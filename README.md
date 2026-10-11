@@ -23,7 +23,12 @@ No game files are changed; delete the DLL to go back to vanilla.
 
 1. Download `dwmapi.dll` from the [latest release](../../releases).
 2. Copy it into `<Half Sword>/HalfswordUE5/Binaries/Win64/`.
-3. Start the game. `HSMMod.ini` is created next to the DLL on first run.
+3. **Linux / Steam Deck (Proton) only:** Proton loads its own built-in `dwmapi.dll` unless told otherwise. In Steam,
+   right-click Half Sword → Properties → General → Launch Options and set:
+   ```
+   WINEDLLOVERRIDES="dwmapi=n,b" %command%
+   ```
+4. Start the game. `HSMMod.ini` is created next to the DLL on first run.
 
 Every player needs the same mod version and the same game build (Steam build 24185754). On any other game build the
 mod logs "unsupported build" and does nothing.
