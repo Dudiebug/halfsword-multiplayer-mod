@@ -5,6 +5,10 @@
 
 namespace hsm {
 
+namespace {
+constexpr double kMaxAgeMs = 5000;   // an older Steam receive stamp is not believed (the poll time is used)
+}  // namespace
+
 uint32_t SteamTransport::AllowPeer(uint64_t steamId) {
     if (!steamId) return 0;
     auto it = byId_.find(steamId);
@@ -59,6 +63,7 @@ void SteamTransport::Pump() {
         if (!peer) continue;                                                       // not a lobby member we accepted
         if (m.data.size() > kMaxPacket || !validate_ || !validate_(m.data.data(), m.data.size(), uint8_t(m.channel))) continue;
         NetEvent e; e.kind = NetEvent::Data; e.peer = peer; e.steamId = m.from; e.channel = uint8_t(m.channel); e.data = std::move(m.data);
+        if (m.ageMs >= 0 && m.ageMs <= kMaxAgeMs) e.rxMs = NetSteadyMs() - m.ageMs;   // Steam's own receive time
         queue_.push_back(std::move(e));
     }
 }

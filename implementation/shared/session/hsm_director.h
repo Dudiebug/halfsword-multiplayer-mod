@@ -138,6 +138,14 @@ public:
         return out;
     }
     void MarkCreated(uint8_t entity) { auto it = entries_.find(entity); if (it != entries_.end()) it->second.created = true; }
+    // A created puppet the game destroyed while its entity is still announced: pending again. False when there is
+    // nothing to re-create (unknown, never created, or this client's own fighter).
+    bool MarkLost(uint8_t entity) {
+        auto it = entries_.find(entity);
+        if (it == entries_.end() || entity == mine_ || !it->second.created) return false;
+        it->second.created = false;
+        return true;
+    }
     bool Known(uint8_t entity) const { return entries_.count(entity) != 0; }
     const Spawn* Find(uint8_t entity) const { auto it = entries_.find(entity); return it == entries_.end() ? nullptr : &it->second.spawn; }
     size_t size() const { return entries_.size(); }

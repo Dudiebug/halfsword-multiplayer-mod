@@ -330,7 +330,18 @@ void Adapter::KeepRemoteFighter(UObject* willie, float yawDeg, float pitchDeg) {
 
 void Adapter::DestroyActor(UObject* actor) { if (actor) Call(actor, "K2_DestroyActor").invoke(); }
 
-bool Adapter::StillValid(UObject* o, int32_t index) const { return o && index >= 0 && ObjectAt(index) == o; }
+bool Adapter::BeingDestroyed(UObject* actor) {
+    static UFunction* fn = nullptr;
+    if (!fn) if (UClass* actorClass = FindClass("Actor")) fn = FindFunction(actorClass, "IsActorBeingDestroyed");
+    if (!actor || !fn) return false;
+    Call c(actor, fn);
+    return c.invoke() && c.get<bool>("ReturnValue");
+}
+
+bool Adapter::StillValid(UObject* o, int32_t index) const {
+    if (!o || index < 0 || ObjectAt(index) != o) return false;
+    return !destroyAware_ || !BeingDestroyed(o);
+}
 
 void Adapter::DestroyFighter(UObject* willie, int32_t index) {
     if (!StillValid(willie, index)) return;
@@ -548,7 +559,11 @@ constexpr const char* kWeaponClass = "ModularWeaponBP_C";
 constexpr const char* kArmorClass = "BP_Armor_Master_C";
 constexpr const char* kArmorStruct = "Str_Passport_Armor1";
 constexpr const char* kStockScreens[] = {"UI_DED_C", "UI_DeathDoor_C", "UI_WinScreen_C", "UI_WIN_C"};
+// Owner sync only: these pause the game (UI_Lose, UI_GiveUp, UI_NextFIght all call SetGamePaused(true)), which stops
+// that player's stream, and offer "return to tavern / another fight". Host sync keeps its old list.
+constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_NextFIght_C"};
 bool g_suppressScreens = false;
+bool g_suppressOwnerScreens = false;
 bool g_screenHooks = false;
 std::vector<std::pair<UObject*, int32_t>> g_suppressed;   // widgets whose Construct was skipped; removed next tick
 bool ClassNamed(UObject* o, const char* name) { return o && ObjectName(reinterpret_cast<UObject*>(ClassOf(o))) == name; }
@@ -628,7 +643,7 @@ UObject* Adapter::FighterOf(UObject* actor) {
 
 std::vector<UObject*> Adapter::AllWillies() {
     std::vector<UObject*> out;
-    for (UObject* w : FindInstances(kWillieClass)) out.push_back(w);
+    for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || !BeingDestroyed(w)) out.push_back(w);
     return out;
 }
 
@@ -722,11 +737,12 @@ UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamI
     return bot;
 }
 
-void Adapter::SuppressStockScreens(bool on) {
+void Adapter::SuppressStockScreens(bool on, bool ownerMatch) {
     // Remove widgets suppressed since the last tick (never from inside their own construction).
     for (auto& [w, index] : g_suppressed) if (ObjectAt(index) == w) Call(w, "RemoveFromParent").invoke();
     g_suppressed.clear();
     g_suppressScreens = on;
+    g_suppressOwnerScreens = on && ownerMatch;
     if (g_screenHooks) return;
     g_screenHooks = true;
     HookFunctionsMatching([](const std::string& n) { return n == "Construct"; }, [this](UObject* obj, UFunction*, void*) {
@@ -745,6 +761,12 @@ void Adapter::SuppressStockScreens(bool on) {
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;                                 // skip Construct: no slow motion, no input lock, no career reset
         }
+        if (g_suppressOwnerScreens)
+            for (const char* cls : kOwnerMatchScreens) if (ClassNamed(obj, cls)) {
+                HSM_LOG("adapter: suppressed stock %s during an owner-sync match", cls);
+                g_suppressed.push_back({obj, ObjectIndex(obj)});
+                return true;                             // skip Construct: no pause, no tavern / next-fight menu
+            }
         return false;
     });
 }

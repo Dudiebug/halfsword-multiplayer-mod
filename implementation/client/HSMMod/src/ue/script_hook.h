@@ -63,6 +63,12 @@ bool ScriptHookActive();
 // hooks off never drops another's (the stand-in damage guard survives `vmhook off`).
 int HookScript(const std::string& owner, const std::string& className, const std::string& functionName, ScriptPre pre,
                ScriptPost post = {});
+// Watches a Blueprint function without being able to change it: before runs ahead of the body, after once it returned.
+// Unlike HookScript, observers also run for calls made under a ScriptHookBypass (on the game thread), so they see our
+// own native replays too (the victim's replay of a claim runs its Get Damage that way). They count toward the same
+// 32-function limit and are cleared with ClearScriptHooks(owner).
+int ObserveScript(const std::string& owner, const std::string& className, const std::string& functionName,
+                  ScriptPost before, ScriptPost after = {});
 int ResolveScriptHooks();   // total UFunctions hooked
 int ClearScriptHooks(const std::string& owner);   // removes that owner's rules; returns how many
 

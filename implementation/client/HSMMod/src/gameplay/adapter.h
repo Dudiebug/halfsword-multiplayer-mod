@@ -48,6 +48,10 @@ public:
     // engine or Willie_BP removes with it. Attached fighters are never destroyed.
     void DestroyFighter(ue::UObject* willie, int32_t index);
     bool StillValid(ue::UObject* o, int32_t index) const;  // index from ue::ObjectIndex at spawn time
+    // Owner sync: StillValid and AllWillies also treat an actor the game is destroying (AActor::IsActorBeingDestroyed)
+    // as gone, instead of until garbage collection frees its slot. Off in host sync, which keeps its old behaviour.
+    void SetDestroyAware(bool on) { destroyAware_ = on; }
+    static bool BeingDestroyed(ue::UObject* actor);
     std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level
     ue::FVector ActorLocation(ue::UObject* actor);
     double ActorYaw(ue::UObject* actor);
@@ -77,7 +81,9 @@ public:
     ue::UObject* SpawnBot(int rank, const ue::FVector& at, double yawDeg, int teamInt);
     // The Willie's own passport serialized like ExportPassport (bots are relayed as blobs too).
     bool ExportPassportOf(ue::UObject* willie, std::vector<uint8_t>& out);
-    void SuppressStockScreens(bool on);                    // per tick: UI_DED / UI_DeathDoor / UI_WinScreen / UI_WIN never construct while on
+    // Per tick: UI_DED / UI_DeathDoor / UI_WinScreen / UI_WIN never construct while on. ownerMatch (owner sync) also
+    // suppresses UI_Lose / UI_GiveUp / UI_NextFIght, the single-player lose flow that pauses the game.
+    void SuppressStockScreens(bool on, bool ownerMatch = false);
 
     // Input (resolved from Willie_BP_C event functions)
     bool BindInputs(ue::UObject* willie);
@@ -113,6 +119,7 @@ private:
     ue::UObject* world_ = nullptr;
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
+    bool destroyAware_ = false;
     std::array<ue::UFunction*, kAxisCount> axisFn_{};
     std::array<ue::UFunction*, kActionCount> pressFn_{}, releaseFn_{};
     std::unordered_map<ue::UFunction*, InputBinding> bindings_;

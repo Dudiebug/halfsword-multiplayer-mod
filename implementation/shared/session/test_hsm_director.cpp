@@ -141,8 +141,27 @@ static void TestClientWorld() {
     w.OnLevel(); CHECK(w.size() == 0 && w.myEntity() == 2);
 }
 
+static void TestClientWorldLost() {
+    ClientWorld w; w.SetMyEntity(2);
+    auto have = [](uint32_t) { return true; };
+    w.OnSpawn(Sp(1, 0)); w.OnSpawn(Sp(2, 0)); w.OnSpawn(Sp(3, 0));
+    w.MarkCreated(1);
+    CHECK(w.PendingPuppets(have).size() == 1 && w.PendingPuppets(have)[0].entity == 3);
+    CHECK(w.MarkLost(1));                                           // destroyed by the game: pending again
+    auto p = w.PendingPuppets(have);
+    CHECK(p.size() == 2 && p[0].entity == 1 && p[1].entity == 3);
+    CHECK(!w.MarkLost(1));                                          // already pending
+    CHECK(!w.MarkLost(3));                                          // never created
+    CHECK(!w.MarkLost(9));                                          // unknown
+    w.MarkCreated(2);
+    CHECK(!w.MarkLost(2));                                          // own fighter is never a puppet
+    w.MarkCreated(1);
+    CHECK(!w.OnDespawn(3));
+    CHECK(w.OnDespawn(1));                                          // a re-created puppet is destroyed like any other
+}
+
 int main() {
-    TestBlobIds(); TestBlobStore(); TestHostSpawnsAfterReadyAndBlob(); TestReadyTimeoutAndLevelReset(); TestLeaveAndLateJoin(); TestRejoinRespawnsAfterForget(); TestEarlyReadySurvivesLevelLoad(); TestClientWorld();
+    TestBlobIds(); TestBlobStore(); TestHostSpawnsAfterReadyAndBlob(); TestReadyTimeoutAndLevelReset(); TestLeaveAndLateJoin(); TestRejoinRespawnsAfterForget(); TestEarlyReadySurvivesLevelLoad(); TestClientWorld(); TestClientWorldLost();
     std::printf(g_fail ? "%d FAILED\n" : "all director tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

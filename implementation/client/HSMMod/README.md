@@ -12,11 +12,13 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 ## Build and checks (Linux, no MSVC)
 
 ```bash
-./build.sh                                  # needs llvm-mingw (see the top-level README)
+./build.sh                                  # needs llvm-mingw in ~/.local/opt (see ../../../../re/README.md)
 ../../shared/run_tests.sh                   # all game-independent logic under ASan/UBSan
+.venv/bin/python tools/mutate_shared.py     # from the repo root: the tests must kill known bugs
 ```
 
-Output: `build/dwmapi.dll`.
+Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
+`.agents/workflow/tools/workflowctl.py verify`.
 
 ## Steam lobbies (default, Phase 1)
 
@@ -108,17 +110,21 @@ All optional; several instances can share one install.
 | `-hsmtest=all` | run the in-game probes (below) |
 | `-hsmbridge=PORT` | agent bridge on `127.0.0.1:PORT` (never off-machine) |
 
-The bridge takes one command per line and answers with one JSON line:
+The bridge takes one command per line and answers with one JSON line (`tools/hsmctl.py PORT CMD...`):
 `state`, `widgets`, `threads`, `stack [thread-id]`, `window`, `key NAME [tap|down|up]`, `click X Y`,
 `axis NAME VALUE MS`, `action NAME down|up|tap`, `open LEVEL`, `pause on|off`, `exec CONSOLE-COMMAND`, `shot`, `quit`.
-`stack` suspends a thread for a moment and returns its unwound `module+offset` frames; resolve them against the game
-executable in a disassembler. If the game falls behind loading or rendering, a player pawn is spawned by the mod itself.
+`stack` suspends a thread for a moment and returns its unwound `module+offset` frames; resolve them with the Ghidra
+project in `re/`. If the game falls behind loading or rendering, a player pawn is spawned by the mod itself.
 
 ## In-game test harness
 
 Add `-hsmtest=all` to the launch options (or a comma list of probe names), load into any Free Mode level and wait
 about 6 seconds. The harness spawns a test fighter and a test puppet next to you, checks them, removes them, and
-writes `HSMTest.json` next to the exe with each probe's result.
+writes `HSMTest.json` next to the exe. Check it from the repo root:
+
+```bash
+.venv/bin/python tools/check_hsmtest.py "<game>/HalfswordUE5/Binaries/Win64/HSMTest.json"
+```
 
 | Probe | Checks |
 |---|---|
@@ -137,7 +143,7 @@ writes `HSMTest.json` next to the exe with each probe's result.
 ## Known gaps (next milestones)
 
 - Not yet verified in game. Everything above is compile-level plus offline tests; the harness above and
-  two-player sessions are the runtime checks.
+  `docs/HUMAN_TESTING.md` are the runtime checks.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
 - Direct-IP (ENet) sessions have no lobby, so they always play Free-for-all with default settings.

@@ -2,6 +2,8 @@
 // Properties: no decoder reads out of bounds or invokes UB on arbitrary bytes; whatever decodes successfully
 // re-encodes to bytes that decode to an identical encoding (canonical round trip).
 // -DHSM_FUZZ_NEGATIVE_CONTROL adds a deliberately broken decoder so the gate can prove it detects bugs.
+#include "combat/hsm_equip.h"
+#include "combat/hsm_fx.h"
 #include "combat/hsm_sever.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
@@ -38,6 +40,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -86,6 +89,12 @@ std::vector<std::vector<uint8_t>> Seeds() {
     PropLeaseMsg lv; lv.propId = MakeLevelPropId("SM_Barrel_3"); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
     PropStateMsg pe = ps; pe.propId = MakeDropPropId(16, 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
     PropLeaseMsg le = pl; le.propId = pe.propId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
+    combat::PaintFxMsg bl; bl.entity = 3; bl.kind = combat::FxKind::Blood; bl.seq = 7; bl.bone = "lowerarm_r"; bl.bodyPart = 2;
+    bl.local.pos = sync::V3{ 4, -2, 7.5 }; bl.local.rot = sync::Q4{ 0, 0, std::sin(0.3), std::cos(0.3) }; bl.rate = 12.5; bl.damageRate = 1;
+    bl.loopCount = 4; bl.extraVelocity = true; bl.velocity = sync::V3{ -30, 12, 400 }; bl.bleeding = 37; s.push_back(Encode(bl));
+    combat::PaintFxMsg wd; wd.entity = 16; wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
+    wd.damageRate = 1.5; s.push_back(Encode(wd));
+    combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
     return s;
 }
 }  // namespace
@@ -98,7 +107,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::PropLease))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::Equip))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

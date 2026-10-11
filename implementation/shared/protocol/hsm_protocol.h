@@ -12,7 +12,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 9;
+constexpr uint8_t kProtocolRevision = 10;         // 10: PaintFx, Equip (owner sync blood and wounds, drawn and sheathed weapons)
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -53,6 +53,8 @@ enum class MsgType : uint8_t {
     PropState = 28,   // lessee -> host -> others, unreliable: a leased or FREE prop's transform (session/hsm_lease.h)
     StuckBlade = 29,  // attacker -> host -> victim's owner, reliable: my blade stuck in / pulled out of a stand-in
     PropLease = 30,   // both ways, reliable: a lease request/release, or the host's grant (session/hsm_lease.h)
+    PaintFx = 31,     // owner -> host -> others, reliable: blood or a wound painted on an owned fighter (combat/hsm_fx.h)
+    Equip = 32,       // owner -> host -> others, reliable: which sheathed weapons an owned fighter has drawn (combat/hsm_equip.h)
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.

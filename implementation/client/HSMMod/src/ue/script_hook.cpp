@@ -26,9 +26,9 @@ template <class T> T Read(const void* base, size_t off) { T v; std::memcpy(&v, s
 using ExecutorFn = void (*)(UObject*, void*, void*);
 ExecutorFn g_original = nullptr;
 
-struct Hook { ScriptPre pre; ScriptPost post; };
+struct Hook { ScriptPre pre; ScriptPost post; ScriptPost before; bool observer = false; };
 struct Rule { std::string owner, className, functionName; Hook hook; };
-struct Entry { std::vector<Hook> hooks; };
+struct Entry { std::vector<Hook> hooks; bool hasObserver = false; };
 // Published snapshot read lock-free by the detour on every Blueprint call. Never modified once published; superseded
 // snapshots stay allocated (a call on another thread may still be reading one) and are small.
 struct Table { int n = 0; UFunction* fns[kMaxFunctions] = {}; const Entry* entries[kMaxFunctions] = {}; };
@@ -55,6 +55,7 @@ void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
     ++g_hooked;
     bool block = false;
     int64_t t0 = Qpc();
+    for (const Hook& h : e.hooks) if (h.before) h.before(call);
     for (const Hook& h : e.hooks) if (h.pre && h.pre(call)) block = true;
     int64_t spent = Qpc() - t0;
     if (block) ++g_blocked;
@@ -64,6 +65,19 @@ void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
         for (const Hook& h : e.hooks) if (h.post) h.post(call);
         spent += Qpc() - t1;
     }
+    g_hookNs += uint64_t(QpcNs(spent));
+}
+
+// A call under ScriptHookBypass: only observers run, around the body, which always runs.
+void RunObserved(const Entry& e, UObject* ctx, void* stack, void* result) {
+    ScriptCall call(ctx, stack, result);
+    int64_t t0 = Qpc();
+    for (const Hook& h : e.hooks) if (h.observer && h.before) h.before(call);
+    int64_t spent = Qpc() - t0;
+    g_original(ctx, stack, result);
+    int64_t t1 = Qpc();
+    for (const Hook& h : e.hooks) if (h.observer && h.post) h.post(call);
+    spent += Qpc() - t1;
     g_hookNs += uint64_t(QpcNs(spent));
 }
 
@@ -78,7 +92,10 @@ inline const Entry* Lookup(UFunction* node) {
 
 void Detour(UObject* ctx, void* stack, void* result) {
     const Entry* e = Lookup(Read<UFunction*>(stack, kFrameNode));
-    if (e && t_bypass == 0 && GetCurrentThreadId() == GameThreadId()) { RunHooked(*e, ctx, stack, result); return; }
+    if (e && GetCurrentThreadId() == GameThreadId()) {
+        if (t_bypass == 0) { RunHooked(*e, ctx, stack, result); return; }
+        if (e->hasObserver) { RunObserved(*e, ctx, stack, result); return; }
+    }
     g_original(ctx, stack, result);
 }
 
@@ -119,6 +136,7 @@ int Publish(int* lastRule = nullptr) {
             auto& e = byFn[fn];
             if (!e) { e = std::make_unique<Entry>(); order.push_back(fn); }
             e->hooks.push_back(r.hook);
+            e->hasObserver = e->hasObserver || r.hook.observer;
         }
     }
     auto t = std::make_unique<Table>();
@@ -204,9 +222,25 @@ bool ScriptHookActive() { return g_original != nullptr; }
 int HookScript(const std::string& owner, const std::string& className, const std::string& functionName, ScriptPre pre,
                ScriptPost post) {
     std::lock_guard<std::mutex> lock(g_mu);
-    g_rules.push_back({owner, className, functionName, {std::move(pre), std::move(post)}});
+    Hook hook;
+    hook.pre = std::move(pre);
+    hook.post = std::move(post);
+    g_rules.push_back({owner, className, functionName, std::move(hook)});
     int mine = 0, total = Publish(&mine);
     HSM_LOG("vm: [%s] hook %s.%s -> %d function(s), %d hooked in all", owner.c_str(), className.c_str(), functionName.c_str(), mine, total);
+    return mine;
+}
+
+int ObserveScript(const std::string& owner, const std::string& className, const std::string& functionName,
+                  ScriptPost before, ScriptPost after) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    Hook hook;
+    hook.before = std::move(before);
+    hook.post = std::move(after);
+    hook.observer = true;
+    g_rules.push_back({owner, className, functionName, std::move(hook)});
+    int mine = 0, total = Publish(&mine);
+    HSM_LOG("vm: [%s] observe %s.%s -> %d function(s), %d hooked in all", owner.c_str(), className.c_str(), functionName.c_str(), mine, total);
     return mine;
 }
 

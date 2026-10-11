@@ -93,7 +93,7 @@ void ENetTransport::Loop() {
             } else if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
                 uint32_t id = uint32_t(reinterpret_cast<uintptr_t>(ev.peer->data));
                 bool ok = ev.packet->dataLength <= kMaxPacket && validate_ && validate_(ev.packet->data, ev.packet->dataLength, ev.channelID);
-                if (ok) { ne.kind = NetEvent::Data; ne.peer = id; ne.channel = ev.channelID; ne.data.assign(ev.packet->data, ev.packet->data + ev.packet->dataLength); }
+                if (ok) { ne.kind = NetEvent::Data; ne.peer = id; ne.channel = ev.channelID; ne.data.assign(ev.packet->data, ev.packet->data + ev.packet->dataLength); ne.rxMs = NetSteadyMs(); }
                 enet_packet_destroy(ev.packet);
                 if (!ok) continue;   // malformed packets never reach the game thread
             } else continue;

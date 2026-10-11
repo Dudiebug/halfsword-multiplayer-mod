@@ -1,5 +1,6 @@
 #include "gameplay/combat_sync.h"
 #include <windows.h>
+#include "combat/hsm_ue_map.h"
 #include "log.h"
 #include <algorithm>
 #include <cmath>
@@ -28,15 +29,6 @@ constexpr const char* kSeveredMap = "Dismembered Parts Map";     // Willie_BP.cp
 constexpr double kBloodSizeBase = 0.25, kBloodSizePerUnit = 1.0 / 64.0;
 constexpr double kBloodRateSharp = 1.0, kBloodRateBlunt = 0.5;
 
-// TMap<uint8, bool> in UE 5.4 is a TSet over a TSparseArray: { TArray<Element> Data (ptr, num, max),
-// TBitArray AllocationFlags (inline storage at +16, NumBits at +32, MaxBits at +36), FirstFreeIndex, NumFreeIndices }.
-// Element = { uint8 key, bool value, int32 hashNext, int32 hashIndex }, stride 12. Assumed layout, not yet verified
-// in game; every read is bounds- and pointer-checked and any surprise makes the function fail closed.
-constexpr size_t kSparseSize = 48, kFlagsOffset = 16, kNumBitsOffset = 32, kMaxBitsOffset = 36;
-constexpr size_t kElementStride = 12;
-constexpr int32_t kMaxSparseSlots = 256;
-constexpr uint32_t kInlineBitWords = 4;
-
 bool Readable(const void* p, size_t n) { return p && n && !IsBadReadPtr(p, n); }
 
 bool HasParams(const UFunction* fn, std::initializer_list<const char*> names) {
@@ -50,6 +42,8 @@ bool HasParams(const UFunction* fn, std::initializer_list<const char*> names) {
 
 }  // namespace
 
+// The map's layout lives in shared/combat/hsm_ue_map.h (unit-tested); every read is pointer-checked and any surprise
+// makes this fail closed. The reflected property size must match the layout the reader assumes.
 uint32_t ReadSeveredMask(UObject* willie) {
     auto fail = [](const char* why) -> uint32_t {
         static bool logged = false;
@@ -57,32 +51,21 @@ uint32_t ReadSeveredMask(UObject* willie) {
         return 0;
     };
     if (!willie) return 0;
-    const uint8_t* map = static_cast<const uint8_t*>(FieldPtr(willie, kSeveredMap));
-    if (!Readable(map, kSparseSize)) return fail("property missing");
-
-    const uint8_t* data = *reinterpret_cast<const uint8_t* const*>(map);
-    const int32_t num = *reinterpret_cast<const int32_t*>(map + 8);
-    const int32_t numBits = *reinterpret_cast<const int32_t*>(map + kNumBitsOffset);
-    const int32_t maxBits = *reinterpret_cast<const int32_t*>(map + kMaxBitsOffset);
-    if (num < 0 || num > kMaxSparseSlots || numBits != num || maxBits < numBits) return fail("unexpected TMap layout");
-    if (num == 0) return 0;
-
-    // Bit storage: inline words while they fit, otherwise a heap pointer stored in the same slot.
-    const uint32_t* words = nullptr;
-    if (maxBits <= int32_t(kInlineBitWords * 32)) words = reinterpret_cast<const uint32_t*>(map + kFlagsOffset);
-    else words = *reinterpret_cast<const uint32_t* const*>(map + kFlagsOffset);
-    const size_t wordCount = (size_t(num) + 31) / 32;
-    if (!Readable(words, wordCount * 4) || !Readable(data, size_t(num) * kElementStride)) return fail("TMap storage unreadable");
-
-    uint32_t mask = 0;
-    for (int32_t i = 0; i < num; ++i) {
-        if (((words[size_t(i) >> 5] >> (size_t(i) & 31u)) & 1u) == 0) continue;   // free slot
-        const uint8_t key = data[size_t(i) * kElementStride];
-        const uint8_t value = data[size_t(i) * kElementStride + 1];
-        if (key >= kCombatPartBits || value > 1) return fail("unexpected key or value");
-        if (value) mask |= 1u << key;
+    static int32_t propSize = -1;
+    if (propSize < 0) {
+        const FProperty* p = FindProperty(ClassOf(willie), kSeveredMap);
+        propSize = p ? PropertySize(p) : 0;
     }
-    return mask & kCombatPartMask;
+    if (propSize != int32_t(combat::kUeMapSize)) return fail("property missing or not a UE 5.4 TMap");
+    const uint8_t* map = static_cast<const uint8_t*>(FieldPtr(willie, kSeveredMap));
+    uint32_t mask = 0;
+    switch (combat::ReadByteBoolMap(map, Readable, kCombatPartBits, mask)) {
+        case combat::MapRead::Ok: return mask & kCombatPartMask;
+        case combat::MapRead::Unreadable: return fail("TMap storage unreadable");
+        case combat::MapRead::BadLayout: return fail("unexpected TMap layout");
+        case combat::MapRead::BadEntry: return fail("unexpected key or value");
+    }
+    return fail("unknown result");
 }
 
 bool ApplyDismember(UObject* willie, uint32_t parts) {

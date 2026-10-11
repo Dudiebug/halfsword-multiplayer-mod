@@ -32,7 +32,7 @@ struct Event {
     std::vector<SteamId> lobbies;
 };
 
-struct Message { SteamId from = 0; int channel = 0; std::vector<uint8_t> data; };
+struct Message { SteamId from = 0; int channel = 0; std::vector<uint8_t> data; double ageMs = -1; };   // ageMs: since Steam received it (-1 unknown)
 
 enum SendFlags : int { kUnreliable = 0, kNoNagle = 1, kReliable = 8, kAutoRestart = 32 };
 

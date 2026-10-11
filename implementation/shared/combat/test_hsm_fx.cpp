@@ -1,0 +1,192 @@
+// Unit tests for hsm_fx.h. Run via implementation/shared/run_tests.sh test_hsm_fx.
+//
+// Wire layout is written out independently below (Wire()), in the order hsm_fx.h documents:
+//   header(PaintFx) entity:u8 kind:u8 seq:u16 bone:str bodyPart:u8 local:Xform extent:V3 rate:f64 damageRate:f64
+//   loopCount:u8 extraVelocity:u8 velocity:V3 power:V3 bleeding:f64 gateLastRate:f64 gateSpRate:f64 gatePart:u8
+#include "combat/hsm_fx.h"
+#include <cmath>
+#include <cstdio>
+#include <limits>
+
+static int g_fail = 0;
+#define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
+
+using namespace hsm::combat;
+using hsm::MsgType;
+
+namespace {
+
+bool Near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= eps; }
+bool NearV(const V3& a, const V3& b, double eps = 1e-9) { return Near(a.x, b.x, eps) && Near(a.y, b.y, eps) && Near(a.z, b.z, eps); }
+
+PaintFxMsg Blood() {
+    PaintFxMsg m;
+    m.entity = 3; m.kind = FxKind::Blood; m.seq = 777; m.bone = "lowerarm_r"; m.bodyPart = 2;
+    m.local.pos = {4, -2, 7.5};
+    m.local.rot = {0, 0, std::sin(0.3), std::cos(0.3)};
+    m.rate = 12.5; m.damageRate = 1; m.loopCount = 4; m.extraVelocity = true;
+    m.velocity = {-30, 12, 400}; m.power = {9000, -100, 25}; m.bleeding = 37;
+    m.gateLastRate = 4.25; m.gateSpRate = 2.5; m.gatePart = 6;
+    return m;
+}
+PaintFxMsg Wound() {
+    PaintFxMsg m;
+    m.entity = 16; m.kind = FxKind::Wound; m.seq = 65535; m.bone = "head"; m.bodyPart = 0;
+    m.local.pos = {1, 2, 3};
+    m.extent = {3, 3, 3}; m.damageRate = 1.5; m.loopCount = 1;
+    return m;
+}
+
+// The documented layout, written by hand: kindByte and extraByte override the enum and bool so raw bad values fit.
+std::vector<uint8_t> Wire(const PaintFxMsg& m, uint8_t kindByte, uint8_t extraByte, MsgType type = MsgType::PaintFx) {
+    hsm::Writer w;
+    w.header(type);
+    w.u8(m.entity); w.u8(kindByte); w.u16(m.seq); w.str(m.bone, 255); w.u8(m.bodyPart);
+    PutXform(w, m.local); PutV3(w, m.extent); PutF64(w, m.rate); PutF64(w, m.damageRate);
+    w.u8(m.loopCount); w.u8(extraByte); PutV3(w, m.velocity); PutV3(w, m.power); PutF64(w, m.bleeding);
+    PutF64(w, m.gateLastRate); PutF64(w, m.gateSpRate); w.u8(m.gatePart);
+    return w.buf;
+}
+std::vector<uint8_t> Wire(const PaintFxMsg& m) { return Wire(m, uint8_t(m.kind), m.extraVelocity ? 1 : 0); }
+
+bool Dec(const std::vector<uint8_t>& b, PaintFxMsg& out) { return Decode(b.data(), b.size(), out); }
+bool Dec(const std::vector<uint8_t>& b) { PaintFxMsg o; return Dec(b, o); }
+
+void TestRoundTrip() {
+    for (const PaintFxMsg& m : {Blood(), Wound()}) {
+        std::vector<uint8_t> b = Encode(m);
+        CHECK(b == Wire(m));   // Encode writes the documented layout
+        PaintFxMsg o;
+        CHECK(Dec(b, o));
+        CHECK(o.entity == m.entity && o.kind == m.kind && o.seq == m.seq && o.bone == m.bone && o.bodyPart == m.bodyPart);
+        CHECK(NearV(o.local.pos, m.local.pos) && Near(o.local.rot.z, m.local.rot.z) && Near(o.local.rot.w, m.local.rot.w));
+        CHECK(NearV(o.local.scale, m.local.scale) && NearV(o.extent, m.extent));
+        CHECK(o.rate == m.rate && o.damageRate == m.damageRate && o.loopCount == m.loopCount);
+        CHECK(o.extraVelocity == m.extraVelocity && NearV(o.velocity, m.velocity) && NearV(o.power, m.power));
+        CHECK(o.bleeding == m.bleeding);
+        CHECK(o.gateLastRate == m.gateLastRate && o.gateSpRate == m.gateSpRate && o.gatePart == m.gatePart);
+    }
+}
+
+void TestFraming() {
+    std::vector<uint8_t> b = Encode(Blood());
+    CHECK(!Dec(Wire(Blood(), 1, 1, MsgType::StuckBlade)));   // same body, another type: negative control
+    std::vector<uint8_t> shortB(b.begin(), b.end() - 1);
+    CHECK(!Dec(shortB));
+    std::vector<uint8_t> longB = b; longB.push_back(0);
+    CHECK(!Dec(longB));
+    PaintFxMsg o;
+    CHECK(!Decode(b.data(), 0, o));
+}
+
+void TestRanges() {
+    { PaintFxMsg m = Blood(); m.entity = 0; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.entity = 17; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.entity = 1; CHECK(Dec(Wire(m))); }
+    CHECK(!Dec(Wire(Blood(), 0, 1)));
+    CHECK(!Dec(Wire(Blood(), 3, 1)));
+    CHECK(!Dec(Wire(Blood(), 1, 2)));                          // extraVelocity is 0 or 1
+    { PaintFxMsg m = Blood(); m.bone = ""; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bone = std::string(64, 'b'); CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bone = std::string(65, 'b'); CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bodyPart = 7; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bodyPart = 8; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.local.rot = {0, 0, 0, 2}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.local.scale = {1, 0, 1}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.local.pos = {kFxMaxOffset + 1, 0, 0}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.local.pos = {kFxMaxOffset, 0, 0}; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.extent = {-1, 0, 0}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Wound(); m.extent = {kFxMaxExtent, kFxMaxExtent, kFxMaxExtent}; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Wound(); m.extent = {3, kFxMaxExtent + 1, 3}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Wound(); m.extent = {3, 3, 0}; CHECK(!Dec(Wire(m))); }   // a wound box has a volume
+    { PaintFxMsg m = Blood(); m.rate = -0.1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.rate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.rate = kFxMaxRate; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Wound(); m.damageRate = -1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Wound(); m.damageRate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.loopCount = 0; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.loopCount = kFxMaxLoops; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.loopCount = kFxMaxLoops + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.velocity = {0, kFxMaxVector + 1, 0}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.power = {0, 0, -kFxMaxVector - 1}; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.power = {0, 0, -kFxMaxVector}; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.velocity.x = std::numeric_limits<double>::quiet_NaN(); CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bleeding = -1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.bleeding = kFxMaxBleeding + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gateLastRate = -1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gateLastRate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gateSpRate = -1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gateSpRate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gatePart = 7; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.gatePart = 8; CHECK(!Dec(Wire(m))); }
+    // A rejected decode leaves the output untouched.
+    PaintFxMsg out = Wound();
+    PaintFxMsg bad = Blood(); bad.bodyPart = 9;
+    CHECK(!Dec(Wire(bad), out));
+    CHECK(out.kind == FxKind::Wound && out.bone == "head");
+}
+
+void TestBoneFrame() {
+    Xform bone;
+    bone.pos = {100, -50, 30};
+    bone.rot = {0, std::sin(0.4), 0, std::cos(0.4)};
+    Xform world;
+    world.pos = {120, -40, 25};
+    world.rot = {std::sin(0.2), 0, 0, std::cos(0.2)};
+    V3 dir{0, 300, -20};
+    Xform local = FxToBone(bone, world);
+    Xform back = FxFromBone(bone, local);
+    CHECK(NearV(back.pos, world.pos, 1e-9));
+    CHECK(Near(back.rot.x, world.rot.x) && Near(back.rot.y, world.rot.y) && Near(back.rot.z, world.rot.z) && Near(back.rot.w, world.rot.w));
+    CHECK(NearV(bone.FromLocalDir(bone.ToLocalDir(dir)), dir));
+    // On a moved and turned bone, the local spot follows the bone.
+    Xform moved = bone;
+    moved.pos = {0, 0, 0};
+    moved.rot = {0, 0, std::sin(0.8), std::cos(0.8)};
+    Xform there = FxFromBone(moved, local);
+    CHECK(NearV(there.pos, moved.FromLocal(local.pos)));
+    CHECK(!NearV(there.pos, world.pos, 1.0));
+}
+
+void TestWoundRadius() {
+    CHECK(Near(WoundRadius(0, 0), 3));
+    CHECK(Near(WoundRadius(100, 100), 3));       // (200)*0.005 = 1 -> 3
+    CHECK(Near(WoundRadius(1000, 0), 5));
+    CHECK(Near(WoundRadius(600, 400), 5));
+    CHECK(Near(WoundRadius(5000, 0), 10));       // 25 -> 10
+    CHECK(Near(WoundRadius(1900, 100), 10));
+}
+
+void TestLimiter() {
+    FxLimiter l;
+    int allowed = 0;
+    for (int i = 0; i < kFxMaxPerSecond + 5; ++i) allowed += l.Allow(3, FxKind::Blood, 1000.0 + i) ? 1 : 0;
+    CHECK(allowed == kFxMaxPerSecond);
+    CHECK(l.Allow(3, FxKind::Wound, 1010));          // kinds are counted apart
+    CHECK(l.Allow(4, FxKind::Blood, 1010));          // and entities
+    CHECK(!l.Allow(3, FxKind::Blood, 1999));
+    CHECK(l.Allow(3, FxKind::Blood, 2000));           // a new one-second window
+    l.Forget(3);
+    for (int i = 0; i < kFxMaxPerSecond - 1; ++i) CHECK(l.Allow(3, FxKind::Blood, 2001));
+    CHECK(l.Allow(3, FxKind::Blood, 2001));
+    CHECK(!l.Allow(3, FxKind::Blood, 2001));
+    FxLimiter m;
+    for (int i = 0; i < kFxMaxPerSecond; ++i) m.Allow(5, FxKind::Wound, 0);
+    m.Forget(6);
+    CHECK(!m.Allow(5, FxKind::Wound, 1));            // Forget of another entity keeps 5's count
+    CHECK(!m.Allow(0, FxKind::Blood, 0));            // entity 0 is never a fighter
+}
+
+}  // namespace
+
+int main() {
+    TestRoundTrip();
+    TestFraming();
+    TestRanges();
+    TestBoneFrame();
+    TestWoundRadius();
+    TestLimiter();
+    if (g_fail) { std::printf("test_hsm_fx: %d failure(s)\n", g_fail); return 1; }
+    std::printf("test_hsm_fx: ok\n");
+    return 0;
+}

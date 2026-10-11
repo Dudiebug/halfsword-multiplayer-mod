@@ -3,6 +3,7 @@
 // before they are queued for the game thread.
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -19,7 +20,13 @@ struct NetEvent {
     uint64_t steamId = 0;   // set by SteamTransport
     uint8_t channel = 0;
     std::vector<uint8_t> data;
+    double rxMs = 0;        // Data: when it arrived, on the steady clock (NetSteadyMs; 0 = unknown, use the poll time)
 };
+
+// Milliseconds on std::chrono::steady_clock, the clock of game::SteadyNowMs (owner_sync.cpp), from any thread.
+inline double NetSteadyMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 class ITransport {
 public:

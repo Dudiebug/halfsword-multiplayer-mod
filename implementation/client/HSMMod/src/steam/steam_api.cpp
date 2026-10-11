@@ -23,7 +23,8 @@ struct NetMessage {
     void* data; int32_t size; uint32_t conn; NetIdentity peer; int64_t connUserData; int64_t usecReceived;
     int64_t messageNumber; void* freeData; void* release; int32_t channel; int32_t flags; int64_t userData; uint16_t lane; uint16_t pad;
 };
-static_assert(offsetof(NetMessage, peer) == 16 && offsetof(NetMessage, channel) == 192, "SteamNetworkingMessage_t");
+static_assert(offsetof(NetMessage, peer) == 16 && offsetof(NetMessage, usecReceived) == 160 && offsetof(NetMessage, channel) == 192,
+              "SteamNetworkingMessage_t");
 
 struct LobbyCreated { int32_t result; uint64_t lobby; };                                   // 513 (call result)
 struct LobbyMatchList { uint32_t count; };                                                // 510 (call result)
@@ -80,6 +81,7 @@ struct Api {
     FLAT(bool, CloseSessionWithUser, void*, const NetIdentity*)
     FLAT(int, GetSessionConnectionInfo, void*, const NetIdentity*, void*, void*)
     FLAT(void, InitRelayNetworkAccess, void*)
+    FLAT(int64_t, GetLocalTimestamp, void*)
     FLAT(void, ReleaseMessage, void*)
 } g;
 #undef FLAT
@@ -215,6 +217,10 @@ bool Init() {
     BIND(InitRelayNetworkAccess, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess")
     BIND(ReleaseMessage, "SteamAPI_SteamNetworkingMessage_t_Release")
 #undef BIND
+    // Optional: the clock of m_usecTimeReceived, so a message's age is known (pose arrival times); without it the
+    // session stamps arrivals when it polls them.
+    g.GetLocalTimestamp = Fn<Api::GetLocalTimestamp_t>("SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp");
+    if (!g.GetLocalTimestamp) HSM_LOG("steam: no SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp; arrival times are the poll time");
     if (!g_mm || !g_friends || !g_user || !g_utils || !g_msgs || !g_netUtils) { HSM_LOG("steam: interface accessor returned null"); return false; }
     for (CallbackObj& cb : g_callbacks) g.RegisterCallback(&cb, cb.id);
     ue::HookNative(reinterpret_cast<void*>(g.RunCallbacks), reinterpret_cast<void*>(&RunCallbacksDetour), reinterpret_cast<void**>(&g_runOriginal), "SteamAPI_RunCallbacks");
@@ -315,10 +321,12 @@ size_t Receive(int channel, std::vector<Message>& out, int max) {
     if (!g_ready) return 0;
     NetMessage* msgs[64];
     int n = g.ReceiveMessagesOnChannel(g_msgs, channel, msgs, max < 64 ? max : 64);
+    const int64_t nowUs = n > 0 && g.GetLocalTimestamp ? g.GetLocalTimestamp(g_netUtils) : 0;
     for (int i = 0; i < n; ++i) {
         NetMessage* m = msgs[i];
         if (m->peer.type == kIdentitySteamId && m->size >= 0) {
             Message o; o.from = m->peer.steamId; o.channel = channel;
+            if (nowUs > 0 && m->usecReceived > 0 && m->usecReceived <= nowUs) o.ageMs = double(nowUs - m->usecReceived) / 1000.0;
             o.data.assign(static_cast<uint8_t*>(m->data), static_cast<uint8_t*>(m->data) + m->size);
             out.push_back(std::move(o));
         }
