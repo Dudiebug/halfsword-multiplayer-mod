@@ -1,0 +1,15 @@
+{
+  "name": "HalfSwordMP",
+  "protocol_revision": 1,
+  "game_build": "PIN_AT_BOOTSTRAP",
+  "engine": "UE5.4.x",
+  "authority": "dedicated_unreal_server",
+  "lanes": {
+    "input": "unreliable_sequenced",
+    "pose": "unreliable_sequenced",
+    "grab_state": "reliable_ordered",
+    "combat": "reliable_ordered",
+    "dismemberment": "reliable_ordered",
+    "match": "reliable_ordered"
+  }
+}

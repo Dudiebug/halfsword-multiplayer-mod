@@ -1,0 +1,28 @@
+// ProcessEvent interception. Native code reaches Blueprints only through ProcessEvent (input events,
+// component hit/overlap delegates, ticks), so this is the single choke point for observing or
+// suppressing those entry points. Blueprint-to-Blueprint calls inside the VM do not pass through here.
+#pragma once
+#include "ue/engine.h"
+#include <functional>
+#include <string>
+
+namespace hsm::ue {
+
+// Return true to block the call (the original ProcessEvent is skipped).
+using PreHook = std::function<bool(UObject* obj, UFunction* fn, void* params)>;
+
+bool InstallProcessEventHook();
+void RemoveProcessEventHook();
+
+// Exact-function rule.
+void HookFunction(UFunction* fn, PreHook hook);
+// Name rule, evaluated once per distinct UFunction the first time it is seen (covers classes loaded later).
+void HookFunctionsMatching(std::function<bool(const std::string& functionName)> match, PreHook hook);
+// Hook an arbitrary native function (MinHook). Safe to call before or after InstallProcessEventHook.
+bool HookNative(void* target, void* detour, void** original, const char* label);
+// Thread that made the first ProcessEvent call (the game thread); 0 before that.
+unsigned long GameThreadId();
+// Drop all rules (e.g. when a session ends).
+void ClearHooks();
+
+}  // namespace hsm::ue
