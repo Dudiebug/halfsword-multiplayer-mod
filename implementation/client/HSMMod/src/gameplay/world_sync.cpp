@@ -27,7 +27,7 @@ std::vector<hsm::WorldSample> CollectLooseWeapons(Adapter& a, const std::functio
     UObject* mathLib = MathLibraryCDO();
     if (!mathLib) { HSM_LOG("world_sync: KismetMathLibrary unavailable"); return out; }
 
-    for (UObject* actor : FindInstances(kWeaponClassName)) {
+    for (UObject* actor : FindInstances(kWeaponClassName, true)) {
         UObject** parent = Field<UObject*>(actor, "Parent Actor");
         if (parent && *parent) continue;   // currently held: not a loose weapon
 
@@ -112,7 +112,7 @@ UObject* FindClientWeapon(Adapter& a, uint8_t ownerEntity, int weaponIndex, cons
     UObject* owner = actorOfEntity(ownerEntity);
     if (!owner) return nullptr;
 
-    for (UObject* w : FindInstances(kWeaponClassName)) {
+    for (UObject* w : FindInstances(kWeaponClassName, true)) {
         UObject** parent = Field<UObject*>(w, "Parent Actor");
         UObject** last = Field<UObject*>(w, "Last Parent");
         UObject* holder = (parent && *parent) ? *parent : (last ? *last : nullptr);

@@ -112,6 +112,7 @@ static void TestPoseRejects() {
 static VitalsMsg SomeVitals() {
     VitalsMsg v;
     v.entity = 9; v.flags = 0x5; v.health = 77.5f; v.consciousness = 0.25f; v.stamina = 40.f; v.bleeding = 1.5f;
+    v.tsMs = 123456; v.consciousnessLegs = 3.25f; v.bloodRate = 11.75f;
     for (size_t i = 0; i < v.partHealth.size(); ++i) v.partHealth[i] = float(10 * i) + 0.5f;
     v.severed = 0x81; v.dislocated = 0x3;
     return v;
@@ -122,6 +123,8 @@ static void TestVitals() {
     const auto bytes = Encode(v);
     VitalsMsg o;
     CHECK(Decode(bytes.data(), bytes.size(), o));
+    CHECK(bytes.size() == 78 && o.tsMs == v.tsMs);
+    CHECK(o.consciousnessLegs == 3.25f && o.bloodRate == 11.75f);
     CHECK(o.entity == 9 && o.flags == 0x5 && o.health == 77.5f && o.consciousness == 0.25f && o.stamina == 40.f && o.bleeding == 1.5f);
     for (size_t i = 0; i < o.partHealth.size(); ++i) CHECK(o.partHealth[i] == v.partHealth[i]);
     CHECK(o.severed == 0x81 && o.dislocated == 0x3);
@@ -132,8 +135,14 @@ static void TestVitals() {
     m = v; m.flags = 0x7; CHECK(!bad(m));
     m = v; m.health = std::numeric_limits<float>::quiet_NaN(); CHECK(bad(m));
     m = v; m.partHealth[6] = std::numeric_limits<float>::infinity(); CHECK(bad(m));
+    m = v; m.partHealth[7] = std::numeric_limits<float>::infinity(); CHECK(bad(m));
+    m = v; m.partHealth[8] = std::numeric_limits<float>::quiet_NaN(); CHECK(bad(m));
+    m = v; m.consciousnessLegs = std::numeric_limits<float>::infinity(); CHECK(bad(m));
+    m = v; m.bloodRate = std::numeric_limits<float>::quiet_NaN(); CHECK(bad(m));
+    for (size_t n = 0; n < bytes.size(); ++n) CHECK(!Decode(bytes.data(), n, o));
     std::vector<uint8_t> b = bytes; b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));
     b = bytes; b.pop_back(); CHECK(!Decode(b.data(), b.size(), o));
+    b = bytes; b[2] = 10; CHECK(!Decode(b.data(), b.size(), o)); // old builds cannot mix with fix2
 }
 
 static combat::HitClaim SomeClaim() {

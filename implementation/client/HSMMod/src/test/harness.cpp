@@ -108,7 +108,7 @@ void RunPassportAndSpawn(game::Adapter& a) {
     if (Selected("spawn_bot")) { g_bot = a.SpawnBot(3, {base.x, base.y + 400, base.z}, 0, 2); g_botIndex = ObjectIndex(g_bot); }
     if (Selected("weapon_owner")) {
         int held = 0, credited = 0;
-        for (UObject* w : FindInstances("ModularWeaponBP_C")) {
+    for (UObject* w : FindInstances("ModularWeaponBP_C", true)) {
             UObject** parent = Field<UObject*>(w, "Parent Actor");
             if (!parent || *parent != me) continue;
             ++held; credited += a.FighterOf(w) == me;

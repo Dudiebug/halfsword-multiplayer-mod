@@ -1,10 +1,11 @@
 // Match rules. Game-independent, unit-tested; the host's session executes what these decide.
 //   ResolveTeams  - lobby picks + host overrides + auto-balance -> team per roster slot
 //   TeamColor     - tabard tint per team
-//   KillLog       - last hostile contact per victim (kill attribution window)
+//   KillLog       - last opposing damage per victim (kill attribution window)
 //   Match         - phases, score limit, time limit + sudden death, players-vs-bots loss, respawn schedule
 //   PartitionSides / PickRespawn - team spawn sides and respawn points
 #pragma once
+#include "hsm_protocol.h"
 #include "session/hsm_spawn.h"
 #include <cmath>
 #include <cstdint>
@@ -15,7 +16,8 @@ namespace hsm {
 
 // PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with hordes of the game's zombie Willies.
 enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5 };
-constexpr uint8_t kFormatCount = 6;
+constexpr uint8_t kFormatCount = kMatchFormatCount;
+static_assert(uint8_t(Format::Zombies) + 1 == kFormatCount);
 enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2 };   // PvP gear: own loadout / random by tier / everyone identical
 constexpr uint8_t kGearCount = 3;
 constexpr int8_t kNoTeam = -1;        // free-for-all: everyone on their own
@@ -49,8 +51,11 @@ Rgba TeamColor(int team);             // a == 0: no tint (free-for-all keeps pla
 
 class KillLog {
 public:
-    static constexpr uint32_t kWindowMs = 10000;
-    void OnHit(uint8_t victim, uint8_t attacker, uint32_t nowMs);
+    static constexpr uint32_t kWindowMs = 60000;
+    void OnHit(uint8_t victim, uint8_t attacker, uint32_t nowMs); // legacy host-contact path
+    bool OnDamage(uint8_t victim, uint8_t attacker, uint32_t nowMs, double damage, bool opposing);
+    uint32_t AgeMs(uint8_t victim, uint32_t nowMs) const;
+    std::string AgeText(uint8_t victim, uint32_t nowMs) const;
     uint8_t KillerOf(uint8_t victim, uint32_t nowMs) const;   // 0 = nobody within the window
     void Forget(uint8_t entity);
 private:
@@ -59,6 +64,7 @@ private:
 };
 
 enum class MatchPhase : uint8_t { Idle = 0, Countdown = 1, Live = 2, SuddenDeath = 3, Results = 4 };
+inline bool CombatPhase(MatchPhase phase) { return phase == MatchPhase::Live || phase == MatchPhase::SuddenDeath; }
 
 struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = true; };
 
@@ -69,7 +75,7 @@ public:
     static constexpr int kMaxBotsAlive = 10;
     struct Events {
         bool live = false, ended = false, rematch = false;
-        bool waveStarted = false, waveCleared = false, roundReset = false;
+        bool waveStarted = false, waveCleared = false, roundReset = false, countdownRestart = false;
         int spawnBots = 0, botRank = 0;  // bot formats: how many bots to spawn now, and their Enum_Ranks tier
         std::vector<uint8_t> respawn;   // entities to respawn now
     };
@@ -80,6 +86,7 @@ public:
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
     Events Tick(uint32_t nowMs);
     void MarkRespawned(uint8_t entity);
+    void RespawnFailed(uint8_t entity, uint32_t nowMs);
     void Finish(int winnerKey, uint32_t nowMs);          // ends a running match now (no effect once over)
     bool Has(uint8_t e) const { return fighters_.count(e) != 0; }
     int wave() const { return wave_; }
@@ -102,7 +109,7 @@ public:
     size_t size() const { return fighters_.size(); }
 
 private:
-    struct F { int8_t team = kNoTeam; bool human = true, alive = true; uint32_t diedAt = 0; int kills = 0, deaths = 0; };
+    struct F { int8_t team = kNoTeam; bool human = true, alive = true, recovering = false; uint32_t diedAt = 0; int kills = 0, deaths = 0; };
     void AddPoints(int key, int points);
     void End(int winnerKey, uint32_t nowMs);
     int UniqueLeader() const;                           // kNoWinner when tied or empty

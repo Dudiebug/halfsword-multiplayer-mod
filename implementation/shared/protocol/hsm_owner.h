@@ -54,24 +54,38 @@ static_assert(sync::kPoseFrameMaxBytes <= 0xFFFF, "pose payload length is a u16"
 
 struct VitalsMsg {
     uint8_t entity = 0;
+    uint32_t tsMs = 0;                     // owner's stream clock; rejects reordered samples within a session
     uint8_t flags = 0;                      // bit0 dead, bit1 fallen, bit2 knocked out
     float health = 0, consciousness = 0, stamina = 0, bleeding = 0;
-    std::array<float, 7> partHealth{};      // head, upper body, lower body, arm R, arm L, leg R, leg L
+    float consciousnessLegs = 0, bloodRate = 0;
+    std::array<float, 9> partHealth{};      // head, upper body, lower body, arm R, arm L, leg R, leg L, neck, back
     uint32_t severed = 0;                   // bit per Enum_DismembermentPart value
     uint32_t dislocated = 0;                // bit per dislocatable joint (phase 4)
 };
 constexpr uint8_t kVitalsFlagsMask = 0x07;
 
+// Single reflected-name mapping for both capture and mirror; no engine types. Append-only part order.
+template<class V, class F> inline void VisitVitalsFields(V& v, F field) {
+    field("Health", v.health); field("Consciousness", v.consciousness);
+    field("Stamina", v.stamina); field("Bleeding", v.bleeding);
+    field("Consciousness 2 (Legs)", v.consciousnessLegs); field("Blood Rate", v.bloodRate);
+    constexpr const char* parts[] = {"Head Health", "Body Upper Health", "Body Lower Health", "Arm_R Health",
+        "Arm_L Health", "Leg_R Health", "Leg_L Health", "Neck Health", "Back Health"};
+    for (size_t i = 0; i < v.partHealth.size(); ++i) field(parts[i], v.partHealth[i]);
+}
+
 inline std::vector<uint8_t> Encode(const VitalsMsg& m) {
     Writer w; w.header(MsgType::Vitals);
-    w.u8(m.entity); w.u8(m.flags); w.f32(m.health); w.f32(m.consciousness); w.f32(m.stamina); w.f32(m.bleeding);
+    w.u8(m.entity); w.u32(m.tsMs); w.u8(m.flags); w.f32(m.health); w.f32(m.consciousness); w.f32(m.stamina); w.f32(m.bleeding);
+    w.f32(m.consciousnessLegs); w.f32(m.bloodRate);
     for (float h : m.partHealth) w.f32(h);
     w.u32(m.severed); w.u32(m.dislocated);
     return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, VitalsMsg& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Vitals) return false;
-    m.entity = r.u8(); m.flags = r.u8(); m.health = r.f32(); m.consciousness = r.f32(); m.stamina = r.f32(); m.bleeding = r.f32();
+    m.entity = r.u8(); m.tsMs = r.u32(); m.flags = r.u8(); m.health = r.f32(); m.consciousness = r.f32(); m.stamina = r.f32(); m.bleeding = r.f32();
+    m.consciousnessLegs = r.f32(); m.bloodRate = r.f32();
     for (float& h : m.partHealth) h = r.f32();
     m.severed = r.u32(); m.dislocated = r.u32();
     return r.done() && m.entity >= 1 && m.entity <= kMaxWillies && (m.flags & ~kVitalsFlagsMask) == 0;

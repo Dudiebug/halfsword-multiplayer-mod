@@ -331,8 +331,12 @@ void Adapter::KeepRemoteFighter(UObject* willie, float yawDeg, float pitchDeg) {
 void Adapter::DestroyActor(UObject* actor) { if (actor) Call(actor, "K2_DestroyActor").invoke(); }
 
 bool Adapter::BeingDestroyed(UObject* actor) {
+    static UClass* actorClass = nullptr;
+    if (!actorClass) actorClass = FindClass("Actor");
+    // StillValid also checks components. An AActor native function on a component reads the wrong layout.
+    if (!actor || !actorClass || !IsA(actor, actorClass)) return false;
     static UFunction* fn = nullptr;
-    if (!fn) if (UClass* actorClass = FindClass("Actor")) fn = FindFunction(actorClass, "IsActorBeingDestroyed");
+    if (!fn) fn = FindFunction(actorClass, "IsActorBeingDestroyed");
     if (!actor || !fn) return false;
     Call c(actor, fn);
     return c.invoke() && c.get<bool>("ReturnValue");
@@ -470,8 +474,7 @@ bool Adapter::ReadVitals(UObject* willie, uint8_t entity, VitalsMsg& out) {
     if (!health) return false;
     out = VitalsMsg{}; out.entity = entity;
     auto d = [&](const char* name) { double* p = Field<double>(willie, name); return p && std::isfinite(*p) ? float(*p) : 0.f; };
-    out.health = d("Health"); out.consciousness = d("Consciousness"); out.stamina = d("Stamina"); out.bleeding = d("Bleeding");
-    for (size_t i = 0; i < 7; ++i) out.partHealth[i] = d(kPartHealth[i]);
+    VisitVitalsFields(out, [&](const char* name, float& value) { value = d(name); });
     bool b = false;
     if (GetBool(willie, "DED", b) && b) out.flags |= 1;
     if (GetBool(willie, "Fallen", b) && b) out.flags |= 2;
@@ -549,6 +552,17 @@ void Adapter::ApplyVitals(UObject* willie, const WillieState& s) {
     for (size_t i = 0; i < 7; ++i) put(kPartHealth[i], s.partHealth[i]);
 }
 
+size_t Adapter::ApplyOwnerVitals(UObject* willie, const VitalsMsg& s) {
+    if (!willie) return 0;
+    size_t written = 0;
+    VisitVitalsFields(s, [&](const char* name, float value) {
+        if (std::isfinite(value)) if (double* p = Field<double>(willie, name)) { *p = value; ++written; }
+    });
+    // ReceiveTick is blocked for session stand-ins; the rig neutralises motors and drives the owner's pose.
+    // Never call Fall/get-up or copy Fallen/Downed: those would start a second posture simulation here.
+    return written;
+}
+
 void Adapter::TriggerDeath(UObject* willie) { Call(willie, "Death").invoke(); }
 
 }  // namespace hsm::game
@@ -624,7 +638,7 @@ void Adapter::ConsoleCommand(const std::string& command) {
 
 bool Adapter::IsDead(UObject* willie) { bool d = false; return GetBool(willie, "DED", d) && d; }
 
-bool Adapter::IsWeapon(UObject* actor) { return ClassNamed(actor, kWeaponClass); }
+bool Adapter::IsWeapon(UObject* actor) { return IsAByName(actor, kWeaponClass); }
 
 UObject* Adapter::FighterOf(UObject* actor) {
     for (int depth = 0; actor && depth < 4; ++depth) {
@@ -643,7 +657,16 @@ UObject* Adapter::FighterOf(UObject* actor) {
 
 std::vector<UObject*> Adapter::AllWillies() {
     std::vector<UObject*> out;
-    for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || !BeingDestroyed(w)) out.push_back(w);
+    if (!willieClass_) willieClass_ = FindClass(kWillieClass);
+    if (!statics_ || !world_ || !willieClass_) return out;
+    if (!allWillies_.valid())
+        allWillies_ = PreparedCall(ClassOf(statics_), "GetAllActorsOfClass", {"WorldContextObject", "ActorClass", "OutActors"});
+    allWillies_.put(0, world_).put(1, willieClass_);
+    if (!allWillies_.invoke(statics_)) return out;
+    const auto arr = allWillies_.take<FObjArray>(2);
+    if (!arr.data || arr.num < 0 || arr.num > arr.max || arr.num > 65536) return out;
+    for (int32_t i = 0; i < arr.num; ++i)
+        if (UObject* w = arr.data[i]; w && (!destroyAware_ || !BeingDestroyed(w))) out.push_back(w);
     return out;
 }
 

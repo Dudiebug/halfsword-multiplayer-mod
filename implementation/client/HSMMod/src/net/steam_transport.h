@@ -4,6 +4,7 @@
 #pragma once
 #include "net/transport.h"
 #include <unordered_map>
+#include <unordered_set>
 
 namespace hsm {
 
@@ -32,6 +33,9 @@ private:
     std::unordered_map<uint32_t, uint64_t> bySlot_;
     uint32_t nextPeer_ = 1;
     bool sendFailLogged_ = false;
+    bool receiveRejectLogged_ = false;
+    std::unordered_set<uint64_t> firstTx_, firstRx_;
+    double nextDiagnostics_ = 0;
     std::vector<NetEvent> queue_;
     size_t head_ = 0;
 };

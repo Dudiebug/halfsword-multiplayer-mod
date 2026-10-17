@@ -223,6 +223,51 @@ static void TestDuelRounds() {
     three.OnDeath(3, 2, t + 2); CHECK(three.Score(2) == 1);                     // last one standing
 }
 
+// DUEL-5: a fighter already dead when Start observes it, or dying at the Countdown boundary,
+// must recover without points, and must not enter Live until a fresh full countdown has elapsed.
+static void TestDuelCountdownRecovery() {
+    for (uint32_t deathAt : {0u, 1000u, Match::kCountdownMs}) {
+        Match m; m.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+        m.OnDeath(1, 0, deathAt);
+        auto ev = m.Tick(deathAt);
+        CHECK(ev.countdownRestart && ev.respawn == std::vector<uint8_t>({1}) && !ev.live);
+        CHECK(!m.Alive(1) && m.phase() == MatchPhase::Countdown && m.Score(2) == 0 && m.Deaths(1) == 0);
+        CHECK(m.Tick(deathAt + 999).respawn.empty());
+        ev = m.Tick(deathAt + 1000); // failed/unacknowledged spawn: retry, never silently mark alive
+        CHECK(ev.respawn == std::vector<uint8_t>({1}) && !ev.live);
+        m.MarkRespawned(1);
+        CHECK(!m.Tick(deathAt + 1000 + Match::kCountdownMs - 1).live);
+        CHECK(m.Tick(deathAt + 1000 + Match::kCountdownMs).live);
+        m.OnDeath(1, 0, deathAt + 7000); // Live environmental death awards the survivor, not a kill
+        CHECK(m.Score(2) == 1 && m.Kills(2) == 0);
+        ev = m.Tick(deathAt + 7000 + Match::kRoundGapMs);
+        CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2}));
+        m.RespawnFailed(1, deathAt + 11000);
+        CHECK(!m.Alive(1) && m.phase() == MatchPhase::Countdown && m.Score(2) == 1);
+        CHECK(m.Tick(deathAt + 12000).respawn == std::vector<uint8_t>({1}));
+        m.MarkRespawned(1); m.Tick(deathAt + 17000);
+        m.OnDeath(1, 0, deathAt + 17001);
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 2 && m.Score(2) == 2);
+        ev = m.Tick(deathAt + 17001 + Match::kResultsMs);
+        CHECK(ev.rematch && m.Alive(1) && m.Alive(2) && m.phase() == MatchPhase::Countdown && m.Score(2) == 0);
+    }
+    Match both; both.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    both.OnDeath(1, 2, 10); both.OnDeath(2, 1, 10);
+    CHECK(both.Tick(6000).respawn == std::vector<uint8_t>({1, 2})); // late frame cannot skip recovery
+    CHECK(both.phase() == MatchPhase::Countdown && both.scores().empty());
+    both.MarkRespawned(1);
+    CHECK(both.Tick(7000).respawn == std::vector<uint8_t>({2}));
+    for (auto phase : {MatchPhase::Idle, MatchPhase::Countdown, MatchPhase::Results, MatchPhase(255)})
+        CHECK(!CombatPhase(phase));
+    CHECK(CombatPhase(MatchPhase::Live) && CombatPhase(MatchPhase::SuddenDeath));
+    KillLog k;
+    CHECK(k.AgeText(1, 20000) == "none");
+    k.OnDamage(1, 2, 0xfffffff0u, 10, true);
+    CHECK(k.AgeText(1, 0x10u) == "32ms"); // real wrap is a valid elapsed duration
+    CHECK(k.AgeText(1, 0xfffffff0u) == "0ms");
+    k.Forget(1); CHECK(k.AgeText(1, 0) == "none");
+}
+
 static void TestHasAndFinish() {
     Match m; m.Start(Cfg(Format::FreeForAll, 5), {{1, kNoTeam, true}}, 0);
     CHECK(m.Has(1) && !m.Has(2));
@@ -291,7 +336,7 @@ int main() {
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
-    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWaves(); TestSides();
+    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestDuelCountdownRecovery(); TestHasAndFinish(); TestWaves(); TestSides();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -1,3 +1,4 @@
+#include "diagnostics/stall.h"
 #include <atomic>
 #include "ue/hook.h"
 #include "log.h"
@@ -16,14 +17,14 @@ struct NameRule { std::function<bool(const std::string&)> match; PreHook hook; }
 
 std::shared_mutex g_mu;
 std::unordered_map<UFunction*, std::vector<PreHook>> g_exact;      // includes resolved name rules
-std::unordered_map<UFunction*, bool> g_classified;                 // function already checked against name rules
+std::unordered_map<UFunction*, std::string> g_classified;                 // function already checked against name rules
 std::vector<NameRule> g_nameRules;
 
 // Resolve name rules for a function seen for the first time. Requires the unique lock.
 void Classify(UFunction* fn) {
-    g_classified[fn] = true;
-    if (g_nameRules.empty()) return;
     std::string name = ObjectName(reinterpret_cast<UObject*>(fn));
+    g_classified[fn] = name;
+    if (g_nameRules.empty()) return;
     for (const NameRule& r : g_nameRules) if (r.match(name)) g_exact[fn].push_back(r.hook);
 }
 
@@ -35,24 +36,30 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
         g_gameThreadId.store(GetCurrentThreadId());
         HSM_LOG("hook: first ProcessEvent call (%s)", fn ? ObjectName(reinterpret_cast<UObject*>(fn)).c_str() : "?");
     }
+    diagnostics::Scope trace("ProcessEvent classify/lock", reinterpret_cast<uintptr_t>(fn));
     bool block = false;
     if (obj && fn) {
         std::vector<PreHook> hooks;
         {
             std::shared_lock<std::shared_mutex> lock(g_mu);
             bool known = g_classified.count(fn) != 0;
-            if (known) { auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second; }
+            if (known) { trace.Name(g_classified.at(fn).c_str()); auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second; }
             if (!known) {
                 lock.unlock();
                 std::unique_lock<std::shared_mutex> w(g_mu);
                 if (!g_classified.count(fn)) Classify(fn);
+                trace.Name(g_classified.at(fn).c_str());
                 auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second;
             }
         }
         // Hooks run without the lock so they may call ProcessEvent (re-entering this detour).
+        trace.Stage("ProcessEvent pre-hooks");
         for (const PreHook& h : hooks) if (h(obj, fn, params)) block = true;
     }
-    if (!block) g_original(obj, fn, params);
+    if (!block) {
+        trace.Stage("ProcessEvent original");
+        g_original(obj, fn, params);
+    }
 }
 }  // namespace
 
@@ -63,8 +70,12 @@ bool EnsureMinHook() {
 
 bool HookNative(void* target, void* detour, void** original, const char* label) {
     if (!target || !EnsureMinHook()) return false;
-    if (MH_CreateHook(target, detour, original) != MH_OK || MH_EnableHook(target) != MH_OK) {
-        HSM_LOG("hook: failed to hook %s at %p", label, target); return false;
+    if (MH_CreateHook(target, detour, original) != MH_OK) {
+        HSM_LOG("hook: failed to create %s at %p", label, target); return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        MH_RemoveHook(target); *original=nullptr;
+        HSM_LOG("hook: failed to enable %s at %p; allocation removed", label, target); return false;
     }
     HSM_LOG("hook: %s hooked at %p", label, target);
     return true;
@@ -74,9 +85,12 @@ bool InstallProcessEventHook() {
     g_target = ProcessEventAddress();
     if (!g_target) { HSM_LOG("hook: ProcessEvent address unavailable"); return false; }
     if (!EnsureMinHook()) { HSM_LOG("hook: MH_Initialize failed"); return false; }
-    if (MH_CreateHook(g_target, reinterpret_cast<void*>(&Detour), reinterpret_cast<void**>(&g_original)) != MH_OK ||
-        MH_EnableHook(g_target) != MH_OK) {
-        HSM_LOG("hook: failed to hook ProcessEvent at %p", g_target); return false;
+    if (MH_CreateHook(g_target, reinterpret_cast<void*>(&Detour), reinterpret_cast<void**>(&g_original)) != MH_OK) {
+        HSM_LOG("hook: failed to create ProcessEvent at %p", g_target); g_target=nullptr;return false;
+    }
+    if (MH_EnableHook(g_target) != MH_OK) {
+        HSM_LOG("hook: failed to enable ProcessEvent at %p; allocation removed", g_target);
+        MH_RemoveHook(g_target);g_target=nullptr;g_original=nullptr;return false;
     }
     HSM_LOG("hook: ProcessEvent hooked at %p", g_target);
     return true;

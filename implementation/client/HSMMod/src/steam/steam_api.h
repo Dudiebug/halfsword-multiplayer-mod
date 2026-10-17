@@ -1,5 +1,5 @@
 // Steamworks access through the game's own steam_api64.dll (SDK 1.57 flat API), resolved at runtime.
-// The game already calls SteamAPI_Init; we only look up interfaces, register callbacks and poll call results.
+// Initialises Steam if the game has not, then resolves interfaces, registers callbacks and polls call results.
 // Callbacks may fire on any thread; they are copied into a queue that the game thread drains with Poll().
 #pragma once
 #include <cstdint>
@@ -24,6 +24,10 @@ struct Event {
         LobbyList,            // lobbies
         SessionRequest,       // user wants a networking session
         SessionFailed,        // user
+        RelayStatus,
+        ServersConnected,
+        ServersDisconnected,
+        ServerConnectFailure,
     } kind;
     bool ok = true;
     SteamId lobby = 0, user = 0;
@@ -66,10 +70,11 @@ void SetRichPresence(const std::string& key, const std::string& value);
 
 // Networking (ISteamNetworkingMessages; relayed, NAT-traversing)
 void InitRelay();
-bool Send(SteamId to, int channel, const void* data, uint32_t size, int flags);
+int Send(SteamId to, int channel, const void* data, uint32_t size, int flags); // Steam EResult; 1 = OK
 size_t Receive(int channel, std::vector<Message>& out, int max = 64);
 void AcceptSession(SteamId user);
 void CloseSession(SteamId user);
 int PingMs(SteamId user);                // -1 if unknown
+void LogSessionState(SteamId user);      // logs only changes; caller polls at most once per second
 
 }  // namespace hsm::steam

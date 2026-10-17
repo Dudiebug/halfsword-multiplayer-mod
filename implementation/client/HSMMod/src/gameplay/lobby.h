@@ -66,7 +66,7 @@ private:
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
     State state_ = State::Offline;
-    steam::SteamId lobby_ = 0, owner_ = 0;
+    steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;
     steam::LobbyType type_ = steam::LobbyType::FriendsOnly;
     std::vector<LobbyMember> members_;
     std::vector<LobbyListing> listings_;
