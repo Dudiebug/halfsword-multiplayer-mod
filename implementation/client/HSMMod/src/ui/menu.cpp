@@ -256,7 +256,7 @@ void UpdateOpenLabel(Session& session) {
 
 void HandleClicks(Session& session) {
     game::Lobby& lobby = session.lobby();
-    if (Clicked(g.openButton)) { g.panelOpen = !g.panelOpen; SetVisible(g.panel, g.panelOpen); if (g.panelOpen) g.nextText = 0; }
+    if (Clicked(g.openButton)) { g.panelOpen = !g.panelOpen; SetVisible(g.panel, g.panelOpen); if (g.panelOpen) g.nextText = 0; HSM_LOG("ui: multiplayer panel open=%d", int(g.panelOpen)); }
     if (!g.panelOpen) return;
     if (Clicked(g.hostFriends)) lobby.Host(steam::LobbyType::FriendsOnly);
     if (Clicked(g.hostPublic)) lobby.Host(steam::LobbyType::Public);

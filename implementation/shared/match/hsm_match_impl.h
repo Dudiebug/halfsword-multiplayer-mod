@@ -44,6 +44,19 @@ inline Rgba TeamColor(int team) {
     return team >= 0 && team < 4 ? kPalette[team] : Rgba{};
 }
 
+// A minute covers delayed bleeding/collapse in DUEL-3 (about 40 s), while expiring unrelated later falls.
+inline bool KillLog::OnDamage(uint8_t victim, uint8_t attacker, uint32_t nowMs, double damage, bool opposing) {
+    if (!victim || !attacker || attacker == victim || !opposing || !std::isfinite(damage) || damage <= 0) return false;
+    last_[victim] = {attacker, nowMs};
+    return true;
+}
+inline uint32_t KillLog::AgeMs(uint8_t victim, uint32_t nowMs) const {
+    auto it = last_.find(victim);
+    return it == last_.end() ? UINT32_MAX : nowMs - it->second.at;
+}
+inline std::string KillLog::AgeText(uint8_t victim, uint32_t nowMs) const {
+    return last_.count(victim) ? std::to_string(AgeMs(victim, nowMs)) + "ms" : "none";
+}
 inline void KillLog::OnHit(uint8_t victim, uint8_t attacker, uint32_t nowMs) {
     if (attacker == 0 || attacker == victim) return;
     last_[victim] = {attacker, nowMs};
@@ -53,6 +66,7 @@ inline uint8_t KillLog::KillerOf(uint8_t victim, uint32_t nowMs) const {
     return it != last_.end() && nowMs - it->second.at <= kWindowMs ? it->second.attacker : 0;
 }
 inline void KillLog::Forget(uint8_t entity) { last_.erase(entity); }
+
 
 inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs) {
     cfg_ = Sanitize(cfg); fighters_.clear(); score_.clear(); winner_ = kNoWinner; endedPending_ = false; ResetModeState();
@@ -93,7 +107,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     auto it = fighters_.find(victim);
     if (it == fighters_.end() || !it->second.alive) return;          // unknown or already dead (repeat report)
     F& v = it->second;
-    v.alive = false; v.diedAt = nowMs;
+    v.alive = false; v.diedAt = nowMs; v.recovering = false;
     bool scoring = phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath;
     if (!scoring) return;
     ++v.deaths;
@@ -108,7 +122,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
         roundOver_ = true; roundEnd_ = nowMs;
         if (alive == 1) {
             AddPoints(ScoreKeyOf(last), 1);
-            if (Score(ScoreKeyOf(last)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(last), nowMs);
+            if (phase_ == MatchPhase::SuddenDeath || Score(ScoreKeyOf(last)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(last), nowMs);
         }
         return;
     }
@@ -133,6 +147,19 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
 
 inline Match::Events Match::Tick(uint32_t nowMs) {
     Events ev;
+    // DetectDeaths runs before Tick, including the first tick after Start. Never enter Live with a dead duelist.
+    // Repeat failed spawns once a second; hold a full countdown until every requested body exists.
+    if (cfg_.format == Format::Duel && phase_ == MatchPhase::Countdown) {
+        bool dead = false;
+        for (auto& [e, f] : fighters_) if (!f.alive) {
+            dead = true;
+            if (!f.recovering || nowMs - f.diedAt >= 1000) {
+                ev.countdownRestart = true;
+                ev.respawn.push_back(e); f.recovering = true; f.diedAt = nowMs;
+            }
+        }
+        if (dead) { phaseStart_ = nowMs; return ev; }
+    }
     uint32_t elapsed = nowMs - phaseStart_;
     if (endedPending_) { ev.ended = true; endedPending_ = false; }    // before the rematch branch can return
     if (phase_ == MatchPhase::Countdown && elapsed >= kCountdownMs) {
@@ -182,6 +209,15 @@ inline Match::Events Match::Tick(uint32_t nowMs) {
 }
 
 inline void Match::MarkRespawned(uint8_t entity) { auto it = fighters_.find(entity); if (it != fighters_.end()) it->second.alive = true; }
+
+inline void Match::RespawnFailed(uint8_t entity, uint32_t nowMs) {
+    auto it = fighters_.find(entity);
+    if (it == fighters_.end()) return;
+    it->second.alive = false; it->second.recovering = true; it->second.diedAt = nowMs;
+    if (cfg_.format == Format::Duel && phase_ != MatchPhase::Idle && phase_ != MatchPhase::Results) {
+        phase_ = MatchPhase::Countdown; phaseStart_ = nowMs; roundOver_ = false;
+    }
+}
 
 inline void Match::Finish(int winnerKey, uint32_t nowMs) {
     if (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath || phase_ == MatchPhase::Countdown) End(winnerKey, nowMs);

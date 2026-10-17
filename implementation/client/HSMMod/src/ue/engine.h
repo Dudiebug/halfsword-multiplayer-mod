@@ -22,7 +22,7 @@ struct FTransform { FQuat rotation; FVector translation; double pad0 = 0; FVecto
 static_assert(sizeof(FTransform) == 0x60, "UE 5.4 FTransform (double, SIMD-aligned)");
 
 // Lifecycle ---------------------------------------------------------------
-bool Init();                       // build gate + engine globals; false = unsupported, stay vanilla
+bool Init(bool forceScan = false);                       // build gate + engine globals; false = unsupported, stay vanilla
 bool SelfTest();                   // reflection layout checks; call once Kismet classes are loaded
 uint64_t BuildKey();               // PE TimeDateStamp << 32 | SizeOfImage
 void* ProcessEventAddress();
@@ -35,13 +35,14 @@ FName ObjectFName(const UObject* o);
 UClass* ClassOf(const UObject* o);
 UObject* OuterOf(const UObject* o);
 bool IsA(const UObject* o, const UClass* c);
+bool IsAByName(const UObject* o, const char* className); // walks the object's class and its super chain
 bool IsChildOf(const UClass* c, const UClass* base);   // c == base or derives from it
 bool IsDefaultObject(const UObject* o);
 int32_t ObjectCount();
 int32_t ObjectIndex(const UObject* o);          // GUObjectArray slot (UObjectBase::InternalIndex)
 UObject* ObjectAt(int32_t index);
 UObject* FindObject(const std::string& name, const char* className = nullptr);   // by object name
-std::vector<UObject*> FindInstances(const char* className);                      // non-CDO instances
+std::vector<UObject*> FindInstances(const char* className, bool includeDerived = false); // non-CDO instances
 UObject* DefaultObject(const UClass* c);
 
 // Reflection -----------------------------------------------------------------

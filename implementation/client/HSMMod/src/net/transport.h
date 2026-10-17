@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "net/hsm_impairment.h"
 
 namespace hsm {
 
@@ -42,6 +43,7 @@ public:
 
 class ENetTransport final : public ITransport {
 public:
+    explicit ENetTransport(ImpairmentSettings impairment = {}) : impairment_(impairment) {}
     ~ENetTransport() override { Stop(); }
     bool StartHost(uint16_t port, size_t maxClients, Validator v);
     bool StartClient(const std::string& host, uint16_t port, Validator v);
@@ -68,6 +70,7 @@ private:
     std::deque<Outgoing> outbox_;
     std::vector<uint32_t> rtt_;
     bool isHost_ = false;
+    ImpairmentSettings impairment_;
 };
 
 }  // namespace hsm

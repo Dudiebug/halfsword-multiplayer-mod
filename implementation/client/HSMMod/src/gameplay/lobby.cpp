@@ -51,8 +51,15 @@ void Lobby::Tick() {
                 Enter(e.lobby);
                 break;
             case steam::Event::LobbyEntered:
-                if (!e.ok) { state_ = State::Idle; SetStatus("Could not join lobby (full or closed)"); break; }
                 if (state_ == State::Creating) break;    // our own new lobby: entered before LobbyCreated sets its data
+                if (state_ == State::InLobby && lobby_ == e.lobby) break;
+                if (state_ != State::Joining || e.lobby != joining_) {
+                    if (e.ok) steam::LeaveLobby(e.lobby);
+                    HSM_LOG("lobby: ignored stale enter lobby=%llu", (unsigned long long)e.lobby);
+                    break;
+                }
+                joining_ = 0;
+                if (!e.ok) { state_ = State::Idle; SetStatus("Could not join lobby (full or closed)"); break; }
                 if (state_ != State::InLobby || lobby_ != e.lobby) {
                     LobbyListing l = Describe(e.lobby);
                     if (!l.compatible) { steam::LeaveLobby(e.lobby); state_ = State::Idle; SetStatus("Cannot join: " + l.reason); break; }
@@ -84,6 +91,10 @@ void Lobby::Tick() {
                 HSM_LOG("lobby: networking session with %s failed", steam::PersonaName(e.user).c_str());
                 break;
             case steam::Event::LobbyChat:
+            case steam::Event::RelayStatus:
+            case steam::Event::ServersConnected:
+            case steam::Event::ServersDisconnected:
+            case steam::Event::ServerConnectFailure:
                 break;
         }
     }
@@ -92,12 +103,13 @@ void Lobby::Tick() {
 LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     LobbyListing l; l.id = lobby;
     l.name = steam::LobbyData(lobby, "name"); l.map = steam::LobbyData(lobby, "map"); l.mode = steam::LobbyData(lobby, "mode");
-    l.players = int(steam::LobbyMembers(lobby).size());
+    auto members = steam::LobbyMembers(lobby);
+    l.players = int(members.size());
     std::string proto = steam::LobbyData(lobby, "hsm_proto"), build = steam::LobbyData(lobby, "hsm_build");
     if (proto.empty()) l.reason = "not a HalfSwordMP lobby";
     else if (proto != ProtocolStr()) l.reason = "different mod version (host " + steam::LobbyData(lobby, "hsm_ver") + ", you " + kModVersion + ")";
     else if (build != BuildKeyHex()) l.reason = "different game version";
-    else if (l.players >= kMaxLobbyMembers) l.reason = "lobby full";
+    else if (l.players >= kMaxLobbyMembers && std::find(members.begin(), members.end(), steam::MySteamId()) == members.end()) l.reason = "lobby full";
     l.compatible = l.reason.empty();
     return l;
 }
@@ -109,8 +121,8 @@ void Lobby::Host(steam::LobbyType type) {
 }
 
 void Lobby::Join(steam::SteamId lobby) {
-    if (state_ == State::Offline || !lobby) return;
-    state_ = State::Joining; SetStatus("Joining lobby...");
+    if (state_ != State::Idle || !lobby) return;
+    joining_ = lobby; state_ = State::Joining; SetStatus("Joining lobby...");
     steam::JoinLobby(lobby);
 }
 
@@ -121,15 +133,17 @@ void Lobby::Enter(steam::SteamId lobby) {
     steam::SetRichPresence("status", IsHost() ? "Hosting a Half Sword fight" : "In a Half Sword lobby");
     members_.clear();
     RefreshMembers();
+    HSM_LOG("lobby: entered id=%llu owner=%llu members=%zu role=%s", (unsigned long long)lobby_,
+            (unsigned long long)owner_, members_.size(), IsHost() ? "host" : "client");
     SetStatus(IsHost() ? "Hosting - invite friends, then start any fight" : "Waiting for host to start a fight...");
     if (onEntered) onEntered();
 }
 
 void Lobby::Leave() {
     if (state_ != State::InLobby && state_ != State::Joining) return;
-    steam::LeaveLobby(lobby_);
+    steam::LeaveLobby(state_ == State::Joining ? joining_ : lobby_);
     for (const LobbyMember& m : members_) if (m.id != steam::MySteamId() && onMemberLeft) onMemberLeft(m.id);
-    members_.clear(); lobby_ = owner_ = 0; state_ = State::Idle;
+    members_.clear(); lobby_ = owner_ = joining_ = 0; state_ = State::Idle;
     steam::SetRichPresence("connect", ""); steam::SetRichPresence("status", "");
     SetStatus("Left lobby");
     if (onLeft) onLeft();
@@ -194,6 +208,10 @@ void Lobby::RefreshMembers() {
         return;
     }
     std::vector<steam::SteamId> ids = steam::LobbyMembers(lobby_);
+    bool membershipChanged = ids.size() != members_.size();
+    for (steam::SteamId id : ids)
+        membershipChanged = membershipChanged || std::none_of(members_.begin(), members_.end(), [&](const LobbyMember& m) { return m.id == id; });
+    if (membershipChanged) HSM_LOG("lobby: members id=%llu owner=%llu count=%zu", (unsigned long long)lobby_, (unsigned long long)owner_, ids.size());
     for (const LobbyMember& m : members_)
         if (std::find(ids.begin(), ids.end(), m.id) == ids.end() && m.id != steam::MySteamId() && onMemberLeft) onMemberLeft(m.id);
     std::vector<LobbyMember> next;

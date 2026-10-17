@@ -5,6 +5,7 @@
 // The stand-in flow follows Cyrex0/HalfSword-MP mods/HSMPAvatars/Scripts/main.lua (drive_root, snap_mesh, the 60 Hz
 // pose stream), Copyright (c) 2026 Cyrex0 and the HalfSword-MP contributors, MIT (see THIRD_PARTY_NOTICES.md).
 #pragma once
+#include "sync/hsm_vitals_feed.h"
 #include "gameplay/adapter.h"
 #include "gameplay/standin_rig.h"
 #include "hsm_owner.h"
@@ -57,7 +58,8 @@ private:
 class StandIns {
 public:
     void OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double nowMs);
-    void OnVitals(const VitalsMsg& v);
+    bool OnVitals(const VitalsMsg& v);              // false for stale/previous-body packets
+    void OnDeath(uint8_t entity);                  // reliable host-confirmed death, latched until body replacement
     void Attach(uint8_t entity, ue::UObject* willie);   // the session spawned willie as entity's stand-in
     void Detach(uint8_t entity);                        // unbinds; the session destroys the actor
     void Forget(uint8_t entity);                        // the entity left: its feed goes too
@@ -89,8 +91,7 @@ private:
     struct Feed {
         sync::PosePlayer player;
         sync::RootTrack root;
-        VitalsMsg vitals{};
-        bool haveVitals = false;
+        sync::VitalsFeed vitals;
         std::array<uint32_t, sync::kPoseWeapons> handClass{};   // newest pose's weapon class per hand (0 = empty, 1 = unknown)
         uint32_t handTs = 0;
         bool haveHands = false;
@@ -106,6 +107,8 @@ private:
         sync::V3 lastTargetPelvis{};
         uint32_t shownTs = 0;
         bool haveShown = false;
+        bool vitalsLogged = false, deathLogged = false;
+        uint32_t vitalsAppliedTs = 0;
     };
     struct Window {
         sync::ErrorStats pelvis, hands;

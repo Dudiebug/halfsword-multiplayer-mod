@@ -54,7 +54,7 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
             return who + "   rematch in " + Seconds(m.timeLeftMs);
         }
         case MatchPhase::SuddenDeath:
-            return "SUDDEN DEATH   " + (f == Format::FreeForAll ? std::string("next kill wins") : TeamScores(m));
+            return "SUDDEN DEATH   " + (f == Format::FreeForAll ? std::string("next kill wins") : f == Format::Duel ? std::string("next round wins") : TeamScores(m));
         case MatchPhase::Live: break;
     }
     std::string s;

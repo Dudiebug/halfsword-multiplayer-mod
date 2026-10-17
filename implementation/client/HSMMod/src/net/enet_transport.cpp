@@ -2,6 +2,7 @@
 #include "log.h"
 #include "hsm_protocol.h"
 #include <enet/enet.h>
+#include <optional>
 
 namespace hsm {
 namespace {
@@ -65,9 +66,36 @@ uint32_t ENetTransport::RoundTripMs(uint32_t peer) {
 
 void ENetTransport::Loop() {
     auto* h = static_cast<ENetHost*>(host_);
+    std::optional<ImpairmentQueue<Outgoing>> impaired;
+    if (impairment_.Enabled())
+        impaired.emplace(impairment_, uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()));
     while (running_) {
         std::deque<Outgoing> out;
         { std::lock_guard<std::mutex> lock(mu_); out.swap(outbox_); }
+        if (impaired) {
+            std::deque<Outgoing> ready;
+            const double now = NetSteadyMs();
+            for (Outgoing& o : out) {
+                if (o.disconnect) {
+                    impaired->RemoveIf([&](const Outgoing& queued) { return queued.peer == o.peer; });
+                    ready.push_back(std::move(o));
+                } else if (o.broadcast) {
+                    // Snapshot recipients now; a later connection must not receive an old broadcast.
+                    for (uint32_t id = 1; id < peers_.size(); ++id) {
+                        auto* peer = static_cast<ENetPeer*>(peers_[id]);
+                        if (peer && peer->state == ENET_PEER_STATE_CONNECTED) {
+                            Outgoing copy = o;
+                            copy.peer = id; copy.broadcast = false;
+                            impaired->Push(std::move(copy), o.reliable, now);
+                        }
+                    }
+                } else if (o.peer < peers_.size() && peers_[o.peer]) {
+                    impaired->Push(std::move(o), o.reliable, now);
+                }
+            }
+            impaired->Drain(now, [&](Outgoing o) { ready.push_back(std::move(o)); });
+            out.swap(ready);
+        }
         for (Outgoing& o : out) {
             ENetPeer* p = !o.broadcast && o.peer < peers_.size() ? static_cast<ENetPeer*>(peers_[o.peer]) : nullptr;
             if (o.disconnect) { if (p) enet_peer_disconnect(p, 0); continue; }
@@ -88,6 +116,7 @@ void ENetTransport::Loop() {
                 ne.kind = NetEvent::Connected; ne.peer = id;
             } else if (ev.type == ENET_EVENT_TYPE_DISCONNECT) {
                 uint32_t id = uint32_t(reinterpret_cast<uintptr_t>(ev.peer->data));
+                if (impaired) impaired->RemoveIf([&](const Outgoing& queued) { return queued.peer == id; });
                 if (id && id < peers_.size()) peers_[id] = nullptr;
                 ne.kind = NetEvent::Disconnected; ne.peer = id;
             } else if (ev.type == ENET_EVENT_TYPE_RECEIVE) {

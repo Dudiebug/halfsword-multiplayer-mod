@@ -1,4 +1,5 @@
 #include "gameplay/severs.h"
+#include "gameplay/combat_sync.h"
 #include "log.h"
 #include "session/hsm_authority.h"
 #include "ue/script_hook.h"
@@ -146,6 +147,7 @@ void Severs::Tick(double nowMs, const Owned& owned) {
         due_.erase(due_.begin() + static_cast<std::ptrdiff_t>(i));
         CallDelayed(d);
     }
+    CheckCompletions(nowMs);
     RunRetries(nowMs);
     pending_.Expire(nowMs);
     for (auto it = blockedOnMine_.begin(); it != blockedOnMine_.end();)
@@ -182,6 +184,24 @@ void Severs::Tick(double nowMs, const Owned& owned) {
 bool Severs::Classify(ScriptCall& c, bool initiate) {
     if (!active_) return false;
     UObject* self = c.self();
+    // A Delayed paired with a blocked Initiate must stay blocked even if Live arrived meanwhile.
+    // Other accepted native Delayed calls must finish across phase changes, just like our queued replays.
+    if (!initiate) {
+        const double now = SteadyNowMs();
+        for (auto it = blockedOnMine_.begin(); it != blockedOnMine_.end(); ++it) {
+            UObject* comp = nullptr; c.get("Dismember Weapon", comp);
+            if (it->willie == self && it->weapon == comp && now - it->atMs < kBlockedDelayedMs) {
+                blockedOnMine_.erase(it); ++n_.blockedOnMine; return true;
+            }
+        }
+    }
+    if (initiate && env_.combatEnabled && !env_.combatEnabled()) {
+        // Remember the blocked Initiate so a native Delayed after Live cannot use stale part state.
+        UObject* comp = nullptr; c.get("Dismember Weapon", comp);
+        if (blockedOnMine_.size() >= kMaxBlockedOnMine) blockedOnMine_.erase(blockedOnMine_.begin());
+        blockedOnMine_.push_back(BlockedOnMine{self, comp, SteadyNowMs()});
+        return true;
+    }
     UObject* weaponComp = nullptr;
     c.get("Dismember Weapon", weaponComp);
     UObject* striker = weaponComp ? adapter_->FighterOf(OuterOf(weaponComp)) : nullptr;
@@ -215,14 +235,7 @@ bool Severs::Classify(ScriptCall& c, bool initiate) {
         ++n_.blockedOnMine;
         return true;
     }
-    bool paired = false;
-    for (auto it = blockedOnMine_.begin(); it != blockedOnMine_.end(); ++it)
-        if (it->willie == self && it->weapon == weaponComp && now - it->atMs < kBlockedDelayedMs) {
-            blockedOnMine_.erase(it);
-            paired = true;
-            break;
-        }
-    if (!fromStandIn && !paired) return false;
+    if (!fromStandIn) return false;
     ++n_.blockedOnMine;
     return true;
 }
@@ -370,6 +383,7 @@ bool Severs::Rebuild(UObject* willie, const SeverClaim& c, Rebuilt& out) {
     out.box2 = RefOf(box2);
     out.weapon = RefOf(weapon ? weapon : box1);   // never null: Delayed disables the limb's collision against it
     out.part = c.part;
+    out.claimId = c.claimId;
     return true;
 }
 
@@ -407,13 +421,45 @@ bool Severs::Invoke(const char* function, const Rebuilt& a, bool standIn) {
 
 void Severs::CallDelayed(DueDelayed& d) {
     const Rebuilt& a = d.args;
-    if (!Live(a.willie) || !Live(a.mesh) || !Live(a.box1) || !Live(a.box2) || !Invoke(kDelayed, a, d.standIn)) {
+    const bool willie = Live(a.willie), mesh = Live(a.mesh), box1 = Live(a.box1), box2 = Live(a.box2);
+    const bool invoked = willie && mesh && box1 && box2 && Invoke(kDelayed, a, d.standIn);
+    if (!invoked) {
         ++n_.delayedLost;
+        HSM_LOG("severs: delayed #%u e%u part %u LOST (willie=%d mesh=%d box1=%d box2=%d invoked=%d)",
+                a.claimId, d.entity, a.part, int(willie), int(mesh), int(box1), int(box2), int(invoked));
         // Without its Delayed the fighter would keep "Dismemberment In Process" for good.
         if (Live(a.willie)) SetBool(a.willie.obj, kInProcess, false);
         return;
     }
     ++n_.delayed;
+    d.dueMs = SteadyNowMs() + 1000;
+    completing_.push_back(std::move(d));
+}
+
+void Severs::CheckCompletions(double nowMs) {
+    for (size_t i = 0; i < completing_.size();) {
+        const DueDelayed& d = completing_[i];
+        const Rebuilt& a = d.args;
+        const bool live = Live(a.willie);
+        const uint32_t mask = live ? ReadSeveredMask(a.willie.obj) : 0;
+        const bool confirmed = (mask & (1u << a.part)) != 0;
+        if (!confirmed && live && nowMs < d.dueMs) { ++i; continue; }
+        if (confirmed) {
+            ++n_.completed;
+            if (d.standIn) {
+                shownMask_[d.entity] |= 1u << a.part;
+                ++(d.late ? n_.shownLate : n_.shown);
+                if (env_.nativeShown) env_.nativeShown(d.entity, a.part);
+            }
+            HSM_LOG("severs: completed #%u e%u part %u on %s; native mask=0x%x", a.claimId, d.entity, a.part,
+                    d.standIn ? "stand-in" : "owner", mask);
+        } else {
+            ++n_.completionLost;
+            HSM_LOG("severs: delayed #%u e%u part %u ran but native completion was not confirmed (live=%d mask=0x%x)",
+                    a.claimId, d.entity, a.part, int(live), mask);
+        }
+        completing_.erase(completing_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
 }
 
 void Severs::DestroyBoxes(const Rebuilt& a) {
@@ -441,6 +487,7 @@ void Severs::Replay(const SeverClaim& c, double nowMs) {
 }
 
 void Severs::Mine(const SeverClaim& c, double nowMs, bool retry) {
+    if (env_.combatEnabled && !env_.combatEnabled()) return;
     UObject* me = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;
     if (!me) {
         ++n_.noVictim;   // between lives: the cut has nothing to land on
@@ -540,11 +587,9 @@ void Severs::Show(const SeverClaim& c, double nowMs, bool late, bool retry) {
     }
     switch (Begin(standIn, c, nowMs, true)) {
     case Run::Accepted:
-        shownMask_[c.victim] |= 1u << c.part;
-        ++(late ? n_.shownLate : n_.shown);
-        if (env_.nativeShown) env_.nativeShown(c.victim, c.part);
+        due_.back().late = late;
         if (n_.shown + n_.shownLate <= kLogFirst)
-            HSM_LOG("severs: shown #%u e%u -> e%u part %u on the stand-in%s%s", c.claimId, c.attacker, c.victim, c.part,
+            HSM_LOG("severs: started #%u e%u -> e%u part %u on the stand-in%s%s", c.claimId, c.attacker, c.victim, c.part,
                     late ? " (claim after the vitals)" : "", retry ? " (after the sever in process)" : "");
         return;
     case Run::InProcess:
@@ -569,6 +614,7 @@ void Severs::Forget(uint8_t entity) {
     shownMask_[entity] = 0;
     bitAtMs_[entity] = {};
     for (auto it = due_.begin(); it != due_.end();) it = it->entity == entity ? due_.erase(it) : std::next(it);
+    for (auto it = completing_.begin(); it != completing_.end();) it = it->entity == entity ? completing_.erase(it) : std::next(it);
     for (auto it = retry_.begin(); it != retry_.end();) it = it->claim.victim == entity ? retry_.erase(it) : std::next(it);
     for (const combat::StuckBlades::Key& k : blades_.Forget(entity)) Let(k.attacker, k.source);
     // A blade of ours stuck in that entity's stand-in: its owner is told it is free (the stand-in it was stuck in is gone).
@@ -939,13 +985,14 @@ std::string Severs::HealthLine() {
     std::snprintf(line, sizeof line,
                   "severs: captured %llu (limited %llu friendly %llu invalid %llu) | replayed %llu (refused %llu retried "
                   "%llu lost %llu dupes %llu stale %llu novictim %llu nomarker %llu nobone %llu nobox %llu) delayed %llu "
-                  "(lost %llu) | remembered %llu shown %llu late %llu refused %llu noclaim %llu | blocked: on stand-ins "
+                  "(lost %llu) completed %llu (unconfirmed %llu) | remembered %llu shown %llu late %llu refused %llu noclaim %llu | blocked: on stand-ins "
                   "%llu, on mine %llu | call failed %llu | stuck sent %llu freed %llu bad %llu, held %llu released %llu "
                   "failed %llu native %llu broken %llu collision kept %llu",
                   d(a.captured, b.captured), d(a.limited, b.limited), d(a.friendly, b.friendly), d(a.invalid, b.invalid),
                   d(a.replayed, b.replayed), d(a.refused, b.refused), d(a.retried, b.retried), d(a.retryLost, b.retryLost),
                   d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.noVictim, b.noVictim), d(a.noMarker, b.noMarker),
                   d(a.noBone, b.noBone), d(a.noBox, b.noBox), d(a.delayed, b.delayed), d(a.delayedLost, b.delayedLost),
+                  d(a.completed, b.completed), d(a.completionLost, b.completionLost),
                   d(a.remembered, b.remembered), d(a.shown, b.shown), d(a.shownLate, b.shownLate),
                   d(a.showRefused, b.showRefused), d(a.noClaim, b.noClaim), d(a.blockedStandIn, b.blockedStandIn),
                   d(a.blockedOnMine, b.blockedOnMine), d(a.callFailed, b.callFailed), d(a.stuckSent, b.stuckSent), d(a.stuckFreed, b.stuckFreed),

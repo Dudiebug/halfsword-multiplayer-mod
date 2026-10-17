@@ -80,7 +80,7 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
         if (nowMs >= o.nextVitalsMs) {
             o.nextVitalsMs = std::max(o.nextVitalsMs + kVitalsEveryMs, nowMs);
             VitalsMsg v;
-            if (adapter.ReadVitals(w, e, v)) { send(Encode(v)); ++vitalsSent_; }
+            if (adapter.ReadVitals(w, e, v)) { v.tsMs = ts; send(Encode(v)); ++vitalsSent_; }
         }
     }
 }
@@ -109,12 +109,18 @@ void StandIns::OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double now
     }
 }
 
-void StandIns::OnVitals(const VitalsMsg& v) {
-    if (!ValidEntity(v.entity)) return;
+bool StandIns::OnVitals(const VitalsMsg& v) {
+    if (!ValidEntity(v.entity)) return false;
     Slot& s = slots_[v.entity];
     if (!s.feed) s.feed = std::make_unique<Feed>();
-    s.feed->vitals = v;
-    s.feed->haveVitals = true;
+    return s.feed->vitals.Push(v);
+}
+
+void StandIns::OnDeath(uint8_t entity) {
+    if (!ValidEntity(entity)) return;
+    Slot& s = slots_[entity];
+    if (!s.feed) s.feed = std::make_unique<Feed>();
+    s.feed->vitals.ConfirmDeath();
 }
 
 void StandIns::Attach(uint8_t entity, UObject* willie) {
@@ -133,7 +139,10 @@ void StandIns::Detach(uint8_t entity) {
 }
 
 void StandIns::Forget(uint8_t entity) {
-    if (ValidEntity(entity)) slots_[entity] = Slot{};
+    if (!ValidEntity(entity)) return;
+    slots_[entity] = Slot{};
+    slots_[entity].feed = std::make_unique<Feed>();
+    slots_[entity].feed->vitals.NewBody();
 }
 
 void StandIns::Clear() {
@@ -159,8 +168,8 @@ UObject* StandIns::ActorOf(uint8_t entity) const {
 }
 
 const VitalsMsg* StandIns::Vitals(uint8_t entity) const {
-    if (!ValidEntity(entity) || !slots_[entity].feed || !slots_[entity].feed->haveVitals) return nullptr;
-    return &slots_[entity].feed->vitals;
+    if (!ValidEntity(entity) || !slots_[entity].feed) return nullptr;
+    return slots_[entity].feed->vitals.Latest();
 }
 
 bool StandIns::PoseHand(uint8_t entity, int hand, uint32_t& classHash) const {
@@ -210,6 +219,22 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
         HSM_LOG("standins: entity %u's stand-in is gone", entity);
         s.actor.reset();
         return;
+    }
+    if (s.feed) {
+        if (const VitalsMsg* v = s.feed->vitals.Latest(); v && (!a.vitalsLogged || v->tsMs != a.vitalsAppliedTs)) {
+            const size_t written = adapter.ApplyOwnerVitals(a.willie, *v);
+            a.vitalsAppliedTs = v->tsMs;
+            if (!a.vitalsLogged) {
+                HSM_LOG("standins: e%u mirrored %zu/15 owner condition fields; native tick blocked, posture from pose stream", entity, written);
+                a.vitalsLogged = true;
+            }
+        }
+        // Mirror state without starting single-player Death/respawn logic. The owner's corpse pose drives this body.
+        SetBool(a.willie, "DED", s.feed->vitals.Dead());
+        if (s.feed->vitals.Dead() && !a.deathLogged) {
+            HSM_LOG("standins: e%u owner death mirrored (corpse pose retained until respawn)", entity);
+            a.deathLogged = true;
+        }
     }
     if (!a.rig.Bound()) {
         if (nowMs < a.nextBindMs) return;

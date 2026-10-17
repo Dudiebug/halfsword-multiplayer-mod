@@ -64,6 +64,15 @@ bool FxSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     standIns_ = &standIns;
     env_ = std::move(env);
     boxClass_ = FindClass("BoxComponent");
+    if (UClass* willie = FindClass("Willie_BP_C")) {
+        for (const char* name : {"Get Damage", "Spawn Blood"}) {
+            UFunction* fn = FindFunction(willie, name);
+            FProperty* bone = fn ? FindProperty(fn, "Bone") : nullptr;
+            HSM_LOG("fx: %s Bone binding=%s offset=%d size=%d", name,
+                    bone ? PropertyName(bone).c_str() : "MISSING", bone ? PropertyOffset(bone) : -1,
+                    bone ? PropertySize(bone) : 0);
+        }
+    }
     int n = ObserveScript(kHookOwner, "Willie_BP_C", "Get Damage", {}, [this](ScriptCall& c) { OnGetDamage(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Spawn Blood", [this](ScriptCall& c) { OnSpawnBlood(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Box Vertex Paint", {}, [this](ScriptCall& c) { OnBoxVertexPaint(c); });
@@ -100,7 +109,7 @@ void FxSync::OnGetDamage(ScriptCall& c) {
     if (!c.get("Damage Raw Scaled", drs) || !(drs > 0)) return;
     if (Flag(self, "Force Disable Vertex Paint")) return;
     FName bone{};
-    c.get("Bone", bone);
+    if (!c.get("Bone", bone)) { ++n_.noBone; return; }
     UObject* box = nullptr;
     if (c.get("Hit Box", box) && box) {
         Call world(box, "K2_GetComponentToWorld");
@@ -130,7 +139,7 @@ void FxSync::OnSpawnBlood(ScriptCall& c) {
     m.entity = entity;
     m.kind = FxKind::Blood;
     FName bone{};
-    c.get("Bone", bone);
+    if (!c.get("Bone", bone)) { ++n_.noBone; return; }
     FTransform t{};
     c.get("Transform", t);
     m.local = ToXform(t);   // world for now; Send moves it into the bone's frame

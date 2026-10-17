@@ -102,6 +102,7 @@ public:
     bool FirstBodyPosition(ue::UObject* willie, ue::FVector& out);   // world position of the first synced bone (hip)
     void NudgeTowards(ue::UObject* willie, const WillieState& target, float blend);   // blends bone velocities, keeps the local motion
     void ApplyVitals(ue::UObject* willie, const WillieState& s);
+    size_t ApplyOwnerVitals(ue::UObject* willie, const VitalsMsg& s); // fields written; no native Fall/Death/get-up calls
     void TriggerDeath(ue::UObject* willie);
     size_t BoneCount() const { return bones_.size(); }
 
@@ -117,6 +118,7 @@ private:
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
     ue::UObject* world_ = nullptr;
+    ue::PreparedCall allWillies_;              // reusable world actor query; releases its previous output array
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;

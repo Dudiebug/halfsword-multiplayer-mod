@@ -22,16 +22,22 @@ constexpr char kDefaultIni[] =
     "; host: the host simulates every fighter (the v0.3 behaviour). Only the host's setting matters.\n"
     "sync_mode=owner\n";
 
-std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
+std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def, const wchar_t* section = L"net") {
     wchar_t buf[256];
     wchar_t wdef[256];
     MultiByteToWideChar(CP_UTF8, 0, def, -1, wdef, 256);
-    GetPrivateProfileStringW(L"net", key, wdef, buf, 256, ini.c_str());
+    GetPrivateProfileStringW(section, key, wdef, buf, 256, ini.c_str());
     char out[3 * 256 + 1];                                   // every UTF-16 unit fits in at most 3 UTF-8 bytes
     if (!WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, sizeof out, nullptr, nullptr)) return def;
     return out;
 }
 int Clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+int ReadTestInt(const std::wstring& ini, const wchar_t* key, int max) {
+    std::string value = ReadString(ini, key, "0", L"test");
+    char* end = nullptr;
+    long n = std::strtol(value.c_str(), &end, 10);
+    return value.size() <= 9 && end != value.c_str() && *end == 0 && n >= 0 && n <= max ? int(n) : 0;
+}
 }  // namespace
 
 const char* RoleName(Role r) { return r == Role::Steam ? "steam" : r == Role::Host ? "host" : r == Role::Client ? "client" : "off"; }
@@ -50,6 +56,9 @@ Config LoadConfig() {
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
     c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
+    c.impairment.lagMs = ReadTestInt(ini, L"lag_ms", 10000);
+    c.impairment.jitterMs = ReadTestInt(ini, L"jitter_ms", 10000);
+    c.impairment.lossPct = ReadTestInt(ini, L"loss_pct", 100);
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (auto r = CmdArg(cl, "hsmrole")) c.role = *r == "host" ? Role::Host : *r == "client" ? Role::Client : *r == "off" ? Role::Off : Role::Steam;
@@ -57,8 +66,27 @@ Config LoadConfig() {
     c.port = uint16_t(CmdArgInt(cl, "hsmport", c.port, 1024, 65535));
     if (auto n = CmdArg(cl, "hsmname"); n && !n->empty()) c.playerName = n->substr(0, 32);
     if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) c.ownerSync = *m != "host";
+    c.impairment.lagMs = CmdArgInt(cl, "hsmlag_ms", c.impairment.lagMs, 0, 10000);
+    c.impairment.jitterMs = CmdArgInt(cl, "hsmjitter_ms", c.impairment.jitterMs, 0, 10000);
+    c.impairment.lossPct = CmdArgInt(cl, "hsmloss_pct", c.impairment.lossPct, 0, 100);
+    if (c.role == Role::Host || c.role == Role::Client) {
+        c.testForceScan = ReadTestInt(ini,L"force_scan",1) == 1;
+        for (const auto& token : SplitCommandLine(cl)) if (token == "-hsmforcescan") c.testForceScan = true;
+        c.testMatch.SetFormat(ReadString(ini,L"format","",L"test"));
+        c.testMatch.SetLimit(ReadString(ini,L"limit","",L"test"));
+        if (auto f=CmdArg(cl,"hsmformat")) c.testMatch.SetFormat(*f);
+        if (auto l=CmdArg(cl,"hsmlimit")) c.testMatch.SetLimit(*l);
+        if (c.testMatch.Enabled()) {
+            MatchConfig test=c.testMatch.Apply(MatchConfig{});
+            HSM_LOG("test: loopback match format=%u limit=%u (%s)",unsigned(test.format),test.scoreLimit,
+                c.role==Role::Host?"host override":"client takes host match config");
+        }
+    }
     HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s", RoleName(c.role), c.hostAddress.c_str(), c.port,
             c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host");
+    if (c.impairment.Enabled())
+        HSM_LOG("test: ENet outgoing impairment lag_ms=%d jitter_ms=%d loss_pct=%d (reliable packets never dropped; Steam unaffected)",
+                c.impairment.lagMs, c.impairment.jitterMs, c.impairment.lossPct);
     return c;
 }
 }  // namespace hsm

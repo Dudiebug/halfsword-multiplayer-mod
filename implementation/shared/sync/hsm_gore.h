@@ -38,7 +38,7 @@ constexpr uint32_t kGoreJointMask = (1u << kGoreJoints) - 1u;
 // owner's Vitals first reports the bit, unless NoteNativeSever() for that part arrives first. Vitals is
 // unreliable at 15 Hz (~66 ms/packet); 400 ms covers several dropped packets plus the travel time of the
 // reliable sever claim that replays the native cut on this stand-in (the sever path in session.cpp calls
-// NoteNativeSever when the game's own Dismember Function Initiate ran), so on any normal connection the
+// NoteNativeSever after Delayed ran and the native part map confirms completion), so on any normal connection the
 // native cut wins the race and this fallback is the exception path, not the common one.
 constexpr double kSeverGraceMs = 400.0;
 

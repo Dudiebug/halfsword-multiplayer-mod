@@ -1,4 +1,9 @@
+#include "diagnostics/stall.h"
 #include "ue/engine.h"
+#include "reflection/hsm_class_match.h"
+#include "reflection/hsm_engine_pins.h"
+#include "reflection/hsm_startup_sanity.h"
+#include "reflection/hsm_name_match.h"
 #include "log.h"
 #include <windows.h>
 #include <cstring>
@@ -16,7 +21,7 @@ struct ScriptVm {
     uintptr_t execAddIntInt;       // UKismetMathLibrary::execAdd_IntInt, checks UFunction::Func's offset
 };
 struct BuildInfo { uint64_t key; const char* label; uintptr_t gobjects, appendString; uint32_t processEventIndex; ScriptVm vm; };
-// key = PE TimeDateStamp << 32 | SizeOfImage. Unknown key => mod disables itself.
+// key = PE TimeDateStamp << 32 | SizeOfImage. Unknown keys use unique signatures, then the same layout checks.
 constexpr BuildInfo kBuilds[] = {
     {0x8EFA122909712000ull, "steam-24185754 (UE 5.4.4 CL-2705)", 0x08BFD240, 0x012C1CB0, 0x4D,
      {0x014A4850, 0x014A4950, 0x6C, 0x036AF990}},
@@ -43,12 +48,14 @@ constexpr int32_t kItemsPerChunk = 0x10000, kItemSize = 0x18;
 struct TUObjectArray { uint8_t** objects; uint8_t* pre; int32_t maxElements, numElements, maxChunks, numChunks; };
 struct FString { wchar_t* data; int32_t num, max; };
 
+BuildInfo g_scanned{};
 const BuildInfo* g_build = nullptr;
 uintptr_t g_base = 0;
 TUObjectArray* g_objects = nullptr;
 using AppendStringFn = void (*)(const FName*, FString*);
 AppendStringFn g_appendString = nullptr;
 uint64_t g_key = 0;
+uintptr_t g_namePool = 0;
 
 std::mutex g_nameMu;
 std::unordered_map<uint64_t, std::string> g_nameCache;
@@ -67,22 +74,184 @@ std::string ClassName(const UObject* o) { UClass* c = ClassOf(o); return c ? Obj
 
 uint64_t BuildKey() { return g_key; }
 
-bool Init() {
+namespace {
+bool Readable(const void* ptr, size_t size) {
+    uintptr_t at=reinterpret_cast<uintptr_t>(ptr);
+    if (!at || size>UINTPTR_MAX-at) return false;
+    uintptr_t end=at+size;
+    while (at<end) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (!VirtualQuery(reinterpret_cast<void*>(at),&info,sizeof info) || info.State!=MEM_COMMIT ||
+            (info.Protect&(PAGE_NOACCESS|PAGE_GUARD)) || !(info.Protect&(PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))) return false;
+        uintptr_t next=reinterpret_cast<uintptr_t>(info.BaseAddress)+info.RegionSize;
+        if (next<=at) return false;
+        at=next;
+    }
+    return true;
+}
+template<class T> bool Checked(const void* ptr, size_t off, T& value) {
+    uintptr_t at=reinterpret_cast<uintptr_t>(ptr);
+    if (!at || off>UINTPTR_MAX-at) return false;
+    SIZE_T got=0;
+    return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+off),&value,sizeof value,&got) && got==sizeof value;
+}
+bool PoolName(FName n, std::string& out) {
+    return uecheck::PoolName(g_namePool,n.index,n.number,[](uintptr_t at,void* dst,size_t size) {
+        SIZE_T got=0;return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),dst,size,&got) && got==size;
+    },out);
+}
+bool NameEntrySane(FName n) { std::string name; return PoolName(n,name); }
+bool NameChecked(const void* object, size_t offset, std::string& out) {
+    FName n{};
+    return Checked(object,offset,n) && PoolName(n,out); // no AppendString call on the startup worker
+}
+bool ArraySane(const TUObjectArray& a) {
+    return uecheck::ArrayShape(a.maxElements,a.numElements,a.maxChunks,a.numChunks) &&
+        Readable(a.objects,size_t(a.numChunks)*sizeof(void*));
+}
+UObject* CheckedObject(int32_t index) {
+    if (index<0 || index>=g_objects->numElements) return nullptr;
+    uint8_t* chunk=nullptr; UObject* obj=nullptr;
+    if (!Checked(g_objects->objects,size_t(index/kItemsPerChunk)*sizeof(void*),chunk) ||
+        !Checked(chunk,size_t(index%kItemsPerChunk)*kItemSize,obj)) return nullptr;
+    return obj;
+}
+bool LayoutSane(const pins::Image& image, std::string& error) {
+    auto fail=[&](const std::string& check) { error=check; return false; };
+    // Before normal unguarded reflection: bounded reads of object/class/outer/struct/property/function layouts.
+    int sampled=0;
+    for (int32_t i=0;i<g_objects->numElements && sampled<64;++i) {
+        UObject* o=CheckedObject(i); int32_t index=-1; UClass* cls=nullptr;
+        if (!o) continue; // unused/collected object slots are legal
+        ++sampled;
+        if (!Checked(o,kObjIndex,index) || index!=i || !Checked(o,kObjClass,cls) || !Readable(cls,kClassCDO+8))
+            return fail("object["+std::to_string(i)+"] index/class (index="+std::to_string(index)+")");
+        const void* outer=o; size_t depth=0;
+        while (outer && depth++<32) {
+            std::string name; if (!NameChecked(outer,kObjName,name) || !Checked(outer,kObjOuter,outer)) return fail("object["+std::to_string(i)+"] name/outer read");
+        }
+        if (outer) return fail("object outer-chain depth");
+    }
+    if (sampled<64) return fail("fewer than 64 live object headers");
+    std::string first; if (!NameChecked(CheckedObject(0),kObjName,first) || first!="/Script/CoreUObject") return fail("object[0] name: "+first);
+    void** vt=nullptr; void* pe=nullptr;
+    if (!Checked(CheckedObject(0),0,vt) || !Checked(vt,g_build->processEventIndex*sizeof(void*),pe) ||
+        reinterpret_cast<uintptr_t>(pe)<g_base || reinterpret_cast<uintptr_t>(pe)-g_base>UINT32_MAX ||
+        !pins::InSection(image,uint32_t(reinterpret_cast<uintptr_t>(pe)-g_base),1,pins::kExecutable)) return fail("ProcessEvent vtable slot 0x4D");
+    UObject* vector=nullptr; UObject* math=nullptr;
+    for (int32_t i=0;i<g_objects->numElements && (!vector || !math);++i) {
+        UObject* o=CheckedObject(i); if (!o) continue;
+        std::string name; if (!NameChecked(o,kObjName,name)) return fail("class lookup object["+std::to_string(i)+"] name");
+        if (name!="Vector" && name!="KismetMathLibrary") continue;
+        void* cls=nullptr; std::string type;
+        if (!Checked(o,kObjClass,cls) || !NameChecked(cls,kObjName,type)) return fail(name+" class name");
+        if (name=="Vector" && type=="ScriptStruct") vector=o;
+        if (name=="KismetMathLibrary" && type=="Class") math=o;
+    }
+    int32_t structSize=0; void* prop=nullptr;
+    if (!vector) return fail("Core Vector not registered yet");
+    if (!Checked(vector,kStructSize,structSize) || structSize!=24 || !Checked(vector,kStructChildProps,prop)) return fail("Vector size/fields (size="+std::to_string(structSize)+")");
+    for (int i=0;i<3;++i) {
+        int32_t offset=-1,size=0,dim=0; void* type=nullptr; std::string name,typeName;
+        if (!prop || !NameChecked(prop,kFFieldName,name) || name!=std::string(1,char('X'+i)) ||
+            !Checked(prop,kPropOffset,offset) || offset!=i*8 || !Checked(prop,kPropElementSize,size) || size!=8 ||
+            !Checked(prop,kPropArrayDim,dim) || dim!=1 || !Checked(prop,kFFieldClass,type) ||
+            !NameChecked(type,0,typeName) || typeName!="DoubleProperty" || !Checked(prop,kFFieldNext,prop)) return fail("Vector field "+std::to_string(i)+" name="+name+" type="+typeName+" offset="+std::to_string(offset)+" size="+std::to_string(size)+" dim="+std::to_string(dim));
+    }
+    if (prop) return fail("Vector extra field");
+    UObject* cdo=nullptr; UClass* cdoClass=nullptr; void* super=nullptr;
+    if (!math) return fail("KismetMathLibrary not registered yet");
+    if (!Checked(math,kStructSuper,super) || !Readable(super,kStructSize+4) ||
+        !Checked(math,kClassCDO,cdo) || !Checked(cdo,kObjClass,cdoClass) || reinterpret_cast<void*>(cdoClass)!=math) return fail("KismetMathLibrary superclass/CDO readiness");
+    UObject* fn=nullptr; if (!Checked(math,kStructChildren,fn)) return fail("KismetMathLibrary child-function pointer");
+    for (size_t count=0;fn && count<4096;++count) {
+        std::string name; if (!NameChecked(fn,kObjName,name)) return fail("KismetMathLibrary child-function name");
+        if (name=="Add_IntInt") {
+            void* native=nullptr; uint32_t flags=0; int32_t size=0;
+            if (!Checked(fn,kFuncNative,native) || native!=reinterpret_cast<void*>(g_base+g_build->vm.execAddIntInt) ||
+                !Checked(fn,kFuncFlags,flags) || !(flags&0x400) || !Checked(fn,kStructSize,size) || size!=12) return fail("Add_IntInt native/flags/parameter size (size="+std::to_string(size)+" flags="+std::to_string(flags)+")");
+            return true;
+        }
+        if (!Checked(fn,kFieldNext,fn)) return fail("KismetMathLibrary child-function next");
+    }
+    return fail("Add_IntInt not registered or child chain too long");
+}
+void LogPins(const pins::Pins& p,const BuildInfo* known) {
+    const uint32_t resolved[]={p.objects,p.append,p.internal,p.executor,p.add};
+    const uintptr_t expected[]={known?known->gobjects:0,known?known->appendString:0,known?known->vm.processInternal:0,
+        known?known->vm.executor:0,known?known->vm.execAddIntInt:0};
+    for (size_t i=0;i<5;++i) HSM_LOG("engine: pin %s resolved=%p RVA=%08x table=%p RVA=%08x known=%d",
+        pins::kSignatures[i].name,resolved[i]?reinterpret_cast<void*>(g_base+resolved[i]):nullptr,resolved[i],
+        known?reinterpret_cast<void*>(g_base+expected[i]):nullptr,unsigned(expected[i]),known?1:0);
+}
+void ResetPins() {
+    g_build=nullptr;g_objects=nullptr;g_appendString=nullptr;g_namePool=0;
+    std::lock_guard<std::mutex> lock(g_nameMu);g_nameCache.clear();
+}
+} // namespace
+
+bool Init(bool forceScan) {
+    ResetPins();
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_key = ComputeBuildKey();
-    for (const BuildInfo& b : kBuilds) if (b.key == g_key) { g_build = &b; break; }
-    if (!g_build) { HSM_LOG("engine: unsupported build key %016llx", (unsigned long long)g_key); return false; }
+    const BuildInfo* known=nullptr;
+    for (const BuildInfo& b:kBuilds) if (b.key==g_key) { known=&b;break; }
+    pins::Image image;
+    // PE headers are the OS-loaded main image; executable sections must be readable before scanning.
+    if (!pins::ParseImage({reinterpret_cast<const uint8_t*>(g_base),uint32_t(g_key)},image)) {
+        LogPins({},known);HSM_LOG("engine: pin failed: invalid PE image"); return false;
+    }
+    for (const auto& section:image.sections) if ((section.flags&pins::kExecutable) &&
+        !Readable(reinterpret_cast<void*>(g_base+section.rva),section.size)) {
+        LogPins({},known);HSM_LOG("engine: pin failed: unreadable executable section RVA=%08x size=%u",section.rva,section.size); return false;
+    }
+    if (forceScan) HSM_LOG("engine: build table skipped by test request (force_scan=1)");
+    else g_build=known;
+    bool scanned=!g_build;
+    if (scanned) {
+        auto result=pins::Scan(image);
+        if (!result.error.empty()) { LogPins(result.pins,known); HSM_LOG("engine: pin failed for %016llx: %s",(unsigned long long)g_key,result.error.c_str());return false; }
+        const auto& p=result.pins;
+        g_scanned={g_key,"signature scan (UE 5.4 layouts)",p.objects,p.append,0x4D,{p.internal,p.executor,p.callSite,p.add}};
+        g_build=&g_scanned;
+        for (size_t i=0;i<result.counts.size();++i) HSM_LOG("engine: scan %s matches=%zu hit RVA=%08x",pins::kSignatures[i].name,result.counts[i],result.hits[i]);
+    }
+    pins::Pins p{uint32_t(g_build->gobjects),uint32_t(g_build->appendString),uint32_t(g_build->vm.processInternal),
+        uint32_t(g_build->vm.executor),uint32_t(g_build->vm.execAddIntInt),g_build->vm.executorCallSite};
+    LogPins(p,known);
+    std::string error;
+    if (!pins::Validate(image,p,error)) { HSM_LOG("engine: pin failed: %s",error.c_str());ResetPins();return false; }
     g_objects = reinterpret_cast<TUObjectArray*>(g_base + g_build->gobjects);
     g_appendString = reinterpret_cast<AppendStringFn>(g_base + g_build->appendString);
-    // Wait for the object array to fill (engine init) before anyone touches it.
-    for (int i = 0; i < 600 && (g_objects->numElements < 10000 || !g_objects->objects); ++i) Sleep(100);
-    if (g_objects->numElements < 10000 || g_objects->numElements > g_objects->maxElements) {
-        HSM_LOG("engine: GObjects looks wrong (num=%d max=%d)", g_objects->numElements, g_objects->maxElements); return false;
+    // AppendString's two RIP-relative LEAs must agree on its allocator; no extra absolute pin.
+    int32_t poolDisp1=0,poolDisp2=0;
+    pins::Read(image.bytes,size_t(p.append)+35,poolDisp1); pins::Read(image.bytes,size_t(p.append)+44,poolDisp2);
+    int64_t pool1=int64_t(p.append)+39+poolDisp1,pool2=int64_t(p.append)+48+poolDisp2;
+    if (pool1!=pool2 || pool1<0 || pool1>UINT32_MAX || !pins::InSection(image,uint32_t(pool1),0x18,pins::kWritable,pins::kExecutable)) {
+        HSM_LOG("engine: pin failed: AppendString name allocator mismatch");ResetPins();return false;
     }
-    UObject* first = ObjectAt(0);
-    std::string n = first ? FullName(first) : "<null>";
-    HSM_LOG("engine: %s, %d objects, object[0]=%s", g_build->label, g_objects->numElements, n.c_str());
-    return first && n.find("CoreUObject") != std::string::npos;
+    g_namePool=g_base+uintptr_t(pool1);
+    // A population threshold is not a readiness barrier: native class registration and CDO creation can lag it.
+    TUObjectArray array{}; bool ready=false;std::string previous;
+    const uint64_t deadline=GetTickCount64()+60000;
+    do {
+        error.clear();
+        if (!Checked(g_objects,0,array)) error="GObjects header unreadable";
+        else if (!ArraySane(array)) error="GObjects shape/chunks num="+std::to_string(array.numElements)+
+            " max="+std::to_string(array.maxElements)+" chunks="+std::to_string(array.numChunks)+" maxChunks="+std::to_string(array.maxChunks);
+        else if (LayoutSane(image,error)) { ready=true;break; }
+        if (error!=previous) { HSM_LOG("engine: waiting for startup sanity: %s",error.c_str());previous=error; }
+        Sleep(100);
+    } while (GetTickCount64()<deadline);
+    if (!ready) {
+        HSM_LOG("engine: pin failed: startup sanity timeout: %s; no hooks installed",error.c_str());
+        ResetPins();return false;
+    }
+    HSM_LOG("engine: build pinned by %s key=%016llx GObjects=%p AppendString=%p ProcessInternal=%p ScriptExecutor=%p execAdd_IntInt=%p",
+        scanned?"scan":"table",(unsigned long long)g_key,reinterpret_cast<void*>(g_base+p.objects),reinterpret_cast<void*>(g_base+p.append),
+        reinterpret_cast<void*>(g_base+p.internal),reinterpret_cast<void*>(g_base+p.executor),reinterpret_cast<void*>(g_base+p.add));
+    HSM_LOG("engine: UE 5.4 layout sanity passed; %d objects",g_objects->numElements);
+    return true;
 }
 
 void* ProcessEventAddress() {
@@ -101,9 +270,11 @@ std::string NameToString(FName n) {
         if (it != g_nameCache.end()) return it->second;
     }
     // AppendString writes into our FString; the buffer is large enough that the engine never reallocates it.
+    if (!NameEntrySane(n)) return {};
     wchar_t buf[1024]; FString s{buf, 0, 1024};
     g_appendString(&n, &s);
     std::string out;
+    if (s.data != buf || s.num < 0 || s.num > 1024 || s.max != 1024) return out;
     for (int i = 0; i < s.num && buf[i]; ++i) out.push_back(buf[i] < 128 ? char(buf[i]) : '?');
     std::lock_guard<std::mutex> lock(g_nameMu);
     g_nameCache.emplace(key, out);
@@ -124,6 +295,12 @@ std::string FullName(const UObject* o) {
 }
 
 bool IsA(const UObject* o, const UClass* c) { return IsChildOf(ClassOf(o), c); }
+
+bool IsAByName(const UObject* o, const char* className) {
+    return className && ClassChainNamed(ClassOf(o), className,
+        [](const UClass* c) { return ObjectName(reinterpret_cast<const UObject*>(c)); },
+        [](const UClass* c) { return Read<UClass*>(c, kStructSuper); });
+}
 
 bool IsChildOf(const UClass* c, const UClass* base) {
     for (const void* s = c; s; s = Read<void*>(s, kStructSuper)) if (s == base) return true;
@@ -150,11 +327,11 @@ UObject* FindObject(const std::string& name, const char* className) {
     return nullptr;
 }
 
-std::vector<UObject*> FindInstances(const char* className) {
+std::vector<UObject*> FindInstances(const char* className, bool includeDerived) {
     std::vector<UObject*> out;
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (o && !IsDefaultObject(o) && ClassName(o) == className) out.push_back(o);
+        if (o && !IsDefaultObject(o) && (includeDerived ? IsAByName(o, className) : ClassName(o) == className)) out.push_back(o);
     }
     return out;
 }
@@ -179,7 +356,7 @@ std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& 
 FProperty* FindProperty(const void* ustruct, const std::string& name) {
     for (const void* s = ustruct; s; s = Read<void*>(s, kStructSuper))
         for (const void* p = Read<void*>(s, kStructChildProps); p; p = Read<void*>(p, kFFieldNext))
-            if (NameToString(Read<FName>(p, kFFieldName)) == name) return static_cast<FProperty*>(const_cast<void*>(p));
+            if (ReflectedNameEqual(NameToString(Read<FName>(p, kFFieldName)), name)) return static_cast<FProperty*>(const_cast<void*>(p));
     return nullptr;
 }
 
@@ -298,6 +475,7 @@ void* Call::paramPtr(const std::string& param) {
 }
 
 bool Call::invoke() {
+    diagnostics::Scope trace("Call::invoke", reinterpret_cast<uintptr_t>(fn_));
     if (!valid()) return false;
     ProcessEvent(target_, fn_, buf_.data());
     return true;
@@ -343,8 +521,10 @@ const void* PreparedCall::slot(size_t i, size_t size) const {
 }
 
 bool PreparedCall::invoke(UObject* target) {
+    diagnostics::Scope trace("PreparedCall validate/clear outputs", reinterpret_cast<uintptr_t>(fn_));
     if (!fn_ || !target || !IsA(target, cls_)) return false;
     if (ran_) for (FProperty* p : owning_) ClearPropertyValue(p, buf_.data() + PropertyOffset(p));
+    trace.Stage("PreparedCall ProcessEvent");
     ProcessEvent(target, fn_, buf_.data());
     ran_ = true;
     return true;

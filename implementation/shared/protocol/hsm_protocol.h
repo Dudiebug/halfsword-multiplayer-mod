@@ -12,7 +12,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 10;         // 10: PaintFx, Equip (owner sync blood and wounds, drawn and sheathed weapons)
+constexpr uint8_t kProtocolRevision = 12;         // 12: owner-confirmed damage credit (both peers must update)
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -55,6 +55,7 @@ enum class MsgType : uint8_t {
     PropLease = 30,   // both ways, reliable: a lease request/release, or the host's grant (session/hsm_lease.h)
     PaintFx = 31,     // owner -> host -> others, reliable: blood or a wound painted on an owned fighter (combat/hsm_fx.h)
     Equip = 32,       // owner -> host -> others, reliable: which sheathed weapons an owned fighter has drawn (combat/hsm_equip.h)
+    DamageCredit = 33, // victim owner -> host, reliable: positive opposing damage, for death/vitals fallback
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
@@ -166,6 +167,7 @@ struct BlobChunk {
 };
 
 // Match (rev 5). Field ranges mirror hsm::Sanitize in match/hsm_match.h.
+constexpr uint8_t kMatchFormatCount = 6; // FFA, two/three teams, Survival, Duel, Zombies
 struct ScoreEntry { int16_t key = 0; int16_t score = 0; };          // key: team, or entity in free-for-all
 struct FighterEntry { uint8_t entity = 0; int8_t team = -1; int16_t kills = 0, deaths = 0; std::string name; };
 struct MatchInfo {
@@ -287,6 +289,17 @@ inline bool Decode(const uint8_t* d, size_t n, OwnerState& m) {
     return m.state.entity >= 1 && m.state.entity <= kMaxWillies;
 }
 
+struct DamageCredit { uint8_t victim = 0, attacker = 0; };
+inline std::vector<uint8_t> Encode(const DamageCredit& m) {
+    Writer w; w.header(MsgType::DamageCredit); w.u8(m.victim); w.u8(m.attacker); return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, DamageCredit& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::DamageCredit) return false;
+    m.victim = r.u8(); m.attacker = r.u8();
+    return r.done() && m.victim >= 1 && m.victim <= kMaxWillies && m.attacker >= 1 &&
+           m.attacker <= kMaxWillies && m.attacker != m.victim;
+}
+
 struct DeathReport { uint8_t victim = 0, killer = 0; };   // killer 0 = environment / unknown
 inline std::vector<uint8_t> Encode(const DeathReport& m) { Writer w; w.header(MsgType::DeathReport); w.u8(m.victim); w.u8(m.killer); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, DeathReport& m) {
@@ -395,7 +408,7 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
     m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
-    if (m.format > 3 || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.format >= kMatchFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
     m.friendlyFire = ff == 1;
     size_t ns = r.u8(); if (ns > kMaxWillies) return false;
     m.scores.resize(ns); for (ScoreEntry& e : m.scores) { e.key = r.i16(); e.score = r.i16(); }

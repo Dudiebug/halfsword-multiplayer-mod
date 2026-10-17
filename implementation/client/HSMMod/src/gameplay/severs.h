@@ -43,6 +43,7 @@ namespace hsm::game {
 class Severs {
 public:
     struct Env {
+        std::function<bool()> combatEnabled;                         // session phase permits new damage
         std::function<uint8_t(const ue::UObject*)> ownedEntity;          // the entity of a fighter simulated here, 0 if none
         std::function<ue::UObject*(uint8_t)> ownedActor;                 // the live Willie of an entity simulated here
         std::function<void(const combat::SeverClaim&)> sendSever;        // a sever captured here (the session routes it)
@@ -76,12 +77,14 @@ private:
         Ref willie, mesh, attach, box1, box2, weapon;
         std::vector<Ref> markers;
         uint8_t part = 0;
+        uint32_t claimId = 0;
     };
     struct DueDelayed {
         double dueMs = 0;
         Rebuilt args;
         uint8_t entity = 0;
         bool standIn = false;   // dismemberment was allowed for this call: forbid it again afterwards
+        bool late = false;
     };
     struct Retry {              // refused while another sever on that fighter was in process: tried once more after it
         combat::SeverClaim claim;
@@ -111,7 +114,8 @@ private:
                  replayed = 0, refused = 0, retried = 0, retryLost = 0, dupes = 0, stale = 0, noVictim = 0, noMarker = 0,
                  noBone = 0, noBox = 0, delayed = 0, delayedLost = 0, remembered = 0, shown = 0, shownLate = 0,
                  showRefused = 0, noClaim = 0, stuckSent = 0, stuckFreed = 0, stuckBad = 0, held = 0, released = 0,
-                 holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0;
+                 holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0,
+                 completed = 0, completionLost = 0;
     };
     enum class Run { Accepted, Refused, InProcess, Failed };
 
@@ -122,6 +126,7 @@ private:
     bool Rebuild(ue::UObject* willie, const combat::SeverClaim& c, Rebuilt& out);
     bool Invoke(const char* function, const Rebuilt& a, bool standIn);
     void CallDelayed(DueDelayed& d);
+    void CheckCompletions(double nowMs);
     void DestroyBoxes(const Rebuilt& a);
     void Show(const combat::SeverClaim& c, double nowMs, bool late, bool retry = false);
     void Mine(const combat::SeverClaim& c, double nowMs, bool retry);
@@ -160,6 +165,7 @@ private:
     combat::SeverPending pending_;
     combat::StuckBlades blades_;
     std::vector<DueDelayed> due_;
+    std::vector<DueDelayed> completing_;
     std::vector<Retry> retry_;
     std::vector<BlockedOnMine> blockedOnMine_;
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};

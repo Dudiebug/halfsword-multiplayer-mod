@@ -36,7 +36,7 @@ void Try(const uint8_t* d, size_t n) {
 void TryAll(const uint8_t* d, size_t n) {
     Try<Hello>(d, n); Try<Welcome>(d, n); Try<Reject>(d, n); Try<InputFrame>(d, n); Try<Snapshot>(d, n);
     Try<Event>(d, n); Try<Travel>(d, n); Try<Ready>(d, n); Try<Spawn>(d, n); Try<Despawn>(d, n); Try<BlobChunk>(d, n);
-    Try<MatchInfo>(d, n); Try<Kill>(d, n);
+    Try<MatchInfo>(d, n); Try<Kill>(d, n); Try<DeathReport>(d, n); Try<DamageCredit>(d, n);
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
@@ -95,6 +95,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     combat::PaintFxMsg wd; wd.entity = 16; wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
     wd.damageRate = 1.5; s.push_back(Encode(wd));
     combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
+    s.push_back(Encode(DamageCredit{1, 2})); s.push_back(Encode(DeathReport{1, 2}));
     return s;
 }
 }  // namespace
@@ -107,7 +108,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::Equip))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::DamageCredit))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

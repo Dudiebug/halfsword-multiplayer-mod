@@ -1,3 +1,4 @@
+#include "diagnostics/stall.h"
 #include "gameplay/claims.h"
 #include "log.h"
 #include "ue/script_hook.h"
@@ -16,7 +17,6 @@ namespace {
 
 constexpr const char* kHookOwner = "claims";
 constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker
-constexpr double kRecentAttackerMs = 10000;   // a death this long after the last replayed blow has no killer
 constexpr uint64_t kLogFirst = 20;            // the first claims and replays are logged in full (test evidence)
 
 struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };
@@ -55,7 +55,8 @@ bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
         components_ = PreparedCall(actor, "K2_GetComponentsByClass", {"ComponentClass", "ReturnValue"});
     primitive_ = FindClass("PrimitiveComponent");
     boxClass_ = FindClass("BoxComponent");
-    int n = HookScript(kHookOwner, "Willie_BP_C", "Deal Complex Damage", [this](ScriptCall& c) { return OnDealComplexDamage(c); });
+    int n = HookScript(kHookOwner, "Willie_BP_C", "Deal Complex Damage", [this](ScriptCall& c) { return OnDealComplexDamage(c); },
+                       [this](ScriptCall& c) { AfterNativeDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Damage", [this](ScriptCall& c) { return OnGetDamage(c); });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
@@ -90,6 +91,14 @@ void Claims::Tick() {
 bool Claims::OnDealComplexDamage(ScriptCall& c) {
     if (!active_) return false;
     UObject* self = c.self();
+    if (env_.combatEnabled && !env_.combatEnabled()) {
+        c.ZeroOutputs();
+        if (++n_.phaseBlocked <= 3) {
+            UObject* source = nullptr; c.get("Collided Component", source);
+            HSM_LOG("claims: phase guard blocked native damage on %s by %s", ObjectName(self).c_str(), source ? ObjectName(source).c_str() : "none");
+        }
+        return true;
+    }
     UObject* comp = nullptr;
     c.get("Collided Component", comp);
     UObject* striker = comp ? adapter_->FighterOf(OuterOf(comp)) : nullptr;
@@ -138,7 +147,9 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
 // Get Damage reached on a fighter simulated here from a stand-in's component by any path other than our own replay
 // (which runs under ScriptHookBypass): e.g. a stand-in's blade left stuck in the body. Blocked, outputs zeroed.
 bool Claims::OnGetDamage(ScriptCall& c) {
-    if (!active_ || !env_.ownedEntity(c.self())) return false;
+    if (!active_) return false;
+    if (env_.combatEnabled && !env_.combatEnabled()) { c.ZeroOutputs(); ++n_.phaseBlocked; return true; }
+    if (!env_.ownedEntity(c.self())) return false;
     UObject* comp = nullptr;
     if (!c.get("Hit By Component", comp) || !comp) return false;
     if (!standIns_->IsStandIn(adapter_->FighterOf(OuterOf(comp)))) return false;
@@ -216,7 +227,10 @@ bool Claims::BoneXform(UObject* mesh, FName bone, Xform& out) const {
 // ---------------------------------------------------------------- victim side
 
 void Claims::Replay(const HitClaim& c, double nowMs) {
+    // detail: claimId in low 32 bits, attacker/victim in bits 32/40.
+    diagnostics::Scope trace("Claims::Replay", uint64_t(c.claimId) | (uint64_t(c.attacker) << 32) | (uint64_t(c.victim) << 40));
     if (!active_) return;
+    if (env_.combatEnabled && !env_.combatEnabled()) { ++n_.phaseBlocked; return; }
     if (!dedupe_.Accept(c.attacker, c.claimId)) { ++n_.dupes; return; }
     int64_t ownerNow = 0;
     if (standIns_->OwnerClockNow(c.attacker, nowMs, ownerNow)) {
@@ -264,7 +278,7 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
         return;
     }
     gate_.Applied(c);
-    recent_[c.victim] = Recent{c.attacker, nowMs};
+    NoteDamage(c.victim, c.attacker, damage, nowMs);
     ++n_.replayed;
     if (n_.replayed <= kLogFirst)
         HSM_LOG("claims: replayed #%u e%u -> e%u bone %s by %s '%s'%s box %d: damage out %.2f%s", c.claimId, c.attacker,
@@ -395,10 +409,27 @@ void Claims::NoteClash(uint8_t attacker, double nowMs) {
     ++n_.clashes;
 }
 
+// Native owned-vs-owned hits also count, after DCD produced Damage Out. Replays bypass this hook and call
+// NoteDamage explicitly; blocked stand-in contacts never reach the post-hook.
+void Claims::AfterNativeDamage(ScriptCall& c) {
+    const uint8_t victim = env_.ownedEntity(c.self());
+    if (!victim) return;
+    UObject* comp = nullptr;
+    double damage = 0;
+    if (!c.get("Collided Component", comp) || !comp || !c.get("Damage Out", damage)) return;
+    UObject* striker = adapter_->FighterOf(OuterOf(comp));
+    const uint8_t attacker = striker ? env_.ownedEntity(striker) : 0;
+    NoteDamage(victim, attacker, damage, SteadyNowMs());
+}
+void Claims::NoteDamage(uint8_t victim, uint8_t attacker, double damage, double nowMs) {
+    if (recent_.OnDamage(victim, attacker, uint32_t(uint64_t(nowMs)), damage,
+                         env_.opposing && env_.opposing(attacker, victim))) {
+        if (env_.damaged) env_.damaged(victim, attacker);
+    }
+}
+
 uint8_t Claims::RecentAttacker(uint8_t victim, double nowMs) const {
-    if (!ValidEntity(victim)) return 0;
-    const Recent& r = recent_[victim];
-    return r.attacker && nowMs - r.atMs <= kRecentAttackerMs ? r.attacker : 0;
+    return recent_.KillerOf(victim, uint32_t(uint64_t(nowMs)));
 }
 
 std::string Claims::HealthLine() {
@@ -409,12 +440,12 @@ std::string Claims::HealthLine() {
     std::snprintf(line, sizeof line,
                   "claims: sent %llu (gated %llu limited %llu friendly %llu) | replayed %llu (dupes %llu stale %llu "
                   "age? %llu parried %llu novictim %llu nobone %llu nostriker %llu failed %llu) | blocked: on stand-ins %llu, "
-                  "on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu",
+                  "on mine %llu, get damage %llu, phase %llu | fx %llu (skipped %llu) clashes %llu",
                   d(a.sent, b.sent), d(a.gated, b.gated), d(a.limited, b.limited), d(a.friendly, b.friendly),
                   d(a.replayed, b.replayed), d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.ageUnknown, b.ageUnknown),
                   d(a.parried, b.parried), d(a.noVictim, b.noVictim), d(a.noBone, b.noBone), d(a.noStriker, b.noStriker),
                   d(a.failed, b.failed), d(a.blockedStandIn, b.blockedStandIn), d(a.blockedOnMine, b.blockedOnMine),
-                  d(a.getDamageBlocked, b.getDamageBlocked), d(a.effects, b.effects), d(a.effectsSkipped, b.effectsSkipped),
+                  d(a.getDamageBlocked, b.getDamageBlocked), d(a.phaseBlocked, b.phaseBlocked), d(a.effects, b.effects), d(a.effectsSkipped, b.effectsSkipped),
                   d(a.clashes, b.clashes));
     reported_ = n_;
     return line;

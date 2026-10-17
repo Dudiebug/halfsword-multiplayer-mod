@@ -1,3 +1,4 @@
+#include "diagnostics/stall.h"
 #include "ue/script_hook.h"
 #include "ue/hook.h"
 #include "log.h"
@@ -28,7 +29,7 @@ ExecutorFn g_original = nullptr;
 
 struct Hook { ScriptPre pre; ScriptPost post; ScriptPost before; bool observer = false; };
 struct Rule { std::string owner, className, functionName; Hook hook; };
-struct Entry { std::vector<Hook> hooks; bool hasObserver = false; };
+struct Entry { std::string name; std::vector<Hook> hooks; bool hasObserver = false; };
 // Published snapshot read lock-free by the detour on every Blueprint call. Never modified once published; superseded
 // snapshots stay allocated (a call on another thread may still be reading one) and are small.
 struct Table { int n = 0; UFunction* fns[kMaxFunctions] = {}; const Entry* entries[kMaxFunctions] = {}; };
@@ -52,15 +53,20 @@ int64_t Qpc() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart;
 
 void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
     ScriptCall call(ctx, stack, result);
+    diagnostics::Scope trace("VM before observers", reinterpret_cast<uintptr_t>(call.function()));
+    trace.Name(e.name.c_str());
     ++g_hooked;
     bool block = false;
     int64_t t0 = Qpc();
     for (const Hook& h : e.hooks) if (h.before) h.before(call);
+    trace.Stage("VM pre-hooks");
     for (const Hook& h : e.hooks) if (h.pre && h.pre(call)) block = true;
     int64_t spent = Qpc() - t0;
     if (block) ++g_blocked;
     else {
+        trace.Stage("VM original");
         g_original(ctx, stack, result);
+        trace.Stage("VM post-hooks");
         int64_t t1 = Qpc();
         for (const Hook& h : e.hooks) if (h.post) h.post(call);
         spent += Qpc() - t1;
@@ -71,10 +77,14 @@ void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
 // A call under ScriptHookBypass: only observers run, around the body, which always runs.
 void RunObserved(const Entry& e, UObject* ctx, void* stack, void* result) {
     ScriptCall call(ctx, stack, result);
+    diagnostics::Scope trace("VM before observers", reinterpret_cast<uintptr_t>(call.function()));
+    trace.Name(e.name.c_str());
     int64_t t0 = Qpc();
     for (const Hook& h : e.hooks) if (h.observer && h.before) h.before(call);
     int64_t spent = Qpc() - t0;
+    trace.Stage("VM bypass original");
     g_original(ctx, stack, result);
+    trace.Stage("VM after observers");
     int64_t t1 = Qpc();
     for (const Hook& h : e.hooks) if (h.observer && h.post) h.post(call);
     spent += Qpc() - t1;
@@ -134,7 +144,7 @@ int Publish(int* lastRule = nullptr) {
             }
             if (lastRule) ++*lastRule;
             auto& e = byFn[fn];
-            if (!e) { e = std::make_unique<Entry>(); order.push_back(fn); }
+            if (!e) { e = std::make_unique<Entry>(); e->name = ObjectName(reinterpret_cast<UObject*>(fn)); order.push_back(fn); }
             e->hooks.push_back(r.hook);
             e->hasObserver = e->hasObserver || r.hook.observer;
         }
