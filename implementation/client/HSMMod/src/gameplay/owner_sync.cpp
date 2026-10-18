@@ -101,9 +101,19 @@ void StandIns::OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double now
     s.feed->root.Push(frame.tsMs, V3{m.rootX, m.rootY, m.rootZ}, m.yawDeg);
     ++s.feed->poses;
     if (!s.feed->haveHands || SeqNewer(frame.tsMs, s.feed->handTs)) {
-        s.feed->handClass.fill(0);
-        for (const sync::WeaponSample& w : frame.weapons)
-            if (w.present && w.hand < sync::kPoseWeapons) s.feed->handClass[w.hand] = w.classHash ? w.classHash : 1;
+        for (int h = 0; h < sync::kPoseWeapons; ++h) {
+            uint32_t cls = 0;
+            V3 pos{};
+            for (const sync::WeaponSample& w : frame.weapons)
+                if (w.present && w.hand == h) { cls = w.classHash ? w.classHash : 1; pos = w.pos; }
+            if (!s.feed->haveHands || cls != s.feed->handClass[h]) {
+                s.feed->handPrevClass[h] = s.feed->haveHands ? s.feed->handClass[h] : 0;
+                s.feed->handSinceMs[h] = nowMs;
+                s.feed->handFirstPos[h] = pos;
+            }
+            s.feed->handClass[h] = cls;
+            s.feed->handPos[h] = pos;
+        }
         s.feed->handTs = frame.tsMs;
         s.feed->haveHands = true;
     }
@@ -168,6 +178,18 @@ bool StandIns::PoseHand(uint8_t entity, int hand, uint32_t& classHash) const {
     const Feed* f = slots_[entity].feed.get();
     if (!f || !f->haveHands || f->handClass[hand] == 1) return false;
     classHash = f->handClass[hand];
+    return true;
+}
+
+bool StandIns::PoseHandInfo(uint8_t entity, int hand, PoseHandView& out) const {
+    if (!ValidEntity(entity) || hand < 0 || hand >= sync::kPoseWeapons) return false;
+    const Feed* f = slots_[entity].feed.get();
+    if (!f || !f->haveHands) return false;
+    out.classHash = f->handClass[size_t(hand)];
+    out.prevClassHash = f->handPrevClass[size_t(hand)];
+    out.sinceMs = f->handSinceMs[size_t(hand)];
+    out.pos = f->handPos[size_t(hand)];
+    out.firstPos = f->handFirstPos[size_t(hand)];
     return true;
 }
 

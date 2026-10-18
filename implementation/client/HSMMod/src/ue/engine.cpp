@@ -131,6 +131,7 @@ bool IsChildOf(const UClass* c, const UClass* base) {
     for (const void* s = c; s; s = Read<void*>(s, kStructSuper)) if (s == base) return true;
     return false;
 }
+UClass* SuperOf(const UClass* c) { return c ? Read<UClass*>(c, kStructSuper) : nullptr; }
 
 int32_t ObjectIndex(const UObject* o) { return o ? Read<int32_t>(o, kObjIndex) : -1; }
 int32_t ObjectCount() { return g_objects ? g_objects->numElements : 0; }

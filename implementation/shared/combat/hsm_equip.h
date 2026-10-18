@@ -126,6 +126,24 @@ private:
     std::map<const void*, int> origin_;   // at most 7 entries after each Read (2 hands, 5 slots)
 };
 
+// What the stand-in's hands show that the owner's do not, read from the owner's pose rather than its Equip state:
+// staleHeld[h] when the stand-in's hand h holds a real weapon (not fists; for the left, not the right's weapon again)
+// and the owner's newest pose shows that hand empty or holding another class. A weapon the owner never drew from a slot
+// (one it started with in hand, a pickup) has token other on both sides, so the Equip state alone cannot tell that the
+// owner put it away.
+struct EquipHints {
+    std::array<bool, 2> staleHeld{};
+};
+
+// Whether hand h (0 right, 1 left) can sheathe into slot k: Create Sheath Constraint R takes R 1, R 2 and Back, L takes
+// L 1, L 2 and Back (Weapon_Slots_Enum, Willie_BP.cpp:2874).
+constexpr bool HandReachesSlot(int hand, int slot) {
+    if (slot < 0 || slot >= kEquipSlots) return false;
+    if (hand == 0) return slot <= 2;
+    if (hand == 1) return slot >= 2;
+    return false;
+}
+
 struct EquipStep {
     enum class Kind : uint8_t { Sheathe, Draw };
     Kind kind = Kind::Draw;
@@ -136,15 +154,35 @@ struct EquipStep {
 // What the stand-in (its own state standIn, hasSlot: which of its slots hold an actor) does to match owner: every
 // Sheathe first, then every Draw.
 //   Sheathe(h, k)  its hand h holds slot k's weapon and the owner has slot k sheathed (a drawn slot never is: Decode);
+//   Sheathe(h, k)  also for a stale hand h (EquipHints) with token other whose weapon has exactly one place to go: k is
+//                  the only slot hand h reaches that the owner has sheathed, the stand-in has empty and neither of its
+//                  hands drew from, and no other stale hand has k as a candidate (otherwise nothing: which weapon went
+//                  where is not known). These come after the plain Sheathes;
 //   Draw(h, k)     the owner's hand h holds slot k's weapon, the stand-in's does not, the stand-in has an actor in slot
 //                  k, and that actor is not in its other hand once the Sheathes are done.
 inline std::vector<EquipStep> PlanEquip(const EquipStateMsg& owner, const EquipStateMsg& standIn,
-                                        const std::array<bool, kEquipSlots>& hasSlot) {
+                                        const std::array<bool, kEquipSlots>& hasSlot,
+                                        const EquipHints& hints = {}) {
     std::vector<EquipStep> steps;
     for (int h = 0; h < 2; ++h) {
         const uint8_t held = standIn.hand[h];
         if (held != kEquipOther && (owner.sheathed & (1u << (held - 1))))   // so the owner's hand h is not drawn from it
             steps.push_back({EquipStep::Kind::Sheathe, h, held - 1});
+    }
+    std::array<uint8_t, 2> candidates{};   // per stale hand: bit k for each slot its weapon could go to
+    for (int h = 0; h < 2; ++h) {
+        if (!hints.staleHeld[h] || standIn.hand[h] != kEquipOther) continue;
+        for (int k = 0; k < kEquipSlots; ++k)
+            if (HandReachesSlot(h, k) && (owner.sheathed & (1u << k)) && !hasSlot[k] && standIn.hand[0] != k + 1 &&
+                standIn.hand[1] != k + 1)
+                candidates[h] |= uint8_t(1u << k);
+    }
+    for (int h = 0; h < 2; ++h) {
+        const uint8_t c = candidates[h];
+        if (c == 0 || (c & (c - 1)) != 0 || (c & candidates[1 - h]) != 0) continue;   // none, several, or shared
+        int k = 0;
+        while (!(c & (1u << k))) ++k;
+        steps.push_back({EquipStep::Kind::Sheathe, h, k});
     }
     for (int h = 0; h < 2; ++h) {
         const uint8_t want = owner.hand[h];

@@ -36,6 +36,7 @@ UClass* ClassOf(const UObject* o);
 UObject* OuterOf(const UObject* o);
 bool IsA(const UObject* o, const UClass* c);
 bool IsChildOf(const UClass* c, const UClass* base);   // c == base or derives from it
+UClass* SuperOf(const UClass* c);                      // the class it derives from (nullptr at the root)
 bool IsDefaultObject(const UObject* o);
 bool IsGarbage(const UObject* o);              // destroyed (marked as garbage), not yet freed by garbage collection
 int32_t ObjectCount();

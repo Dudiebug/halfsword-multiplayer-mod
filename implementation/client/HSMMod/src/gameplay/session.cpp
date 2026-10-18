@@ -212,7 +212,12 @@ public:
     // Wall time of one Tick (the pump): our own share of a frame, against the frame time the game mode reports.
     void NoteTickCost(double ms) {
         if (!sampling_ || tickMs_.size() >= kFrameSamples) return;
-        if (tickMs_.empty()) vmNsAtWindow_ = GetScriptHookStats().hookNs;   // the window starts: VM hook time from here
+        if (tickMs_.empty()) {   // the window starts: VM and ProcessEvent hook time from here
+            vmNsAtWindow_ = GetScriptHookStats().hookNs;
+            const ProcessEventHookStats pe = GetProcessEventHookStats();
+            peNsAtWindow_ = pe.hookNs;
+            peCallsAtWindow_ = pe.calls;
+        }
         tickMs_.push_back(ms);
     }
 
@@ -282,6 +287,7 @@ public:
         mirror_.Tick(adapter_, dt);
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
         adapter_.SetDestroyAware(net_ && OwnerMode());
+        adapter_.SetSubclassWeapons(OwnerMode());   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel() && OwnerMode();
         adapter_.SuppressStockScreens(joined && MatchLevel(), OwnerMode());
         if (stockFlowGuard_ && adapter_.GamePaused()) {   // owner sync: a paused game stops this player's stream
@@ -370,9 +376,11 @@ public:
             out += (v.flags & 4) ? 1 : 0;
             bleeding += v.bleeding;
         }
-        char b[192];
-        std::snprintf(b, sizeof b, "census: fighters %d (stand-ins %d) dead %d fallen %d knocked out %d, bleeding total %.2f",
-                      total, stand, dead, fallen, out, double(bleeding));
+        char b[256];
+        std::snprintf(b, sizeof b, "census: fighters %d (stand-ins %d) dead %d fallen %d knocked out %d, bleeding total %.2f; "
+                      "weapons %zu, objects %d; stand-in timeline calls blocked %u",
+                      total, stand, dead, fallen, out, double(bleeding), adapter_.WeaponActors().size(), ObjectCount(), timelinesBlocked_);
+        timelinesBlocked_ = 0;
         std::string line = b;
         VitalsMsg mine;
         if (UObject* me = adapter_.PlayerWillie(0); me && adapter_.ReadVitals(me, 0, mine)) {
@@ -386,7 +394,7 @@ public:
     // Frame time (the game mode's DeltaSeconds) since the previous call, and the round trip to every peer: a long frame
     // and a slow link both look like lag on the other screen; this line tells them apart.
     std::string FrameAndPingLine() {
-        char b[96];
+        char b[160];
         std::string line;
         if (frameMs_.empty()) line = "frames none";
         else {
@@ -399,14 +407,21 @@ public:
             line = b;
         }
         frameMs_.clear();
-        // Our share: the pump (stand-in servo, streams, our replays of claims including the game code they run) and the
-        // VM hook callbacks (claims, fx, ...). The rest of a frame is the game's own (physics, ragdolls, blood, rendering).
+        // Our share: the pump (stand-in servo, streams, our replays of claims including the game code they run), the VM
+        // hook callbacks (claims, fx, ...) and the other ProcessEvent hooks (the hit hook on every contact, the tick and
+        // timeline filters; the pump runs inside one of them and is taken out). Not counted: the detours' lookup for calls
+        // nothing hooks. The rest of a frame is the game's own (physics, ragdolls, blood, rendering).
         if (!tickMs_.empty()) {
             double sum = 0, mx = 0;
             for (double v : tickMs_) { sum += v; mx = std::max(mx, v); }
+            const double frames = double(tickMs_.size());
             const ScriptHookStats vm = GetScriptHookStats();
-            const double vmMs = double(vm.hookNs - vmNsAtWindow_) / 1e6 / double(tickMs_.size());
-            std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame", sum / double(tickMs_.size()), mx, vmMs);
+            const double vmMs = double(vm.hookNs - vmNsAtWindow_) / 1e6 / frames;
+            const ProcessEventHookStats pe = GetProcessEventHookStats();
+            const double peMs = std::max(0.0, double(pe.hookNs - peNsAtWindow_) / 1e6 / frames - sum / frames);
+            const double peCalls = double(pe.calls - peCallsAtWindow_) / frames;
+            std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls)",
+                          sum / frames, mx, vmMs, peMs, peCalls);
             line += b;
         }
         tickMs_.clear();
@@ -433,6 +448,11 @@ public:
     // A stand-in (the mirror bench's or a session's) whose own Willie ReceiveTick must not run: it re-arms the muscles,
     // pain and damage the stand-in's neutralisation switched off.
     bool IsTickBlocked(const UObject* o) const { return o && (o == mirror_.TickBlocked() || standIns_.IsStandIn(o)); }
+    bool BlockStandInTimeline(const UObject* o) {
+        if (!IsTickBlocked(o)) return false;
+        ++timelinesBlocked_;
+        return true;
+    }
 
     std::string NameOfSlot(uint8_t slot) const {
         uint8_t e = Roster::EntityForSlot(slot);
@@ -798,6 +818,12 @@ private:
             if (IsHost()) net_->Broadcast(chan, b, reliable);
             else if (hostPeer_) net_->Send(hostPeer_, chan, b, reliable);
         };
+        // Stand-in hands matched to their owners' poses (pickups, leftover weapons): Equip's view of each hand, gore's cut-off hands.
+        penv.equipToken = [this](uint8_t e, int hand, uint8_t& token) { return equip_.OwnerToken(e, hand, token); };
+        penv.mayBeDraw = [this](uint8_t e, int hand, uint32_t cls) { return equip_.MayBeDraw(e, hand, cls); };
+        penv.mayBeSheathe = [this](uint8_t e, int hand) { return equip_.MayBeSheathe(e, hand); };
+        penv.deadBones = [this](uint8_t e) { return gore_.DeadBones(e); };
+        penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
         props_.Start(adapter_, standIns_, std::move(penv));
     }
 
@@ -2352,10 +2378,12 @@ private:
     std::map<uint8_t, OwnerLife> lives_;       // host: client fighters as their vitals tell it
     bool ownDeathReported_ = false;
     uint32_t nextKeepAlive_ = 0, streamsDropped_ = 0, claimsRejected_ = 0;
+    uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
     std::vector<double> frameMs_, tickMs_;
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;
+    uint64_t peNsAtWindow_ = 0, peCallsAtWindow_ = 0;
 };
 
 std::unique_ptr<SessionImpl> g_session;
@@ -2392,6 +2420,17 @@ bool StartMod(const Config& cfg) {
         g_session->NoteTickCost(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         return false;
     });
+    // A stand-in's own timelines tick with its TimelineComponents, not with the blocked ReceiveTick. These ones run the
+    // Willie's own logic, which on a stand-in is the owner's to run and stream:
+    //   Timeline_0/1 (Willie_BP.cpp:21168, 21232), the grip check: with the stand-in's tonus at zero, the hand's constraint
+    //     force soon beats its strength and the hand lets go: Set Up Right/Left Hand Weapon with no weapon (a drop, left
+    //     floating by the stand-in's gravity-off weapon), Release Grab, or Get Damage on the hand;
+    //   Timeline (21139) and Timeline_10 (21297, 21302), waking up: they clear Invulnerable, and Timeline_10 overwrites
+    //     Consciousness.
+    HookFunctionsMatching([](const std::string& n) {
+        return n == "Timeline_0__UpdateFunc" || n == "Timeline_1__UpdateFunc" || n == "Timeline__UpdateFunc" ||
+               n == "Timeline_10__UpdateFunc" || n == "Timeline_10__FinishedFunc";
+    }, [](UObject* obj, UFunction*, void*) { return g_session->BlockStandInTimeline(obj); });
     if (!InstallProcessEventHook()) return false;
     HSM_LOG("session: started (%s)", RoleName(cfg.role));
     return true;

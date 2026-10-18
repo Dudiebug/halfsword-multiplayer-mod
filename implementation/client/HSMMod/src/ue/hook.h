@@ -22,6 +22,13 @@ void HookFunctionsMatching(std::function<bool(const std::string& functionName)> 
 bool HookNative(void* target, void* detour, void** original, const char* label);
 // Thread that made the first ProcessEvent call (the game thread); 0 before that.
 unsigned long GameThreadId();
+// The pre-hooks' share of the game thread: calls that ran at least one hook, and the time spent in those hooks
+// (outermost calls only, so a hook's own ProcessEvent calls and the hooks they run are counted once, inside it).
+struct ProcessEventHookStats {
+    uint64_t calls = 0;
+    uint64_t hookNs = 0;
+};
+ProcessEventHookStats GetProcessEventHookStats();   // game thread
 // Drop all rules (e.g. when a session ends).
 void ClearHooks();
 

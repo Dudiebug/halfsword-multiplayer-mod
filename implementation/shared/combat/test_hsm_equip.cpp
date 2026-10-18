@@ -231,6 +231,72 @@ void TestPlan() {
     CHECK(p.size() == 1 && Is(p[0], kSheathe, 1, 4));
 }
 
+void TestReach() {
+    // Create Sheath Constraint R takes R 1, R 2 and Back; L takes L 1, L 2 and Back (Weapon_Slots_Enum).
+    const bool right[kEquipSlots] = {true, true, true, false, false};
+    const bool left[kEquipSlots] = {false, false, true, true, true};
+    for (int k = 0; k < kEquipSlots; ++k) {
+        CHECK(HandReachesSlot(0, k) == right[k]);
+        CHECK(HandReachesSlot(1, k) == left[k]);
+    }
+    CHECK(!HandReachesSlot(0, -1) && !HandReachesSlot(1, -1));
+    CHECK(!HandReachesSlot(0, kEquipSlots) && !HandReachesSlot(1, kEquipSlots));
+    CHECK(!HandReachesSlot(2, 2) && !HandReachesSlot(-1, 2));
+}
+
+EquipHints Stale(bool r, bool l) { EquipHints h; h.staleHeld = {r, l}; return h; }
+
+void TestPlanStale() {
+    // The owner sheathed a weapon it never drew from a slot (one it started with, a pickup) into R 1; the stand-in's
+    // copy is still in its right hand (token other), its R 1 is empty, and the owner's pose no longer shows it there.
+    std::array<bool, kEquipSlots> noR1 = kAll; noR1[0] = false;
+    std::vector<EquipStep> p = PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11110), noR1, Stale(true, false));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 0, 0));
+    // Without the hint nothing changes (as before): the pose still shows it in hand, or nobody knows.
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11110), noR1).empty());
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11110), noR1, Stale(false, false)).empty());
+    // The left hand is stale instead: it cannot reach R 1.
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11110), noR1, Stale(false, true)).empty());
+    // The stand-in's R 1 already holds something: nowhere to put it.
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11111), kAll, Stale(true, false)).empty());
+    // The owner has R 1 empty: it did not sheathe it there.
+    CHECK(PlanEquip(State(0, 0, 0b11110), State(0, 0, 0b11110), noR1, Stale(true, false)).empty());
+    // Then drew R 2 into the same hand: the stale weapon goes first, then the draw.
+    p = PlanEquip(State(2, 0, 0b11101), State(0, 0, 0b11110), noR1, Stale(true, false));
+    CHECK(p.size() == 2 && Is(p[0], kSheathe, 0, 0) && Is(p[1], kDraw, 0, 1));
+    // The left hand into L 2 (and only it: the right is not stale).
+    std::array<bool, kEquipSlots> noL2 = kAll; noL2[4] = false;
+    p = PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b01111), noL2, Stale(false, true));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 1, 4));
+    // Ambiguous, nothing done: both hands stale and the Back slot (both reach it) the only candidate ...
+    std::array<bool, kEquipSlots> noBack = kAll; noBack[2] = false;
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11011), noBack, Stale(true, true)).empty());
+    // ... or one hand stale and two slots it reaches newly sheathed.
+    std::array<bool, kEquipSlots> noR = kAll; noR[0] = noR[1] = false;
+    CHECK(PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b11100), noR, Stale(true, false)).empty());
+    // Two stale hands with one slot each that only that hand reaches: each goes home.
+    std::array<bool, kEquipSlots> noR1L1 = kAll; noR1L1[0] = noR1L1[3] = false;
+    p = PlanEquip(State(0, 0, 0b11111), State(0, 0, 0b10110), noR1L1, Stale(true, true));
+    CHECK(p.size() == 2 && Is(p[0], kSheathe, 0, 0) && Is(p[1], kSheathe, 1, 3));
+    // A hand drawn from a slot (its token) is the plain Sheathe's business, whatever the hint says.
+    std::array<bool, kEquipSlots> noR2 = kAll; noR2[1] = false;
+    p = PlanEquip(State(0, 0, 0b11111), State(2, 0, 0b11101), noR2, Stale(true, false));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 0, 1));
+    // ... even with a slot the drawn hand could take (its token says what it holds).
+    std::array<bool, kEquipSlots> noR1R2 = kAll; noR1R2[0] = noR1R2[1] = false;
+    p = PlanEquip(State(0, 0, 0b11111), State(2, 0, 0b11100), noR1R2, Stale(true, false));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 0, 1));
+    // A slot whose weapon the stand-in's other hand drew is that hand's to fill, never the stale hand's.
+    p = PlanEquip(State(0, 0, 0b11111), State(0, 3, 0b11011), noBack, Stale(true, false));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 1, 2));
+    p = PlanEquip(State(0, 0, 0b11111), State(3, 0, 0b11011), noBack, Stale(false, true));
+    CHECK(p.size() == 1 && Is(p[0], kSheathe, 0, 2));
+    // Order: plain Sheathes, then stale ones, then Draws.
+    std::array<bool, kEquipSlots> mix = {false, true, true, true, false};
+    p = PlanEquip(State(0, 4, 0b10111), State(0, 5, 0b01110), mix, Stale(true, false));
+    CHECK(p.size() == 3 && Is(p[0], kSheathe, 1, 4) && Is(p[1], kSheathe, 0, 0) && Is(p[2], kDraw, 1, 3));
+}
+
 void TestSender() {
     EquipSender s;
     EquipStateMsg a = State(1, 0, 0b11110);
@@ -264,6 +330,8 @@ int main() {
     TestRanges();
     TestTracker();
     TestPlan();
+    TestReach();
+    TestPlanStale();
     TestSender();
     if (g_fail) { std::printf("test_hsm_equip: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_equip: ok\n");

@@ -91,9 +91,10 @@ inline uint8_t PropSheathSlot(uint64_t propId) { return IsLevelProp(propId) ? 0 
 // minting machine starts it at a per-process value and advances it on every wrap of the sequence, so no id is minted
 // twice -- not after 128 drops, not by a machine that reconnected -- whether or not an older prop with it still lies in
 // the level (a machine only knows the ids it tracks or heard of lately). Every other machine has that fighter as a stand-in
-// still holding its copy in the same hand (a stand-in's hands change only when this code releases them), which is
-// how it finds the copy (DropSignature, ResolveDropNow). A weapon keeps its id for good once minted: picked up and
-// dropped again, by anyone, it is the same prop.
+// that normally still holds its copy in the same hand (its tick is blocked, so its hands change only when the mod changes
+// them), which is how it finds the copy (DropSignature, ResolveDropNow); a copy that stand-in let go of already (the
+// hand matching, sync/hsm_handmatch.h, or by itself) is the weapon it let go of from that hand most recently (prop_sync's
+// Adopt). A weapon keeps its id for good once minted: picked up and dropped again, by anyone, it is the same prop.
 inline uint64_t MakeDropPropId(uint8_t ownerEntity, uint8_t hand, uint8_t seq, uint32_t epoch = 0) {
     if (hand > 1) return 0;
     const uint64_t id = MakeWeaponPropId(ownerEntity, uint8_t(((seq & 0x7F) << 1) | hand));

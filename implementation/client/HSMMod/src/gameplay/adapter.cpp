@@ -353,6 +353,13 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
     std::vector<UObject*> carried;
     for (const char* f : {"Weapon R", "Weapon L", "Attached Bolt Quiver"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p) carried.push_back(*p);
+    // Also its feet, the fists of a cut-off upper body and its sheathed weapons: actors of their own, constrained to the
+    // body, not attached (Willie_BP.cpp:18941, 18811, 7007). A slot variable can outlive its weapon's sheath, so a weapon
+    // is taken only while its "Parent Actor" is still this fighter.
+    for (const char* f : {"Foot R Weapon", "Foot L Weapon", "Sapwned R Hand Weapon Upper Body", "Sapwned L Hand Weapon Upper Body",
+                          "Weapon Slot R 1", "Weapon Slot R 2", "Weapon Slot Back", "Weapon Slot L 1", "Weapon Slot L 2"})
+        if (UObject** p = Field<UObject*>(willie, f); p && *p)
+            if (UObject** parent = Field<UObject*>(*p, "Parent Actor"); parent && *parent == willie) carried.push_back(*p);
     Call att(willie, "GetAttachedActors");
     att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
     if (att.invoke())
@@ -561,6 +568,7 @@ void Adapter::TriggerDeath(UObject* willie) { Call(willie, "Death").invoke(); }
 namespace hsm::game {
 namespace {
 constexpr const char* kWeaponClass = "ModularWeaponBP_C";
+constexpr const char* kBodyWeaponClasses[] = {"Weapon_Fists_C", "Weapon_Feet_C"};   // Willie_BP.cpp:18811, 18941
 constexpr const char* kArmorClass = "BP_Armor_Master_C";
 constexpr const char* kArmorStruct = "Str_Passport_Armor1";
 constexpr const char* kStockScreens[] = {"UI_DED_C", "UI_DeathDoor_C", "UI_WinScreen_C", "UI_WIN_C"};
@@ -629,7 +637,30 @@ void Adapter::ConsoleCommand(const std::string& command) {
 
 bool Adapter::IsDead(UObject* willie) { bool d = false; return GetBool(willie, "DED", d) && d; }
 
-bool Adapter::IsWeapon(UObject* actor) { return ClassNamed(actor, kWeaponClass); }
+// Every weapon Blueprint derives from ModularWeaponBP_C (re/out/bp/_class_summary.tsv); the Willie's weapon fields are
+// typed ModularWeaponBP_C, fists and feet included. Owner sync walks the class chain, comparing names by FName once the
+// first match has shown it (FNames live as long as the process; class objects may be reloaded).
+bool Adapter::IsWeapon(UObject* actor) {
+    if (!subclassWeapons_) return ClassNamed(actor, kWeaponClass);
+    for (UClass* c = actor ? ClassOf(actor) : nullptr; c; c = SuperOf(c)) {
+        const FName n = ObjectFName(reinterpret_cast<UObject*>(c));
+        if (weaponNameKnown_) {
+            if (n.index == weaponName_.index && n.number == weaponName_.number) return true;
+        } else if (NameToString(n) == kWeaponClass) {
+            weaponName_ = n;
+            weaponNameKnown_ = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Adapter::IsBodyWeapon(UObject* actor) {
+    if (!actor) return false;
+    const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(actor)));
+    for (const char* body : kBodyWeaponClasses) if (cls == body) return true;
+    return false;
+}
 
 UObject* Adapter::FighterOf(UObject* actor) {
     for (int depth = 0; actor && depth < 4; ++depth) {
@@ -651,6 +682,20 @@ std::vector<UObject*> Adapter::AllWillies() {
     // Destroyed fighters stay in the object array until garbage collection; once the destroy is over only their
     // garbage flag tells them apart (the purges destroyed them again every second, test 2).
     for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) out.push_back(w);
+    return out;
+}
+
+// One pass over the object array; each class is tested once per pass (class objects may be reloaded between passes).
+std::vector<UObject*> Adapter::WeaponActors() {
+    std::vector<UObject*> out;
+    std::unordered_map<UClass*, bool> weaponClass;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o) || IsGarbage(o)) continue;
+        auto it = weaponClass.find(ClassOf(o));
+        if (it == weaponClass.end()) it = weaponClass.emplace(ClassOf(o), IsWeapon(o)).first;
+        if (it->second && (!destroyAware_ || !BeingDestroyed(o))) out.push_back(o);
+    }
     return out;
 }
 
@@ -699,7 +744,10 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     if (!ctrl) { DestroyActor(w); return nullptr; }
     Call(ctrl, "Possess").set<UObject*>("InPawn", w).invoke();
     SetBool(w, "Player", true);
-    if (old && old != w) DestroyActor(old);
+    if (old && old != w) {
+        if (destroyAware_) DestroyFighter(old, ObjectIndex(old));   // owner sync: its feet and weapons go too (test 3 leaked them)
+        else DestroyActor(old);
+    }
     Call(ctrl, "ResetIgnoreInputFlags").invoke();   // the new body must take input whatever the death left behind
     RestoreGameInput();
     HSM_LOG("adapter: local player respawned");

@@ -1,5 +1,7 @@
 #include "gameplay/equip_sync.h"
 #include "log.h"
+#include "sync/hsm_handmatch.h"
+#include "sync/hsm_pose_codec.h"
 #include <cstdio>
 
 namespace hsm::game {
@@ -13,6 +15,9 @@ namespace {
 
 constexpr double kPollMs = 100;      // the owner reads its fighters this often (a draw or sheathe takes far longer)
 constexpr uint64_t kLogFirst = 10;   // the first states sent and steps run are logged in full (test evidence)
+// A pose hand counts for a stale-weapon hint once it has shown the same class this long: a held weapon the pose misses
+// for a few frames (kinematic, or swung past kHeldMaxUu) is not put away.
+constexpr double kPoseSettleMs = 200;
 
 constexpr const char* kFistsPrefix = "Weapon_Fists";   // an empty hand's pseudo weapon (standin_rig.cpp)
 
@@ -97,6 +102,9 @@ bool Live(UObject* component) {
 
 bool Fists(UObject* actor) { return actor && ObjectName(actor).rfind(kFistsPrefix, 0) == 0; }
 
+// As the pose carries it (standin_rig.cpp): the FNV-1a hash of the weapon's class name.
+uint32_t ClassHash(UObject* actor) { return sync::WeaponClassHash(ObjectName(reinterpret_cast<UObject*>(ClassOf(actor))).c_str()); }
+
 const char* Side(int hand) { return hand == 0 ? "R" : "L"; }
 
 }  // namespace
@@ -118,6 +126,8 @@ void EquipSync::Stop() {
 void EquipSync::Forget(uint8_t entity) {
     own_.erase(entity);
     standIn_.erase(entity);
+    owner_.erase(entity);
+    planPose_.erase(entity);
     sender_.Forget(entity);
 }
 
@@ -157,23 +167,60 @@ void EquipSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*
         if (++n_.sent <= kLogFirst)
             HSM_LOG("equip: sent #%u e%u hands R %u L %u sheathed 0x%02x", m.seq, m.entity, m.hand[0], m.hand[1], m.sheathed);
     }
+    // Stand-ins: a pose that settled on something else since the last plan may have left a held weapon stale.
+    for (const auto& kv : owner_) {
+        const uint8_t entity = kv.first;
+        if (auto seen = planPose_.find(entity); seen != planPose_.end() && seen->second == PoseClasses(entity, nowMs)) continue;
+        if (Plan(entity, nowMs)) ++n_.replanned;
+    }
 }
 
 // ---------------------------------------------------------------- the stand-in's side
 
 void EquipSync::Apply(const EquipStateMsg& m) {
     if (!active_) return;
-    UObject* standIn = standIns_->ActorOf(m.entity);
-    if (!standIn) { ++n_.noStandIn; return; }
+    owner_[m.entity] = m;
+    if (Plan(m.entity, SteadyNowMs())) ++n_.applied;
+}
+
+// The owner's pose per hand as far as a stale hint goes: the class it shows (0 empty), or 1 (unknown) before any pose,
+// for a weapon of unknown class, and until that class has shown for kPoseSettleMs.
+std::array<uint32_t, 2> EquipSync::PoseClasses(uint8_t entity, double nowMs) const {
+    std::array<uint32_t, 2> out{sync::kHandUnknown, sync::kHandUnknown};
+    for (int h = 0; h < 2; ++h) {
+        StandIns::PoseHandView v;
+        if (standIns_->PoseHandInfo(entity, h, v) && nowMs - v.sinceMs >= kPoseSettleMs) out[size_t(h)] = v.classHash;
+    }
+    return out;
+}
+
+// The stand-in's hand holds a real weapon (for the left, not the right's again) of a class the owner's settled pose does
+// not show there (combat::EquipHints).
+bool EquipSync::Stale(const Read& r, int hand, uint32_t poseClass) const {
+    UObject* held = r.hands[size_t(hand)];
+    if (!held || (hand == 1 && held == r.hands[0]) || Fists(held) || adapter_->IsBodyWeapon(held) || Adapter::BeingDestroyed(held))
+        return false;
+    return poseClass != sync::kHandUnknown && ClassHash(held) != poseClass;
+}
+
+bool EquipSync::Plan(uint8_t entity, double nowMs) {
+    auto it = owner_.find(entity);
+    if (it == owner_.end()) return false;
+    const EquipStateMsg& m = it->second;
+    const std::array<uint32_t, 2> pose = PoseClasses(entity, nowMs);
+    planPose_[entity] = pose;
+    UObject* standIn = standIns_->ActorOf(entity);
+    if (!standIn) { ++n_.noStandIn; return false; }
     Read r;
-    if (!ReadFighter(standIn, r)) { ++n_.readFailed; return; }
-    const EquipStateMsg mine = standIn_[m.entity].Read(r.snap);
+    if (!ReadFighter(standIn, r)) { ++n_.readFailed; return false; }
+    const EquipStateMsg mine = standIn_[entity].Read(r.snap);
     std::array<bool, kEquipSlots> hasSlot{};
     for (int k = 0; k < kEquipSlots; ++k) hasSlot[k] = r.slots[k] && !Adapter::BeingDestroyed(r.slots[k]);
-    ++n_.applied;
-    for (const EquipStep& s : combat::PlanEquip(m, mine, hasSlot)) {
+    combat::EquipHints hints;
+    for (int h = 0; h < 2; ++h) hints.staleHeld[size_t(h)] = Stale(r, h, pose[size_t(h)]);
+    for (const EquipStep& s : combat::PlanEquip(m, mine, hasSlot, hints)) {
         Read now;   // each step changes the stand-in: read it again
-        if (!ReadFighter(standIn, now)) { ++n_.readFailed; return; }
+        if (!ReadFighter(standIn, now)) { ++n_.readFailed; return true; }
         const bool draw = s.kind == EquipStep::Kind::Draw;
         const bool ok = draw ? Draw(standIn, now, s.hand, s.slot) : Sheathe(standIn, now, s.hand, s.slot);
         if (!ok) continue;
@@ -182,11 +229,43 @@ void EquipSync::Apply(const EquipStateMsg& m) {
             HSM_LOG("equip: #%u stand-in of e%u %s hand %s slot %d", m.seq, m.entity, draw ? "drew into" : "sheathed from", Side(s.hand),
                     s.slot);
     }
-    if (Read after; ReadFighter(standIn, after)) standIn_[m.entity].Read(after.snap);   // where the steps put things
+    if (Read after; ReadFighter(standIn, after)) standIn_[entity].Read(after.snap);   // where the steps put things
+    return true;
+}
+
+bool EquipSync::OwnerToken(uint8_t entity, int hand, uint8_t& token) const {
+    auto it = owner_.find(entity);
+    if (!active_ || it == owner_.end() || hand < 0 || hand > 1) return false;
+    token = it->second.hand[size_t(hand)];
+    return true;
+}
+
+bool EquipSync::MayBeDraw(uint8_t entity, int hand, uint32_t classHash) const {
+    auto it = owner_.find(entity);
+    UObject* standIn = active_ && it != owner_.end() ? standIns_->ActorOf(entity) : nullptr;
+    if (!standIn) return false;
+    for (int k = 0; k < kEquipSlots; ++k) {
+        if (!combat::HandReachesSlot(hand, k) || !(it->second.sheathed & (1u << k))) continue;
+        UObject** slot = SlotField(standIn, k);
+        if (slot && *slot && !Adapter::BeingDestroyed(*slot) && ClassHash(*slot) == classHash) return true;
+    }
+    return false;
+}
+
+bool EquipSync::MayBeSheathe(uint8_t entity, int hand) const {
+    auto it = owner_.find(entity);
+    UObject* standIn = active_ && it != owner_.end() ? standIns_->ActorOf(entity) : nullptr;
+    if (!standIn) return false;
+    for (int k = 0; k < kEquipSlots; ++k) {
+        if (!combat::HandReachesSlot(hand, k) || !(it->second.sheathed & (1u << k))) continue;
+        UObject** slot = SlotField(standIn, k);
+        if (slot && (!*slot || Adapter::BeingDestroyed(*slot))) return true;
+    }
+    return false;
 }
 
 // The stand-in's hand grabs the slot's weapon, then the weapon leaves the slot as Check Scabbard Unsheath State lets it
-// go. A hand holding a real weapon is left alone (prop_sync drops it first; the next state draws).
+// go. A hand holding a real weapon is left alone (prop_sync lets go of it first and asks for a re-plan, which draws).
 bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot) {
     UObject* weapon = r.slots[slot];
     UObject* held = r.hands[hand];
@@ -255,11 +334,13 @@ std::string EquipSync::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[256];
+    char line[320];
     std::snprintf(line, sizeof line,
-                  "equip: sent %llu (unreadable %llu) | applied %llu (no stand-in %llu): drew %llu sheathed %llu skipped %llu failed %llu",
-                  d(a.sent, b.sent), d(a.readFailed, b.readFailed), d(a.applied, b.applied), d(a.noStandIn, b.noStandIn),
-                  d(a.draws, b.draws), d(a.sheathes, b.sheathes), d(a.skipped, b.skipped), d(a.failed, b.failed));
+                  "equip: sent %llu (unreadable %llu) | applied %llu replanned %llu (no stand-in %llu): drew %llu sheathed %llu "
+                  "skipped %llu failed %llu",
+                  d(a.sent, b.sent), d(a.readFailed, b.readFailed), d(a.applied, b.applied), d(a.replanned, b.replanned),
+                  d(a.noStandIn, b.noStandIn), d(a.draws, b.draws), d(a.sheathes, b.sheathes), d(a.skipped, b.skipped),
+                  d(a.failed, b.failed));
     reported_ = n_;
     return line;
 }

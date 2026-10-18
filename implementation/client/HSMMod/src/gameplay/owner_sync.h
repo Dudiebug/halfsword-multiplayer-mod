@@ -70,6 +70,16 @@ public:
     // The weapon class (sync::WeaponSample::classHash) the owner's newest pose shows in hand (0 right, 1 left), 0 when
     // that hand is empty. False before any pose, or when the hand holds a weapon of unknown class (prop_sync.cpp).
     bool PoseHand(uint8_t entity, int hand, uint32_t& classHash) const;
+    // The same hand in more detail (prop_sync's hand matching, sync/hsm_handmatch.h): its class as the pose carries it
+    // (0 empty, 1 unknown class), the class it showed before that (0 when none), the local time that class first showed,
+    // and the weapon's root in the newest pose and when that class first showed (both unset for an empty hand). False
+    // before any pose.
+    struct PoseHandView {
+        uint32_t classHash = 0, prevClassHash = 0;
+        double sinceMs = 0;
+        sync::V3 pos{}, firstPos{};
+    };
+    bool PoseHandInfo(uint8_t entity, int hand, PoseHandView& out) const;
     // The owner's clock now (local time minus the minimum transit offset seen): how old a claim from that owner is.
     bool OwnerClockNow(uint8_t entity, double nowMs, int64_t& out) const;
     // The owner time the stand-in currently shows (its last sample), for the parry window.
@@ -92,6 +102,9 @@ private:
         VitalsMsg vitals{};
         bool haveVitals = false;
         std::array<uint32_t, sync::kPoseWeapons> handClass{};   // newest pose's weapon class per hand (0 = empty, 1 = unknown)
+        std::array<uint32_t, sync::kPoseWeapons> handPrevClass{};   // the class each hand showed before that
+        std::array<double, sync::kPoseWeapons> handSinceMs{};   // local time each hand's class last changed
+        std::array<sync::V3, sync::kPoseWeapons> handPos{}, handFirstPos{};   // its weapon's root: newest, and as the class first showed
         uint32_t handTs = 0;
         bool haveHands = false;
         uint64_t poses = 0, rejected = 0;

@@ -51,6 +51,10 @@ public:
     // Owner sync: StillValid and AllWillies also treat an actor the game is destroying (AActor::IsActorBeingDestroyed)
     // as gone, instead of until garbage collection frees its slot; AllWillies also skips destroyed ones (IsGarbage). Off in host sync, which keeps its old behaviour.
     void SetDestroyAware(bool on) { destroyAware_ = on; }
+    // Owner sync: IsWeapon (and so FighterOf) also counts every Blueprint derived from ModularWeaponBP_C: the forged and
+    // premade weapons, shields, fists and feet. Host sync keeps the old test, ModularWeaponBP_C exactly (the level's and
+    // the procedural weapons only).
+    void SetSubclassWeapons(bool on) { subclassWeapons_ = on; }
     static bool BeingDestroyed(ue::UObject* actor);
     std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level
     ue::FVector ActorLocation(ue::UObject* actor);
@@ -71,7 +75,11 @@ public:
     bool IsDead(ue::UObject* willie);
     ue::UObject* FighterOf(ue::UObject* actor);            // the Willie an actor belongs to (itself, a held weapon, worn armor)
     bool IsWeapon(ue::UObject* actor);
+    // Fists and feet: weapon actors a fighter spawns as part of its own body ("Weapon R/L" with an empty hand, "Foot R/L
+    // Weapon"), never dropped, picked up or synced as props.
+    bool IsBodyWeapon(ue::UObject* actor);
     std::vector<ue::UObject*> AllWillies();                // live Willie_BP_C instances in the loaded level
+    std::vector<ue::UObject*> WeaponActors();              // live weapon actors (IsWeapon), sheathed, held and dropped
     // Re-tints the fabric of every armor piece attached to the Willie; returns how many pieces changed.
     int TintArmor(ue::UObject* willie, float r, float g, float b);
     // Spawns a fresh fighter for local player 0 and possesses it; the old pawn is destroyed.
@@ -120,6 +128,9 @@ private:
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;
+    bool subclassWeapons_ = false;
+    ue::FName weaponName_{};                       // ModularWeaponBP_C, once a class chain has shown it
+    bool weaponNameKnown_ = false;
     std::array<ue::UFunction*, kAxisCount> axisFn_{};
     std::array<ue::UFunction*, kActionCount> pressFn_{}, releaseFn_{};
     std::unordered_map<ue::UFunction*, InputBinding> bindings_;

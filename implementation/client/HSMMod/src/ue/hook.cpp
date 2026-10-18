@@ -29,6 +29,23 @@ void Classify(UFunction* fn) {
 
 std::atomic<unsigned long> g_gameThreadId{0};
 
+// Stats (GetProcessEventHookStats): game thread only. t_inHooks is the depth of hook callbacks this thread is in.
+uint64_t g_hookCalls = 0, g_hookNs = 0;
+thread_local int t_inHooks = 0;
+
+int64_t QpcNs(int64_t ticks) {
+    static const int64_t freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+    return ticks * 1000000000ll / freq;
+}
+int64_t Qpc() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+
+struct InHooks {
+    InHooks() { ++t_inHooks; }
+    ~InHooks() { --t_inHooks; }
+    InHooks(const InHooks&) = delete;
+    InHooks& operator=(const InHooks&) = delete;
+};
+
 void Detour(UObject* obj, UFunction* fn, void* params) {
     static std::atomic<bool> first{true};
     if (first.exchange(false)) {
@@ -50,7 +67,15 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
             }
         }
         // Hooks run without the lock so they may call ProcessEvent (re-entering this detour).
-        for (const PreHook& h : hooks) if (h(obj, fn, params)) block = true;
+        if (!hooks.empty()) {
+            const bool timed = t_inHooks == 0 && GetCurrentThreadId() == g_gameThreadId.load(std::memory_order_relaxed);
+            const int64_t t0 = timed ? Qpc() : 0;
+            {
+                InHooks in;
+                for (const PreHook& h : hooks) if (h(obj, fn, params)) block = true;
+            }
+            if (timed) { ++g_hookCalls; g_hookNs += uint64_t(QpcNs(Qpc() - t0)); }
+        }
     }
     if (!block) g_original(obj, fn, params);
 }
@@ -106,5 +131,12 @@ void ClearHooks() {
 }
 
 unsigned long GameThreadId() { return g_gameThreadId.load(); }
+
+ProcessEventHookStats GetProcessEventHookStats() {
+    ProcessEventHookStats s;
+    s.calls = g_hookCalls;
+    s.hookNs = g_hookNs;
+    return s;
+}
 
 }  // namespace hsm::ue
