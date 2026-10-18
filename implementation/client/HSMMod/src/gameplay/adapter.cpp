@@ -328,7 +328,12 @@ void Adapter::KeepRemoteFighter(UObject* willie, float yawDeg, float pitchDeg) {
     if (UObject* ctrl = ControllerOf(willie)) Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitchDeg, yawDeg, 0}).invoke();
 }
 
-void Adapter::DestroyActor(UObject* actor) { if (actor) Call(actor, "K2_DestroyActor").invoke(); }
+void Adapter::DestroyActor(UObject* actor) {
+    if (!actor) return;
+    Call(actor, "K2_DestroyActor").invoke();
+    static bool reported = false;   // the in-game proof that AllWillies can tell destroyed fighters by their flag
+    if (!reported) { reported = true; HSM_LOG("adapter: a destroyed actor is %smarked as garbage", IsGarbage(actor) ? "" : "NOT "); }
+}
 
 bool Adapter::BeingDestroyed(UObject* actor) {
     static UFunction* fn = nullptr;
@@ -643,7 +648,9 @@ UObject* Adapter::FighterOf(UObject* actor) {
 
 std::vector<UObject*> Adapter::AllWillies() {
     std::vector<UObject*> out;
-    for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || !BeingDestroyed(w)) out.push_back(w);
+    // Destroyed fighters stay in the object array until garbage collection; once the destroy is over only their
+    // garbage flag tells them apart (the purges destroyed them again every second, test 2).
+    for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) out.push_back(w);
     return out;
 }
 

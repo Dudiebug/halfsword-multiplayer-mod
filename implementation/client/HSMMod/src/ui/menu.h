@@ -1,5 +1,6 @@
-// In-game Multiplayer entry: a button injected next to Free Mode on the main menu (UI_MainMenuSNF) and a
-// lobby panel built from real UMG widgets at runtime. Game thread only.
+// In-game Multiplayer entry: a button injected on the main menu (UI_Startup_Menu, or UI_MainMenuSNF in older builds)
+// that opens a full-screen multiplayer page built from real UMG widgets at runtime (lobby, match settings, map list).
+// Game thread only.
 #pragma once
 #include "ue/engine.h"
 

@@ -49,7 +49,7 @@ public:
     void DestroyFighter(ue::UObject* willie, int32_t index);
     bool StillValid(ue::UObject* o, int32_t index) const;  // index from ue::ObjectIndex at spawn time
     // Owner sync: StillValid and AllWillies also treat an actor the game is destroying (AActor::IsActorBeingDestroyed)
-    // as gone, instead of until garbage collection frees its slot. Off in host sync, which keeps its old behaviour.
+    // as gone, instead of until garbage collection frees its slot; AllWillies also skips destroyed ones (IsGarbage). Off in host sync, which keeps its old behaviour.
     void SetDestroyAware(bool on) { destroyAware_ = on; }
     static bool BeingDestroyed(ue::UObject* actor);
     std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level

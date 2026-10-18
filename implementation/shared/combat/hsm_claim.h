@@ -306,6 +306,14 @@ private:
     std::map<uint8_t, LastApplied> last_;
 };
 
+// Bone rule, on the victim: can a claim naming bone (with boneIndex = GetBoneIndex on my fighter's mesh) be replayed?
+// "None" (NAME_None as text) always can: the game calls Deal Complex Damage with no bone itself (a hit result without
+// one, Willie_BP.cpp:7970), its body runs on with it, and GetSocketTransform(None) is the mesh's own frame on both
+// machines. Any other name must be a bone of my fighter. An empty name is never one the game produced.
+inline bool ReplayBoneOk(const std::string& bone, int32_t boneIndex) {
+    return bone == "None" || (!bone.empty() && boneIndex >= 0);
+}
+
 // Age rule: claims older than kClaimMaxAgeMs (receiver-estimated) are dropped.
 inline bool ClaimFresh(int64_t ageMs) { return ageMs < kClaimMaxAgeMs; }
 

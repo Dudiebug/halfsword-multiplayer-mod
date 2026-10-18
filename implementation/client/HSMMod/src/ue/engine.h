@@ -37,6 +37,7 @@ UObject* OuterOf(const UObject* o);
 bool IsA(const UObject* o, const UClass* c);
 bool IsChildOf(const UClass* c, const UClass* base);   // c == base or derives from it
 bool IsDefaultObject(const UObject* o);
+bool IsGarbage(const UObject* o);              // destroyed (marked as garbage), not yet freed by garbage collection
 int32_t ObjectCount();
 int32_t ObjectIndex(const UObject* o);          // GUObjectArray slot (UObjectBase::InternalIndex)
 UObject* ObjectAt(int32_t index);

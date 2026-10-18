@@ -225,6 +225,18 @@ static void TestClaimFresh() {
     CHECK(ClaimFresh(-5));                 // early relative to the receiver's estimate: still fresh
 }
 
+// ---------------------------------------------------------------- bone rule
+static void TestReplayBoneOk() {
+    CHECK(ReplayBoneOk("None", -1));       // the game's own boneless hits (test 2: two claims refused as "bone 'None'")
+    CHECK(ReplayBoneOk("None", 0));
+    CHECK(ReplayBoneOk("hand_l", 0));
+    CHECK(ReplayBoneOk("spine_02", 7));
+    CHECK(!ReplayBoneOk("hand_l", -1));    // a bone my fighter lacks
+    CHECK(!ReplayBoneOk("", 0));
+    CHECK(!ReplayBoneOk("", -1));
+    CHECK(!ReplayBoneOk("none", -1));      // only the engine's exact spelling of NAME_None
+}
+
 // ---------------------------------------------------------------- parry window
 static void TestParryWindow() {
     ParryWindow pw;
@@ -440,6 +452,7 @@ int main() {
     TestDedupeForget();
     TestReplayGate();
     TestClaimFresh();
+    TestReplayBoneOk();
     TestParryWindow();
     TestSerializationRoundTrip();
     TestHostileDecode();

@@ -58,6 +58,7 @@ private:
     };
     bool OnDealComplexDamage(ue::ScriptCall& c);
     bool OnGetDamage(ue::ScriptCall& c);
+    void AfterDealComplexDamage(ue::ScriptCall& c);
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp);
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;
     ue::UObject* StrikerOn(ue::UObject* fighter, const combat::HitClaim& c) const;   // the claim's striking component on fighter
@@ -80,6 +81,8 @@ private:
     combat::ReplayGate gate_;
     combat::ParryWindow parry_;
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
+    struct Pending { ue::UObject* standIn = nullptr; uint32_t claimId = 0; uint8_t attacker = 0; };
+    Pending pending_;   // the claim just made, until its stand-in's own body returns (its damage is logged next to it)
     std::array<Recent, kMaxWillies + 1> recent_{};
     std::array<double, kMaxWillies + 1> lastClashMs_{};
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box

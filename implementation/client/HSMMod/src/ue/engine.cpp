@@ -36,6 +36,7 @@ constexpr size_t kBoolByteOffset = 0x71, kBoolByteMask = 0x72;
 constexpr size_t kPropVtCopyValues = 0xF0;   // FProperty::CopyValuesInternal(Dest, Src, Count)
 constexpr size_t kPropVtClearValue = 0x130;   // FProperty::ClearValueInternal(Data), as ProcessLocalScriptFunction's abort path calls it
 constexpr uint32_t kRF_ClassDefaultObject = 0x10;
+constexpr uint32_t kRF_MirroredGarbage = 0x40000000;   // UE5: set by MarkAsGarbage (an actor's destroy) until GC frees it
 constexpr uint64_t kCPF_Parm = 0x80, kCPF_OutParm = 0x100, kCPF_ZeroConstructor = 0x200, kCPF_ReturnParm = 0x400,
                    kCPF_NoDestructor = 0x1000000000ull;
 constexpr int32_t kItemsPerChunk = 0x10000, kItemSize = 0x18;
@@ -115,6 +116,7 @@ std::string ObjectName(const UObject* o) { return o ? NameToString(Read<FName>(o
 UClass* ClassOf(const UObject* o) { return o ? Read<UClass*>(o, kObjClass) : nullptr; }
 UObject* OuterOf(const UObject* o) { return o ? Read<UObject*>(o, kObjOuter) : nullptr; }
 bool IsDefaultObject(const UObject* o) { return o && (Read<uint32_t>(o, kObjFlags) & kRF_ClassDefaultObject); }
+bool IsGarbage(const UObject* o) { return o && (Read<uint32_t>(o, kObjFlags) & kRF_MirroredGarbage); }
 
 std::string FullName(const UObject* o) {
     if (!o) return "None";

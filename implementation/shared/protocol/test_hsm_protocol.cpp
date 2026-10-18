@@ -1,5 +1,6 @@
 // Unit tests for hsm_protocol.h. Build: g++ -std=c++20 -Wall -Wextra -O1 test_hsm_protocol.cpp
 #include "hsm_protocol.h"
+#include "match/hsm_match.h"
 #include <cstdio>
 #include <limits>
 
@@ -112,7 +113,13 @@ static void TestMatchInfoAndKill() {
     CHECK(o.timeLeftMs == 123456 && o.winner == -1000 && o.scores.size() == 3 && o.scores[1].score == -2 && o.scores[2].key == 2);
     CHECK(o.fighters.size() == 3 && o.fighters[2].entity == 9 && o.fighters[2].team == 2 && o.fighters[2].kills == 7 && o.fighters[1].deaths == 2 && o.fighters[1].name == "ann");
     auto bad = [&](auto mutate) { MatchInfo x = m; mutate(x); auto e = Encode(x); MatchInfo y; return !Decode(e.data(), e.size(), y); };
-    CHECK(bad([](MatchInfo& x) { x.format = 4; }));
+    // Every match format the host can run must reach the client (Duel and Zombies were dropped, test 2).
+    for (uint8_t f = 0; f < kFormatCount; ++f) {
+        MatchInfo x = m; x.format = f; auto e = Encode(x); MatchInfo y;
+        CHECK(Decode(e.data(), e.size(), y) && y.format == f);
+    }
+    CHECK(bad([](MatchInfo& x) { x.format = kFormatCount; }));
+    CHECK(bad([](MatchInfo& x) { x.format = 255; }));
     CHECK(bad([](MatchInfo& x) { x.phase = 5; }));
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 0; }));
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 101; }));
@@ -127,7 +134,7 @@ static void TestMatchInfoAndKill() {
     auto kb = Encode(k); Kill ko; CHECK(Decode(kb.data(), kb.size(), ko) && ko.killer == 3 && ko.victim == 4 && ko.flags == 1);
     k.victim = 0; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));   // victim required
     k.victim = 4; k.flags = 8; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 10);   // rev 10: PaintFx, Equip
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 11);   // rev 11: MatchInfo takes every match format
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so

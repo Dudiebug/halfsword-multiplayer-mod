@@ -2,6 +2,7 @@
 // All integers are little-endian; floats are IEEE-754 binary32. Every decoder validates sizes,
 // counts and finiteness and returns false on malformed input instead of trusting the sender.
 #pragma once
+#include "match/hsm_match.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -12,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 10;         // 10: PaintFx, Equip (owner sync blood and wounds, drawn and sheathed weapons)
+constexpr uint8_t kProtocolRevision = 11;         // 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -395,7 +396,7 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
     m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
-    if (m.format > 3 || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
     m.friendlyFire = ff == 1;
     size_t ns = r.u8(); if (ns > kMaxWillies) return false;
     m.scores.resize(ns); for (ScoreEntry& e : m.scores) { e.key = r.i16(); e.score = r.i16(); }

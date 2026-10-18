@@ -65,6 +65,7 @@
 #include "ue/script_hook.h"
 #include <windows.h>
 #include <array>
+#include <chrono>
 #include <deque>
 #include <atomic>
 #include <cmath>
@@ -208,6 +209,13 @@ public:
 
     // Before the Half Sword game mode ticks (splash/startup screens), any actor tick answers the bridge with the
     // commands that need no session state.
+    // Wall time of one Tick (the pump): our own share of a frame, against the frame time the game mode reports.
+    void NoteTickCost(double ms) {
+        if (!sampling_ || tickMs_.size() >= kFrameSamples) return;
+        if (tickMs_.empty()) vmNsAtWindow_ = GetScriptHookStats().hookNs;   // the window starts: VM hook time from here
+        tickMs_.push_back(ms);
+    }
+
     void PumpAgentEarly() {
         uint32_t now = NowMs();
         if (now - lastModeTick_ < 1000 || now - lastEarlyPump_ < 50) return;
@@ -242,7 +250,8 @@ public:
 
     void Tick(UObject* gameMode, float dt) {
         lastModeTick_ = NowMs();
-        if (!net_ || !InFightLevel()) frameMs_.clear();                 // sampled only where the health line is logged
+        sampling_ = net_ && InFightLevel();                               // sampled only where the health line is logged
+        if (!sampling_) { frameMs_.clear(); tickMs_.clear(); }
         else if (frameMs_.size() < kFrameSamples) frameMs_.push_back(double(dt) * 1000.0);
         if (!selfTested_) {
             selfTested_ = true;
@@ -265,7 +274,7 @@ public:
         if (hostPending_) { hostPending_ = false; BecomeHost(); }
         agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
         AutoRun();
-        ui::Tick(*this, gameMode);
+        if (!inFight_) ui::Tick(*this, gameMode);   // the main menu exists only in menu levels (its scan walks every object)
         EnsureLocalFighter();
         test::Tick(adapter_, InFightLevel(), dt);
         ApplyHeldInput();
@@ -335,6 +344,7 @@ public:
                 streamsDropped_, claimsRejected_, standIns_.Count(), IsHost() ? "" : (adapter_.PlayerWillie(0) ? ", own fighter ok" : ", own fighter MISSING"));
         streamsDropped_ = claimsRejected_ = 0;
         HSM_LOG("%s: %s", who, FrameAndPingLine().c_str());
+        HSM_LOG("%s: %s", who, CensusLine().c_str());
         if (std::string line = standIns_.HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, claims_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, fx_.HealthLine().c_str());
@@ -343,6 +353,34 @@ public:
         HSM_LOG("%s: %s", who, gore_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, grabs_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, props_.HealthLine().c_str());
+    }
+
+    // Every fighter in the level and its state, next to the frame time: what grows when the game slows down (bodies left
+    // behind, fighters on the ground or bleeding). One object scan per 5 s window.
+    std::string CensusLine() {
+        int total = 0, dead = 0, fallen = 0, out = 0, stand = 0;
+        float bleeding = 0;
+        for (UObject* w : adapter_.AllWillies()) {
+            ++total;
+            if (standIns_.IsStandIn(w)) ++stand;
+            VitalsMsg v;
+            if (!adapter_.ReadVitals(w, 0, v)) continue;
+            dead += (v.flags & 1) ? 1 : 0;
+            fallen += (v.flags & 2) ? 1 : 0;
+            out += (v.flags & 4) ? 1 : 0;
+            bleeding += v.bleeding;
+        }
+        char b[192];
+        std::snprintf(b, sizeof b, "census: fighters %d (stand-ins %d) dead %d fallen %d knocked out %d, bleeding total %.2f",
+                      total, stand, dead, fallen, out, double(bleeding));
+        std::string line = b;
+        VitalsMsg mine;
+        if (UObject* me = adapter_.PlayerWillie(0); me && adapter_.ReadVitals(me, 0, mine)) {
+            std::snprintf(b, sizeof b, " | mine:%s%s%s health %.0f bleeding %.2f", (mine.flags & 1) ? " dead" : "",
+                          (mine.flags & 2) ? " fallen" : "", (mine.flags & 4) ? " knocked out" : "", double(mine.health), double(mine.bleeding));
+            line += b;
+        }
+        return line;
     }
 
     // Frame time (the game mode's DeltaSeconds) since the previous call, and the round trip to every peer: a long frame
@@ -361,6 +399,17 @@ public:
             line = b;
         }
         frameMs_.clear();
+        // Our share: the pump (stand-in servo, streams, our replays of claims including the game code they run) and the
+        // VM hook callbacks (claims, fx, ...). The rest of a frame is the game's own (physics, ragdolls, blood, rendering).
+        if (!tickMs_.empty()) {
+            double sum = 0, mx = 0;
+            for (double v : tickMs_) { sum += v; mx = std::max(mx, v); }
+            const ScriptHookStats vm = GetScriptHookStats();
+            const double vmMs = double(vm.hookNs - vmNsAtWindow_) / 1e6 / double(tickMs_.size());
+            std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame", sum / double(tickMs_.size()), mx, vmMs);
+            line += b;
+        }
+        tickMs_.clear();
         line += " | rtt";
         size_t links = 0;
         auto add = [&](uint32_t peer, int slot) {
@@ -2304,7 +2353,9 @@ private:
     bool ownDeathReported_ = false;
     uint32_t nextKeepAlive_ = 0, streamsDropped_ = 0, claimsRejected_ = 0;
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
-    std::vector<double> frameMs_;
+    std::vector<double> frameMs_, tickMs_;
+    bool sampling_ = false;
+    uint64_t vmNsAtWindow_ = 0;
 };
 
 std::unique_ptr<SessionImpl> g_session;
@@ -2336,7 +2387,9 @@ bool StartMod(const Config& cfg) {
         float dt = 0.f;
         if (FProperty* p = FindProperty(fn, "DeltaSeconds")) std::memcpy(&dt, static_cast<uint8_t*>(params) + PropertyOffset(p), sizeof dt);
         if (!(dt > 0.f && dt < 1.f)) dt = 1.f / 60.f;
+        const auto t0 = std::chrono::steady_clock::now();
         g_session->Tick(obj, dt);
+        g_session->NoteTickCost(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         return false;
     });
     if (!InstallProcessEventHook()) return false;

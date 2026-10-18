@@ -55,7 +55,8 @@ bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
         components_ = PreparedCall(actor, "K2_GetComponentsByClass", {"ComponentClass", "ReturnValue"});
     primitive_ = FindClass("PrimitiveComponent");
     boxClass_ = FindClass("BoxComponent");
-    int n = HookScript(kHookOwner, "Willie_BP_C", "Deal Complex Damage", [this](ScriptCall& c) { return OnDealComplexDamage(c); });
+    int n = HookScript(kHookOwner, "Willie_BP_C", "Deal Complex Damage", [this](ScriptCall& c) { return OnDealComplexDamage(c); },
+                       [this](ScriptCall& c) { AfterDealComplexDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Damage", [this](ScriptCall& c) { return OnGetDamage(c); });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
@@ -94,6 +95,7 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
     c.get("Collided Component", comp);
     UObject* striker = comp ? adapter_->FighterOf(OuterOf(comp)) : nullptr;
     if (const uint8_t victim = standIns_->EntityOf(self)) {
+        pending_ = {};
         const uint8_t attacker = striker ? env_.ownedEntity(striker) : 0;
         if (!attacker || attacker == victim) {
             c.ZeroOutputs();
@@ -133,6 +135,17 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
         return true;
     }
     return false;
+}
+
+// The stand-in's own run of a blow just claimed: its raw Damage Out, logged next to the claim so the victim's replay of
+// the same claim id (its "damage out", in the other machine's log) can be compared with what the blow did here. The
+// stand-in wears the victim's passport, so the two should be close; a large gap means the replay is not faithful.
+void Claims::AfterDealComplexDamage(ScriptCall& c) {
+    if (!pending_.standIn || c.self() != pending_.standIn) return;
+    const Pending p = pending_;
+    pending_ = {};
+    if (p.claimId <= kLogFirst)
+        HSM_LOG("claims: #%u e%u: damage out %.2f here on the stand-in", p.claimId, p.attacker, c.get<double>("Damage Out"));
 }
 
 // Get Damage reached on a fighter simulated here from a stand-in's component by any path other than our own replay
@@ -195,6 +208,7 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
                                              ObjectName(comp), std::string{});
     env_.send(claim);
     ++n_.sent;
+    pending_ = Pending{standIn, claim.claimId, attacker};
     if (n_.sent <= kLogFirst)
         HSM_LOG("claims: sent #%u e%u -> e%u bone %s by %s '%s' |impulse| %.0f cut %.2f stab %.2f box %d at t=%u",
                 claim.claimId, attacker, victim, claim.hitBone.c_str(), SourceName(source), claim.strikeComponent.c_str(),
@@ -241,7 +255,7 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
     Call index(mesh, "GetBoneIndex");
     index.setName("BoneName", bone).invoke();
     Xform boneWorld;
-    if (c.hitBone.empty() || index.get<int32_t>("ReturnValue") < 0 || !BoneXform(mesh, bone, boneWorld)) {
+    if (!combat::ReplayBoneOk(c.hitBone, index.get<int32_t>("ReturnValue")) || !BoneXform(mesh, bone, boneWorld)) {
         ++n_.noBone;
         if (n_.noBone <= 3) HSM_LOG("claims: #%u from e%u names bone '%s', which my fighter lacks", c.claimId, c.attacker, c.hitBone.c_str());
         return;
