@@ -61,7 +61,7 @@ static void TestPropStateRejects() {
 
 // ---------------------------------------------------------------- wire format: PropLease
 static void TestPropLeaseRoundTrip() {
-    PropLeaseMsg m; m.propId = MakeLevelPropId("StaticMeshActor_42"); m.action = LeaseAction::Request; m.level = LeaseLevel::Touch; m.slot = 4;
+    PropLeaseMsg m; m.propId = MakeLevelPropId(42); m.action = LeaseAction::Request; m.level = LeaseLevel::Touch; m.slot = 4;
     const auto bytes = Encode(m);
     PropLeaseMsg o;
     CHECK(Decode(bytes.data(), bytes.size(), o));
@@ -75,7 +75,7 @@ static void TestPropLeaseRoundTrip() {
 
 static void TestPropLeaseRejects() {
     auto bad = [](PropLeaseMsg m) { const auto b = Encode(m); PropLeaseMsg o; return !Decode(b.data(), b.size(), o); };
-    PropLeaseMsg m; m.propId = MakeLevelPropId("x"); m.action = LeaseAction::Request; m.level = LeaseLevel::Touch; m.slot = 1;
+    PropLeaseMsg m; m.propId = MakeLevelPropId(1); m.action = LeaseAction::Request; m.level = LeaseLevel::Touch; m.slot = 1;
     CHECK(!bad(m));
     PropLeaseMsg z = m; z.propId = 0; CHECK(bad(z));
     PropLeaseMsg s = m; s.slot = uint8_t(kMaxFighters); CHECK(bad(s));
@@ -103,7 +103,7 @@ static void TestPropIdBoundsOnDecode() {
         PropLeaseMsg m; m.propId = id; m.action = LeaseAction::Request; m.level = LeaseLevel::Hold; m.slot = 1;
         const auto b = Encode(m); PropLeaseMsg o; return Decode(b.data(), b.size(), o);
     };
-    for (uint64_t id : {MakeWeaponPropId(1, 0), MakeWeaponPropId(uint8_t(kMaxWillies), 255), MakeLevelPropId("x"), kPropLevelBit}) {
+    for (uint64_t id : {MakeWeaponPropId(1, 0), MakeWeaponPropId(uint8_t(kMaxWillies), 255), MakeLevelPropId(1), MakeLevelPropId(65535), kPropLevelBit}) {
         CHECK(stateOk(id)); CHECK(leaseOk(id));
     }
     for (uint64_t id : {uint64_t(255), uint64_t(kMaxWillies + 1) << 8, uint64_t(1) << 16, uint64_t(1) << 40, kPropLevelBit - 1}) {
@@ -421,18 +421,33 @@ static void TestIdentityScheme() {
     CHECK(MakeWeaponPropId(3, 5) != MakeWeaponPropId(3, 6));
     CHECK(MakeWeaponPropId(3, 5) != MakeWeaponPropId(4, 5));
     CHECK((MakeWeaponPropId(3, 5) & kPropLevelBit) == 0);             // weapon ids never look like a level prop
-    CHECK(MakeLevelPropId("foo") == MakeLevelPropId("foo"));
-    CHECK(MakeLevelPropId("foo") != MakeLevelPropId("bar"));
-    CHECK((MakeLevelPropId("foo") & kPropLevelBit) != 0);             // level-prop ids are always tagged
-    CHECK(MakeLevelPropId("foo") != 0 && MakeLevelPropId("") != 0);
+    // A level prop is named by the host's census (session/hsm_prop_census.h): its index there, nothing else.
+    CHECK(MakeLevelPropId(7) == MakeLevelPropId(7));
+    CHECK(MakeLevelPropId(7) != MakeLevelPropId(8));
+    CHECK(MakeLevelPropId(7) == (kPropLevelBit | 7));
+    CHECK((MakeLevelPropId(7) & kPropLevelBit) != 0);                 // level-prop ids are always tagged
+    CHECK(MakeLevelPropId(0) == kPropLevelBit && MakeLevelPropId(0) != 0);   // index 0 is a real prop, never "no id"
+    CHECK(MakeLevelPropId(65535) == (kPropLevelBit | 0xFFFF));
+    for (uint32_t i = 0; i <= 0xFFFF; i += 257) {
+        const uint64_t id = MakeLevelPropId(uint16_t(i));
+        CHECK(LevelPropIndex(id) == i && IsCanonicalLevelPropId(id) && ValidPropId(id) && IsLevelProp(id));
+    }
+    // A level id with anything above its index set is no census id (ValidPropId still lets it through the decoders).
+    for (int bit = 16; bit < 63; ++bit) {
+        const uint64_t junk = MakeLevelPropId(5) | (uint64_t(1) << bit);
+        CHECK(!IsCanonicalLevelPropId(junk) && ValidPropId(junk) && LevelPropIndex(junk) == 5);
+    }
+    CHECK(!IsCanonicalLevelPropId(MakeWeaponPropId(3, 5)) && !IsCanonicalLevelPropId(0));
+    CHECK(!IsCanonicalLevelPropId(MakeDropPropId(3, 1, 5, 0xDEADBEEFu)));
+    CHECK(LevelPropIndex(MakeWeaponPropId(3, 5)) == 0 && LevelPropIndex(0) == 0);   // a weapon id has no census index
     for (uint8_t owner = 1; owner <= kMaxWillies; ++owner)
         for (uint8_t slot = 0; slot < 8; ++slot) CHECK(MakeWeaponPropId(owner, slot) != 0);
     CHECK(MakeWeaponPropId(0, 0) == 0);                                // the reserved/degenerate case: no known holder
     // What a receiver needs to find the actor: the weapon's holder entity and sheath slot back out of the id.
-    CHECK(!IsLevelProp(MakeWeaponPropId(3, 5)) && IsLevelProp(MakeLevelPropId("foo")));
+    CHECK(!IsLevelProp(MakeWeaponPropId(3, 5)) && IsLevelProp(MakeLevelPropId(7)));
     CHECK(PropOwnerEntity(MakeWeaponPropId(3, 5)) == 3 && PropSheathSlot(MakeWeaponPropId(3, 5)) == 5);
     CHECK(PropOwnerEntity(MakeWeaponPropId(uint8_t(kMaxWillies), 255)) == kMaxWillies && PropSheathSlot(MakeWeaponPropId(1, 255)) == 255);
-    CHECK(PropOwnerEntity(MakeLevelPropId("foo")) == 0 && PropSheathSlot(MakeLevelPropId("foo")) == 0);
+    CHECK(PropOwnerEntity(MakeLevelPropId(0x0305)) == 0 && PropSheathSlot(MakeLevelPropId(0x0305)) == 0);
 }
 
 // ---------------------------------------------------------------- dropped-weapon identity (owner sync, prop_sync.cpp)
@@ -452,7 +467,7 @@ static void TestDropIdentity() {
     CHECK(PropDropSeq(MakeDropPropId(3, 1, 5)) == 5 && PropDropSeq(MakeDropPropId(3, 0, 127)) == 127);
     CHECK(PropDropSeq(MakeDropPropId(3, 1, 0)) == 0);
     CHECK(PropOwnerEntity(MakeDropPropId(9, 1, 77)) == 9);
-    CHECK(PropHand(MakeLevelPropId("foo")) == 0 && PropDropSeq(MakeLevelPropId("foo")) == 0);
+    CHECK(PropHand(MakeLevelPropId(0x0303)) == 0 && PropDropSeq(MakeLevelPropId(0x0303)) == 0);
     std::vector<uint64_t> ids;
     for (int hand = 0; hand < 2; ++hand)
         for (int seq = 0; seq < 128; ++seq) {
@@ -494,7 +509,11 @@ static void TestDropEpoch() {
     CHECK(e != MakeDropPropId(3, 1, 5) && ValidPropId(e) && !IsLevelProp(e));
     CHECK(e == (MakeDropPropId(3, 1, 5) | (uint64_t(0xDEADBEEFu) << 16)));
     CHECK(PropOwnerEntity(e) == 3 && PropHand(e) == 1 && PropDropSeq(e) == 5 && PropDropEpoch(e) == 0xDEADBEEFu);
-    CHECK(PropDropEpoch(MakeDropPropId(3, 1, 5)) == 0 && PropDropEpoch(MakeLevelPropId("foo")) == 0);
+    CHECK(PropDropEpoch(MakeDropPropId(3, 1, 5)) == 0 && PropDropEpoch(MakeLevelPropId(0xFFFF)) == 0);
+    // A level id has no drop epoch, whatever lies in bits 16-62: ValidPropId accepts any id with bit 63, so a peer can
+    // send one with bits set where a weapon's epoch would be.
+    CHECK(ValidPropId(kPropLevelBit | (uint64_t(0xDEADBEEFu) << 16) | 7) &&
+          PropDropEpoch(kPropLevelBit | (uint64_t(0xDEADBEEFu) << 16) | 7) == 0);
     CHECK(PropDropEpoch(MakeDropPropId(3, 0, 0, 1)) == 1 && MakeDropPropId(3, 0, 0, 1) != MakeDropPropId(3, 0, 0, 2));
     CHECK(MakeDropPropId(0, 0, 0, 7) == 0 && MakeDropPropId(3, 2, 0, 7) == 0);   // no identity, whatever the epoch
     CHECK(MakeDropPropId(uint8_t(kMaxWillies + 1), 0, 0, 7) == 0);
@@ -547,7 +566,7 @@ static void TestDropSignature() {
     CHECK(DropSignature(MakeDropPropId(1, 1, 4), LeaseLevel::Touch, kHostSlot));               // the host's fighter
     CHECK(DropSignature(MakeDropPropId(uint8_t(kMaxFighters + 1), 0, 0), LeaseLevel::Touch, kHostSlot));   // a bot
     CHECK(!DropSignature(MakeDropPropId(uint8_t(kMaxFighters + 1), 0, 0), LeaseLevel::Touch, 1));
-    CHECK(!DropSignature(MakeLevelPropId("crate"), LeaseLevel::Touch, kHostSlot));           // level props: no stand-in
+    CHECK(!DropSignature(MakeLevelPropId(0x0301), LeaseLevel::Touch, kHostSlot));           // level props: no stand-in
     CHECK(!DropSignature(0, LeaseLevel::Touch, kHostSlot));
 }
 

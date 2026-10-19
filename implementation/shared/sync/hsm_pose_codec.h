@@ -16,6 +16,7 @@
 // THIRD_PARTY_NOTICES.md).
 #pragma once
 #include "sync/hsm_pose.h"
+#include "util/hsm_names.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -88,9 +89,11 @@ constexpr double kVLinMax = 10000.0;       // uu/s, mu-law full scale
 constexpr double kVAngMax = 5000.0;        // deg/s, mu-law full scale
 constexpr double kMuLaw = 255.0;
 
+// FNV-1a of the class name with ASCII letters folded to lower case: a name's display casing is whichever casing its
+// FName registered first in that process, so two machines can spell one class differently.
 constexpr uint32_t WeaponClassHash(const char* s) {
     uint32_t h = 2166136261u;
-    if (s) for (const char* p = s; *p; ++p) h = (h ^ static_cast<uint32_t>(static_cast<unsigned char>(*p))) * 16777619u;
+    if (s) for (const char* p = s; *p; ++p) h = (h ^ static_cast<uint32_t>(static_cast<unsigned char>(FoldAscii(*p)))) * 16777619u;
     return h;
 }
 

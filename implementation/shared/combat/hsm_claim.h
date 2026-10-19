@@ -3,12 +3,13 @@
 // claims and which claims are ever replayed on the victim. Pure types, no engine headers; World
 // space is Unreal units (uu, cm) and degrees, matching sync/hsm_pose.h.
 //
-// Claim fields, the bone-frame rule and the replay gate rules follow Cyrex0/HalfSword-MP
+// Claim fields and the bone-frame rule follow Cyrex0/HalfSword-MP
 // docs/development/subsystems/combat.md, Copyright (c) 2026 Cyrex0 and the HalfSword-MP
 // contributors, MIT (see THIRD_PARTY_NOTICES.md).
 #pragma once
 #include "hsm_protocol.h"
 #include "sync/hsm_pose.h"
+#include "util/hsm_names.h"
 #include <bitset>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +17,8 @@
 #include <deque>
 #include <map>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace hsm::combat {
 
@@ -24,7 +27,6 @@ using hsm::sync::V3;
 
 constexpr size_t kMaxClaimString = 64;          // hitBone / strikeComponent / strikeBone
 constexpr int kClaimLimiterMaxPerBoneTick = 4;  // BF.MAX_PER_BONE_TICK
-constexpr uint32_t kReplayGateMs = 200;         // BF.GD_GATE_MS: Get Damage's RetriggerableDelay
 constexpr int64_t kClaimMaxAgeMs = 1000;        // claims older than this (receiver estimate) are dropped
 constexpr int32_t kParryBeforeMs = 150;         // clash window: this far before the claim's attacker ts
 constexpr int32_t kParryAfterMs = 17;           // clash window: this far after the claim's attacker ts
@@ -271,41 +273,6 @@ private:
     std::map<uint8_t, State> state_;
 };
 
-// Replay gate rule (HSMP combat.md Sec.5 "Victim"): before replaying a claim through the victim's
-// own Deal Complex Damage, Last Complex Damage Impulse is always cleared (the claim already passed
-// that gate on the attacker's screen); Get Damage's per-bone Last Damage Taken/Last Damaged Bone is
-// kept only if the previous applied blow was from the same attacker, on the same bone, less than
-// kReplayGateMs on the attacker's clock, otherwise it is cleared.
-class ReplayGate {
-public:
-    struct Decision {
-        bool clearComplexImpulse = true;
-        bool keepLastDamage = false;
-    };
-
-    Decision Before(const HitClaim& c) const {
-        Decision d;
-        auto it = last_.find(c.victim);
-        if (it != last_.end()) {
-            const LastApplied& p = it->second;
-            if (p.attacker == c.attacker && p.bone == c.hitBone) {
-                int32_t delta = int32_t(c.attackerTsMs - p.attackerTsMs);
-                if (delta >= 0 && uint32_t(delta) < kReplayGateMs) d.keepLastDamage = true;
-            }
-        }
-        return d;
-    }
-    void Applied(const HitClaim& c) { last_[c.victim] = LastApplied{c.attacker, c.hitBone, c.attackerTsMs}; }
-
-private:
-    struct LastApplied {
-        uint8_t attacker;
-        std::string bone;
-        uint32_t attackerTsMs;
-    };
-    std::map<uint8_t, LastApplied> last_;
-};
-
 // Bone rule, on the victim: can a claim naming bone (with boneIndex = GetBoneIndex on my fighter's mesh) be replayed?
 // "None" (NAME_None as text) always can: the game calls Deal Complex Damage with no bone itself (a hit result without
 // one, Willie_BP.cpp:7970), its body runs on with it, and GetSocketTransform(None) is the mesh's own frame on both
@@ -317,29 +284,178 @@ inline bool ReplayBoneOk(const std::string& bone, int32_t boneIndex) {
 // Age rule: claims older than kClaimMaxAgeMs (receiver-estimated) are dropped.
 inline bool ClaimFresh(int64_t ageMs) { return ageMs < kClaimMaxAgeMs; }
 
-// Parry rule, decided on the victim: a clash between my weapon and that attacker's stand-in weapon
-// cancels a claim if the clash's attacker-clock timestamp falls within
-// [claim.attackerTsMs - kParryBeforeMs, claim.attackerTsMs + kParryAfterMs].
+// Parry rule, decided on the victim: a clash between my weapon and one weapon of that attacker's stand-in cancels a
+// claim struck with that same weapon if the clash's attacker-clock timestamp falls within
+// [claim.attackerTsMs - kParryBeforeMs, claim.attackerTsMs + kParryAfterMs]. The attacker's other weapon and its body
+// (a kick, a punch) are not parried by it (test 4: in a bind, nothing else the attacker did landed).
 class ParryWindow {
 public:
-    void NoteClash(uint8_t attacker, uint32_t attackerTsMsEstimate) {
+    void NoteClash(uint8_t attacker, StrikeSource weapon, uint32_t attackerTsMsEstimate) {
         auto& q = clashes_[attacker];
-        q.push_back(attackerTsMsEstimate);
+        q.push_back(Clash{attackerTsMsEstimate, weapon});
         if (q.size() > kMaxClashHistory) q.pop_front();
     }
     bool Cancels(const HitClaim& c) const {
+        if (c.source == StrikeSource::Body) return false;   // a body strike never met a blade
         auto it = clashes_.find(c.attacker);
         if (it == clashes_.end()) return false;
-        for (uint32_t ts : it->second) {
-            int32_t delta = int32_t(ts - c.attackerTsMs);   // clash ts minus claim ts, wrap-aware
+        for (const Clash& k : it->second) {
+            if (k.weapon != c.source) continue;
+            int32_t delta = int32_t(k.tsMs - c.attackerTsMs);   // clash ts minus claim ts, wrap-aware
             if (delta >= -kParryBeforeMs && delta <= kParryAfterMs) return true;
         }
         return false;
     }
+    void Forget(uint8_t attacker) { clashes_.erase(attacker); }   // its id goes to the next fighter
 
 private:
-    static constexpr size_t kMaxClashHistory = 64;   // bounds memory; clashes are reported at most every 100ms
-    std::map<uint8_t, std::deque<uint32_t>> clashes_;
+    struct Clash { uint32_t tsMs; StrikeSource weapon; };
+    static constexpr size_t kMaxClashHistory = 64;   // bounds memory; clashes are reported at most every 100ms per weapon
+    std::map<uint8_t, std::deque<Clash>> clashes_;
+};
+
+// ---------------------------------------------------------------- one blow, many contacts (attacker side)
+// A blade resting on a body, or one swing sliding over neighbouring bones, makes the game call Deal Complex Damage on
+// every contact. Test 4 logged twenty zero-impulse claims, 73 ms apart, alternating neck_01 and neck_02 (one blow).
+// Contacts are grouped by body part, so two bones of one part are one target.
+enum BodyPart : uint8_t {
+    kBodyPartOther = 0,
+    kBodyPartHead,          // head, neck_*
+    kBodyPartTorso,         // pelvis, spine_*, clavicle_*
+    kBodyPartUpperArmL, kBodyPartLowerArmL, kBodyPartHandL,
+    kBodyPartUpperArmR, kBodyPartLowerArmR, kBodyPartHandR,
+    kBodyPartThighL, kBodyPartCalfL, kBodyPartFootL,
+    kBodyPartThighR, kBodyPartCalfR, kBodyPartFootR,
+};
+
+// The body part of a skeleton bone, ignoring ASCII case; kBodyPartOther for anything else ("None", empty, unknown).
+inline uint8_t BodyPartOfBone(std::string_view bone) {
+    if (SameNameAscii(bone, "head") || StartsWithNameAscii(bone, "neck_")) return kBodyPartHead;
+    if (SameNameAscii(bone, "pelvis") || StartsWithNameAscii(bone, "spine_") || StartsWithNameAscii(bone, "clavicle_"))
+        return kBodyPartTorso;
+    if (bone.size() <= 2) return kBodyPartOther;
+    const std::string_view side = bone.substr(bone.size() - 2);
+    const bool left = SameNameAscii(side, "_l");
+    if (!left && !SameNameAscii(side, "_r")) return kBodyPartOther;
+    struct Limb { const char* prefix; uint8_t left, right; };
+    static constexpr Limb kLimbs[] = {
+        {"upperarm_", kBodyPartUpperArmL, kBodyPartUpperArmR}, {"lowerarm_", kBodyPartLowerArmL, kBodyPartLowerArmR},
+        {"hand_", kBodyPartHandL, kBodyPartHandR},             {"thumb_", kBodyPartHandL, kBodyPartHandR},
+        {"index_", kBodyPartHandL, kBodyPartHandR},            {"middle_", kBodyPartHandL, kBodyPartHandR},
+        {"ring_", kBodyPartHandL, kBodyPartHandR},             {"pinky_", kBodyPartHandL, kBodyPartHandR},
+        {"thigh_", kBodyPartThighL, kBodyPartThighR},          {"calf_", kBodyPartCalfL, kBodyPartCalfR},
+        {"foot_", kBodyPartFootL, kBodyPartFootR},             {"ball_", kBodyPartFootL, kBodyPartFootR},
+    };
+    for (const Limb& l : kLimbs)
+        if (StartsWithNameAscii(bone, l.prefix)) return left ? l.left : l.right;
+    return kBodyPartOther;
+}
+
+constexpr double kBlowWindowMs = 250;         // contacts of one key this close to its first one are one blow
+constexpr int kClaimsPerSecond = 12;          // per (attacker, victim), sliding
+constexpr double kClaimCapWindowMs = 1000;
+
+struct BlowKey {
+    uint8_t attacker = 0, victim = 0;
+    std::string strikeComponent;
+    uint8_t bodyPart = kBodyPartOther;
+    bool operator<(const BlowKey& o) const {
+        if (attacker != o.attacker) return attacker < o.attacker;
+        if (victim != o.victim) return victim < o.victim;
+        if (bodyPart != o.bodyPart) return bodyPart < o.bodyPart;
+        return strikeComponent < o.strikeComponent;
+    }
+};
+
+// Decides, per contact, whether it becomes a claim. strength is the DCD gate's scaled impulse (DcdGateNewImpulse).
+//   - The first contact of a key opens a kBlowWindowMs window and is sent.
+//   - Inside the window one more contact is sent, only when strictly stronger than every one sent in it (Coalesced
+//     otherwise); a contact of strength 0 (a blunt part sliding) is never that one (ZeroImpulse).
+//   - At most kClaimsPerSecond are sent per (attacker, victim) in any kClaimCapWindowMs (Capped); a capped contact
+//     sends nothing and opens nothing.
+class BlowCoalescer {
+public:
+    enum class Verdict : uint8_t { Send, Coalesced, ZeroImpulse, Capped };
+    Verdict Allow(const BlowKey& key, double strength, double nowMs) {
+        if (!(strength > 0)) strength = 0;                       // NaN and negatives count as no impulse
+        Window& w = windows_[key];
+        const bool open = w.open && nowMs - w.startMs < kBlowWindowMs;
+        if (open) {
+            if (strength == 0) return Verdict::ZeroImpulse;
+            if (w.extraSent || !(strength > w.strongest)) return Verdict::Coalesced;
+        }
+        std::deque<double>& sent = sent_[Pair{key.attacker, key.victim}];
+        while (!sent.empty() && nowMs - sent.front() >= kClaimCapWindowMs) sent.pop_front();
+        if (sent.size() >= size_t(kClaimsPerSecond)) return Verdict::Capped;
+        sent.push_back(nowMs);
+        if (open) w.extraSent = true;
+        else w = Window{true, nowMs, 0, false};
+        w.strongest = strength;
+        if (windows_.size() > kPruneAbove) Prune(nowMs);
+        return Verdict::Send;
+    }
+    // An entity left, respawned or rejoined: its contacts, as attacker or victim, start over.
+    void Forget(uint8_t entity) {
+        for (auto it = windows_.begin(); it != windows_.end();)
+            it = it->first.attacker == entity || it->first.victim == entity ? windows_.erase(it) : std::next(it);
+        for (auto it = sent_.begin(); it != sent_.end();)
+            it = it->first.attacker == entity || it->first.victim == entity ? sent_.erase(it) : std::next(it);
+    }
+
+private:
+    struct Window {
+        bool open = false;
+        double startMs = 0;
+        double strongest = 0;       // the strongest contact sent in this window
+        bool extraSent = false;     // the one more has been sent
+    };
+    struct Pair {
+        uint8_t attacker, victim;
+        bool operator<(const Pair& o) const { return attacker != o.attacker ? attacker < o.attacker : victim < o.victim; }
+    };
+    static constexpr size_t kPruneAbove = 256;   // keys whose window closed are dropped past this many
+    void Prune(double nowMs) {
+        for (auto it = windows_.begin(); it != windows_.end();)
+            it = nowMs - it->second.startMs >= kBlowWindowMs ? windows_.erase(it) : std::next(it);
+    }
+    std::map<BlowKey, Window> windows_;
+    std::map<Pair, std::deque<double>> sent_;    // send times in the last kClaimCapWindowMs, at most kClaimsPerSecond
+};
+
+// ---------------------------------------------------------------- replays spread over frames (victim side)
+constexpr size_t kReplaysPerTick = 8;         // per victim
+constexpr size_t kMaxQueuedReplays = 64;      // per victim; more is a flood, dropped
+
+// Claims to replay, per victim in arrival order.
+class ReplayQueue {
+public:
+    bool Push(const HitClaim& c) {                       // false when the victim's queue is full (the claim is dropped)
+        std::deque<HitClaim>& q = queues_[c.victim];
+        if (q.size() >= kMaxQueuedReplays) return false;
+        q.push_back(c);
+        return true;
+    }
+    // Up to maxPerVictim claims of every victim, each victim's in arrival order.
+    std::vector<HitClaim> Drain(size_t maxPerVictim = kReplaysPerTick) {
+        std::vector<HitClaim> out;
+        for (auto it = queues_.begin(); it != queues_.end();) {
+            std::deque<HitClaim>& q = it->second;
+            for (size_t n = 0; n < maxPerVictim && !q.empty(); ++n) {
+                out.push_back(std::move(q.front()));
+                q.pop_front();
+            }
+            it = q.empty() ? queues_.erase(it) : std::next(it);
+        }
+        return out;
+    }
+    size_t Size(uint8_t victim) const {
+        auto it = queues_.find(victim);
+        return it == queues_.end() ? 0 : it->second.size();
+    }
+    void Forget(uint8_t victim) { queues_.erase(victim); }
+
+private:
+    std::map<uint8_t, std::deque<HitClaim>> queues_;
 };
 
 // ---------------------------------------------------------------- serialisation

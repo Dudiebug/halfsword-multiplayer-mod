@@ -12,12 +12,18 @@
 // still holds that the owner no longer does is let go. A weapon that leaves a stand-in's hand by itself is taken back
 // while the pose still shows it there, and otherwise falls as a loose weapon would; one this machine let go of before
 // the owner's drop was heard of becomes that drop's prop when it is.
-// Level props are not synced: no identity was found that every machine computes the same (see prop_sync.cpp).
+// Level props (an actor that is no fighter and no weapon, attached to nothing, whose root simulates physics: barrels,
+// stools, debris) are named by the host's census (session/hsm_prop_census.h): the host gives each an index and sends
+// the list; a client finds its own actor for each index (same class, nearest the host's first-seen place). From then
+// on a level prop is leased like a dropped weapon (FREE: the host streams it; TOUCH: whoever's fighter touched it),
+// never HOLD. In the first census of a level a client destroys its own props tagged 'Random Delete' that matched
+// nothing: the host's level manager deleted those, so both sides keep the host's set.
 // Game thread only; inert until Start; owner sync only (host sync keeps world_sync's WorldState untouched).
 #pragma once
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_prop_census.h"
 #include "sync/hsm_handmatch.h"
 #include "ue/engine.h"
 #include <array>
@@ -25,6 +31,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -52,6 +59,9 @@ public:
         // left by itself): Equip plans that stand-in again (EquipSync::Replan), as a draw it skipped for a full hand can
         // run now. Optional.
         std::function<void(uint8_t entity)> handsChanged;
+        // Whether this machine is in a fight level, whose physics props the census covers (a client ticks props only
+        // once its level gate is open). Without it no level prop is synced.
+        std::function<bool()> fightLevel;
     };
     void Start(Adapter& adapter, StandIns& standIns, Env env);
     void Stop();                                                     // everything, the drop sequences too
@@ -72,12 +82,17 @@ public:
     void SlotLeft(uint8_t slot);                                     // host: every lease the slot held goes FREE
     std::vector<std::vector<uint8_t>> GrantsForJoiner() const;       // host: every current lease, as Grants
     void ForgetEntity(uint8_t entity);                               // the entity's fighter is gone (left, respawned, removed)
+    // Level props. Host: the current census as PropCensus parts, for a machine that has just loaded the level (send them
+    // before GrantsForJoiner: a client refuses a level prop's Grant whose index its census lacks); none before the first
+    // walk. Client: one part of the host's census, matched once the census is complete; false when it is refused.
+    std::vector<std::vector<uint8_t>> CensusForJoiner() const;
+    bool OnPropCensus(const uint8_t* d, size_t n);
 
     std::string HealthLine();                                        // since the previous call
 
 private:
     struct RootCalls {
-        ue::PreparedCall toWorld, linVel, angVel, setAng, simulating;
+        ue::PreparedCall toWorld, linVel, angVel, setAng, setLin, simulating;
     };
     struct Prop {
         ue::UObject* actor = nullptr;
@@ -90,6 +105,8 @@ private:
         int restoreTicks = 0;              // physics restore re-asserted after a stand-in let go of it
         bool dirty = false;                // a fresh state from the streamer was applied to the view since the last drive
         bool denied = false;               // held here while another machine holds it
+        bool level = false;                // a level prop (MakeLevelPropId), not a dropped weapon
+        bool moving = false;               // its last read was not at rest (level props: streamed before those at rest)
         uint64_t readTick = 0;             // the tick `read` was taken in
         bool readOk = false;
         PropStateMsg read;
@@ -130,16 +147,25 @@ private:
         uint32_t classHash = 0;
     };
     enum class DropResult : uint8_t { Dropped, Skipped, Failed };
+    struct LevelActor {                    // a physics prop of the level as the census walk found it here
+        ue::UObject* actor = nullptr;
+        int32_t index = -1;
+        uint32_t classHash = 0;
+        ue::FVector at;
+    };
+    using LevelKey = std::pair<const ue::UObject*, int32_t>;        // a level actor and its object-array slot
     struct Counters {
-        uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
+        uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, forced = 0, kept = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
                  requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, readFailed = 0, lost = 0,
-                 attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, adopted = 0;
+                 attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, adopted = 0,
+                 censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0;
     };
 
     uint8_t MySlot() const { return env_.mySlot ? env_.mySlot() : kHostSlot; }
     void DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned);
     void ResolvePending(double nowMs);
+    void DeadlineRelease(uint64_t id, uint8_t owner, int hand);
     bool ReleaseFromStandIn(uint64_t propId, ue::UObject* standIn, int hand, ue::UObject* copy);
     DropResult DropFromHands(ue::UObject* standIn, int hand, ue::UObject* copy, const std::string& what);
     void MatchStandIns(double nowMs);
@@ -161,7 +187,15 @@ private:
     void Grant(uint64_t propId, uint8_t slot, LeaseLevel level);     // host: broadcast it and apply it here
     void OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level);   // every machine: the view, and a drop to resolve
     bool Read(Prop& p, PropStateMsg& out);
-    void Drive(Prop& p, const PropStateMsg& s);
+    void StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs);   // read, and send when due
+    void StreamLevel(const std::vector<uint64_t>& due, uint64_t& cursor, size_t& budget, bool countDeferred, uint8_t me, double nowMs);
+    bool Drive(Prop& p, const PropStateMsg& s);
+    // Level props (session/hsm_prop_census.h).
+    std::vector<LevelActor> WalkLevel(size_t& notSimulating);       // every physics prop of the level here
+    void HostCensus(double nowMs);                                   // walk, index, track, and send when it changed
+    void ClientCensus(double nowMs);                                 // bind the census's indices to actors here
+    bool InCensus(uint64_t propId) const;                            // a level id of the current census
+    bool TaggedRandomDelete(ue::UObject* actor);
     void RestorePhysics(ue::UObject* root, int32_t rootIndex);
     RootCalls* CallsFor(ue::UObject* root);
     ue::UObject* ObjectField(ue::UObject* o, int which);             // 0 "Parent Actor", 1 "Weapon R", 2 "Weapon L"
@@ -187,6 +221,30 @@ private:
     double weaponsMs_ = -1e18;                                       // when weapons_ was last refreshed
     std::map<const ue::UClass*, std::unique_ptr<RootCalls>> calls_;
     std::array<std::unordered_map<const ue::UClass*, int32_t>, 3> fieldOff_{};   // ObjectField: offset per class, -1 none
+    // Level props. levelSinceMs_: when this level was first ticked in a fight level (-1: not yet); censusMs_: the next walk
+    // (host) or match retry (client); censusIndex_: the indices of the current census, on both sides.
+    double levelSinceMs_ = -1;
+    double censusMs_ = 0;
+    std::set<uint16_t> censusIndex_;
+    uint64_t movingCursor_ = 0, idleCursor_ = 0;                     // StreamLevel's round robin
+    // Host: the book that names its props, the census as sent, and its sequence (kept across levels: a client may hold
+    // the previous level's census until its own level change clears it).
+    CensusBook<LevelKey> book_;
+    std::vector<CensusEntry> sent_;
+    uint16_t censusSeq_ = 0;
+    bool haveSent_ = false;
+    // Client: the host's census, the seq it was last matched for, each bound index's entry as it was matched (a changed
+    // entry is matched again), the misses of the last match, and whether this level's 'Random Delete' purge ran.
+    CensusAssembler census_;
+    bool matched_ = false;
+    uint16_t matchedSeq_ = 0;
+    std::map<uint16_t, CensusEntry> bound_;
+    size_t misses_ = 0;
+    bool purged_ = false;
+    ue::FName randomDelete_{};
+    bool randomDeleteKnown_ = false;
+    std::unordered_map<const ue::UClass*, int32_t> rootOff_, mobilityOff_;   // WalkLevel: "RootComponent", "Mobility"
+    std::unordered_map<const ue::UClass*, uint8_t> classKind_;      // WalkLevel: 0 not a candidate, 1 a candidate actor class
     Counters n_, reported_;
 };
 

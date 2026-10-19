@@ -7,6 +7,11 @@
 // placed on its own bone, and runs the game's own two functions, so the limb comes off there exactly as in a solo fight.
 // Everyone else keeps the claim until the owner's vitals report the part severed, then runs the same two functions on
 // their stand-in (dismemberment briefly allowed for that one call). Without a claim the gore fallback shows it.
+// A sever a fighter simulated here takes natively (its own blade, another fighter simulated here such as a bot on the
+// host, a trap) runs as the game runs it; a post-hook on its accepted Initiate sends the same arguments as a SeverNotice
+// (attacker == victim, combat/hsm_sever.h), which everyone else keeps like a claim. The notice does not name the striker:
+// unless the fighter cut itself, a stand-in's Delayed gets the fresh VP box as its weapon, so the limb does not ignore
+// the striker's blade there.
 //
 // A blade stuck in a stand-in (the weapon's "Stuck Constraints Array") is reported on/off; the victim's owner holds the
 // attacker's stand-in weapon to its own bone with a PhysicsConstraintComponent while it is stuck, as the game's own
@@ -46,6 +51,7 @@ public:
         std::function<uint8_t(const ue::UObject*)> ownedEntity;          // the entity of a fighter simulated here, 0 if none
         std::function<ue::UObject*(uint8_t)> ownedActor;                 // the live Willie of an entity simulated here
         std::function<void(const combat::SeverClaim&)> sendSever;        // a sever captured here (the session routes it)
+        std::function<void(const combat::SeverClaim&)> sendNotice;       // an own cut of a fighter simulated here
         std::function<void(const combat::StuckBladeMsg&)> sendStuck;     // a blade of ours stuck in / freed from a stand-in
         std::function<bool(uint8_t attacker, uint8_t victim)> allowed;   // the friendly-fire rule
         std::function<void(uint8_t entity, uint8_t part)> nativeShown;   // a stand-in lost that part natively (gore)
@@ -111,13 +117,25 @@ private:
                  replayed = 0, refused = 0, retried = 0, retryLost = 0, dupes = 0, stale = 0, noVictim = 0, noMarker = 0,
                  noBone = 0, noBox = 0, delayed = 0, delayedLost = 0, remembered = 0, shown = 0, shownLate = 0,
                  showRefused = 0, noClaim = 0, stuckSent = 0, stuckFreed = 0, stuckBad = 0, held = 0, released = 0,
-                 holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0;
+                 holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0, noticed = 0,
+                 noticeInvalid = 0;
     };
     enum class Run { Accepted, Refused, InProcess, Failed };
+    enum class Read { Ok, NoBoxes, NoBone };
+    struct OwnCut {             // a native Initiate on a fighter simulated here, read before its body runs
+        ue::UObject* willie = nullptr;   // the call's self: alive until its post-hook
+        bool before = false;             // "Dismemberment In Process" before the body (the game refuses it then)
+        Read read = Read::NoBoxes;
+        combat::SeverCapture in;
+    };
 
     bool Classify(ue::ScriptCall& c, bool initiate);
     void Capture(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie,
                  ue::UObject* weaponComp, uint8_t part, double nowMs);
+    Read ReadSever(ue::ScriptCall& c, ue::UObject* willie, combat::SeverCapture& in);   // the call's arguments on willie
+    void SourceOf(ue::UObject* fighter, ue::UObject* weaponComp, combat::SeverCapture& in) const;
+    void NoteOwnCut(ue::ScriptCall& c, ue::UObject* self, uint8_t entity, ue::UObject* striker, ue::UObject* weaponComp);
+    void OwnCutDone(ue::ScriptCall& c);   // the Initiate's post-hook: a notice when the game accepted it
     Run Begin(ue::UObject* willie, const combat::SeverClaim& c, double nowMs, bool standIn);   // Rebuild + Initiate
     bool Rebuild(ue::UObject* willie, const combat::SeverClaim& c, Rebuilt& out);
     bool Invoke(const char* function, const Rebuilt& a, bool standIn);
@@ -162,6 +180,7 @@ private:
     std::vector<DueDelayed> due_;
     std::vector<Retry> retry_;
     std::vector<BlockedOnMine> blockedOnMine_;
+    std::vector<OwnCut> ownCuts_;   // a stack: pushed by the pre-hook, popped by the post-hook of the same call
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
     std::array<uint32_t, kMaxWillies + 1> severed_{};        // the last severed mask each owner reported
     std::array<uint32_t, kMaxWillies + 1> shownMask_{};      // parts shown natively on that stand-in this life

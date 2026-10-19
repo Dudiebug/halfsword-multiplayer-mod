@@ -1,4 +1,5 @@
 #include "gameplay/equip_sync.h"
+#include "util/hsm_names.h"
 #include "log.h"
 #include "sync/hsm_handmatch.h"
 #include "sync/hsm_pose_codec.h"
@@ -100,7 +101,7 @@ bool Live(UObject* component) {
     return c.invoke() && !c.get<bool>("ReturnValue");
 }
 
-bool Fists(UObject* actor) { return actor && ObjectName(actor).rfind(kFistsPrefix, 0) == 0; }
+bool Fists(UObject* actor) { return actor && StartsWithNameAscii(ObjectName(actor), kFistsPrefix); }
 
 // As the pose carries it (standin_rig.cpp): the FNV-1a hash of the weapon's class name.
 uint32_t ClassHash(UObject* actor) { return sync::WeaponClassHash(ObjectName(reinterpret_cast<UObject*>(ClassOf(actor))).c_str()); }

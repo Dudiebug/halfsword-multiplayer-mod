@@ -11,9 +11,15 @@
 // so no machine can name a dropped weapon from what it sees alone. The dropping fighter's machine mints the id
 // (MakeDropPropId: owner entity, hand, a 7-bit sequence under a per-process drop epoch) and asks for a Touch on it;
 // everyone else finds the weapon in the hand of its stand-in of that fighter (DropSignature, ResolveDropNow). An id
-// is kept for the weapon's life: a pick-up (HOLD) and a later drop by anyone reuse it. Level props are left out on
-// purpose: the only candidate identity is the actor's name, and nothing verified that a level-baked prop has the same name on every machine (the
-// game spawns most loose items at runtime, whose names carry per-process counters), so they stay local physics.
+// is kept for the weapon's life: a pick-up (HOLD) and a later drop by anyone reuse it. A level prop has no name two
+// machines share (the level manager's purge and respawn make per-machine actors), so the host names them: its census
+// (session/hsm_prop_census.h) gives each an index, MakeLevelPropId(index), and each client binds its own actor to it.
+//
+// Level props on the wire. The host walks its level kCensusFirstMs into a fight and every kCensusRefreshMs after (at
+// once when one is lost) and sends the census whenever its set changed; a client matches each complete census it has
+// not matched yet, and retries the indices it could not bind every kCensusRefreshMs. A level prop is FREE (the host
+// streams it) or TOUCH (the machine whose fighter touched it last), never HOLD. Most of them lie still, so they are
+// read at most kLevelReadsPerTick a tick, the moving ones first.
 //
 // Driving. A machine that does not stream a prop teleports its copy to each new state from the prop's streamer
 // (ApplyWorldObject, plus the angular velocity), and only while the copy is loose here: a copy in the hand of a
@@ -35,6 +41,11 @@ constexpr double kWeaponsRefreshMs = 10000.0; // the attach's list of weapon act
                                               // again at most this often; props and loose_ are always looked at
 constexpr uint64_t kLogFirst = 10;            // the first attaches, releases, self-drops and adoptions are logged in full
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kBlock = 2;   // ECollisionChannel / ECollisionResponse
+constexpr double kCensusFirstMs = 3000.0;     // a fight level's first census walk (and a client's first match) waits this
+                                              // long: past the level manager's purge (0.1 s) and its first respawns (2.5 s)
+constexpr double kCensusRefreshMs = 5000.0;   // the host walks again this often; a client retries its misses this often
+constexpr size_t kLevelReadsPerTick = 16;     // level props read (and so streamed) per tick at most, the moving ones first
+constexpr uint8_t kMovable = 2;               // EComponentMobility::Movable: only a movable root can simulate
 
 // Where this process starts every entity's drop epoch: the wall clock, so a machine that reconnects (Stop zeroes the
 // sequences) does not mint the ids its previous session gave weapons that may still lie in the level elsewhere.
@@ -57,7 +68,7 @@ void PropSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     standIns_ = &standIns;
     env_ = std::move(env);
     active_ = true;
-    HSM_LOG("props: on (%s): dropped weapons are leased FREE/TOUCH/HOLD; level props are not synced",
+    HSM_LOG("props: on (%s): dropped weapons are leased FREE/TOUCH/HOLD; level props by the host's census, FREE/TOUCH",
             env_.host ? "host arbitrates" : "client");
 }
 
@@ -81,6 +92,24 @@ void PropSync::Clear() {
     weaponsMs_ = -1e18;
     calls_.clear();
     fieldOff_ = {};
+    // Level props: a new level, a new census. censusSeq_ goes on (a client may still hold the last level's census until
+    // its own level change), and the 'Random Delete' name stays what it is.
+    levelSinceMs_ = -1;
+    censusMs_ = 0;
+    censusIndex_.clear();
+    movingCursor_ = idleCursor_ = 0;
+    book_.Clear();
+    sent_.clear();
+    haveSent_ = false;
+    census_.Clear();
+    matched_ = false;
+    matchedSeq_ = 0;
+    bound_.clear();
+    misses_ = 0;
+    purged_ = false;
+    rootOff_.clear();
+    mobilityOff_.clear();
+    classKind_.clear();
 }
 
 // ---------------------------------------------------------------- per frame
@@ -94,13 +123,25 @@ void PropSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>
     if (!pending_.empty()) ResolvePending(nowMs);
     MatchStandIns(nowMs);
     if (!loose_.empty()) TickLoose(nowMs);
+    if (env_.fightLevel && env_.fightLevel()) {
+        if (levelSinceMs_ < 0) { levelSinceMs_ = nowMs; censusMs_ = nowMs + kCensusFirstMs; }
+        if (env_.host) {
+            if (nowMs >= censusMs_) HostCensus(nowMs);
+        } else if (census_.HaveCensus() && nowMs >= levelSinceMs_ + kCensusFirstMs &&
+                   (!matched_ || census_.Seq() != matchedSeq_ || (bound_.size() < census_.Census().size() && nowMs >= censusMs_))) {
+            ClientCensus(nowMs);
+        }
+    }
     const uint8_t me = MySlot();
+    std::vector<uint64_t> dueMoving, dueIdle;   // level props due on the moving schedule, by their last read
     for (auto it = props_.begin(); it != props_.end();) {
         const uint64_t id = it->first;
         Prop& p = it->second;
         if (!adapter_->StillValid(p.actor, p.index)) {   // destroyed here (a respawn takes what its fighter held)
             ++n_.lost;
             if (p.claim.sent != LeaseLevel::Free) Claim(id, ClaimSend::Release, LeaseLevel::Free, nowMs);
+            // A level prop: the host walks again at once (its census drops it); a client binds that index again when it can.
+            if (p.level) { if (env_.host) censusMs_ = nowMs; else bound_.erase(LevelPropIndex(id)); }
             byActor_.erase(p.actor);
             it = props_.erase(it);
             continue;
@@ -129,24 +170,53 @@ void PropSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>
             // A lease of mine I have just released streams no more (the host would drop it until its FREE Grant lands).
             const bool streaming = level == LeaseLevel::Free || p.claim.sent != LeaseLevel::Free;
             if (streaming && PropStreamDue(level, p.lastSentMs, false, nowMs)) {   // due on the moving schedule: worth a read
-                PropStateMsg s;
-                if (Read(p, s) && PropStreamDue(level, p.lastSentMs, PropAtRest(s), nowMs)) {
-                    s.propId = id;
-                    s.lessee = me;
-                    s.senderTimeMs = uint32_t(uint64_t(nowMs));
-                    if (env_.send) env_.send(Encode(s), false);
-                    p.lastSentMs = nowMs;
-                    ++n_.statesSent;
-                }
+                if (!p.level) StreamState(id, p, level, me, nowMs);
+                else (p.moving ? dueMoving : dueIdle).push_back(id);
             }
         } else if (p.dirty) {
             p.dirty = false;
             const bool awaitingGrant = p.claim.sent != LeaseLevel::Free && level == LeaseLevel::Free;
             if (!parent && !awaitingGrant)
-                if (const PropStateMsg* s = view_.Find(id)) Drive(p, *s);
+                if (const PropStateMsg* s = view_.Find(id))
+                    if (Drive(p, *s) && p.level) ++n_.levelDriven;
         }
         ++it;
     }
+    size_t budget = kLevelReadsPerTick;
+    StreamLevel(dueMoving, movingCursor_, budget, true, me, nowMs);
+    StreamLevel(dueIdle, idleCursor_, budget, false, me, nowMs);
+}
+
+// Read a prop I stream, and send its state when it is due by that read (at rest: the slow schedule).
+void PropSync::StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs) {
+    PropStateMsg s;
+    if (!Read(p, s)) return;
+    const bool atRest = PropAtRest(s);
+    p.moving = !atRest;
+    if (!PropStreamDue(level, p.lastSentMs, atRest, nowMs)) return;
+    s.propId = propId;
+    s.lessee = me;
+    s.senderTimeMs = uint32_t(uint64_t(nowMs));
+    if (env_.send) env_.send(Encode(s), false);
+    p.lastSentMs = nowMs;
+    ++n_.statesSent;
+    if (p.level) ++n_.levelStreamed;
+}
+
+// Level props due a read, in id order: as many as the budget allows, round robin from the one after cursor so each gets
+// its turn however many there are. Those left over wait for a later tick; for props that were moving (countDeferred)
+// that is a stream falling behind, counted in levelDeferred (one at rest only waits for its next once-a-second send).
+void PropSync::StreamLevel(const std::vector<uint64_t>& due, uint64_t& cursor, size_t& budget, bool countDeferred, uint8_t me,
+                           double nowMs) {
+    if (due.empty()) return;
+    const size_t start = size_t(std::upper_bound(due.begin(), due.end(), cursor) - due.begin());
+    size_t done = 0;
+    for (; done < due.size() && budget > 0; ++done, --budget) {
+        const uint64_t id = due[(start + done) % due.size()];
+        cursor = id;
+        if (auto it = props_.find(id); it != props_.end()) StreamState(id, it->second, view_.Level(id), me, nowMs);
+    }
+    if (countDeferred) n_.levelDeferred += due.size() - done;
 }
 
 // A weapon leaves the hand of a fighter simulated here (dropped, thrown, disarmed): the hand field moves off it and
@@ -190,7 +260,9 @@ void PropSync::DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, UO
 }
 
 // Drops heard of (a Touch Grant on an id this machine does not know, from the machine that owns the id's fighter):
-// the weapon is still in the hand of the stand-in here, until the owner's pose shows that hand empty.
+// the weapon is still in the hand of the stand-in here, until the owner's pose shows that hand empty. At the deadline the
+// id still names the hand: an unknown weapon in that hand of the stand-in is the drop's, whatever the pose shows (no
+// pose, or one that never caught up), and is let go of (DeadlineRelease).
 void PropSync::ResolvePending(double nowMs) {
     for (auto it = pending_.begin(); it != pending_.end();) {
         const uint64_t id = it->first;
@@ -215,12 +287,37 @@ void PropSync::ResolvePending(double nowMs) {
         }
         if (!done && nowMs >= it->second) {
             done = true;
-            ++n_.unresolved;
-            HSM_LOG("props: drop %016llx (entity %u, hand %d) not found on its stand-in; that weapon stays local here",
-                    static_cast<unsigned long long>(id), owner, hand);
+            DeadlineRelease(id, owner, hand);
         }
         it = done ? pending_.erase(it) : std::next(it);
     }
+}
+
+// A drop whose deadline passed. An unknown weapon still in that hand of the owner's stand-in is the drop's: let go of
+// (forced), unless the owner holds that prop again (a Hold Grant to the owner's slot), when the copy in hand is that
+// weapon, held, and becomes the prop where it is (kept). Only with no such weapon in that hand is the drop unresolved.
+void PropSync::DeadlineRelease(uint64_t id, uint8_t owner, int hand) {
+    UObject* standIn = standIns_->ActorOf(owner);
+    UObject* copy = standIn ? ObjectField(standIn, hand == 0 ? 1 : 2) : nullptr;
+    if (!copy || byActor_.count(copy) || !adapter_->IsWeapon(copy) || adapter_->IsBodyWeapon(copy) || ObjectField(copy, 0) != standIn) {
+        ++n_.unresolved;
+        HSM_LOG("props: drop %016llx (entity %u, hand %d) not found on its stand-in; that weapon stays local here",
+                static_cast<unsigned long long>(id), owner, hand);
+        return;
+    }
+    if (view_.Level(id) == LeaseLevel::Hold && view_.Streamer(id) == OwnerSlotOf(owner)) {
+        Prop* p = Track(id, copy);
+        if (!p) return;
+        p->dirty = view_.Find(id) != nullptr;
+        if (++n_.kept <= kLogFirst)
+            HSM_LOG("props: drop %016llx (entity %u, hand %d): the owner holds it again; %s in that hand of its stand-in is that prop",
+                    static_cast<unsigned long long>(id), owner, hand, ObjectName(copy).c_str());
+        return;
+    }
+    const std::string name = ObjectName(copy);
+    if (ReleaseFromStandIn(id, standIn, hand, copy) && ++n_.forced <= kLogFirst)
+        HSM_LOG("props: drop %016llx (entity %u, hand %d): the owner's pose never showed that hand let go; %s let go of at the deadline",
+                static_cast<unsigned long long>(id), owner, hand, name.c_str());
 }
 
 // The game's own drop on the stand-in: "Set Up ... Hand Weapon" with no class detaches the weapon in that hand
@@ -614,7 +711,7 @@ void PropSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
 bool PropSync::OnPropState(const uint8_t* d, size_t n, uint8_t fromSlot) {
     if (!active_) return false;
     PropStateMsg m;
-    if (!Decode(d, n, m) || IsLevelProp(m.propId)) { ++n_.statesRejected; return false; }
+    if (!Decode(d, n, m) || (IsLevelProp(m.propId) && !InCensus(m.propId))) { ++n_.statesRejected; return false; }
     if (env_.host && !table_.Accepts(m, fromSlot)) { ++n_.statesRejected; return false; }
     if (!env_.host && m.lessee == MySlot()) { ++n_.statesRejected; return false; }   // never mine back
     heardMs_[m.propId] = SteadyNowMs();
@@ -627,7 +724,11 @@ bool PropSync::OnPropState(const uint8_t* d, size_t n, uint8_t fromSlot) {
 void PropSync::OnPropLease(const uint8_t* d, size_t n, uint8_t fromSlot) {
     if (!active_) return;
     PropLeaseMsg m;
-    if (!Decode(d, n, m) || IsLevelProp(m.propId)) { ++n_.leasesRejected; return; }
+    // A level prop's index must be in the current census, and nobody holds one (HOLD is for weapons in hand).
+    if (!Decode(d, n, m) || (IsLevelProp(m.propId) && (!InCensus(m.propId) || m.level == LeaseLevel::Hold))) {
+        ++n_.leasesRejected;
+        return;
+    }
     if (env_.host) {
         if (!LeaseFromPeerOk(m, fromSlot)) { ++n_.leasesRejected; return; }
         if (m.action == LeaseAction::Request) HostRequest(m.propId, m.slot, m.level, SteadyNowMs());
@@ -648,6 +749,199 @@ std::vector<std::vector<uint8_t>> PropSync::GrantsForJoiner() const {
     if (!active_ || !env_.host) return out;
     for (const PropLeaseMsg& g : table_.Grants()) out.push_back(Encode(g));
     return out;
+}
+
+// ---------------------------------------------------------------- level props (session/hsm_prop_census.h)
+
+std::vector<std::vector<uint8_t>> PropSync::CensusForJoiner() const {
+    std::vector<std::vector<uint8_t>> out;
+    if (!active_ || !env_.host || !haveSent_) return out;
+    for (const PropCensusMsg& m : SplitCensus(censusSeq_, sent_)) out.push_back(Encode(m));
+    return out;
+}
+
+bool PropSync::OnPropCensus(const uint8_t* d, size_t n) {
+    if (!active_ || env_.host) return false;
+    PropCensusMsg m;
+    if (!Decode(d, n, m)) { ++n_.censusRejected; return false; }
+    switch (census_.Add(m)) {
+        case CensusAssembler::Result::Rejected: ++n_.censusRejected; return false;
+        case CensusAssembler::Result::Complete:   // matched in Tick; from now on only its indices are heard
+            ++n_.censuses;
+            censusIndex_.clear();
+            for (const CensusEntry& e : census_.Census()) censusIndex_.insert(e.index);
+            return true;
+        default: return true;                     // a part of one still coming, or of one already replaced
+    }
+}
+
+bool PropSync::InCensus(uint64_t propId) const {
+    return IsCanonicalLevelPropId(propId) && censusIndex_.count(LevelPropIndex(propId)) != 0;
+}
+
+// The level's physics props here: actors that are no fighter and no weapon, attached to nothing and not being destroyed,
+// whose root is a movable primitive that simulates physics (one that does not is counted in notSimulating). One walk over
+// every object (the WeaponActors pattern); what each class is, and where its root and mobility lie, is read once.
+std::vector<PropSync::LevelActor> PropSync::WalkLevel(size_t& notSimulating) {
+    std::vector<LevelActor> out;
+    notSimulating = 0;
+    static UClass* actorClass = nullptr;
+    static UClass* primitiveClass = nullptr;
+    if (!actorClass) actorClass = FindClass("Actor");
+    if (!primitiveClass) primitiveClass = FindClass("PrimitiveComponent");
+    if (!actorClass || !primitiveClass) return out;
+    auto offsetOf = [](std::unordered_map<const UClass*, int32_t>& cache, const UClass* cls, int32_t size, auto find) {
+        auto it = cache.find(cls);
+        if (it == cache.end()) {
+            FProperty* p = find();
+            it = cache.emplace(cls, p && PropertySize(p) == size ? PropertyOffset(p) : -1).first;
+        }
+        return it->second;
+    };
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o) || IsGarbage(o)) continue;
+        const UClass* cls = ClassOf(o);
+        auto kind = classKind_.find(cls);
+        if (kind == classKind_.end())
+            kind = classKind_.emplace(cls, uint8_t(IsChildOf(cls, actorClass) && !adapter_->IsWillie(o) && !adapter_->IsWeapon(o))).first;
+        if (!kind->second) continue;
+        const int32_t rootOff = offsetOf(rootOff_, cls, int32_t(sizeof(UObject*)), [&] { return FindProperty(ClassOf(o), "RootComponent"); });
+        if (rootOff < 0) continue;
+        UObject* root = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(o) + rootOff);
+        if (!root || IsGarbage(root) || !IsA(root, primitiveClass)) continue;
+        const int32_t mobilityOff = offsetOf(mobilityOff_, ClassOf(root), 1, [&] { return FindProperty(ClassOf(root), "Mobility"); });
+        if (mobilityOff < 0 || *(reinterpret_cast<const uint8_t*>(root) + mobilityOff) != kMovable) continue;
+        RootCalls* c = CallsFor(root);
+        if (!c) continue;
+        c->simulating.put(0, FName{});
+        if (!c->simulating.invoke(root) || !c->simulating.take<bool>(1)) { ++notSimulating; continue; }
+        if (Adapter::BeingDestroyed(o)) continue;
+        Call parent(o, "GetAttachParentActor");
+        if (!parent.invoke() || parent.get<UObject*>("ReturnValue")) continue;   // a fighter's armour, a weapon's part
+        out.push_back(LevelActor{o, i, ClassHashOf(o), adapter_->ActorLocation(o)});
+    }
+    return out;
+}
+
+// Host: walk, let the book name what it found, track the new ones, forget the gone ones, and send the census when its set
+// changed (and the first time, empty or not: a client must hear that too).
+void PropSync::HostCensus(double nowMs) {
+    censusMs_ = nowMs + kCensusRefreshMs;
+    size_t notSimulating = 0;
+    const std::vector<LevelActor> walk = WalkLevel(notSimulating);
+    std::vector<CensusBook<LevelKey>::Seen> seen;
+    seen.reserve(walk.size());
+    for (const LevelActor& a : walk)
+        seen.push_back({LevelKey{a.actor, a.index}, a.classHash, float(a.at.x), float(a.at.y), float(a.at.z)});
+    if (!book_.Update(seen) && haveSent_) return;
+    const std::vector<CensusEntry> entries = book_.Entries();
+    std::set<uint16_t> live;
+    for (const CensusEntry& e : entries) live.insert(e.index);
+    size_t gone = 0, added = 0;
+    for (uint16_t index : censusIndex_) {
+        if (live.count(index)) continue;
+        ++gone;
+        if (auto p = props_.find(MakeLevelPropId(index)); p != props_.end()) {
+            byActor_.erase(p->second.actor);
+            props_.erase(p);
+        }
+    }
+    for (const LevelActor& a : walk) {
+        uint16_t index = 0;
+        if (!book_.Find(LevelKey{a.actor, a.index}, index) || censusIndex_.count(index)) continue;
+        ++added;
+        if (Prop* p = Track(MakeLevelPropId(index), a.actor)) p->level = true;
+    }
+    censusIndex_ = std::move(live);
+    sent_ = entries;
+    ++censusSeq_;
+    haveSent_ = true;
+    ++n_.censuses;
+    for (const PropCensusMsg& m : SplitCensus(censusSeq_, sent_))
+        if (env_.send) env_.send(Encode(m), true);
+    if (n_.censuses <= kLogFirst)
+        HSM_LOG("props: level census %zu physics props (%zu movable not simulating, %zu left out), seq %u (+%zu -%zu)",
+                sent_.size(), notSimulating, book_.LeftOut(), censusSeq_, added, gone);
+}
+
+// Client: bind the census's indices to this machine's own physics props. A bound index stays bound while the census
+// still has it as it was matched and its actor lives; the others are matched (MatchCensus) against the props here that
+// are not synced yet. In the first match of a level, a prop here tagged 'Random Delete' that matched nothing is one the
+// host's level manager purged (its RandomBool differs per machine): destroyed, so both sides keep the host's set.
+void PropSync::ClientCensus(double nowMs) {
+    const std::vector<CensusEntry>& census = census_.Census();
+    const bool fresh = !matched_ || census_.Seq() != matchedSeq_;
+    matched_ = true;
+    matchedSeq_ = census_.Seq();
+    censusMs_ = nowMs + kCensusRefreshMs;
+    std::map<uint16_t, const CensusEntry*> want;
+    for (const CensusEntry& e : census) want[e.index] = &e;
+    for (auto it = bound_.begin(); it != bound_.end();) {
+        const uint64_t id = MakeLevelPropId(it->first);
+        const auto w = want.find(it->first);
+        const bool same = w != want.end() && w->second->classHash == it->second.classHash && w->second->px == it->second.px &&
+                          w->second->py == it->second.py && w->second->pz == it->second.pz;
+        auto p = props_.find(id);
+        if (same && p != props_.end()) { ++it; continue; }
+        if (p != props_.end()) {
+            if (w != want.end() && p->second.claim.sent != LeaseLevel::Free) Claim(id, ClaimSend::Release, LeaseLevel::Free, nowMs);
+            byActor_.erase(p->second.actor);
+            props_.erase(p);
+        }
+        it = bound_.erase(it);
+    }
+    size_t notSimulating = 0;
+    std::vector<LevelActor> free;   // the physics props here that no census index has yet
+    for (LevelActor& a : WalkLevel(notSimulating))
+        if (!byActor_.count(a.actor)) free.push_back(a);
+    std::vector<CensusEntry> open;
+    for (const CensusEntry& e : census)
+        if (!bound_.count(e.index)) open.push_back(e);
+    std::vector<CensusCandidate> locals;
+    locals.reserve(free.size());
+    for (const LevelActor& a : free) locals.push_back(CensusCandidate{a.classHash, float(a.at.x), float(a.at.y), float(a.at.z)});
+    const std::vector<int> match = MatchCensus(open, locals);
+    std::vector<bool> used(free.size(), false);
+    size_t bound = 0;
+    for (size_t i = 0; i < open.size(); ++i) {
+        if (match[i] < 0) continue;
+        used[size_t(match[i])] = true;
+        const uint64_t id = MakeLevelPropId(open[i].index);
+        Prop* p = Track(id, free[size_t(match[i])].actor);
+        if (!p) continue;
+        p->level = true;
+        p->dirty = view_.Find(id) != nullptr;
+        bound_[open[i].index] = open[i];
+        ++bound;
+    }
+    misses_ = census.size() - bound_.size();
+    const bool purge = !purged_;
+    purged_ = true;
+    size_t purged = 0, unmatched = 0;
+    for (size_t j = 0; j < free.size(); ++j) {
+        if (used[j]) continue;
+        if (purge && TaggedRandomDelete(free[j].actor)) { adapter_->DestroyActor(free[j].actor); ++purged; }
+        else ++unmatched;
+    }
+    n_.censusPurged += purged;
+    if ((fresh && n_.censuses <= kLogFirst) || (!fresh && bound > 0))
+        HSM_LOG("props: level census seq %u resolved %zu of %zu (%zu now), purged %zu, miss %zu (%zu here unmatched, %zu movable not simulating)",
+                census_.Seq(), bound_.size(), census.size(), bound, purged, misses_, unmatched, notSimulating);
+}
+
+// Tagged 'Random Delete' (the tag BP_LevelManager's purge looks for): AActor::ActorHasTag. The FName is made once; if it
+// cannot be made, nothing counts as tagged and nothing is purged.
+bool PropSync::TaggedRandomDelete(UObject* actor) {
+    if (!randomDeleteKnown_) {
+        randomDeleteKnown_ = true;
+        randomDelete_ = MakeName("Random Delete");
+        if (randomDelete_.index == 0 && randomDelete_.number == 0) HSM_LOG("props: the 'Random Delete' tag could not be named; nothing is purged");
+    }
+    if (randomDelete_.index == 0 && randomDelete_.number == 0) return false;
+    Call c(actor, "ActorHasTag");
+    c.set<FName>("Tag", randomDelete_);
+    return c.invoke() && c.get<bool>("ReturnValue");
 }
 
 void PropSync::ForgetEntity(uint8_t entity) {
@@ -710,18 +1004,22 @@ bool PropSync::Read(Prop& p, PropStateMsg& out) {
     return true;
 }
 
-void PropSync::Drive(Prop& p, const PropStateMsg& s) {
+bool PropSync::Drive(Prop& p, const PropStateMsg& s) {
     WorldObject o;
     o.px = s.px; o.py = s.py; o.pz = s.pz;
     o.rot = s.rot;
     o.vx = s.vx; o.vy = s.vy; o.vz = s.vz;
-    if (!ApplyWorldObject(*adapter_, p.actor, o)) return;   // teleport + linear velocity (world_sync)
+    if (!ApplyWorldObject(*adapter_, p.actor, o)) return false;   // teleport + a weapon's linear velocity (world_sync)
     ++n_.driven;
     RootCalls* c = adapter_->StillValid(p.root, p.rootIndex) ? CallsFor(p.root) : nullptr;
-    if (!c) return;
+    if (!c) return true;
     c->simulating.put(0, FName{});
-    if (c->simulating.invoke(p.root) && c->simulating.take<bool>(1))
+    if (c->simulating.invoke(p.root) && c->simulating.take<bool>(1)) {
         c->setAng.put(0, FVector{double(s.wx), double(s.wy), double(s.wz)}).put(1, false).put(2, FName{}).invoke(p.root);
+        // ApplyWorldObject sets the linear velocity on a weapon's "BaseMesh"; a level prop's body is its root.
+        if (p.level) c->setLin.put(0, FVector{double(s.vx), double(s.vy), double(s.vz)}).put(1, false).put(2, FName{}).invoke(p.root);
+    }
+    return true;
 }
 
 PropSync::RootCalls* PropSync::CallsFor(UObject* root) {
@@ -732,9 +1030,11 @@ PropSync::RootCalls* PropSync::CallsFor(UObject* root) {
     c->linVel = PreparedCall(cls, "GetPhysicsLinearVelocity", {"BoneName", "ReturnValue"});
     c->angVel = PreparedCall(cls, "GetPhysicsAngularVelocityInDegrees", {"BoneName", "ReturnValue"});
     c->setAng = PreparedCall(cls, "SetPhysicsAngularVelocityInDegrees", {"NewAngVel", "bAddToCurrent", "BoneName"});
+    c->setLin = PreparedCall(cls, "SetPhysicsLinearVelocity", {"NewVel", "bAddToCurrent", "BoneName"});
     c->simulating = PreparedCall(cls, "IsSimulatingPhysics", {"BoneName", "ReturnValue"});
-    if (!c->toWorld.valid() || !c->linVel.valid() || !c->angVel.valid() || !c->setAng.valid() || !c->simulating.valid()) {
-        HSM_LOG("props: %s is not a physics body; weapons rooted in it are not synced", ObjectName(reinterpret_cast<const UObject*>(cls)).c_str());
+    if (!c->toWorld.valid() || !c->linVel.valid() || !c->angVel.valid() || !c->setAng.valid() || !c->setLin.valid() ||
+        !c->simulating.valid()) {
+        HSM_LOG("props: %s is not a physics body; props rooted in it are not synced", ObjectName(reinterpret_cast<const UObject*>(cls)).c_str());
         c.reset();
     }
     return (calls_[cls] = std::move(c)).get();
@@ -762,21 +1062,27 @@ std::string PropSync::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[1024];
+    size_t level = 0;
+    for (const auto& kv : props_) level += kv.second.level ? 1 : 0;
+    char line[1536];
     std::snprintf(line, sizeof line,
-                  "props: live %zu pending %zu loose %zu | drops %llu minted %llu mintFailed %llu | resolved %llu unresolved %llu "
-                  "adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu | "
+                  "props: live %zu pending %zu loose %zu | drops %llu minted %llu mintFailed %llu | resolved %llu forced %llu kept %llu "
+                  "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu | "
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
                   "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu "
-                  "released %llu selfDrops %llu reattached %llu",
+                  "released %llu selfDrops %llu reattached %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
+                  "leftOut %zu purged %llu censuses %llu censusRejected %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
-                  d(a.resolved, b.resolved), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
+                  d(a.resolved, b.resolved), d(a.forced, b.forced), d(a.kept, b.kept), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
                   d(a.releaseFailed, b.releaseFailed), d(a.requests, b.requests), d(a.releases, b.releases),
                   d(a.holdDenied, b.holdDenied), d(a.contacts, b.contacts), d(a.grants, b.grants), d(a.lapsed, b.lapsed),
                   d(a.leasesRejected, b.leasesRejected), d(a.statesSent, b.statesSent), d(a.statesApplied, b.statesApplied),
                   d(a.statesStale, b.statesStale), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
                   d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss),
-                  d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached));
+                  d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), level,
+                  censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
+                  d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
+                  d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected));
     reported_ = n_;
     return line;
 }

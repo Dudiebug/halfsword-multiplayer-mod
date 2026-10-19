@@ -2,6 +2,7 @@
 #include "log.h"
 #include "session/hsm_authority.h"
 #include "ue/script_hook.h"
+#include "util/hsm_names.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -30,6 +31,7 @@ constexpr double kRetryMs = 2000;            // a sever refused for another in p
 constexpr double kBlockedDelayedMs = 1000;   // a blocked Initiate's Delayed follows 0.1 s later; remembered this long
 constexpr size_t kMaxBlockedOnMine = 64;
 constexpr size_t kMaxRetries = 64;
+constexpr size_t kMaxOwnCuts = 8;            // Initiates in flight on fighters simulated here (one, unless nested)
 constexpr uint64_t kLogFirst = 20;           // the first events of each kind are logged in full (test evidence)
 constexpr double kStuckSlackUu = 2;          // Constraint_Weapon_Stuck_BP.cpp:600-602: its limited linear axis on a cut
 constexpr int32_t kMaxBoneNames = 1024;      // a sane bound on a Willie's bone and socket name arrays
@@ -109,7 +111,8 @@ bool Severs::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
     primitive_ = FindClass("PrimitiveComponent");
     boxClass_ = FindClass("BoxComponent");
     constraintClass_ = FindClass("PhysicsConstraintComponent");
-    int n = HookScript(kHookOwner, "Willie_BP_C", kInitiate, [this](ScriptCall& c) { return Classify(c, true); });
+    int n = HookScript(kHookOwner, "Willie_BP_C", kInitiate, [this](ScriptCall& c) { return Classify(c, true); },
+                       [this](ScriptCall& c) { OwnCutDone(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", kDelayed, [this](ScriptCall& c) { return Classify(c, false); });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
@@ -205,11 +208,15 @@ bool Severs::Classify(ScriptCall& c, bool initiate) {
         Capture(c, self, victim, attacker, striker, weaponComp, part, now);
         return true;
     }
-    if (!env_.ownedEntity(self)) return false;
+    const uint8_t own = env_.ownedEntity(self);
+    if (!own) return false;
     const bool fromStandIn = striker && standIns_->IsStandIn(striker);
     const double now = SteadyNowMs();
     if (initiate) {
-        if (!fromStandIn) return false;
+        if (!fromStandIn) {
+            NoteOwnCut(c, self, own, striker, weaponComp);
+            return false;   // the game's own sever runs; its post-hook sends the notice (OwnCutDone)
+        }
         if (blockedOnMine_.size() >= kMaxBlockedOnMine) blockedOnMine_.erase(blockedOnMine_.begin());
         blockedOnMine_.push_back(BlockedOnMine{self, weaponComp, now});
         ++n_.blockedOnMine;
@@ -235,11 +242,47 @@ void Severs::Capture(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t at
     in.attacker = attacker;
     in.victim = victim;
     in.part = part;
-    UObject* standInMesh = adapter_->Mesh(standIn);
+    switch (ReadSever(c, standIn, in)) {
+    case Read::NoBoxes:
+        ++n_.invalid;
+        if (n_.invalid <= 3) HSM_LOG("severs: a sever of e%u by e%u had no readable VP boxes; no claim", victim, attacker);
+        return;
+    case Read::NoBone:
+        ++n_.noBone;
+        if (n_.noBone <= 3) HSM_LOG("severs: no frame bone for part %u on the stand-in of e%u; no claim", part, victim);
+        return;
+    case Read::Ok:
+        break;
+    }
+    SourceOf(attackerWillie, weaponComp, in);
+    in.claimId = nextClaimId_[attacker] + 1;
+    in.attackerTsMs = streams_->ClockMs(nowMs);
+    SeverClaim claim;
+    if (!combat::MakeSeverClaim(in, claim)) {
+        ++n_.invalid;
+        if (n_.invalid <= 3)
+            HSM_LOG("severs: a sever of e%u part %u by e%u cannot travel (marker '%s', bone '%s'); no claim", victim, part,
+                    attacker, in.attachMarker.c_str(), in.frameBone.c_str());
+        return;
+    }
+    nextClaimId_[attacker] = claim.claimId;
+    env_.sendSever(claim);
+    ++n_.captured;
+    if (n_.captured <= kLogFirst)
+        HSM_LOG("severs: captured #%u e%u -> e%u part %u frame %s marker '%s' (+%zu) by %s '%s' at t=%u", claim.claimId,
+                attacker, victim, part, claim.frameBone.c_str(), claim.attachMarker.c_str(), claim.markers.size(),
+                SourceName(claim.source), claim.weaponComponent.c_str(), claim.attackerTsMs);
+    Remember(claim, nowMs);   // the stand-in shows it here once the owner's vitals confirm it
+}
+
+// The arguments of a native Initiate on willie (a stand-in, or a fighter simulated here), read before its body runs:
+// its mesh and marker components by name, and the two VP boxes in the frame of the bone they are attached to.
+Severs::Read Severs::ReadSever(ScriptCall& c, UObject* willie, combat::SeverCapture& in) {
+    UObject* mesh = adapter_->Mesh(willie);
     UObject* master = nullptr;
     c.get("Master Mesh", master);
-    if (!master) master = standInMesh;
-    if (master != standInMesh) in.masterMesh = ObjectName(master);
+    if (!master) master = mesh;
+    if (master != mesh) in.masterMesh = ObjectName(master);
     UObject* attach = nullptr;
     if (c.get("Attach Marker", attach) && attach) in.attachMarker = ObjectName(attach);
     // A by-reference TArray: param() points at the caller's array, read in place.
@@ -258,48 +301,80 @@ void Severs::Capture(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t at
     UObject* box2 = nullptr;
     c.get("VP Box Collision 1", box1);
     c.get("VP Box Collision 2", box2);
-    if (!readBox(box1, in.box1World, in.box1Extent) || !readBox(box2, in.box2World, in.box2Extent)) {
-        ++n_.invalid;
-        if (n_.invalid <= 3) HSM_LOG("severs: a sever of e%u by e%u had no readable VP boxes; no claim", victim, attacker);
-        return;
-    }
+    if (!readBox(box1, in.box1World, in.box1Extent) || !readBox(box2, in.box2World, in.box2Extent)) return Read::NoBoxes;
     // Call_Dismember attaches both boxes to the struck bone ("Bone Name 2"): that bone is the claim's frame. A box with
     // no usable socket falls back to the part's own spawn bone.
     std::string bone;
     Call socket(box1, "GetAttachSocketName");
     if (socket.invoke()) bone = NameToString(socket.get<FName>("ReturnValue"));
     if (bone.empty() || bone == "None" || !BoneXform(master, bone, in.boneWorld)) {
-        const char* spawn = combat::SeverSpawnBone(part);
+        const char* spawn = combat::SeverSpawnBone(in.part);
         bone = spawn ? spawn : "";
-        if (bone.empty() || !BoneXform(master, bone, in.boneWorld)) {
-            ++n_.noBone;
-            if (n_.noBone <= 3) HSM_LOG("severs: no frame bone for part %u on the stand-in of e%u; no claim", part, victim);
-            return;
-        }
+        if (bone.empty() || !BoneXform(master, bone, in.boneWorld)) return Read::NoBone;
     }
     in.frameBone = bone;
+    return Read::Ok;
+}
+
+// Which of fighter's hands the blade is in (Body when neither), and the blade's component by name.
+void Severs::SourceOf(UObject* fighter, UObject* weaponComp, combat::SeverCapture& in) const {
     UObject* weapon = weaponComp ? OuterOf(weaponComp) : nullptr;
-    if (weapon && weapon == WeaponOf(attackerWillie, StrikeSource::WeaponRight)) in.source = StrikeSource::WeaponRight;
-    else if (weapon && weapon == WeaponOf(attackerWillie, StrikeSource::WeaponLeft)) in.source = StrikeSource::WeaponLeft;
+    if (weapon && weapon == WeaponOf(fighter, StrikeSource::WeaponRight)) in.source = StrikeSource::WeaponRight;
+    else if (weapon && weapon == WeaponOf(fighter, StrikeSource::WeaponLeft)) in.source = StrikeSource::WeaponLeft;
     if (weaponComp) in.weaponComponent = ObjectName(weaponComp);
-    in.claimId = nextClaimId_[attacker] + 1;
-    in.attackerTsMs = streams_->ClockMs(nowMs);
-    SeverClaim claim;
-    if (!combat::MakeSeverClaim(in, claim)) {
-        ++n_.invalid;
-        if (n_.invalid <= 3)
-            HSM_LOG("severs: a sever of e%u part %u by e%u cannot travel (marker '%s', bone '%s'); no claim", victim, part,
-                    attacker, in.attachMarker.c_str(), bone.c_str());
+}
+
+// ---------------------------------------------------------------- an own cut: the owner tells everyone else
+
+// A native Initiate on a fighter simulated here, not by a stand-in's blade: the game's own sever runs. Its arguments are
+// read now, before the body, as Capture reads them; OwnCutDone sends them if the game accepted the call. Only a cut by
+// the fighter's own blade names the blade: the notice cannot name another striker (attacker == victim).
+void Severs::NoteOwnCut(ScriptCall& c, UObject* self, uint8_t entity, UObject* striker, UObject* weaponComp) {
+    OwnCut cut;
+    cut.willie = self;
+    cut.in.attacker = entity;
+    cut.in.victim = entity;
+    cut.in.part = 0xFF;
+    c.get("Dismembered Part", cut.in.part);
+    GetBool(self, kInProcess, cut.before);
+    if (!cut.before && cut.in.part < combat::kSeverParts) {   // otherwise the game refuses it: nothing to read
+        cut.read = ReadSever(c, self, cut.in);
+        if (striker == self) SourceOf(self, weaponComp, cut.in);
+    }
+    if (ownCuts_.size() >= kMaxOwnCuts) ownCuts_.erase(ownCuts_.begin());   // a post-hook that never ran
+    ownCuts_.push_back(std::move(cut));
+}
+
+void Severs::OwnCutDone(ScriptCall& c) {
+    if (ownCuts_.empty() || ownCuts_.back().willie != c.self()) return;   // not a call NoteOwnCut saw
+    OwnCut cut = std::move(ownCuts_.back());
+    ownCuts_.pop_back();
+    if (!active_) return;
+    bool after = false;
+    GetBool(cut.willie, kInProcess, after);
+    const uint8_t* current = Field<uint8_t>(cut.willie, kCurrentPart);
+    if (!combat::InitiateAccepted(cut.before, after, current ? *current : 0xFF, cut.in.part)) return;   // refused
+    const uint8_t e = cut.in.victim;
+    const double now = SteadyNowMs();
+    cut.in.claimId = nextClaimId_[e] + 1;
+    cut.in.attackerTsMs = streams_->ClockMs(now);
+    SeverClaim notice;
+    if (cut.read != Read::Ok || !combat::MakeSeverNotice(cut.in, notice)) {
+        ++n_.noticeInvalid;
+        if (n_.noticeInvalid <= 3)
+            HSM_LOG("severs: an own cut of e%u part %u cannot travel (%s, marker '%s', bone '%s'); the others show it "
+                    "from the vitals", e, cut.in.part,
+                    cut.read == Read::NoBoxes ? "no readable VP boxes" : cut.read == Read::NoBone ? "no frame bone" : "read",
+                    cut.in.attachMarker.c_str(), cut.in.frameBone.c_str());
         return;
     }
-    nextClaimId_[attacker] = claim.claimId;
-    env_.sendSever(claim);
-    ++n_.captured;
-    if (n_.captured <= kLogFirst)
-        HSM_LOG("severs: captured #%u e%u -> e%u part %u frame %s marker '%s' (+%zu) by %s '%s' at t=%u", claim.claimId,
-                attacker, victim, part, claim.frameBone.c_str(), claim.attachMarker.c_str(), claim.markers.size(),
-                SourceName(claim.source), claim.weaponComponent.c_str(), claim.attackerTsMs);
-    Remember(claim, nowMs);   // the stand-in shows it here once the owner's vitals confirm it
+    nextClaimId_[e] = notice.claimId;
+    if (env_.sendNotice) env_.sendNotice(notice);
+    ++n_.noticed;
+    if (n_.noticed <= kLogFirst)
+        HSM_LOG("severs: noticed #%u: e%u lost part %u natively, frame %s marker '%s' (+%zu) by %s '%s' at t=%u",
+                notice.claimId, e, notice.part, notice.frameBone.c_str(), notice.attachMarker.c_str(),
+                notice.markers.size(), SourceName(notice.source), notice.weaponComponent.c_str(), notice.attackerTsMs);
 }
 
 // ---------------------------------------------------------------- running the game's own two functions
@@ -335,7 +410,7 @@ bool Severs::Rebuild(UObject* willie, const SeverClaim& c, Rebuilt& out) {
     auto named = [&comps](const std::string& name) -> UObject* {
         if (name.empty()) return nullptr;
         for (UObject* o : comps)
-            if (o && ObjectName(o) == name) return o;
+            if (o && SameNameAscii(ObjectName(o), name)) return o;
         return nullptr;
     };
     UObject* mesh = c.masterMesh.empty() ? nullptr : named(c.masterMesh);
@@ -865,7 +940,7 @@ UObject* Severs::WeaponPart(uint8_t entity, StrikeSource source, const std::stri
     if (!weapon) return nullptr;
     if (!component.empty())
         for (UObject* o : Components(weapon))
-            if (o && ObjectName(o) == component) return o;
+            if (o && SameNameAscii(ObjectName(o), component)) return o;
     Call root(weapon, "K2_GetRootComponent");
     UObject* r = root.invoke() ? root.get<UObject*>("ReturnValue") : nullptr;
     return r && primitive_ && IsA(r, primitive_) ? r : nullptr;
@@ -941,7 +1016,7 @@ std::string Severs::HealthLine() {
                   "%llu lost %llu dupes %llu stale %llu novictim %llu nomarker %llu nobone %llu nobox %llu) delayed %llu "
                   "(lost %llu) | remembered %llu shown %llu late %llu refused %llu noclaim %llu | blocked: on stand-ins "
                   "%llu, on mine %llu | call failed %llu | stuck sent %llu freed %llu bad %llu, held %llu released %llu "
-                  "failed %llu native %llu broken %llu collision kept %llu",
+                  "failed %llu native %llu broken %llu collision kept %llu | noticed %llu (invalid %llu)",
                   d(a.captured, b.captured), d(a.limited, b.limited), d(a.friendly, b.friendly), d(a.invalid, b.invalid),
                   d(a.replayed, b.replayed), d(a.refused, b.refused), d(a.retried, b.retried), d(a.retryLost, b.retryLost),
                   d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.noVictim, b.noVictim), d(a.noMarker, b.noMarker),
@@ -950,7 +1025,8 @@ std::string Severs::HealthLine() {
                   d(a.showRefused, b.showRefused), d(a.noClaim, b.noClaim), d(a.blockedStandIn, b.blockedStandIn),
                   d(a.blockedOnMine, b.blockedOnMine), d(a.callFailed, b.callFailed), d(a.stuckSent, b.stuckSent), d(a.stuckFreed, b.stuckFreed),
                   d(a.stuckBad, b.stuckBad), d(a.held, b.held), d(a.released, b.released), d(a.holdFailed, b.holdFailed),
-                  d(a.alreadyStuck, b.alreadyStuck), d(a.broken, b.broken), d(a.collisionKept, b.collisionKept));
+                  d(a.alreadyStuck, b.alreadyStuck), d(a.broken, b.broken), d(a.collisionKept, b.collisionKept),
+                  d(a.noticed, b.noticed), d(a.noticeInvalid, b.noticeInvalid));
     reported_ = n_;
     return line;
 }

@@ -1,4 +1,5 @@
 #include "gameplay/claims.h"
+#include "util/hsm_names.h"
 #include "log.h"
 #include "ue/script_hook.h"
 #include <cmath>
@@ -15,7 +16,7 @@ using combat::Xform;
 namespace {
 
 constexpr const char* kHookOwner = "claims";
-constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker
+constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker weapon
 constexpr double kRecentAttackerMs = 10000;   // a death this long after the last replayed blow has no killer
 constexpr uint64_t kLogFirst = 20;            // the first claims and replays are logged in full (test evidence)
 
@@ -78,8 +79,10 @@ void Claims::Stop() {
     *this = Claims{};
 }
 
-void Claims::Tick() {
-    if (active_) limiter_.NewTick();
+void Claims::Tick(double nowMs) {
+    if (!active_) return;
+    limiter_.NewTick();
+    for (const HitClaim& c : queue_.Drain()) ReplayNow(c, nowMs);
 }
 
 // ---------------------------------------------------------------- the hooks (game thread, inside the VM)
@@ -203,17 +206,35 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
     UObject** left = Field<UObject*>(attackerWillie, "Weapon L");
     if (weapon && right && weapon == *right) source = StrikeSource::WeaponRight;
     else if (weapon && left && weapon == *left) source = StrikeSource::WeaponLeft;
+    const double impulseLen = std::sqrt(in.hitImpulse.x * in.hitImpulse.x + in.hitImpulse.y * in.hitImpulse.y +
+                                        in.hitImpulse.z * in.hitImpulse.z);
+    // One blow touches several bones of one body part, frame after frame: only its first contact and at most one
+    // stronger one become claims (combat::BlowCoalescer).
+    combat::BlowKey key;
+    key.attacker = attacker;
+    key.victim = victim;
+    key.strikeComponent = ObjectName(comp);
+    key.bodyPart = combat::BodyPartOfBone(in.hitBone);
+    switch (coalescer_.Allow(key, combat::DcdGateNewImpulse(impulseLen, in.cuttingPower), SteadyNowMs())) {
+    case combat::BlowCoalescer::Verdict::Send: break;
+    case combat::BlowCoalescer::Verdict::Coalesced: ++n_.coalesced; return;
+    case combat::BlowCoalescer::Verdict::ZeroImpulse: ++n_.zeroImpulse; return;
+    case combat::BlowCoalescer::Verdict::Capped:
+        if (++n_.capped <= 3)
+            HSM_LOG("claims: e%u -> e%u over %d claims in 1 s; bone %s not claimed", attacker, victim,
+                    combat::kClaimsPerSecond, in.hitBone.c_str());
+        return;
+    }
     const uint32_t ts = streams_->ClockMs(SteadyNowMs());
     const HitClaim claim = combat::MakeClaim(in, boneWorld, ++nextClaimId_[attacker], attacker, victim, ts, source,
-                                             ObjectName(comp), std::string{});
+                                             key.strikeComponent, std::string{});
     env_.send(claim);
     ++n_.sent;
     pending_ = Pending{standIn, claim.claimId, attacker};
     if (n_.sent <= kLogFirst)
         HSM_LOG("claims: sent #%u e%u -> e%u bone %s by %s '%s' |impulse| %.0f cut %.2f stab %.2f box %d at t=%u",
                 claim.claimId, attacker, victim, claim.hitBone.c_str(), SourceName(source), claim.strikeComponent.c_str(),
-                std::sqrt(in.hitImpulse.x * in.hitImpulse.x + in.hitImpulse.y * in.hitImpulse.y + in.hitImpulse.z * in.hitImpulse.z),
-                in.cuttingPower, in.stabRate, in.hasHitBox ? 1 : 0, ts);
+                impulseLen, in.cuttingPower, in.stabRate, in.hasHitBox ? 1 : 0, ts);
 }
 
 bool Claims::BoneXform(UObject* mesh, FName bone, Xform& out) const {
@@ -243,9 +264,22 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
     } else {
         ++n_.ageUnknown;   // no pose from that attacker yet: its clock cannot be estimated; accepted
     }
+    const size_t waiting = queue_.Size(c.victim);
+    if (!queue_.Push(c)) {
+        ++n_.dropped;
+        if (n_.dropped <= 3)
+            HSM_LOG("claims: dropped #%u from e%u: %zu replays already queued for e%u", c.claimId, c.attacker, waiting, c.victim);
+        return;
+    }
+    if (waiting >= combat::kReplaysPerTick) ++n_.queued;   // it waits past the next frame
+}
+
+// A queued claim, at most kReplaysPerTick per victim per frame (Tick).
+void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     if (parry_.Cancels(c)) {
         ++n_.parried;
-        HSM_LOG("claims: #%u from e%u parried (my weapon met theirs around t=%u)", c.claimId, c.attacker, c.attackerTsMs);
+        HSM_LOG("claims: #%u from e%u parried (my weapon met their %s weapon around t=%u)", c.claimId, c.attacker,
+                c.source == StrikeSource::WeaponLeft ? "left" : "right", c.attackerTsMs);
         return;
     }
     UObject* victim = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;
@@ -261,13 +295,9 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
         return;
     }
     const DcdInputs in = combat::ReplayInputs(c, boneWorld);
-    const combat::ReplayGate::Decision d = gate_.Before(c);
-    if (d.clearComplexImpulse)
-        if (double* p = Field<double>(victim, "Last Complex Damage Impulse")) *p = 0.0;
-    if (!d.keepLastDamage) {
-        if (double* p = Field<double>(victim, "Last Damage Taken")) *p = 0.0;
-        if (FName* p = Field<FName>(victim, "Last Damaged Bone")) *p = FName{};
-    }
+    // The claim already passed the impulse gate on the attacker's screen. Last Damage Taken and Last Damaged Bone stay:
+    // the victim's own Reset Last Damage Taken clears them 0.2 s after a blow, as in a solo fight.
+    if (double* p = Field<double>(victim, "Last Complex Damage Impulse")) *p = 0.0;
     UObject* striker = StrikerOn(standIns_->ActorOf(c.attacker), c);
     if (!striker) ++n_.noStriker;   // the blow still lands; blood is painted on nothing
     UObject* box = in.hasHitBox ? HitBox(victim, c, in) : nullptr;
@@ -277,13 +307,12 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
         if (n_.failed <= 3) HSM_LOG("claims: #%u from e%u: Deal Complex Damage could not be called", c.claimId, c.attacker);
         return;
     }
-    gate_.Applied(c);
     recent_[c.victim] = Recent{c.attacker, nowMs};
     ++n_.replayed;
     if (n_.replayed <= kLogFirst)
-        HSM_LOG("claims: replayed #%u e%u -> e%u bone %s by %s '%s'%s box %d: damage out %.2f%s", c.claimId, c.attacker,
+        HSM_LOG("claims: replayed #%u e%u -> e%u bone %s by %s '%s'%s box %d: damage out %.2f", c.claimId, c.attacker,
                 c.victim, c.hitBone.c_str(), SourceName(c.source), c.strikeComponent.c_str(), striker ? "" : " (no striker)",
-                box ? 1 : 0, damage, d.keepLastDamage ? " (same blow continued)" : "");
+                box ? 1 : 0, damage);
 }
 
 // The claim's striking component on fighter (the attacker's stand-in here): the named component on its weapon or body,
@@ -308,7 +337,7 @@ UObject* Claims::ComponentNamed(UObject* actor, const std::string& name) const {
     const FObjArray arr = components_.take<FObjArray>(1);
     if (!arr.data || arr.num <= 0 || arr.num > 512) return nullptr;
     for (int32_t i = 0; i < arr.num; ++i)
-        if (arr.data[i] && ObjectName(arr.data[i]) == name) return arr.data[i];
+        if (arr.data[i] && SameNameAscii(ObjectName(arr.data[i]), name)) return arr.data[i];
     return nullptr;
 }
 
@@ -397,15 +426,25 @@ void Claims::Effect(const HitClaim& c) {
     else ++n_.effectsSkipped;
 }
 
-// My weapon met attacker's stand-in weapon: noted at the owner time that stand-in shows, so a claim from that attacker
-// made around then is a parried blow (ParryWindow). At most one per attacker per 100 ms.
-void Claims::NoteClash(uint8_t attacker, double nowMs) {
-    if (!active_ || !ValidEntity(attacker)) return;
-    if (nowMs - lastClashMs_[attacker] < kClashEveryMs) return;
+// My weapon met theirWeapon, a weapon of attacker's stand-in: noted with the hand that holds it ("Weapon R"/"Weapon L",
+// as MakeClaim names a claim's source) at the owner time that stand-in shows, so a claim from that attacker's same
+// weapon made around then is a parried blow (ParryWindow). A weapon in neither hand (a sheathed one bumped) parries
+// nothing (clashUnmatched). At most one per attacker weapon per 100 ms.
+void Claims::NoteClash(uint8_t attacker, UObject* theirWeapon, double nowMs) {
+    if (!active_ || !ValidEntity(attacker) || !theirWeapon) return;
+    UObject* standIn = standIns_->ActorOf(attacker);
+    UObject** right = standIn ? Field<UObject*>(standIn, "Weapon R") : nullptr;
+    UObject** left = standIn ? Field<UObject*>(standIn, "Weapon L") : nullptr;
+    StrikeSource source = StrikeSource::Body;
+    if (right && *right == theirWeapon) source = StrikeSource::WeaponRight;
+    else if (left && *left == theirWeapon) source = StrikeSource::WeaponLeft;
+    if (source == StrikeSource::Body) { ++n_.clashUnmatched; return; }
+    double& last = lastClashMs_[attacker][size_t(source)];
+    if (nowMs - last < kClashEveryMs) return;
     uint32_t shown = 0;
     if (!standIns_->ShownOwnerTs(attacker, shown)) return;
-    lastClashMs_[attacker] = nowMs;
-    parry_.NoteClash(attacker, shown);
+    last = nowMs;
+    parry_.NoteClash(attacker, source, shown);
     ++n_.clashes;
 }
 
@@ -419,17 +458,20 @@ std::string Claims::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[512];
+    char line[1024];
     std::snprintf(line, sizeof line,
-                  "claims: sent %llu (gated %llu limited %llu friendly %llu) | replayed %llu (dupes %llu stale %llu "
+                  "claims: sent %llu (gated %llu limited %llu friendly %llu coalesced %llu zero-impulse %llu capped %llu) | "
+                  "replayed %llu (queued %llu dropped %llu dupes %llu stale %llu "
                   "age? %llu parried %llu novictim %llu nobone %llu nostriker %llu failed %llu) | blocked: on stand-ins %llu, "
-                  "on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu",
+                  "on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu)",
                   d(a.sent, b.sent), d(a.gated, b.gated), d(a.limited, b.limited), d(a.friendly, b.friendly),
-                  d(a.replayed, b.replayed), d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.ageUnknown, b.ageUnknown),
+                  d(a.coalesced, b.coalesced), d(a.zeroImpulse, b.zeroImpulse), d(a.capped, b.capped),
+                  d(a.replayed, b.replayed), d(a.queued, b.queued), d(a.dropped, b.dropped), d(a.dupes, b.dupes),
+                  d(a.stale, b.stale), d(a.ageUnknown, b.ageUnknown),
                   d(a.parried, b.parried), d(a.noVictim, b.noVictim), d(a.noBone, b.noBone), d(a.noStriker, b.noStriker),
                   d(a.failed, b.failed), d(a.blockedStandIn, b.blockedStandIn), d(a.blockedOnMine, b.blockedOnMine),
                   d(a.getDamageBlocked, b.getDamageBlocked), d(a.effects, b.effects), d(a.effectsSkipped, b.effectsSkipped),
-                  d(a.clashes, b.clashes));
+                  d(a.clashes, b.clashes), d(a.clashUnmatched, b.clashUnmatched));
     reported_ = n_;
     return line;
 }

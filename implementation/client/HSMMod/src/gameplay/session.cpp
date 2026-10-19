@@ -16,6 +16,7 @@
 //   relays the streams, routes the claims and referees the match. sync_mode=host (or a host without the script VM
 //   hook) keeps the host-simulates-all flow above, unchanged.
 #include "config.h"
+#include "util/hsm_names.h"
 #include "gameplay/adapter.h"
 #include "gameplay/claims.h"
 #include "gameplay/combat_sync.h"
@@ -105,6 +106,18 @@ double ArrivalMs(const NetEvent& ev) {
     return ev.rxMs > 0 && ev.rxMs <= now ? ev.rxMs : now;
 }
 
+// What a level gate that timed out was still waiting for, in log words.
+const char* GateWaitingName(LevelSpawnGate::Waiting w) {
+    switch (w) {
+        case LevelSpawnGate::Waiting::Manager: return "a level manager";
+        case LevelSpawnGate::Waiting::PlayerSpawnedCleared: return "\"Player Spawned\" to clear";
+        case LevelSpawnGate::Waiting::PlayerSpawned: return "\"Player Spawned\"";
+        case LevelSpawnGate::Waiting::Pawn: return "a player pawn";
+        case LevelSpawnGate::Waiting::Nothing: break;
+    }
+    return "nothing";
+}
+
 // A Hello from another protocol revision passes validation so the host can answer it with a Reject.
 bool IsForeignHello(const uint8_t* d, size_t n) {
     return n >= 4 && uint16_t(d[0] | d[1] << 8) == kMagic && d[2] != kProtocolRevision && d[3] == uint8_t(MsgType::Hello);
@@ -124,6 +137,7 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::DeathReport: { DeathReport m; return Decode(d, n, m); }
         case MsgType::HitClaim: { HitClaimMsg m; return Decode(d, n, m); }
         case MsgType::SeverClaim: { combat::SeverClaimMsg m; return Decode(d, n, m); }
+        case MsgType::SeverNotice: { combat::SeverNoticeMsg m; return Decode(d, n, m); }
         case MsgType::StuckBlade: { combat::StuckBladeMsg m; return Decode(d, n, m); }
         case MsgType::GrabState: { GrabStateMsg m; return Decode(d, n, m); }
         case MsgType::PropState: { PropStateMsg m; return Decode(d, n, m); }
@@ -155,10 +169,12 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::HitClaim: { HitClaimMsg m; return Decode(d, n, m); }
         case MsgType::HitFx: { HitFxMsg m; return Decode(d, n, m); }
         case MsgType::SeverClaim: { combat::SeverClaimMsg m; return Decode(d, n, m); }
+        case MsgType::SeverNotice: { combat::SeverNoticeMsg m; return Decode(d, n, m); }
         case MsgType::StuckBlade: { combat::StuckBladeMsg m; return Decode(d, n, m); }
         case MsgType::GrabState: { GrabStateMsg m; return Decode(d, n, m); }
         case MsgType::PropState: { PropStateMsg m; return Decode(d, n, m); }
         case MsgType::PropLease: { PropLeaseMsg m; return Decode(d, n, m) && m.action == LeaseAction::Grant; }
+        case MsgType::PropCensus: { PropCensusMsg m; return Decode(d, n, m); }
         case MsgType::PaintFx: { combat::PaintFxMsg m; return Decode(d, n, m); }
         case MsgType::Equip: { combat::EquipStateMsg m; return Decode(d, n, m); }
         default: return false;
@@ -221,6 +237,37 @@ public:
         tickMs_.push_back(ms);
     }
 
+    // The pump's cost by part, summed over the frames of a health window (as tickMs_ samples them): which of our own
+    // parts grows when the frames slow down. Each part's time includes the game code it runs (a replayed claim's Get
+    // Damage counts under claims, a stand-in's native cut under severs or net).
+    enum PumpPart : uint8_t { kPumpNet, kPumpStreams, kPumpServo, kPumpClaims, kPumpSevers, kPumpGore, kPumpGrabs, kPumpProps,
+                              kPumpEquip, kPumpMatch, kPumpParts };
+    template <class F> void Timed(PumpPart part, F&& f) {
+        if (!sampling_ || tickMs_.size() >= kFrameSamples) { f(); return; }
+        const auto t0 = std::chrono::steady_clock::now();
+        f();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        pumpMs_[part] += ms;
+        pumpMaxMs_[part] = std::max(pumpMaxMs_[part], ms);
+    }
+    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); }
+
+    // " | pump ms/frame: net A streams B ... (max P x ms)": P is the part with the longest single run in the window.
+    std::string PumpLine(double frames) const {
+        static constexpr const char* kNames[kPumpParts] = {"net", "streams", "servo", "claims", "severs", "gore", "grabs",
+                                                           "props", "equip", "match"};
+        std::string line = " | pump ms/frame:";
+        char b[48];
+        size_t worst = 0;
+        for (size_t i = 0; i < kPumpParts; ++i) {
+            std::snprintf(b, sizeof b, " %s %.2f", kNames[i], pumpMs_[i] / frames);
+            line += b;
+            if (pumpMaxMs_[i] > pumpMaxMs_[worst]) worst = i;
+        }
+        std::snprintf(b, sizeof b, " (max %s %.1f ms)", kNames[worst], pumpMaxMs_[worst]);
+        return line + b;
+    }
+
     void PumpAgentEarly() {
         uint32_t now = NowMs();
         if (now - lastModeTick_ < 1000 || now - lastEarlyPump_ < 50) return;
@@ -256,7 +303,7 @@ public:
     void Tick(UObject* gameMode, float dt) {
         lastModeTick_ = NowMs();
         sampling_ = net_ && InFightLevel();                               // sampled only where the health line is logged
-        if (!sampling_) { frameMs_.clear(); tickMs_.clear(); }
+        if (!sampling_) { frameMs_.clear(); tickMs_.clear(); ClearPumpCost(); }
         else if (frameMs_.size() < kFrameSamples) frameMs_.push_back(double(dt) * 1000.0);
         if (!selfTested_) {
             selfTested_ = true;
@@ -423,8 +470,10 @@ public:
             std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls)",
                           sum / frames, mx, vmMs, peMs, peCalls);
             line += b;
+            line += PumpLine(frames);
         }
         tickMs_.clear();
+        ClearPumpCost();
         line += " | rtt";
         size_t links = 0;
         auto add = [&](uint32_t peer, int slot) {
@@ -571,11 +620,15 @@ private:
     // produce a player: a fight level that still has no local pawn after the grace period gets one from the mod (own
     // loadout, possessed by player 0). Clients take the spot the host announced; host/solo use the level's spawn
     // points. Plain single-player play is never touched (no pawn is normal there: death screens, transitions).
+    // An owner-sync client waits for its level gate instead (the gate's exit spawns the announced fighter) and is
+    // only the short fallback after it (LocalFighterGrace).
     void EnsureLocalFighter() {
         if (!(net_ || automated_) || !InFightLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
+        double graceMs = 0;
+        if (!LocalFighterGrace(net_ && !IsHost() && OwnerMode(), levelGate_.Open(), graceMs)) { noPawnSince_ = 0; return; }
         uint32_t now = NowMs();
         if (!noPawnSince_) { noPawnSince_ = now; return; }
-        if (now - noPawnSince_ < kLocalFighterGraceMs) return;
+        if (double(now - noPawnSince_) < graceMs) return;
         noPawnSince_ = now;                                   // retry spacing if the spawn fails
         game::Adapter::SpawnOptions o; o.teamInt = 1;
         std::vector<uint8_t> own;
@@ -591,7 +644,7 @@ private:
             o.at = pts.empty() ? FVector{} : pts.front();
             if (adapter_.ExportPassport(own)) o.blob = &own;
         }
-        HSM_LOG("session: no player pawn in %s after %u ms; spawning the local fighter", currentLevel_.c_str(), kLocalFighterGraceMs);
+        HSM_LOG("session: no player pawn in %s after %.0f ms; spawning the local fighter", currentLevel_.c_str(), graceMs);
         adapter_.RespawnLocalPlayer(o);
     }
 
@@ -711,7 +764,7 @@ private:
         ownDeadPending_ = false; ownDiedAt_ = 0;
         // Client side: puppets died with the level; the host re-announces them after Ready.
         world_.OnLevel(); puppets_.clear();
-        levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; recreate_.Clear(); lostSlots_.clear();
+        levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
         // Owner sync, client: the stock pawn the level gives player 0 is replaced by the dressed fighter the host
         // announces, once the level's own start-up cleanup is over (ClientGateOpen).
         if (net_ && !IsHost() && OwnerMode() && InFightLevel()) ownDeadPending_ = true;
@@ -783,6 +836,10 @@ private:
             if (IsHost()) RouteHostSever(kHostSlot, c);
             else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverClaimMsg{c}), true);
         };
+        sev.sendNotice = [this](const combat::SeverClaim& c) {
+            if (IsHost()) RouteHostNotice(kHostSlot, c);
+            else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverNoticeMsg{c}), true);
+        };
         sev.sendStuck = [this](const combat::StuckBladeMsg& m) {
             if (IsHost()) RouteHostStuck(kHostSlot, m);
             else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
@@ -824,6 +881,8 @@ private:
         penv.mayBeSheathe = [this](uint8_t e, int hand) { return equip_.MayBeSheathe(e, hand); };
         penv.deadBones = [this](uint8_t e) { return gore_.DeadBones(e); };
         penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
+        // Level props: the host censuses a fight level from its first tick in it; a client matches once its level gate is open.
+        penv.fightLevel = [this] { return InFightLevel() && (IsHost() || levelGate_.Open()); };
         props_.Start(adapter_, standIns_, std::move(penv));
     }
 
@@ -870,19 +929,21 @@ private:
 
     void HostTick(float dt) {
         myWillie_.store(inFight_ ? adapter_.PlayerWillie(0) : nullptr);   // owner-authority checks read this, not the engine
-        NetEvent ev;
-        while (net_->Poll(ev)) {
-            if (ev.kind == NetEvent::Connected) HSM_LOG("host: peer %u connected", ev.peer);
-            else if (ev.kind == NetEvent::Disconnected) OnClientLeft(ev.peer);
-            else HostReceive(ev);
-        }
+        Timed(kPumpNet, [&] {
+            NetEvent ev;
+            while (net_->Poll(ev)) {
+                if (ev.kind == NetEvent::Connected) HSM_LOG("host: peer %u connected", ev.peer);
+                else if (ev.kind == NetEvent::Disconnected) OnClientLeft(ev.peer);
+                else HostReceive(ev);
+            }
+        });
         for (uint8_t slot : reservations_.Expire(NowMs())) {
             bool back = std::any_of(peers_.begin(), peers_.end(), [&](const auto& kv) { return kv.second.slot == slot; });
             if (const RosterMember* m = roster_.BySlot(slot); m && !back) { HSM_LOG("host: slot %u did not rejoin in time", slot); RemoveMember(slot, m->key); }
         }
         if (director_.fight()) SpawnDue();
         if (!OwnerMode()) for (uint8_t slot = 1; slot < kMaxFighters; ++slot) DriveRemoteFighter(slot, dt);
-        HostMatchTick();
+        Timed(kPumpMatch, [&] { HostMatchTick(); });
         if (OwnerMode()) { OwnerHostTick(dt); return; }
         sendAccum_ += dt;
         if (peers_.empty() || sendAccum_ < 1.f / float(SnapshotHz())) return;
@@ -916,21 +977,25 @@ private:
 
     // Owner sync, host side: stream its own fighter and its bots, drive every client's stand-in, keep the line warm.
     // Severs, stuck blades and gore (phase 4a) ride on claims and vitals; grabs and dropped weapons (phase 4b) ride on
-    // GrabState and PropSync's leases; level props stay local.
+    // GrabState and PropSync's leases; level props on the host's census and the same leases.
     void OwnerHostTick(float dt) {
         const double now = game::SteadyNowMs();
         std::vector<std::pair<uint8_t, UObject*>> owned;
         if (UObject* me = myWillie_.load()) owned.push_back({uint8_t(1), me});
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) owned.push_back({e, ref.obj});
-        streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { net_->Broadcast(kChanUnreliable, b, false); });
-        standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned));
-        RecoverLostStandIns(now);
-        claims_.Tick();
-        severs_.Tick(now, owned);
-        gore_.Tick(now);
-        grabs_.Tick(now, dt, owned);
-        props_.Tick(now, owned);
-        equip_.Tick(now, owned);
+        Timed(kPumpStreams, [&] {
+            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { net_->Broadcast(kChanUnreliable, b, false); });
+        });
+        Timed(kPumpServo, [&] {
+            standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned));
+            RecoverLostStandIns(now);
+        });
+        Timed(kPumpClaims, [&] { claims_.Tick(now); });
+        Timed(kPumpSevers, [&] { severs_.Tick(now, owned); });
+        Timed(kPumpGore, [&] { gore_.Tick(now); });
+        Timed(kPumpGrabs, [&] { grabs_.Tick(now, dt, owned); });
+        Timed(kPumpProps, [&] { props_.Tick(now, owned); });
+        Timed(kPumpEquip, [&] { equip_.Tick(now, owned); });
         if (!peers_.empty() && NowMs() >= nextKeepAlive_) {
             nextKeepAlive_ = NowMs() + kKeepAliveMs;
             net_->Broadcast(kChanUnreliable, EncodePing(NowMs(), false), false);
@@ -1031,6 +1096,15 @@ private:
         else if (std::optional<uint32_t> to = PeerOfSlot(r.replaySlot)) net_->Send(*to, kChanReliable, msg, true);
         for (uint8_t slot : r.fxSlots) if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, msg, true);
         if (r.hostFx) severs_.Remember(c, now);
+    }
+
+    // A sever the owner's fighter took natively (combat::SeverNoticeMsg; the sender owns that fighter): every other
+    // machine keeps it as it keeps a claim, until the owner's vitals confirm the part. Nobody replays it.
+    void RouteHostNotice(uint8_t senderSlot, const combat::SeverClaim& c) {
+        const std::vector<uint8_t> msg = Encode(combat::SeverNoticeMsg{c});
+        for (uint8_t slot : RelayTargets(senderSlot, ConnectedSlots()))
+            if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, msg, true);
+        if (senderSlot != kHostSlot) severs_.Remember(c, game::SteadyNowMs());
     }
 
     // A blade stuck in / freed from a stand-in: only the victim's owner holds it. A release always passes, so a blade
@@ -1233,6 +1307,10 @@ private:
         } else if (OwnerMode() && t == MsgType::SeverClaim) {
             combat::SeverClaimMsg m; Decode(d, n, m);
             RouteHostSever(peer.slot, m.claim);
+        } else if (OwnerMode() && t == MsgType::SeverNotice) {
+            combat::SeverNoticeMsg m;
+            if (!Decode(d, n, m) || !MayStream(peer.slot, m.claim.victim)) { ++streamsDropped_; return; }
+            RouteHostNotice(peer.slot, m.claim);
         } else if (OwnerMode() && t == MsgType::StuckBlade) {
             combat::StuckBladeMsg m; Decode(d, n, m);
             RouteHostStuck(peer.slot, m);
@@ -1275,8 +1353,12 @@ private:
             Ready r; Decode(d, n, r);
             director_.OnReady(peer.slot, r.travelSeq, NowMs());
             for (const Spawn& sp : director_.LiveSpawns()) net_->Send(ev.peer, kChanReliable, Encode(sp), true);
-            // Every current lease, after the level load that cleared the joiner's view (props_.Clear).
-            if (OwnerMode()) for (const std::vector<uint8_t>& g : props_.GrantsForJoiner()) net_->Send(ev.peer, kChanReliable, g, true);
+            // The level props' census, then every current lease (a client refuses a level prop's Grant its census lacks),
+            // after the level load that cleared the joiner's view (props_.Clear).
+            if (OwnerMode()) {
+                for (const std::vector<uint8_t>& c : props_.CensusForJoiner()) net_->Send(ev.peer, kChanReliable, c, true);
+                for (const std::vector<uint8_t>& g : props_.GrantsForJoiner()) net_->Send(ev.peer, kChanReliable, g, true);
+            }
             HSM_LOG("host: slot %u ready in %s (travel #%u)", peer.slot, r.level.c_str(), r.travelSeq);
         } else if (t == MsgType::Chat) {
             ChatLine c; Decode(d, n, c);
@@ -1439,8 +1521,8 @@ private:
         UObject* fa = adapter_.FighterOf(a);
         UObject* fb = adapter_.FighterOf(b);
         const uint8_t sa = standIns_.EntityOf(fa), sb = standIns_.EntityOf(fb);
-        if (sa && !sb && OwnedEntityOf(fb)) claims_.NoteClash(sa, game::SteadyNowMs());
-        else if (sb && !sa && OwnedEntityOf(fa)) claims_.NoteClash(sb, game::SteadyNowMs());
+        if (sa && !sb && OwnedEntityOf(fb)) claims_.NoteClash(sa, a, game::SteadyNowMs());
+        else if (sb && !sa && OwnedEntityOf(fa)) claims_.NoteClash(sb, b, game::SteadyNowMs());
     }
 
     // Hit events fire thousands of times a second: the parameter offset is looked up once per function.
@@ -1904,17 +1986,19 @@ private:
 
     void ClientTick(float dt) {
         bool hostGone = false;
-        NetEvent ev;
-        while (net_->Poll(ev)) {
-            if (ev.kind == NetEvent::Connected) {
-                hostPeer_ = ev.peer;
-                SendHello();
-            } else if (ev.kind == NetEvent::Disconnected) {
-                HSM_LOG("client: disconnected from host");
-                if (welcomed_ && InFightLevel()) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
-                welcomed_ = false; hostPeer_ = 0;
-            } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
-        }
+        Timed(kPumpNet, [&] {
+            NetEvent ev;
+            while (net_->Poll(ev)) {
+                if (ev.kind == NetEvent::Connected) {
+                    hostPeer_ = ev.peer;
+                    SendHello();
+                } else if (ev.kind == NetEvent::Disconnected) {
+                    HSM_LOG("client: disconnected from host");
+                    if (welcomed_ && InFightLevel()) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
+                    welcomed_ = false; hostPeer_ = 0;
+                } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
+            }
+        });
         // Only fights have steady host traffic (snapshots); menus and loading screens never count as silence.
         if (welcomed_ && InFightLevel()) {
             HostLossAction a = hostLoss_.Tick(NowMs());
@@ -1965,10 +2049,31 @@ private:
         if (p.manager) GetBool(managers.front(), "Player Spawned", p.playerSpawned);
         p.pawn = adapter_.PlayerWillie(0) != nullptr;
         const double now = game::SteadyNowMs();
+        if (p.manager && !managerProbed_) {
+            // Once per level: the delay the manager waits before it spawns the player (a Blueprint default the RE
+            // tools cannot decode offline; test 5's line decides LevelSpawnGate::kMaxWaitMs).
+            managerProbed_ = true;
+            const double* delay = Field<double>(managers.front(), "Level Load Delay");
+            if (delay) HSM_LOG("client: level manager found; Level Load Delay %.2f s, Player Spawned %d, pawn %d", *delay, p.playerSpawned, p.pawn);
+            else HSM_LOG("client: level manager found; Level Load Delay unreadable, Player Spawned %d, pawn %d", p.playerSpawned, p.pawn);
+            // Level props: 0.1 s into the level its manager destroys each prop tagged 'Random Delete' on a RandomBool of
+            // this machine's own when "Purge Map" is set; the host's census decides which stay (PropSync purges the
+            // rest), so the manager's own purge is turned off here. Best effort: the world time says whether in time.
+            bool purge = false;
+            const bool purgeRead = GetBool(managers.front(), "Purge Map", purge);
+            const bool purgeOff = purgeRead && purge && SetBool(managers.front(), "Purge Map", false);
+            HSM_LOG("client: level manager's Purge Map %s at world time %.2f s (its purge runs at 0.10 s)",
+                    !purgeRead ? "unreadable" : !purge ? "already off" : purgeOff ? "turned off" : "on (could not turn it off)",
+                    adapter_.WorldSeconds());
+        }
         if (!levelGate_.Update(now, p)) return false;
         const char* why = levelGate_.why() == LevelSpawnGate::Why::LevelSpawned ? "the level spawned its player"
                         : levelGate_.why() == LevelSpawnGate::Why::NoManager ? "no level manager" : "timed out waiting for the level";
-        HSM_LOG("client: level start-up over (%s); spawning fighters", why);
+        const LevelProbe& last = levelGate_.lastProbe();
+        if (levelGate_.why() == LevelSpawnGate::Why::TimedOut)
+            HSM_LOG("client: level start-up over (%s, still waiting for %s; last probe: manager %d, Player Spawned %d, pawn %d); spawning fighters",
+                    why, GateWaitingName(levelGate_.waitingFor()), last.manager, last.playerSpawned, last.pawn);
+        else HSM_LOG("client: level start-up over (%s); spawning fighters", why);
         if (ownDeadPending_) if (const Spawn* sp = world_.Find(world_.myEntity())) OnOwnSpawn(*sp);
         return true;
     }
@@ -2002,15 +2107,17 @@ private:
             }
         std::vector<std::pair<uint8_t, UObject*>> owned;
         if (me && mine && snappedOwn_) owned.push_back({mine, me});
-        streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false); });
-        ReportOwnDeath(me, now);
-        standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned));
-        claims_.Tick();
-        severs_.Tick(now, owned);
-        gore_.Tick(now);
-        grabs_.Tick(now, dt, owned);
-        props_.Tick(now, owned);
-        equip_.Tick(now, owned);
+        Timed(kPumpStreams, [&] {
+            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false); });
+            ReportOwnDeath(me, now);
+        });
+        Timed(kPumpServo, [&] { standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned)); });
+        Timed(kPumpClaims, [&] { claims_.Tick(now); });
+        Timed(kPumpSevers, [&] { severs_.Tick(now, owned); });
+        Timed(kPumpGore, [&] { gore_.Tick(now); });
+        Timed(kPumpGrabs, [&] { grabs_.Tick(now, dt, owned); });
+        Timed(kPumpProps, [&] { props_.Tick(now, owned); });
+        Timed(kPumpEquip, [&] { equip_.Tick(now, owned); });
     }
 
     // Once per life: my fighter died here, natively; the host referees the match and credits the last blow I took.
@@ -2226,6 +2333,11 @@ private:
                 else severs_.Remember(m.claim, game::SteadyNowMs());
                 break;
             }
+            case MsgType::SeverNotice: {
+                combat::SeverNoticeMsg m;
+                if (OwnerMode() && Decode(d, n, m) && m.claim.victim != world_.myEntity()) severs_.Remember(m.claim, game::SteadyNowMs());
+                break;
+            }
             case MsgType::StuckBlade: {
                 combat::StuckBladeMsg m;
                 if (OwnerMode() && Decode(d, n, m) && m.victim == world_.myEntity()) severs_.OnStuck(m, game::SteadyNowMs());
@@ -2248,6 +2360,7 @@ private:
             }
             case MsgType::PropState: { if (OwnerMode()) props_.OnPropState(d, n, kHostSlot); break; }
             case MsgType::PropLease: { if (OwnerMode()) props_.OnPropLease(d, n, kHostSlot); break; }
+            case MsgType::PropCensus: { if (OwnerMode()) props_.OnPropCensus(d, n); break; }
             case MsgType::Event: {
                 Event e; Decode(d, n, e);
                 if (e.kind == EventKind::Died && e.a <= 0xFF)
@@ -2325,6 +2438,7 @@ private:
     std::map<uint8_t, ActorRef> puppets_;
     LevelSpawnGate levelGate_;                   // owner sync: the level's start-up cleanup is over (hsm_level_gate.h)
     uint32_t nextGateProbe_ = 0;
+    bool managerProbed_ = false;   // this level's manager seen by ClientGateOpen (its Level Load Delay logged)
     bool stockFlowGuard_ = false;                    // GuardStockFlow's hooks block while set (per tick)
     uint32_t stockFlowBlocked_ = 0, unpaused_ = 0;
     RecreateLimiter recreate_;                   // owner sync: lost stand-ins, both sides
@@ -2361,7 +2475,6 @@ private:
     std::array<Held, kAxisCount> held_{};
     bool quitRequested_ = false, automated_ = false;
     uint32_t startedAt_ = 0, quitAfterMs_ = 0, nextAuto_ = 0, lastModeTick_ = 0, lastEarlyPump_ = 0, noPawnSince_ = 0;
-    static constexpr uint32_t kLocalFighterGraceMs = 15000;   // longer than the stock spawner's latent delay
     std::string autoLevel_;
     // owner sync (both roles)
     SyncMode syncMode_ = SyncMode::Host;
@@ -2381,6 +2494,7 @@ private:
     uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
     std::vector<double> frameMs_, tickMs_;
+    std::array<double, kPumpParts> pumpMs_{}, pumpMaxMs_{};   // Timed: per part, this window
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;
     uint64_t peNsAtWindow_ = 0, peCallsAtWindow_ = 0;
@@ -2408,7 +2522,7 @@ bool StartMod(const Config& cfg) {
         }
         if (!g_gameModeClass) {
             UClass* c = ClassOf(obj);
-            if (ObjectName(reinterpret_cast<UObject*>(c)) != kGameModeClass) { g_session->PumpAgentEarly(); return false; }
+            if (!SameNameAscii(ObjectName(reinterpret_cast<UObject*>(c)), kGameModeClass)) { g_session->PumpAgentEarly(); return false; }
             g_gameModeClass = c;
         }
         if (ClassOf(obj) != g_gameModeClass) { g_session->PumpAgentEarly(); return false; }

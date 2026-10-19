@@ -1,6 +1,7 @@
 // Unit tests for hsm_sever.h. Run via implementation/shared/run_tests.sh test_hsm_sever.
 #include "combat/hsm_sever.h"
 #include "hsm_protocol.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -246,6 +247,104 @@ static void TestSeverMalformed() {
     b = Encode(SeverClaimMsg{bad}); CHECK(Decode(b.data(), b.size(), out));
 }
 
+// ---------------------------------------------------------------- SeverNotice: a cut the owner made on its own fighter
+// Its own blade, or on the host a bot's: the hook lets the native Initiate run, and the others learn of it only through
+// this notice (shown on their stand-in once the owner's vitals confirm). The fighter is named twice: attacker == victim.
+static SeverCapture OwnCapture() {
+    Xform bone;
+    bone.pos = {10, 20, 30};
+    bone.rot = AxisAngleDeg(0, 0, 1, 90.0);
+    SeverCapture in = SampleCapture(bone);
+    in.attacker = in.victim;
+    return in;
+}
+
+static bool DecodeNotice(const std::vector<uint8_t>& b, SeverNoticeMsg& out) { return Decode(b.data(), b.size(), out); }
+
+static void TestSeverNoticeMake() {
+    SeverCapture in = OwnCapture();
+    SeverClaim n;
+    CHECK(MakeSeverNotice(in, n));
+    CHECK(n.attacker == 2 && n.victim == 2 && n.part == 4 && n.attachMarker == "DM Sphere Lowerarm_R 3");
+    // The same capture by another attacker gives the same claim body.
+    SeverCapture other = in; other.attacker = 1;
+    SeverClaim c;
+    CHECK(MakeSeverClaim(other, c));
+    c.attacker = n.attacker;
+    CHECK(SameClaim(c, n));
+
+    SeverClaim r;
+    in = OwnCapture(); in.attacker = 1;                       // another fighter's blade: that is a SeverClaim
+    CHECK(!MakeSeverNotice(in, r));
+    in = OwnCapture(); in.part = kSeverParts;
+    CHECK(!MakeSeverNotice(in, r));
+    in = OwnCapture(); in.part = kSeverParts - 1;             // control: the last part
+    CHECK(MakeSeverNotice(in, r));
+    in = OwnCapture(); in.attachMarker = "";
+    CHECK(!MakeSeverNotice(in, r));
+    in = OwnCapture(); in.box2Extent = {1, -1, 1};
+    CHECK(!MakeSeverNotice(in, r));
+    in = OwnCapture();                                        // MakeSeverClaim still refuses the own cut
+    CHECK(!MakeSeverClaim(in, r));
+}
+
+static void TestSeverNoticeWire() {
+    CHECK(kProtocolRevision == 12);                           // a rev-11 peer would drop a SeverNotice without a word
+    SeverClaim n;
+    CHECK(MakeSeverNotice(OwnCapture(), n));
+    std::vector<uint8_t> b = Encode(SeverNoticeMsg{n});
+    CHECK(b.size() >= 15 && b.size() <= kMaxPacket);
+    CHECK(b.size() >= 4 && b[3] == uint8_t(MsgType::SeverNotice));
+    SeverNoticeMsg out;
+    CHECK(DecodeNotice(b, out) && SameClaim(n, out.claim));
+    // Not a SeverClaim, and a SeverClaim is not a notice.
+    SeverClaimMsg asClaim;
+    CHECK(!Decode(b.data(), b.size(), asClaim));
+    SeverClaim c = SampleClaim();
+    std::vector<uint8_t> claimBytes = Encode(SeverClaimMsg{c});
+    CHECK(!DecodeNotice(claimBytes, out));
+    claimBytes[3] = uint8_t(MsgType::SeverNotice);            // retyped, but two fighters: refused
+    CHECK(!DecodeNotice(claimBytes, out));
+    claimBytes[8] = c.victim;                                 // ... and with one fighter it is a notice
+    CHECK(DecodeNotice(claimBytes, out) && out.claim.attacker == c.victim && out.claim.victim == c.victim);
+    std::vector<uint8_t> ownAsClaim = Encode(SeverClaimMsg{n});   // one fighter, but typed as a claim: not a notice
+    CHECK(!DecodeNotice(ownAsClaim, out));
+
+    // Fixed offsets as the claim: attacker at 8, victim at 9, part at 14.
+    auto patched = [&](std::initializer_list<std::pair<size_t, uint8_t>> at) {
+        std::vector<uint8_t> p = b;
+        for (auto [i, v] : at) if (i < p.size()) p[i] = v;
+        SeverNoticeMsg o;
+        return DecodeNotice(p, o);
+    };
+    CHECK(patched({{8, 3}, {9, 3}}));                         // control: another fighter of its own
+    CHECK(!patched({{8, 3}}));                                // attacker != victim
+    CHECK(!patched({{9, 3}}));
+    CHECK(!patched({{8, 0}, {9, 0}}));
+    CHECK(!patched({{8, uint8_t(kMaxWillies + 1)}, {9, uint8_t(kMaxWillies + 1)}}));
+    CHECK(patched({{8, uint8_t(kMaxWillies)}, {9, uint8_t(kMaxWillies)}}));
+    CHECK(patched({{14, 14}}));                               // control: the last part
+    CHECK(!patched({{14, 15}}));
+
+    // Hostile bytes.
+    for (size_t k = 0; k < b.size(); ++k) { std::vector<uint8_t> t(b.begin(), b.begin() + long(k)); CHECK(!DecodeNotice(t, out)); }
+    std::vector<uint8_t> longer = b; longer.push_back(0);
+    CHECK(!DecodeNotice(longer, out));
+    std::vector<uint8_t> wrongRev = b;
+    if (wrongRev.size() > 2) wrongRev[2] = uint8_t(kProtocolRevision - 1);
+    CHECK(!DecodeNotice(wrongRev, out));
+    std::vector<uint8_t> huge(kMaxPacket + 1, 0); std::copy(b.begin(), b.end(), huge.begin());
+    CHECK(!DecodeNotice(huge, out));
+    SeverClaim bad = n; bad.markers.assign(kSeverMaxMarkers + 1, "m");
+    CHECK(!DecodeNotice(Encode(SeverNoticeMsg{bad}), out));
+    bad = n; bad.frameBone = "";
+    CHECK(!DecodeNotice(Encode(SeverNoticeMsg{bad}), out));
+    bad = n; bad.box1.local.rot = {0, 0, 0, 0};
+    CHECK(!DecodeNotice(Encode(SeverNoticeMsg{bad}), out));
+    bad = n; bad.source = StrikeSource(3);
+    CHECK(!DecodeNotice(Encode(SeverNoticeMsg{bad}), out));
+}
+
 // ---------------------------------------------------------------- attacker-side limiter
 static void TestSeverLimiter() {
     SeverLimiter l;
@@ -423,6 +522,8 @@ int main() {
     TestCaptureRefusesAndTrims();
     TestSeverRoundTrip();
     TestSeverMalformed();
+    TestSeverNoticeMake();
+    TestSeverNoticeWire();
     TestSeverLimiter();
     TestInitiateAccepted();
     TestSeverPending();

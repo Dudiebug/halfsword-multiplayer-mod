@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 11;         // 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 12;         // 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -56,6 +56,8 @@ enum class MsgType : uint8_t {
     PropLease = 30,   // both ways, reliable: a lease request/release, or the host's grant (session/hsm_lease.h)
     PaintFx = 31,     // owner -> host -> others, reliable: blood or a wound painted on an owned fighter (combat/hsm_fx.h)
     Equip = 32,       // owner -> host -> others, reliable: which sheathed weapons an owned fighter has drawn (combat/hsm_equip.h)
+    SeverNotice = 33, // owner -> host -> others, reliable: a sever the owner's own fighter took natively (combat/hsm_sever.h)
+    PropCensus = 34,  // host -> client, reliable: the level's physics props and their indices (session/hsm_prop_census.h)
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.

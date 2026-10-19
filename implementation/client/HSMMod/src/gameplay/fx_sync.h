@@ -38,7 +38,7 @@ public:
 
 private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
-    struct Counters { uint64_t blood = 0, wounds = 0, limited = 0, noBone = 0, applied = 0, skipped = 0, failed = 0; };
+    struct Counters { uint64_t blood = 0, wounds = 0, limited = 0, noBone = 0, noName = 0, applied = 0, skipped = 0, failed = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
     void OnBoxVertexPaint(ue::ScriptCall& c);

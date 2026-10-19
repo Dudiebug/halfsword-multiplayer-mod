@@ -307,6 +307,13 @@ static void TestWeaponClassHash() {
     CHECK(WeaponClassHash(nullptr) == 2166136261u);
     CHECK(WeaponClassHash("BP_Longsword_Tier3_C") != WeaponClassHash("BP_Dagger_Tier1_C"));
     CHECK(WeaponClassHash("a") == WeaponClassHash("a"));
+    // A class name's display casing is whichever casing its FName registered first in that process, so two machines can
+    // spell the same class differently: the hash ignores ASCII case, and nothing else.
+    CHECK(WeaponClassHash("ModularWeaponBP_C") == WeaponClassHash("modularweaponbp_c"));
+    CHECK(WeaponClassHash("BP_Longsword_Tier3_C") == WeaponClassHash("BP_LONGSWORD_TIER3_C"));
+    CHECK(WeaponClassHash("ModularWeaponBP_C") != WeaponClassHash("ModularWeaponBP_D"));
+    CHECK(WeaponClassHash("[") != WeaponClassHash("{"));        // only letters fold
+    CHECK(WeaponClassHash("\xC4") != WeaponClassHash("\xE4"));  // and only ASCII ones
 }
 
 int main() {

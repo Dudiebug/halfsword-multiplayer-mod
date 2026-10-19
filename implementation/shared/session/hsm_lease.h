@@ -14,14 +14,16 @@
 // Cyrex0/HalfSword-MP's HSMPWorld (docs/development/subsystems/world-replication.md), Copyright (c) 2026 Cyrex0 and
 // the HalfSword-MP contributors, MIT (see THIRD_PARTY_NOTICES.md).
 //
-// Identity: any machine must compute the same 64-bit propId for the same object on its own, without asking the
-// host (unlike session/hsm_world.h's WorldTracker, which allocates ids only the host hands out).
+// Identity: a 64-bit propId every machine agrees on.
 //   - A loose weapon: MakeWeaponPropId(lastOwnerEntity, lowByte), bit 63 clear. Owner sync (gameplay/prop_sync.cpp)
 //     fills the low byte with MakeDropPropId's (seq << 1) | hand and bits 16-47 with a drop epoch, minted once by the
 //     dropping fighter's machine: SheathSlot is a sheath type in this game, not unique per fighter (see "dropped
 //     weapons" below). Bits 48-62 of a weapon id are always clear.
-//   - A level prop: MakeLevelPropId(stableName) -- FNV-1a of the actor's stable (level-baked, not runtime) name.
-//     Bit 63 set (kPropLevelBit), so the two id spaces can never collide.
+//   - A level prop: MakeLevelPropId(index) -- its index in the host's census (session/hsm_prop_census.h), which
+//     every other machine matches to its own actor by class and place. Not a name: the level manager destroys the
+//     actors tagged 'Random Delete' on a per-machine coin flip and re-spawns the ones tagged 'Respawn' under new
+//     names (BP_LevelManager), so the two machines' names differ. Bit 63 set (kPropLevelBit), so the two id spaces
+//     can never collide; bits 16-62 clear (IsCanonicalLevelPropId).
 //   propId 0 is reserved ("no identity yet", e.g. a weapon nobody has ever held) and every decoder rejects it.
 #pragma once
 #include "hsm_protocol.h"
@@ -29,7 +31,6 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
-#include <string>
 #include <vector>
 
 namespace hsm {
@@ -58,17 +59,12 @@ constexpr uint64_t kPropLevelBit = uint64_t(1) << 63;
 constexpr int kDropEpochShift = 16;           // a dropped weapon's epoch: bits 16-47 ...
 constexpr int kWeaponIdBits = 48;             // ... and nothing above them in a weapon id
 
-inline uint64_t Fnv1a64(const std::string& s) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (unsigned char c : s) { h ^= c; h *= 0x100000001b3ull; }
-    return h;
-}
 // lastOwnerEntity 0 (no known holder yet) or out of range deliberately yields 0, the reserved/invalid id.
 inline uint64_t MakeWeaponPropId(uint8_t lastOwnerEntity, uint8_t sheathSlot) {
     if (lastOwnerEntity == 0 || lastOwnerEntity > kMaxWillies) return 0;
     return (uint64_t(lastOwnerEntity) << 8) | sheathSlot;
 }
-inline uint64_t MakeLevelPropId(const std::string& stableName) { return Fnv1a64(stableName) | kPropLevelBit; }
+inline uint64_t MakeLevelPropId(uint16_t hostIndex) { return kPropLevelBit | hostIndex; }
 
 // An id some machine could have made: any level-prop hash, or a weapon id (any epoch) whose owner byte is a valid
 // entity. Every decoder rejects anything else (0 included), so garbage never reaches the lease table or an actor lookup.
@@ -82,6 +78,10 @@ inline bool ValidPropId(uint64_t propId) {
 inline bool IsLevelProp(uint64_t propId) { return (propId & kPropLevelBit) != 0; }
 inline uint8_t PropOwnerEntity(uint64_t propId) { return IsLevelProp(propId) ? 0 : uint8_t(propId >> 8); }
 inline uint8_t PropSheathSlot(uint64_t propId) { return IsLevelProp(propId) ? 0 : uint8_t(propId & 0xFF); }
+// A level prop's census index (0 for a weapon id); IsCanonicalLevelPropId: a level id with nothing above the index,
+// the only kind a census names (ValidPropId lets the rest through the decoders; prop_sync drops them).
+inline uint16_t LevelPropIndex(uint64_t propId) { return IsLevelProp(propId) ? uint16_t(propId & 0xFFFF) : 0; }
+inline bool IsCanonicalLevelPropId(uint64_t propId) { return IsLevelProp(propId) && (propId & ~(kPropLevelBit | 0xFFFF)) == 0; }
 
 // ---------------------------------------------------------------- dropped weapons (owner sync)
 // In the game a weapon's SheathSlot is its sheath *type* (Willie_BP Assign_R_Weapon_Slot: 0-4), not an index: two

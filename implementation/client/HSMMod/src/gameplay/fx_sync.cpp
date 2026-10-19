@@ -182,7 +182,7 @@ void FxSync::SendWound(uint8_t entity, UObject* willie, FName bone, const Xform&
 // bounds are applied here too, so a report the receivers would reject is never sent.
 bool FxSync::Send(PaintFxMsg& m, UObject* willie, FName bone) {
     m.bone = NameToString(bone);
-    if (m.bone.empty() || m.bone == "None" || m.bone.size() > combat::kMaxClaimString) return false;
+    if (m.bone.empty() || m.bone == "None" || m.bone.size() > combat::kMaxClaimString) { ++n_.noName; return false; }
     Xform boneWorld;
     if (!BoneXform(adapter_->Mesh(willie), bone, boneWorld)) { ++n_.noBone; return false; }
     if (!limiter_.Allow(m.entity, m.kind, SteadyNowMs())) { ++n_.limited; return false; }
@@ -329,8 +329,9 @@ std::string FxSync::HealthLine() {
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
     char line[256];
-    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu (limited %llu nobone %llu) | replayed %llu (skipped %llu failed %llu)",
-                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.applied, b.applied),
+    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu (limited %llu nobone %llu noname %llu) | replayed %llu (skipped %llu failed %llu)",
+                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName),
+                  d(a.applied, b.applied),
                   d(a.skipped, b.skipped), d(a.failed, b.failed));
     reported_ = n_;
     return line;

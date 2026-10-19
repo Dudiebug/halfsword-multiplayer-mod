@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <set>
+#include <string>
 #include <vector>
 
 static int g_fail = 0;
@@ -188,34 +190,6 @@ static void TestDedupeForget() {
     CHECK(!dd.Accept(1, 2));
 }
 
-// ---------------------------------------------------------------- replay gate
-static void TestReplayGate() {
-    ReplayGate rg;
-    HitClaim c1; c1.victim = 5; c1.attacker = 9; c1.hitBone = "head"; c1.attackerTsMs = 1000;
-
-    ReplayGate::Decision d0 = rg.Before(c1);
-    CHECK(d0.clearComplexImpulse);
-    CHECK(!d0.keepLastDamage);             // nothing applied yet
-    rg.Applied(c1);
-
-    HitClaim c2 = c1; c2.attackerTsMs = 1000 + 199;
-    ReplayGate::Decision d1 = rg.Before(c2);
-    CHECK(d1.clearComplexImpulse && d1.keepLastDamage);    // same attacker+bone, 199ms: keep
-
-    HitClaim c3 = c1; c3.attackerTsMs = 1000 + 200;
-    ReplayGate::Decision d2 = rg.Before(c3);
-    CHECK(d2.clearComplexImpulse && !d2.keepLastDamage);   // 200ms: clears
-
-    HitClaim c4 = c1; c4.attacker = 10; c4.attackerTsMs = 1000 + 50;
-    CHECK(!rg.Before(c4).keepLastDamage);  // different attacker: clears
-
-    HitClaim c5 = c1; c5.hitBone = "torso"; c5.attackerTsMs = 1000 + 50;
-    CHECK(!rg.Before(c5).keepLastDamage);  // different bone: clears
-
-    // Complex impulse is always cleared, even on the keep path.
-    CHECK(rg.Before(c2).clearComplexImpulse);
-}
-
 // ---------------------------------------------------------------- age rule
 static void TestClaimFresh() {
     CHECK(ClaimFresh(0));
@@ -240,16 +214,213 @@ static void TestReplayBoneOk() {
 // ---------------------------------------------------------------- parry window
 static void TestParryWindow() {
     ParryWindow pw;
-    pw.NoteClash(1, 1000);
-    HitClaim c; c.attacker = 1;
+    pw.NoteClash(1, StrikeSource::WeaponRight, 1000);
+    HitClaim c; c.attacker = 1; c.source = StrikeSource::WeaponRight;
 
     c.attackerTsMs = 1150; CHECK(pw.Cancels(c));    // clash 150ms before the claim: edge, cancels
     c.attackerTsMs = 1151; CHECK(!pw.Cancels(c));   // 151ms before: does not
     c.attackerTsMs = 983;  CHECK(pw.Cancels(c));    // clash 17ms after the claim: edge, cancels
     c.attackerTsMs = 982;  CHECK(!pw.Cancels(c));   // 18ms after: does not
 
-    HitClaim other; other.attacker = 2; other.attackerTsMs = 1000;
+    HitClaim other; other.attacker = 2; other.attackerTsMs = 1000; other.source = StrikeSource::WeaponRight;
     CHECK(!pw.Cancels(other));                      // a different attacker never cancels
+}
+
+// Test 4: a clash between my blade and the attacker's right weapon also cancelled that attacker's left-weapon blows,
+// punches and kicks for 150 ms, so in a bind nothing else it did landed. A clash parries only the weapon that clashed.
+static void TestParryWindowPerWeapon() {
+    ParryWindow pw;
+    pw.NoteClash(1, StrikeSource::WeaponRight, 1000);
+    HitClaim right; right.attacker = 1; right.attackerTsMs = 1000; right.source = StrikeSource::WeaponRight;
+    HitClaim left = right; left.source = StrikeSource::WeaponLeft;
+    HitClaim body = right; body.source = StrikeSource::Body;
+    CHECK(pw.Cancels(right));
+    CHECK(!pw.Cancels(left));                       // the other weapon did not clash
+    CHECK(!pw.Cancels(body));                       // a kick or a punch is never parried
+    pw.NoteClash(1, StrikeSource::WeaponLeft, 1000);
+    CHECK(pw.Cancels(left));
+    CHECK(!pw.Cancels(body));
+    pw.NoteClash(1, StrikeSource::Body, 1000);      // not a clash anything reports; still no parry of a body strike
+    CHECK(!pw.Cancels(body));
+
+    // An entity id is reused by the next fighter (respawn, rejoin): its old clashes go with Forget, and only its own.
+    pw.NoteClash(2, StrikeSource::WeaponRight, 1000);
+    pw.Forget(1);
+    CHECK(!pw.Cancels(right));
+    CHECK(!pw.Cancels(left));
+    HitClaim two = right; two.attacker = 2;
+    CHECK(pw.Cancels(two));
+    pw.NoteClash(1, StrikeSource::WeaponRight, 1000);
+    CHECK(pw.Cancels(right));                       // a clash after the Forget counts again
+}
+
+// ---------------------------------------------------------------- body parts
+static void TestBodyPartOfBone() {
+    // One target per part: the two neck bones of test 4's storm, the head, any casing (test 4 logged "Head").
+    CHECK(BodyPartOfBone("neck_01") == kBodyPartHead);
+    CHECK(BodyPartOfBone("neck_02") == kBodyPartHead);
+    CHECK(BodyPartOfBone("head") == kBodyPartHead);
+    CHECK(BodyPartOfBone("Head") == kBodyPartHead);
+    CHECK(BodyPartOfBone("NECK_01") == kBodyPartHead);
+    for (const char* b : {"pelvis", "spine_01", "spine_03", "spine_05", "clavicle_l", "clavicle_r"})
+        CHECK(BodyPartOfBone(b) == kBodyPartTorso);
+    CHECK(BodyPartOfBone("hand_l") == kBodyPartHandL);
+    CHECK(BodyPartOfBone("hand_r") == kBodyPartHandR);
+    CHECK(BodyPartOfBone("hand_r") != BodyPartOfBone("hand_l"));
+    CHECK(BodyPartOfBone("index_01_l") == kBodyPartHandL);         // fingers are the hand
+    CHECK(BodyPartOfBone("thumb_03_r") == kBodyPartHandR);
+    CHECK(BodyPartOfBone("upperarm_twist_01_l") == kBodyPartUpperArmL);
+    CHECK(BodyPartOfBone("lowerarm_twist_01_r") == kBodyPartLowerArmR);
+    CHECK(BodyPartOfBone("thigh_twist_01_r") == kBodyPartThighR);
+    CHECK(BodyPartOfBone("ball_l") == kBodyPartFootL);             // toes are the foot
+    CHECK(BodyPartOfBone("ball_r") == kBodyPartFootR);
+    CHECK(BodyPartOfBone("Calf_R") == kBodyPartCalfR);
+    for (const char* b : {"", "None", "root", "hand", "neck", "spine", "weapon_l", "ik_hand_l", "_l", "l"})
+        CHECK(BodyPartOfBone(b) == kBodyPartOther);
+    // Every limb part is its own: fourteen bones, fourteen parts, none Other.
+    const char* limbs[] = {"head", "pelvis", "upperarm_l", "lowerarm_l", "hand_l", "upperarm_r", "lowerarm_r", "hand_r",
+                           "thigh_l", "calf_l", "foot_l", "thigh_r", "calf_r", "foot_r"};
+    std::set<uint8_t> parts;
+    for (const char* b : limbs) { CHECK(BodyPartOfBone(b) != kBodyPartOther); parts.insert(BodyPartOfBone(b)); }
+    CHECK(parts.size() == 14);
+    // Every bone a pose carries is some body part.
+    for (const char* b : hsm::sync::kPoseBoneNames) CHECK(BodyPartOfBone(b) != kBodyPartOther);
+}
+
+// ---------------------------------------------------------------- blow coalescer
+using Verdict = BlowCoalescer::Verdict;
+static BlowKey Key(const char* bone, const char* comp = "Blade", uint8_t attacker = 1, uint8_t victim = 2) {
+    BlowKey k;
+    k.attacker = attacker; k.victim = victim; k.strikeComponent = comp; k.bodyPart = BodyPartOfBone(bone);
+    return k;
+}
+
+static void TestCoalescerNeckStorm() {
+    // Test 4: twenty zero-impulse contacts 73 ms apart, alternating neck_01 / neck_02. One send per 250 ms window: at
+    // 0, 292, 584, 876 and 1168 ms (contacts 0, 4, 8, 12, 16); the rest are the same sliding contact.
+    BlowCoalescer bc;
+    int sent = 0;
+    for (int i = 0; i < 20; ++i) {
+        const Verdict v = bc.Allow(Key(i % 2 ? "neck_02" : "neck_01"), 0.0, 1000.0 + 73.0 * i);
+        const bool expectSend = i % 4 == 0;
+        CHECK(v == (expectSend ? Verdict::Send : Verdict::ZeroImpulse));
+        sent += v == Verdict::Send;
+    }
+    CHECK(sent == 5);
+}
+
+static void TestCoalescerWindow() {
+    BlowCoalescer bc;
+    CHECK(bc.Allow(Key("head"), 0.0, 0) == Verdict::Send);
+    CHECK(bc.Allow(Key("head"), 0.0, 249) == Verdict::ZeroImpulse);   // still the same blow
+    CHECK(bc.Allow(Key("head"), 0.0, 250) == Verdict::Send);          // a new window
+    BlowCoalescer two;                                                // two blows 300 ms apart both land
+    CHECK(two.Allow(Key("spine_02"), 400.0, 0) == Verdict::Send);
+    CHECK(two.Allow(Key("spine_02"), 400.0, 300) == Verdict::Send);
+}
+
+static void TestCoalescerStronger() {
+    BlowCoalescer bc;
+    CHECK(bc.Allow(Key("thigh_l"), 100.0, 0) == Verdict::Send);
+    CHECK(bc.Allow(Key("thigh_l"), 100.0, 10) == Verdict::Coalesced);   // not stronger
+    CHECK(bc.Allow(Key("calf_l"), 90.0, 15) == Verdict::Send);          // another part is another target
+    CHECK(bc.Allow(Key("thigh_l"), 150.0, 20) == Verdict::Send);        // stronger: the one more
+    CHECK(bc.Allow(Key("thigh_l"), 500.0, 30) == Verdict::Coalesced);   // only one more per window
+    CHECK(bc.Allow(Key("thigh_l"), 0.0, 40) == Verdict::ZeroImpulse);
+    CHECK(bc.Allow(Key("thigh_l"), 100.0, 250) == Verdict::Send);       // the next window
+    BlowCoalescer z;                                                    // a sliding contact, then a real hit
+    CHECK(z.Allow(Key("hand_r"), 0.0, 0) == Verdict::Send);
+    CHECK(z.Allow(Key("hand_r"), 0.0, 5) == Verdict::ZeroImpulse);
+    CHECK(z.Allow(Key("hand_r"), 5.0, 10) == Verdict::Send);
+    CHECK(z.Allow(Key("hand_r"), 9.0, 20) == Verdict::Coalesced);
+    BlowCoalescer nan;                                                  // a non-number counts as zero
+    CHECK(nan.Allow(Key("head"), std::nan(""), 0) == Verdict::Send);
+    CHECK(nan.Allow(Key("head"), std::nan(""), 1) == Verdict::ZeroImpulse);
+    CHECK(nan.Allow(Key("head"), 1.0, 2) == Verdict::Send);
+}
+
+static void TestCoalescerKeys() {
+    BlowCoalescer bc;
+    CHECK(bc.Allow(Key("head"), 50.0, 0) == Verdict::Send);
+    CHECK(bc.Allow(Key("head", "Pommel"), 50.0, 1) == Verdict::Send);          // another striking component
+    CHECK(bc.Allow(Key("head", "Blade", 3), 50.0, 2) == Verdict::Send);        // another attacker
+    CHECK(bc.Allow(Key("head", "Blade", 1, 4), 50.0, 3) == Verdict::Send);     // another victim
+    CHECK(bc.Allow(Key("hand_l"), 50.0, 4) == Verdict::Send);                  // another part
+    CHECK(bc.Allow(Key("head"), 50.0, 5) == Verdict::Coalesced);
+}
+
+static void TestCoalescerCap() {
+    // Forty strengthening contacts in one second on eight parts: each would send five times (a window opens every
+    // 400 ms, one stronger contact 200 ms later), the cap lets the first twelve through.
+    const char* bones[] = {"head", "pelvis", "hand_l", "hand_r", "thigh_l", "thigh_r", "foot_l", "foot_r"};
+    BlowCoalescer bc;
+    int sent = 0, capped = 0;
+    for (int i = 0; i < 40; ++i) {
+        const Verdict v = bc.Allow(Key(bones[i % 8]), 100.0 + i, 25.0 * i);
+        CHECK(v == (i < 12 ? Verdict::Send : Verdict::Capped));
+        sent += v == Verdict::Send;
+        capped += v == Verdict::Capped;
+    }
+    CHECK(sent == 12 && capped == 28);
+    CHECK(bc.Allow(Key("head", "Blade", 1, 3), 10.0, 500) == Verdict::Send);    // per (attacker, victim)
+    CHECK(bc.Allow(Key("head", "Blade", 5, 2), 10.0, 500) == Verdict::Send);
+    CHECK(bc.Allow(Key("calf_l"), 10.0, 999) == Verdict::Capped);               // the first send is 999 ms old
+    CHECK(bc.Allow(Key("calf_l"), 10.0, 1000) == Verdict::Send);                // 1000 ms: it has left the window
+    CHECK(bc.Allow(Key("calf_r"), 10.0, 1000) == Verdict::Capped);              // and only it
+}
+
+static void TestCoalescerForget() {
+    BlowCoalescer bc;
+    for (int i = 0; i < 12; ++i) {                                            // twelve components fill the cap
+        const std::string comp = "Part" + std::to_string(i);
+        CHECK(bc.Allow(Key("head", comp.c_str(), 1, 2), 10.0, i) == Verdict::Send);
+    }
+    CHECK(bc.Allow(Key("head", "Blade", 1, 2), 10.0, 20) == Verdict::Capped);
+    CHECK(bc.Allow(Key("head", "Blade", 3, 4), 10.0, 20) == Verdict::Send);
+    bc.Forget(2);                                                             // the victim respawned
+    CHECK(bc.Allow(Key("head", "Blade", 1, 2), 10.0, 21) == Verdict::Send);
+    CHECK(bc.Allow(Key("head", "Blade", 3, 4), 10.0, 22) == Verdict::Coalesced);   // others untouched
+    bc.Forget(3);                                                             // as attacker
+    CHECK(bc.Allow(Key("head", "Blade", 3, 4), 10.0, 23) == Verdict::Send);
+}
+
+// ---------------------------------------------------------------- replay queue
+static HitClaim QClaim(uint8_t victim, uint32_t id) {
+    HitClaim c; c.victim = victim; c.attacker = 1; c.claimId = id;
+    return c;
+}
+
+static void TestReplayQueue() {
+    ReplayQueue q;
+    for (uint32_t id = 1; id <= 20; ++id) CHECK(q.Push(QClaim(5, id)));
+    CHECK(q.Size(5) == 20);
+    uint32_t next = 1;
+    for (size_t want : {8u, 8u, 4u, 0u}) {
+        const std::vector<HitClaim> got = q.Drain();
+        CHECK(got.size() == want);
+        for (const HitClaim& c : got) CHECK(c.victim == 5 && c.claimId == next++);   // arrival order
+    }
+    CHECK(q.Size(5) == 0);
+
+    ReplayQueue two;                                       // per victim
+    for (uint32_t id = 1; id <= 10; ++id) two.Push(QClaim(5, id));
+    for (uint32_t id = 1; id <= 3; ++id) two.Push(QClaim(6, id));
+    std::vector<HitClaim> got = two.Drain();
+    CHECK(got.size() == 11);
+    CHECK(two.Size(5) == 2 && two.Size(6) == 0);
+    two.Push(QClaim(6, 4));
+    two.Forget(5);
+    got = two.Drain();
+    CHECK(got.size() == 1 && got[0].victim == 6 && got[0].claimId == 4);
+    CHECK(two.Drain(3).empty());
+
+    ReplayQueue cap;                                       // a flood is bounded
+    for (uint32_t id = 1; id <= kMaxQueuedReplays; ++id) CHECK(cap.Push(QClaim(7, id)));
+    CHECK(!cap.Push(QClaim(7, 1000)));
+    CHECK(cap.Size(7) == kMaxQueuedReplays);
+    CHECK(cap.Push(QClaim(8, 1)));                         // another victim still has room
+    CHECK(cap.Drain(2).size() == 3);
+    CHECK(cap.Push(QClaim(7, 1001)));                      // room again after a drain
 }
 
 // ---------------------------------------------------------------- serialisation round trip
@@ -450,10 +621,18 @@ int main() {
     TestLimiter();
     TestDedupe();
     TestDedupeForget();
-    TestReplayGate();
     TestClaimFresh();
     TestReplayBoneOk();
     TestParryWindow();
+    TestParryWindowPerWeapon();
+    TestBodyPartOfBone();
+    TestCoalescerNeckStorm();
+    TestCoalescerWindow();
+    TestCoalescerStronger();
+    TestCoalescerKeys();
+    TestCoalescerCap();
+    TestCoalescerForget();
+    TestReplayQueue();
     TestSerializationRoundTrip();
     TestHostileDecode();
     if (g_fail) { std::printf("test_hsm_claim: %d failure(s)\n", g_fail); return 1; }

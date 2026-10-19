@@ -23,6 +23,7 @@ public:
     static constexpr double kNoManagerMs = 5000;   // a level without a level manager has no start-up cleanup to wait for
     static constexpr double kMaxWaitMs = 15000;    // never wait longer than this (logged as a timeout)
     enum class Why { Closed, LevelSpawned, NoManager, TimedOut };
+    enum class Waiting { Nothing, Manager, PlayerSpawnedCleared, PlayerSpawned, Pawn };
 
     void OnLevel(double nowMs) { *this = LevelSpawnGate{}; started_ = true; startMs_ = nowMs; }
     // Opens once the level manager's "Player Spawned" has been seen cleared and then set while player 0 has a fighter;
@@ -30,6 +31,7 @@ public:
     // Returns true on the update that opens the gate.
     bool Update(double nowMs, const LevelProbe& p) {
         if (why_ != Why::Closed) return false;
+        last_ = p;
         if (!started_) { started_ = true; startMs_ = nowMs; }
         const double elapsed = nowMs - startMs_;
         if (p.manager) {
@@ -43,12 +45,33 @@ public:
     }
     bool Open() const { return why_ != Why::Closed; }
     Why why() const { return why_; }
+    // What kept the gate closed as of the last probe, in the order the open rule needs it (for the timeout log).
+    Waiting waitingFor() const {
+        if (why_ == Why::LevelSpawned || why_ == Why::NoManager) return Waiting::Nothing;
+        if (!managerSeen_ || !last_.manager) return Waiting::Manager;
+        if (!sawCleared_) return Waiting::PlayerSpawnedCleared;
+        if (!last_.playerSpawned) return Waiting::PlayerSpawned;
+        if (!last_.pawn) return Waiting::Pawn;
+        return Waiting::Nothing;
+    }
+    const LevelProbe& lastProbe() const { return last_; }      // the last probe; frozen once the gate opens
 
 private:
     bool started_ = false, managerSeen_ = false, sawCleared_ = false;
     double startMs_ = 0;
     Why why_ = Why::Closed;
+    LevelProbe last_;
 };
+
+// How long a fight level may go without a local fighter before the mod spawns one (EnsureLocalFighter). Returns false
+// while it must not spawn one at all, else sets graceMs.
+constexpr double kLocalFighterGraceMs = 15000;   // host, solo, host-sync client: longer than the stock spawner's delay
+constexpr double kAnnouncedGraceMs = 2000;       // owner-sync client once the level gate is open
+inline bool LocalFighterGrace(bool ownerClient, bool gateOpen, double& graceMs) {
+    if (ownerClient && !gateOpen) return false;   // the gate's exit spawns the announced fighter (ClientGateOpen)
+    graceMs = ownerClient ? kAnnouncedGraceMs : kLocalFighterGraceMs;
+    return true;
+}
 
 // At most one re-creation attempt per entity per kRetryMs.
 class RecreateLimiter {

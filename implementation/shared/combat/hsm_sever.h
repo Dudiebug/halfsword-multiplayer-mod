@@ -1,4 +1,5 @@
-// Severs and stuck blades in owner sync (protocol rev 9, MsgType::SeverClaim and MsgType::StuckBlade).
+// Severs and stuck blades in owner sync (protocol rev 9, MsgType::SeverClaim and MsgType::StuckBlade; rev 12,
+// MsgType::SeverNotice).
 //
 // A sever starts natively on the attacker's screen: Constraint_Weapon_Stuck_BP::Call_Dismember (the only caller) runs
 // the struck Willie's "Dismember Function Initiate" and, 0.1 s later, "Dismember Function Delayed" with the Willie's
@@ -6,7 +7,9 @@
 // paint boxes and the weapon. When that Willie is a stand-in the attacker captures the call as a SeverClaim: marker
 // and component names (stable Willie_BP component names, the same on every machine), and the two boxes in one bone's
 // frame. The victim's owner rebuilds the call on its own fighter and runs the game's own functions; everyone else shows
-// it on their stand-in once the owner's vitals confirm the part is gone (SeverPending).
+// it on their stand-in once the owner's vitals confirm the part is gone (SeverPending). A sever the owner's fighter takes
+// from its own blade (or, on the host, from a bot) runs natively there; the owner sends the same claim as a SeverNotice,
+// naming its fighter twice, and the others show it the same way.
 //
 // A blade stuck in a stand-in is reported on/off (StuckBladeMsg); the victim's owner constrains the attacker's
 // stand-in weapon to its own bone while it is stuck (StuckBlades). Pure types, no engine headers.
@@ -100,12 +103,8 @@ inline SeverBox ToBoneFrame(const Xform& bone, const Xform& boxWorld, const V3& 
     b.extent = extent;
     return b;
 }
-}  // namespace detail
-
-// The claim for a captured call, or false when it cannot travel (no part, no attach marker, no frame bone, a name the
-// wire would truncate, a box out of bounds). Markers that cannot travel are dropped; at most kSeverMaxMarkers are kept.
-inline bool MakeSeverClaim(const SeverCapture& in, SeverClaim& out) {
-    if (in.part >= kSeverParts || in.attacker == in.victim) return false;
+// The body a claim and a notice share; the caller checks the part and who struck whom.
+inline bool BuildSever(const SeverCapture& in, SeverClaim& out) {
     if (in.attachMarker.empty() || in.frameBone.empty()) return false;
     if (!detail::FitsWire(in.attachMarker) || !detail::FitsWire(in.frameBone) || !detail::FitsWire(in.masterMesh) ||
         !detail::FitsWire(in.weaponComponent))
@@ -132,6 +131,20 @@ inline bool MakeSeverClaim(const SeverCapture& in, SeverClaim& out) {
     out = std::move(c);
     return true;
 }
+}  // namespace detail
+
+// The claim for a captured call, or false when it cannot travel (no part, no attach marker, no frame bone, a name the
+// wire would truncate, a box out of bounds). Markers that cannot travel are dropped; at most kSeverMaxMarkers are kept.
+inline bool MakeSeverClaim(const SeverCapture& in, SeverClaim& out) {
+    if (in.part >= kSeverParts || in.attacker == in.victim) return false;
+    return detail::BuildSever(in, out);
+}
+
+// The notice for an own cut: the capture names the owner's fighter twice (attacker == victim); same rules otherwise.
+inline bool MakeSeverNotice(const SeverCapture& in, SeverClaim& out) {
+    if (in.part >= kSeverParts || in.attacker != in.victim) return false;
+    return detail::BuildSever(in, out);
+}
 
 // A box of a claim placed on the victim's own bone.
 inline Xform SeverBoxWorld(const SeverBox& b, const Xform& boneWorld) {
@@ -147,10 +160,9 @@ struct SeverClaimMsg {
     SeverClaim claim;
 };
 
-inline std::vector<uint8_t> Encode(const SeverClaimMsg& m) {
-    const SeverClaim& c = m.claim;
-    Writer w;
-    w.header(MsgType::SeverClaim);
+namespace detail {
+// The wire body a SeverClaim and a SeverNotice share (after the header).
+inline void PutSeverBody(Writer& w, const SeverClaim& c) {
     w.u32(c.claimId);
     w.u8(c.attacker);
     w.u8(c.victim);
@@ -167,15 +179,10 @@ inline std::vector<uint8_t> Encode(const SeverClaimMsg& m) {
     PutV3(w, c.box2.extent);
     w.u8(uint8_t(c.source));
     w.str(c.weaponComponent, kMaxClaimString);
-    return w.buf;
 }
 
-inline bool Decode(const uint8_t* d, size_t n, SeverClaimMsg& m) {
-    if (n > kMaxPacket) return false;
-    Reader r(d, n);
-    MsgType t;
-    if (!r.header(t) || t != MsgType::SeverClaim) return false;
-    SeverClaim c;
+// Reads that body with every check that does not depend on who struck whom; the caller checks the two entities.
+inline bool GetSeverBody(Reader& r, SeverClaim& c) {
     c.claimId = r.u32();
     c.attacker = r.u8();
     c.victim = r.u8();
@@ -198,13 +205,57 @@ inline bool Decode(const uint8_t* d, size_t n, SeverClaimMsg& m) {
     const uint8_t src = r.u8();
     c.weaponComponent = r.str(kMaxClaimString);
     if (!r.done() || !numOk) return false;
-    if (c.attacker < 1 || c.attacker > kMaxWillies || c.victim < 1 || c.victim > kMaxWillies || c.attacker == c.victim)
-        return false;
     if (c.part >= kSeverParts || c.attachMarker.empty() || c.frameBone.empty()) return false;
     if (src > uint8_t(StrikeSource::WeaponLeft)) return false;
     if (!detail::ExtentOk(c.box1.extent) || !detail::ExtentOk(c.box2.extent)) return false;
     if (!detail::LocalXformOk(c.box1.local) || !detail::LocalXformOk(c.box2.local)) return false;
     c.source = StrikeSource(src);
+    return true;
+}
+}  // namespace detail
+
+inline std::vector<uint8_t> Encode(const SeverClaimMsg& m) {
+    Writer w;
+    w.header(MsgType::SeverClaim);
+    detail::PutSeverBody(w, m.claim);
+    return w.buf;
+}
+
+inline bool Decode(const uint8_t* d, size_t n, SeverClaimMsg& m) {
+    if (n > kMaxPacket) return false;
+    Reader r(d, n);
+    MsgType t;
+    if (!r.header(t) || t != MsgType::SeverClaim) return false;
+    SeverClaim c;
+    if (!detail::GetSeverBody(r, c)) return false;
+    if (c.attacker < 1 || c.attacker > kMaxWillies || c.victim < 1 || c.victim > kMaxWillies || c.attacker == c.victim)
+        return false;
+    m.claim = std::move(c);
+    return true;
+}
+
+// ---------------------------------------------------------------- SeverNotice on the wire
+// A sever the owner's own fighter took natively: the claim body with that fighter named twice. Nobody replays it; the
+// others keep it like a claim (SeverPending) and show it once the owner's vitals confirm the part.
+struct SeverNoticeMsg {
+    SeverClaim claim;
+};
+
+inline std::vector<uint8_t> Encode(const SeverNoticeMsg& m) {
+    Writer w;
+    w.header(MsgType::SeverNotice);
+    detail::PutSeverBody(w, m.claim);
+    return w.buf;
+}
+
+inline bool Decode(const uint8_t* d, size_t n, SeverNoticeMsg& m) {
+    if (n > kMaxPacket) return false;
+    Reader r(d, n);
+    MsgType t;
+    if (!r.header(t) || t != MsgType::SeverNotice) return false;
+    SeverClaim c;
+    if (!detail::GetSeverBody(r, c)) return false;
+    if (c.victim < 1 || c.victim > kMaxWillies || c.attacker != c.victim) return false;
     m.claim = std::move(c);
     return true;
 }

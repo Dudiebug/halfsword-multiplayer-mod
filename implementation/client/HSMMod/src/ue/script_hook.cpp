@@ -118,6 +118,18 @@ std::vector<UFunction*> Resolve(const Rule& r) {
     return out;
 }
 
+// The parameters of a hooked function as the engine spells them, once per function per process. A shipping build
+// displays a name in the casing registered first ("bone" for a "Bone" parameter), so this line is the record of what a
+// ScriptCall lookup is matched against. Requires g_mu.
+std::set<std::string> g_paramsLogged;
+void LogParamsOnce(UFunction* fn) {
+    const std::string name = FullName(reinterpret_cast<UObject*>(fn));
+    if (!g_paramsLogged.insert(name).second) return;
+    std::string list;
+    for (FProperty* p : Params(fn)) list += (list.empty() ? "" : ", ") + PropertyName(p);
+    HSM_LOG("vm: params of %s: %s", name.c_str(), list.empty() ? "(none)" : list.c_str());
+}
+
 // Rebuilds and publishes the table from the rules; returns how many functions are hooked, and in lastRule how many the
 // newest rule resolved to. Requires g_mu.
 int Publish(int* lastRule = nullptr) {
@@ -133,6 +145,7 @@ int Publish(int* lastRule = nullptr) {
                 continue;
             }
             if (lastRule) ++*lastRule;
+            LogParamsOnce(fn);
             auto& e = byFn[fn];
             if (!e) { e = std::make_unique<Entry>(); order.push_back(fn); }
             e->hooks.push_back(r.hook);

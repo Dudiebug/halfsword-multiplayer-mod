@@ -1,4 +1,5 @@
 #include "ui/chat.h"
+#include "util/hsm_names.h"
 #include "hsm_chat.h"
 #include "log.h"
 #include <windows.h>
@@ -87,7 +88,7 @@ bool Build() {
     UObject* tree = Tree(w.hud);
     UObject** rootPtr = tree ? Field<UObject*>(tree, "RootWidget") : nullptr;
     UObject* root = rootPtr ? *rootPtr : nullptr;
-    if (!root || ObjectName(reinterpret_cast<UObject*>(ClassOf(root))) != "CanvasPanel") { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
+    if (!root || !SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(root))), "CanvasPanel")) { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
     if (UObject** src = Field<UObject*>(w.hud, "TextHurt"); src && *src)
         if (void* font = FieldPtr(*src, "Font")) {
             FProperty* p = FindProperty(ClassOf(*src), "Font");

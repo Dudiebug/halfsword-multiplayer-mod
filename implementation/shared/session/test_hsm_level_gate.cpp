@@ -87,6 +87,88 @@ static void TestClockStartsAtFirstUpdate() {
     CHECK(g.Update(50000 + LevelSpawnGate::kNoManagerMs, P(false, false, false)));
 }
 
+// The timeout log names what the level never did (test 4: the client waited the full 15 s; the log did not say why).
+static void TestWaitingFor() {
+    using W = LevelSpawnGate::Waiting;
+    {   // no level manager yet
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(g.waitingFor() == W::Manager);
+        CHECK(!g.Update(100, P(false, false, true)));
+        CHECK(g.waitingFor() == W::Manager);
+    }
+    {   // "Player Spawned" never seen cleared: no Clean Up Map seen
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, true, true)));
+        CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(true, true, true)));
+        CHECK(g.why() == LevelSpawnGate::Why::TimedOut);
+        CHECK(g.waitingFor() == W::PlayerSpawnedCleared);
+    }
+    {   // cleared and never set again: the stock spawner never ran
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, false, true)));
+        CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(true, false, true)));
+        CHECK(g.waitingFor() == W::PlayerSpawned);
+    }
+    {   // cleared, never set again, and no fighter either: the spawner that would set both never ran
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, false, false)));
+        CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(true, false, false)));
+        CHECK(g.waitingFor() == W::PlayerSpawned);
+    }
+    {   // set again, but player 0 has no fighter
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, false, false)));
+        CHECK(!g.Update(200, P(true, true, false)));
+        CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(true, true, false)));
+        CHECK(g.waitingFor() == W::Pawn);
+    }
+    {   // the manager was seen, then missing from the last probe
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, false, true)));
+        CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(false, false, true)));
+        CHECK(g.waitingFor() == W::Manager);
+    }
+    {   // opened by the level, or by the no-manager rule: nothing was missing
+        LevelSpawnGate g; g.OnLevel(0);
+        CHECK(!g.Update(100, P(true, false, true)));
+        CHECK(g.Update(200, P(true, true, true)));
+        CHECK(g.waitingFor() == W::Nothing);
+        LevelSpawnGate h; h.OnLevel(0);
+        CHECK(h.Update(LevelSpawnGate::kNoManagerMs, P(false, false, true)));
+        CHECK(h.waitingFor() == W::Nothing);
+    }
+}
+
+// The last probe is kept for the log and frozen once the gate opens.
+static void TestLastProbe() {
+    LevelSpawnGate g; g.OnLevel(0);
+    CHECK(!g.Update(100, P(true, false, true)));
+    CHECK(g.lastProbe().manager && !g.lastProbe().playerSpawned && g.lastProbe().pawn);
+    CHECK(g.Update(LevelSpawnGate::kMaxWaitMs, P(true, false, false)));
+    CHECK(g.lastProbe().manager && !g.lastProbe().playerSpawned && !g.lastProbe().pawn);
+    CHECK(!g.Update(LevelSpawnGate::kMaxWaitMs + 100, P(false, true, true)));   // after opening: not kept
+    CHECK(g.lastProbe().manager && !g.lastProbe().playerSpawned && !g.lastProbe().pawn);
+    g.OnLevel(20000);
+    CHECK(!g.lastProbe().manager && !g.lastProbe().playerSpawned && !g.lastProbe().pawn);
+    CHECK(g.waitingFor() == LevelSpawnGate::Waiting::Manager);
+}
+
+// Test 4: the client's own 15 s fallback and the gate's 15 s timeout both spawned its fighter, 60 ms apart.
+static void TestLocalFighterGrace() {
+    double grace = -1;
+    CHECK(!LocalFighterGrace(true, false, grace));   // owner-sync client, gate closed: the gate's exit spawns it
+    grace = -1;
+    CHECK(LocalFighterGrace(true, true, grace));
+    CHECK(grace == kAnnouncedGraceMs);               // gate open: a fighter lost later comes back soon
+    grace = -1;
+    CHECK(LocalFighterGrace(false, false, grace));
+    CHECK(grace == kLocalFighterGraceMs);            // host, solo, host-sync client: after the stock spawner
+    grace = -1;
+    CHECK(LocalFighterGrace(false, true, grace));
+    CHECK(grace == kLocalFighterGraceMs);
+    CHECK(kAnnouncedGraceMs < kLocalFighterGraceMs);
+}
+
 static void TestRecreateLimiter() {
     RecreateLimiter r;
     CHECK(r.Allow(3, 1000));
@@ -109,6 +191,9 @@ int main() {
     TestTimeout();
     TestNewLevelCloses();
     TestClockStartsAtFirstUpdate();
+    TestWaitingFor();
+    TestLastProbe();
+    TestLocalFighterGrace();
     TestRecreateLimiter();
     if (g_fail) { std::printf("test_hsm_level_gate: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_level_gate: ok\n");

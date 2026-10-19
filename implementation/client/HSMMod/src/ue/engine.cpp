@@ -1,5 +1,6 @@
 #include "ue/engine.h"
 #include "log.h"
+#include "util/hsm_names.h"
 #include <windows.h>
 #include <cstring>
 #include <mutex>
@@ -62,7 +63,7 @@ uint64_t ComputeBuildKey() {
     return uint64_t(nt->FileHeader.TimeDateStamp) << 32 | nt->OptionalHeader.SizeOfImage;
 }
 
-bool IsName(const UObject* o, const char* n) { return o && ObjectName(o) == n; }
+bool IsName(const UObject* o, const char* n) { return o && SameNameAscii(ObjectName(o), n); }
 std::string ClassName(const UObject* o) { UClass* c = ClassOf(o); return c ? ObjectName(reinterpret_cast<UObject*>(c)) : std::string(); }
 }  // namespace
 
@@ -146,8 +147,8 @@ UObject* ObjectAt(int32_t index) {
 UObject* FindObject(const std::string& name, const char* className) {
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (!o || ObjectName(o) != name) continue;
-        if (className && ClassName(o) != className) continue;
+        if (!o || !SameNameAscii(ObjectName(o), name)) continue;
+        if (className && !SameNameAscii(ClassName(o), className)) continue;
         return o;
     }
     return nullptr;
@@ -157,7 +158,7 @@ std::vector<UObject*> FindInstances(const char* className) {
     std::vector<UObject*> out;
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (o && !IsDefaultObject(o) && ClassName(o) == className) out.push_back(o);
+        if (o && !IsDefaultObject(o) && SameNameAscii(ClassName(o), className)) out.push_back(o);
     }
     return out;
 }
@@ -168,28 +169,28 @@ UObject* DefaultObject(const UClass* c) { return c ? Read<UObject*>(c, kClassCDO
 UFunction* FindFunction(const UClass* c, const std::string& name) {
     for (const void* s = c; s; s = Read<void*>(s, kStructSuper))
         for (UObject* f = Read<UObject*>(s, kStructChildren); f; f = Read<UObject*>(f, kFieldNext))
-            if (ObjectName(f) == name) return reinterpret_cast<UFunction*>(f);
+            if (SameNameAscii(ObjectName(f), name)) return reinterpret_cast<UFunction*>(f);
     return nullptr;
 }
 
 std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& prefix) {
     std::vector<UFunction*> out;
     for (UObject* f = Read<UObject*>(c, kStructChildren); f; f = Read<UObject*>(f, kFieldNext))
-        if (ObjectName(f).rfind(prefix, 0) == 0) out.push_back(reinterpret_cast<UFunction*>(f));
+        if (StartsWithNameAscii(ObjectName(f), prefix)) out.push_back(reinterpret_cast<UFunction*>(f));
     return out;
 }
 
 FProperty* FindProperty(const void* ustruct, const std::string& name) {
     for (const void* s = ustruct; s; s = Read<void*>(s, kStructSuper))
         for (const void* p = Read<void*>(s, kStructChildProps); p; p = Read<void*>(p, kFFieldNext))
-            if (NameToString(Read<FName>(p, kFFieldName)) == name) return static_cast<FProperty*>(const_cast<void*>(p));
+            if (SameNameAscii(NameToString(Read<FName>(p, kFFieldName)), name)) return static_cast<FProperty*>(const_cast<void*>(p));
     return nullptr;
 }
 
 FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix) {
     for (const void* s = ustruct; s; s = Read<void*>(s, kStructSuper))
         for (const void* p = Read<void*>(s, kStructChildProps); p; p = Read<void*>(p, kFFieldNext))
-            if (NameToString(Read<FName>(p, kFFieldName)).rfind(prefix, 0) == 0) return static_cast<FProperty*>(const_cast<void*>(p));
+            if (StartsWithNameAscii(NameToString(Read<FName>(p, kFFieldName)), prefix)) return static_cast<FProperty*>(const_cast<void*>(p));
     return nullptr;
 }
 

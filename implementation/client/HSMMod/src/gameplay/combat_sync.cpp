@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "combat/hsm_ue_map.h"
 #include "log.h"
+#include "util/hsm_names.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -34,7 +35,7 @@ bool Readable(const void* p, size_t n) { return p && n && !IsBadReadPtr(p, n); }
 bool HasParams(const UFunction* fn, std::initializer_list<const char*> names) {
     std::vector<FProperty*> params = Params(fn);
     for (const char* want : names) {
-        bool found = std::any_of(params.begin(), params.end(), [want](FProperty* p) { return PropertyName(p) == want; });
+        bool found = std::any_of(params.begin(), params.end(), [want](FProperty* p) { return SameNameAscii(PropertyName(p), want); });
         if (!found) return false;
     }
     return true;

@@ -5,6 +5,7 @@
 #include "log.h"
 #include "sync/hsm_gore.h"
 #include "ue/hook.h"
+#include "util/hsm_names.h"
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -78,7 +79,7 @@ UObject* Adapter::PlayerWillie(int localIndex) {
     if (!ch) return nullptr;
     if (!willieClass_) {
         UClass* cls = ClassOf(ch);
-        if (ObjectName(reinterpret_cast<UObject*>(cls)) == kWillieClass) willieClass_ = cls;
+        if (SameNameAscii(ObjectName(reinterpret_cast<UObject*>(cls)), kWillieClass)) willieClass_ = cls;
     }
     return willieClass_ && IsA(ch, willieClass_) ? ch : nullptr;
 }
@@ -387,6 +388,18 @@ double Adapter::ActorYaw(UObject* actor) {
     return c.invoke() ? c.get<FRotator>("ReturnValue").yaw : 0.0;
 }
 
+// GameplayStatics::GetTimeSeconds: a double in UE5 (a float before); read as whichever the function declares.
+double Adapter::WorldSeconds() {
+    if (!statics_ || !world_) return -1;
+    Call c(statics_, "GetTimeSeconds");
+    c.set<UObject*>("WorldContextObject", world_);
+    FProperty* rv = c.valid() ? FindProperty(c.function(), "ReturnValue") : nullptr;
+    if (!rv || !c.invoke()) return -1;
+    if (PropertySize(rv) == int32_t(sizeof(double))) return c.get<double>("ReturnValue");
+    if (PropertySize(rv) == int32_t(sizeof(float))) return double(c.get<float>("ReturnValue"));
+    return -1;
+}
+
 std::vector<FVector> Adapter::SpawnCandidates() {
     std::vector<FVector> out;
     for (UObject* a : FindInstances(kSpawnerClass)) out.push_back(ActorLocation(a));
@@ -579,7 +592,7 @@ bool g_suppressScreens = false;
 bool g_suppressOwnerScreens = false;
 bool g_screenHooks = false;
 std::vector<std::pair<UObject*, int32_t>> g_suppressed;   // widgets whose Construct was skipped; removed next tick
-bool ClassNamed(UObject* o, const char* name) { return o && ObjectName(reinterpret_cast<UObject*>(ClassOf(o))) == name; }
+bool ClassNamed(UObject* o, const char* name) { return o && SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(o))), name); }
 }  // namespace
 
 bool Adapter::IsWillie(UObject* o) {
@@ -646,7 +659,7 @@ bool Adapter::IsWeapon(UObject* actor) {
         const FName n = ObjectFName(reinterpret_cast<UObject*>(c));
         if (weaponNameKnown_) {
             if (n.index == weaponName_.index && n.number == weaponName_.number) return true;
-        } else if (NameToString(n) == kWeaponClass) {
+        } else if (SameNameAscii(NameToString(n), kWeaponClass)) {
             weaponName_ = n;
             weaponNameKnown_ = true;
             return true;

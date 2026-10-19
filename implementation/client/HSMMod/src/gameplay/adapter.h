@@ -59,6 +59,7 @@ public:
     std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level
     ue::FVector ActorLocation(ue::UObject* actor);
     double ActorYaw(ue::UObject* actor);
+    double WorldSeconds();                                 // game seconds since this world began play, -1 unreadable
     void Teleport(ue::UObject* actor, const ue::FVector& to);
     ue::UObject* ControllerOf(ue::UObject* pawn);
 

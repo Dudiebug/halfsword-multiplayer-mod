@@ -1,4 +1,5 @@
 #include "ui/menu.h"
+#include "util/hsm_names.h"
 #include "gameplay/session.h"
 #include "log.h"
 #include "match/hsm_hud_text.h"
@@ -183,7 +184,7 @@ bool BuildPanel(UObject* freeMode) {   // freeMode: style source for the page's 
     UObject* tree = WidgetTree(g.menu);
     UObject** rootPtr = tree ? Field<UObject*>(tree, "RootWidget") : nullptr;
     UObject* root = rootPtr ? *rootPtr : nullptr;
-    if (!root || ObjectName(reinterpret_cast<UObject*>(ClassOf(root))) != "CanvasPanel") { HSM_LOG("ui: menu root is not a CanvasPanel; panel disabled"); return false; }
+    if (!root || !SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(root))), "CanvasPanel")) { HSM_LOG("ui: menu root is not a CanvasPanel; panel disabled"); return false; }
     g.panel = Spawn("Border");
     UObject* page = Spawn("VerticalBox");
     UObject* header = Spawn("HorizontalBox");
@@ -275,7 +276,7 @@ bool InViewport(UObject* widget) {
 // style and go below Quit (Button_3; Button_4 is Free Mode, decomp UI/UI_Startup_Menu.cpp LatentResume_L44).
 // UI_MainMenuSNF (older builds): text buttons; ours copy ButtonFreeMode's style and TextFreeMode's font.
 void Build() {
-    bool startup = ObjectName(reinterpret_cast<UObject*>(g.menuClass)) == "UI_Startup_Menu_C";
+    bool startup = SameNameAscii(ObjectName(reinterpret_cast<UObject*>(g.menuClass)), "UI_Startup_Menu_C");
     const char* anchorName = startup ? "Button_3" : "ButtonFreeMode";
     UObject** anchorPtr = Field<UObject*>(g.menu, anchorName);
     g.built = true;

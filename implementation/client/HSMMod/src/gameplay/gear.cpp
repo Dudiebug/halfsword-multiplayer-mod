@@ -1,5 +1,6 @@
 #include "gameplay/gear.h"
 #include "log.h"
+#include "util/hsm_names.h"
 #include <algorithm>
 
 namespace hsm::game {
@@ -24,7 +25,7 @@ bool SerializePassport(Adapter& a, UObject* statics, UClass* sgClass, const void
                        std::vector<uint8_t>& out) {
     if (!passport) { HSM_LOG("gear: Generate Character has no Character Passport"); return false; }
     FProperty* src = nullptr;
-    for (FProperty* p : Params(generate)) if (PropertyName(p) == "Character Passport") src = p;
+    for (FProperty* p : Params(generate)) if (SameNameAscii(PropertyName(p), "Character Passport")) src = p;
     Call c(statics, "CreateSaveGameObject");
     c.set<UClass*>("SaveGameClass", sgClass);
     UObject* sg = c.invoke() ? c.get<UObject*>("ReturnValue") : nullptr;

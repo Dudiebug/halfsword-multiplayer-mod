@@ -4,7 +4,8 @@ Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
 > **Status: pre-release.** The current build (v0.4) passes every offline check (unit tests under ASan/UBSan
-> and protocol fuzzing) but has not yet been played in a two-player match. Expect bugs.
+> and protocol fuzzing) and is being play-tested in two-player matches; each pre-release fixes what the last test
+> found. Expect bugs.
 
 ## What it does
 
@@ -15,8 +16,9 @@ No game files are changed; delete the DLL to go back to vanilla.
   are physics stand-ins driven by a 60 Hz pose stream.
 - **Hits through the game's own damage code:** the attacker claims a hit; the victim's machine replays it on its own
   fighter, so armour, wounds, bleeding, knockouts and deaths work as in solo.
-- **Gore, grabs and dropped weapons** are synced: severed limbs, stuck blades, dislocations, grabbing another
-  player, and loose weapons everyone sees in the same place.
+- **Gore, grabs, dropped weapons and level props** are synced: severed limbs, stuck blades, dislocations, grabbing
+  another player, loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
+  props, which the host names for everyone.
 - Match modes, scores, chat and spectating.
 
 ## Install

@@ -1,4 +1,5 @@
 #include "ui/hud.h"
+#include "util/hsm_names.h"
 #include "log.h"
 #include <windows.h>
 #include <vector>
@@ -64,7 +65,7 @@ bool Build() {
     UObject* tree = Tree(g.hud);
     UObject** rootPtr = tree ? Field<UObject*>(tree, "RootWidget") : nullptr;
     UObject* root = rootPtr ? *rootPtr : nullptr;
-    if (!root || ObjectName(reinterpret_cast<UObject*>(ClassOf(root))) != "CanvasPanel") { HSM_LOG("hud: UI_HUD root is not a CanvasPanel; match HUD disabled"); return false; }
+    if (!root || !SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(root))), "CanvasPanel")) { HSM_LOG("hud: UI_HUD root is not a CanvasPanel; match HUD disabled"); return false; }
     if (UObject** src = Field<UObject*>(g.hud, "TextHurt"); src && *src)
         if (void* font = FieldPtr(*src, "Font")) {
             FProperty* p = FindProperty(ClassOf(*src), "Font");

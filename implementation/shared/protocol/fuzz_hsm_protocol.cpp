@@ -8,6 +8,7 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_prop_census.h"
 #include "sync/hsm_grab.h"
 #include <cmath>
 #include <cstdio>
@@ -38,9 +39,9 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<Event>(d, n); Try<Travel>(d, n); Try<Ready>(d, n); Try<Spawn>(d, n); Try<Despawn>(d, n); Try<BlobChunk>(d, n);
     Try<MatchInfo>(d, n); Try<Kill>(d, n);
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
-    Try<combat::SeverClaimMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
+    Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
-    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -78,6 +79,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     sc.box1.local.rot = sync::Q4{ 0, 0, 0, 1 }; sc.box1.extent = sync::V3{ 100, 500, 100 }; sc.box1.local.pos = sync::V3{ 0, 500, 0 };
     sc.box2 = sc.box1; sc.box2.local.pos = sync::V3{ 0, -500, 0 }; sc.source = combat::StrikeSource::WeaponRight; sc.weaponComponent = "Blade";
     s.push_back(Encode(combat::SeverClaimMsg{ sc }));
+    combat::SeverClaim own = sc; own.attacker = own.victim; s.push_back(Encode(combat::SeverNoticeMsg{ own }));
     combat::StuckBladeMsg sb; sb.attacker = 1; sb.victim = 2; sb.stuck = true; sb.seq = 3; sb.bone = "spine_03"; sb.weaponComponent = "Blade";
     sb.weaponInBone.rot = sync::Q4{ 0, 0, 0, 1 }; s.push_back(Encode(sb));
     sb.stuck = false; sb.bone = ""; s.push_back(Encode(sb));
@@ -86,7 +88,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     PropStateMsg ps; ps.propId = MakeDropPropId(3, 1, 5); ps.lessee = 2; ps.senderTimeMs = 77; ps.px = 120; ps.pz = 40;
     ps.rot = PackQuat(0, 0, 0.3f, 0.95f); ps.vx = 300; ps.wz = 720; s.push_back(Encode(ps));
     PropLeaseMsg pl; pl.propId = ps.propId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
-    PropLeaseMsg lv; lv.propId = MakeLevelPropId("SM_Barrel_3"); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
+    PropLeaseMsg lv; lv.propId = MakeLevelPropId(3); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
     PropStateMsg pe = ps; pe.propId = MakeDropPropId(16, 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
     PropLeaseMsg le = pl; le.propId = pe.propId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
     combat::PaintFxMsg bl; bl.entity = 3; bl.kind = combat::FxKind::Blood; bl.seq = 7; bl.bone = "lowerarm_r"; bl.bodyPart = 2;
@@ -95,6 +97,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     combat::PaintFxMsg wd; wd.entity = 16; wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
     wd.damageRate = 1.5; s.push_back(Encode(wd));
     combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
+    PropCensusMsg pc; pc.seq = 3; pc.part = 1; pc.parts = 2;
+    pc.entries = {CensusEntry{0, 0x1234u, 10, -20, 30}, CensusEntry{9, 0xBEEFu, -500, 0.5f, 120}}; s.push_back(Encode(pc));
     return s;
 }
 }  // namespace
@@ -107,7 +111,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::Equip))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::PropCensus))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

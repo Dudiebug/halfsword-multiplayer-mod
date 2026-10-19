@@ -1,4 +1,5 @@
 #include "gameplay/standin_rig.h"
+#include "util/hsm_names.h"
 #include "log.h"
 #include <algorithm>
 #include <cmath>
@@ -177,7 +178,7 @@ void FighterRig::RefreshWeapon(int w) {
     wp.index = ObjectIndex(actor);
     const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(actor)));
     wp.classHash = sync::WeaponClassHash(cls.c_str());
-    wp.fists = cls.rfind(kFistsPrefix, 0) == 0;
+    wp.fists = StartsWithNameAscii(cls, kFistsPrefix);
     if (wp.fists) return;
     Call rc(actor, "K2_GetRootComponent");
     UObject* root = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
