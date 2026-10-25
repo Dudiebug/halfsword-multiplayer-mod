@@ -1,4 +1,4 @@
-# HSMMod: HalfSwordMP drop-in mod (v0.2 Phase 3, untested in game)
+# HSMMod: HalfSwordMP drop-in mod
 
 One DLL, no game files changed. It installs as `dwmapi.dll` next to the game exe (a DLL the game loads at
 startup, the same load point UE4SS uses), forwards every dwmapi export to the real system DLL, and (when enabled in
