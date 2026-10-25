@@ -137,6 +137,11 @@ private:
         double retryMs = 0, backoffMs = 0;
         double reattachMs = -1e18;         // the last time a weapon that left by itself was taken back
         bool selfDropLogged = false;       // its first loss since the stand-in was bound (left by itself, or gone) is logged
+        // A lease change from the owner let this hand go (NoticeDrop) while the owner's pose still showed that hand in the
+        // episode that began at leaseLetGoPoseMs: until the pose moves on the hand takes nothing (it would take the weapon
+        // just dropped).
+        bool leaseLetGo = false;
+        double leaseLetGoPoseMs = 0;
     };
     struct StandInHands {
         ue::UObject* willie = nullptr;
@@ -177,8 +182,8 @@ private:
     struct Counters {
         uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, forced = 0, kept = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
                  requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
-                 statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, readFailed = 0, lost = 0,
-                 attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, adopted = 0,
+                 statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
+                 attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0;
     };
 
@@ -208,6 +213,8 @@ private:
     void HostRelease(uint64_t propId, uint8_t slot);
     void Grant(uint64_t propId, uint8_t slot, LeaseLevel level);     // host: broadcast it and apply it here
     void OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level);   // every machine: the view, and a drop to resolve
+    // The owner's lease on a prop a stand-in holds here changed (sync DropNoticed): the stand-in lets the copy go at once.
+    void NoticeDrop(uint64_t propId, LeaseLevel prevLevel, uint8_t prevSlot, LeaseLevel level, uint8_t slot);
     bool Read(Prop& p, PropStateMsg& out);
     void StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs);   // read, and send when due
     void StreamLevel(const std::vector<uint64_t>& due, uint64_t& cursor, size_t& budget, bool countDeferred, uint8_t me, double nowMs);

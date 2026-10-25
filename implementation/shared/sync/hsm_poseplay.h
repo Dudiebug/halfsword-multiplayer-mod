@@ -334,6 +334,7 @@ inline void InterpolateFrame(const PoseFrame& a, const PoseFrame& b, double at, 
     const double h = static_cast<double>(b.tsMs) - static_cast<double>(a.tsMs);
     const double s = h > 0.0 ? (at - static_cast<double>(a.tsMs)) / h : 0.0;
     out.stepUs = (s < 0.5) ? a.stepUs : b.stepUs;
+    out.grip = (s < 0.5) ? a.grip : b.grip;   // discrete, like a weapon's hand and class: the nearer frame's
     for (size_t i = 0; i < kBoneSlots; ++i) {
         InterpolateSlot(a.bones[i].pos, a.bones[i].rot, a.bones[i].vel, a.bones[i].angVelDeg, b.bones[i].pos, b.bones[i].rot, b.bones[i].vel,
                          b.bones[i].angVelDeg, s, h, out.bones[i].pos, out.bones[i].rot, out.bones[i].vel, out.bones[i].angVelDeg);

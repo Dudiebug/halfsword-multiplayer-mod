@@ -1,4 +1,5 @@
 #include "gameplay/standin_rig.h"
+#include "sync/hsm_grip.h"
 #include "util/hsm_names.h"
 #include "log.h"
 #include <algorithm>
@@ -28,6 +29,11 @@ constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Bend Over Extr
 
 constexpr const char* kWeaponFields[sync::kPoseWeapons] = {"Weapon R", "Weapon L"};   // slot = hand
 constexpr const char* kGripFields[2] = {"PhysicsConstraint R Hand", "PhysicsConstraint L Hand"};
+// The hands' grip variables (docs/TWO_PLAYER_TEST_6.md section 1): the fingers follow the two grip types and the offhand flag in
+// ABP_Willie; the other flags move the left hand's attach point. Order = GripState: offhand, alt, mordhau, switched, reverse.
+constexpr const char* kGripBoolFields[] = {"L Hand In Offhand Attached", "R Alt Grip", "Mordhau Grip", "2H Switched Hands (Temp)",
+                                            "R Hand Reverse Grip"};
+static_assert(sizeof(kGripBoolFields) / sizeof(kGripBoolFields[0]) == 5, "GripState has five flags");
 constexpr const char* kRootConstraints[] = {"PhysicsConstraint Main", "PhysicsConstraint_Z"};
 constexpr const char* kHandles[] = {"PhysicsHandle GetUp", "PhysicsHandle LowerBody", "PhysicsHandle UpperBody"};
 constexpr const char* kFistsPrefix = "Weapon_Fists";   // an empty hand's pseudo weapon, kinematic at the world origin
@@ -141,6 +147,9 @@ bool FighterRig::Bind(UObject* willie) {
         if (FProperty* p = TypedField(wc, kWeaponFields[w], "ObjectProperty")) weaponOffset_[w] = PropertyOffset(p);
     for (int h = 0; h < 2; ++h)
         if (FProperty* p = TypedField(wc, kGripFields[h], "ObjectProperty")) gripOffset_[h] = PropertyOffset(p);
+    if (uint8_t* p = Field<uint8_t>(willie, "R_GripType_Current")) gripTypeOffset_[0] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
+    if (uint8_t* p = Field<uint8_t>(willie, "L_GripType_Current")) gripTypeOffset_[1] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
+    for (int i = 0; i < 5; ++i) gripFlag_[i] = TypedField(wc, kGripBoolFields[i], "BoolProperty");
     for (const char* f : kStandInZeroDoubleFields)
         if (FProperty* p = TypedField(wc, f, "DoubleProperty")) zeroDoubles_.push_back(PropertyOffset(p));
     for (const char* f : kStandInTrueBoolFields)
@@ -316,6 +325,7 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
             now->weaponValid[w] = true;
         }
     }
+    if (frame) frame->grip = ReadGrip();
     if (!typesLogged_) {
         typesLogged_ = true;
         auto type = [this](int w) { const Weapon& wp = weapons_[w]; return Live(wp.root, wp.rootIndex) ? ObjectType(wp.root) : -1; };
@@ -424,6 +434,7 @@ void FighterRig::Shift(const V3& d) {
         MoveTo(wp.root, Add(wp.pos, d));   // wp.pos is the root component's location as read this frame
         HoldStill(wp);
     }
+    slots_.Shift(willie_, d);   // the sheathed weapons go with the body (standin_slots.h)
 }
 
 void FighterRig::PlaceCapsule(const V3& at, const double* yawDeg) {
@@ -450,6 +461,55 @@ void FighterRig::Neutralise(double nowMs) {
     NeutraliseFull();
     weaponChanged_ = false;
     nextFullMs_ = nowMs + (nowMs - boundAtMs_ < kFullEarlyForMs ? kFullEarlyEveryMs : kFullEveryMs);
+}
+
+// ---- grips -----------------------------------------------------------------------------------------------------------
+
+sync::GripState FighterRig::ReadGrip() const {
+    sync::GripState g;
+    if (!willie_) return g;
+    const auto* base = reinterpret_cast<const uint8_t*>(willie_);
+    if (gripTypeOffset_[0] >= 0) g.gripR = base[gripTypeOffset_[0]];
+    if (gripTypeOffset_[1] >= 0) g.gripL = base[gripTypeOffset_[1]];
+    bool* const flags[5] = {&g.offhand, &g.altGrip, &g.mordhau, &g.switched2H, &g.reverseR};
+    for (int i = 0; i < 5; ++i) {
+        bool v = false;
+        if (gripFlag_[i] && GetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), v)) *flags[i] = v;
+    }
+    return g;
+}
+
+void FighterRig::ApplyGrip(const sync::GripState& g) {
+    if (!StillValid()) return;
+    auto* base = reinterpret_cast<uint8_t*>(willie_);
+    sync::GripState applied = g;
+    uint8_t* const appliedType[2] = {&applied.gripR, &applied.gripL};
+    const uint8_t poseType[2] = {g.gripR, g.gripL};
+    for (int h = 0; h < 2; ++h) {
+        if (gripTypeOffset_[h] < 0) continue;
+        UObject* held = FieldAt(weaponOffset_[h]);   // this stand-in's own hand: a two-handed grip leaves Weapon L null
+        uint8_t def = 0;
+        if (held && poseType[h] == 0) {              // the weapon's default matters only where the pose has none
+            const uint8_t* d = h == 0 ? Field<uint8_t>(held, "Grip R Hand Default") : Field<uint8_t>(held, "Grip L Hand Default");
+            if (d) def = *d;
+        }
+        const uint8_t v = sync::GripToApply(poseType[h], held != nullptr, def);
+        *appliedType[h] = v;
+        if (held && v == 0) continue;                // the weapon's own default is 0 too: leave the game's value, 0 destroys it
+        base[gripTypeOffset_[h]] = v;
+    }
+    const bool flags[5] = {g.offhand, g.altGrip, g.mordhau, g.switched2H, g.reverseR};
+    for (int i = 0; i < 5; ++i)
+        if (gripFlag_[i]) SetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), flags[i]);
+    const sync::GripState& l = gripStateLogged_;
+    if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
+        l.altGrip == applied.altGrip && l.mordhau == applied.mordhau && l.switched2H == applied.switched2H && l.reverseR == applied.reverseR)
+        return;
+    gripStateLogged_ = applied;
+    gripStateKnown_ = true;
+    HSM_LOG("rig: %s grips R %u L %u%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(applied.gripR), unsigned(applied.gripL),
+            applied.offhand ? " offhand" : "", applied.altGrip ? " alt" : "", applied.mordhau ? " mordhau" : "",
+            applied.switched2H ? " switched" : "", applied.reverseR ? " reverse" : "");
 }
 
 void FighterRig::SetBodyPolicy(UObject* body) {
@@ -497,6 +557,7 @@ void FighterRig::NeutraliseFull() {
     if (FProperty* p = FindProperty(ClassOf(mesh_), "VisibilityBasedAnimTickOption"); p && PropertySize(p) == 1)
         *(reinterpret_cast<uint8_t*>(mesh_) + PropertyOffset(p)) = kAlwaysTickPose;
     gripFreed_[0] = gripFreed_[1] = nullptr;   // the grips are freed again on the next Drive: the BP may re-lock them
+    slots_.Maintain(willie_);   // the sheathed weapons: diagnosis line (standin_slots.h)
 }
 
 }  // namespace hsm::game

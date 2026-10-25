@@ -344,6 +344,64 @@ void TestSender() {
     CHECK(!s.Due(other, 3009));                     // 5 kept
 }
 
+// SlotAnchorPlan: the sheath slots of a stand-in the client anchors to its body.
+void TestSlotAnchor() {
+    int w[kEquipSlots], extra, other;   // distinct actor identities: the five slot weapons and two loose ones
+    const std::array<const void*, kEquipSlots> filled = {&w[0], &w[1], &w[2], &w[3], &w[4]};
+    const std::array<bool, kEquipSlots> live = {true, true, true, true, true};
+    const std::array<const void*, 2> bare = {nullptr, nullptr};
+
+    // every slot filled with a live constraint and both hands empty: all five are anchored
+    const std::array<bool, kEquipSlots> all = SlotAnchorPlan(filled, live, bare);
+    for (int k = 0; k < kEquipSlots; ++k) CHECK(all[size_t(k)]);
+
+    // an empty slot is skipped, whatever its constraint says (hands full of other weapons, so no hand is null either)
+    const std::array<const void*, 2> others = {&extra, &other};
+    for (int k = 0; k < kEquipSlots; ++k) {
+        std::array<const void*, kEquipSlots> s = filled;
+        s[size_t(k)] = nullptr;
+        for (const auto& hands : {bare, others}) {
+            const std::array<bool, kEquipSlots> p = SlotAnchorPlan(s, live, hands);
+            for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+        }
+    }
+
+    // a dead constraint is skipped, the others stay
+    for (int k = 0; k < kEquipSlots; ++k) {
+        std::array<bool, kEquipSlots> l = live;
+        l[size_t(k)] = false;
+        const std::array<bool, kEquipSlots> p = SlotAnchorPlan(filled, l, others);
+        for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+    }
+
+    // NEGATIVE CONTROL: a slot whose weapon is in a hand is never anchored (a draw grabs it while the slot variable
+    // still holds it), whichever hand and whichever slot; the other slots are unaffected
+    for (int k = 0; k < kEquipSlots; ++k)
+        for (int hand = 0; hand < 2; ++hand) {
+            std::array<const void*, 2> held = {&extra, &other};
+            held[size_t(hand)] = &w[k];
+            const std::array<bool, kEquipSlots> p = SlotAnchorPlan(filled, live, held);
+            for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+        }
+    // both hands on slot weapons (a two-handed move): both slots skipped
+    const std::array<const void*, 2> both = {&w[0], &w[4]};
+    const std::array<bool, kEquipSlots> pb = SlotAnchorPlan(filled, live, both);
+    CHECK(!pb[0] && pb[1] && pb[2] && pb[3] && !pb[4]);
+    // one weapon in both hands (and one slot) stays one skip
+    const std::array<const void*, 2> twice = {&w[2], &w[2]};
+    const std::array<bool, kEquipSlots> pt = SlotAnchorPlan(filled, live, twice);
+    CHECK(pt[0] && pt[1] && !pt[2] && pt[3] && pt[4]);
+    // a held weapon that is in no slot changes nothing
+    CHECK(SlotAnchorPlan(filled, live, others) == all);
+
+    // nothing filled, nothing dead-or-alive to anchor
+    const std::array<bool, kEquipSlots> nothing{};
+    CHECK(SlotAnchorPlan({}, live, others) == nothing);
+    CHECK(SlotAnchorPlan({}, live, bare) == nothing);
+    // everything dead: nothing
+    CHECK(SlotAnchorPlan(filled, {}, others) == nothing);
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +414,7 @@ int main() {
     TestMayBeDraw();
     TestPlanStale();
     TestSender();
+    TestSlotAnchor();
     if (g_fail) { std::printf("test_hsm_equip: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_equip: ok\n");
     return 0;

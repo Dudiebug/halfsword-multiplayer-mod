@@ -580,6 +580,96 @@ static void TestResolveDropNow() {
     CHECK(!ResolveDropNow(true, axe, 0));
 }
 
+// A lease change from the owner is a drop (two-player test 6, section 4): the stand-in of the owner holds a copy of a
+// prop it already tracks, and the owner's HOLD falling to TOUCH / FREE -- or a TOUCH Grant for it -- is the owner
+// letting go, heard a pose-lag earlier than the pose shows it and without the 2 s the hand matching holds the class.
+static void TestDropNoticed() {
+    const uint8_t owner = 2, other = 1, host = kHostSlot;
+    // The owner's HOLD ends: it threw or dropped it (TOUCH: still its simulation), or the lease went FREE.
+    CHECK(DropNoticed(LeaseLevel::Hold, owner, LeaseLevel::Touch, owner, owner, true));
+    CHECK(DropNoticed(LeaseLevel::Hold, owner, LeaseLevel::Free, host, owner, true));
+    // A TOUCH Grant for the owner's slot, from FREE or from another slot's TOUCH.
+    CHECK(DropNoticed(LeaseLevel::Free, host, LeaseLevel::Touch, owner, owner, true));
+    CHECK(DropNoticed(LeaseLevel::Touch, other, LeaseLevel::Touch, owner, owner, true));
+    // The host's own fighter is owner slot 0 (kHostSlot): FREE is also slot 0, but only a HOLD / TOUCH names a holder.
+    CHECK(DropNoticed(LeaseLevel::Hold, host, LeaseLevel::Touch, host, host, true));
+    CHECK(!DropNoticed(LeaseLevel::Free, host, LeaseLevel::Free, host, host, true));
+    CHECK(!DropNoticed(LeaseLevel::Touch, host, LeaseLevel::Free, host, host, true));
+
+    // NEGATIVE CONTROL: a HOLD grant to the owner (a pick-up, or its renewal) releases nothing.
+    CHECK(!DropNoticed(LeaseLevel::Free, host, LeaseLevel::Hold, owner, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Touch, owner, LeaseLevel::Hold, owner, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Hold, owner, LeaseLevel::Hold, owner, owner, true));
+    // A TOUCH renewal is not a change.
+    CHECK(!DropNoticed(LeaseLevel::Touch, owner, LeaseLevel::Touch, owner, owner, true));
+    // The owner's TOUCH ending is a rest release, not a HOLD ending.
+    CHECK(!DropNoticed(LeaseLevel::Touch, owner, LeaseLevel::Free, host, owner, true));
+    // Another entity's grants say nothing about the owner's hand.
+    CHECK(!DropNoticed(LeaseLevel::Free, host, LeaseLevel::Touch, other, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Touch, other, LeaseLevel::Touch, other, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Free, host, LeaseLevel::Hold, other, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Touch, owner, LeaseLevel::Touch, other, owner, true));
+    CHECK(!DropNoticed(LeaseLevel::Hold, other, LeaseLevel::Free, host, owner, true));      // someone else's HOLD ended
+    CHECK(!DropNoticed(LeaseLevel::Hold, other, LeaseLevel::Touch, other, owner, true));
+    // No stand-in of the owner holds it here: not this rule's (the existing PendingDrop path, or nothing).
+    CHECK(!DropNoticed(LeaseLevel::Hold, owner, LeaseLevel::Touch, owner, owner, false));
+    CHECK(!DropNoticed(LeaseLevel::Hold, owner, LeaseLevel::Free, host, owner, false));
+    CHECK(!DropNoticed(LeaseLevel::Free, host, LeaseLevel::Touch, owner, owner, false));
+}
+
+// The same through the host's table and a machine's view, as PropSync::OnGrant sees them: the view's state before the
+// Grant against the Grant itself. The host answers only changes, so a renewal never reaches DropNoticed at all.
+static void TestDropNoticedFollowsTheTable() {
+    const uint8_t owner = 2, other = 1;
+    const uint64_t id = MakeWeaponPropId(3, 5);
+    LeaseTable t;
+    PropStateView v;
+    auto heard = [&](const LeaseResult& r) {
+        const LeaseLevel pl = v.Level(id);
+        const uint8_t ps = v.Streamer(id);
+        v.OnGrant(id, r.slot, r.level);
+        return DropNoticed(pl, ps, r.level, r.slot, owner, true);
+    };
+    LeaseResult r = t.Request(id, owner, LeaseLevel::Hold, 0.0);           // the owner picks it up
+    CHECK(r.changed && !heard(r));
+    r = t.Request(id, owner, LeaseLevel::Hold, 1000.0);                    // renewed: no Grant is sent
+    CHECK(!r.changed);
+    r = t.Request(id, other, LeaseLevel::Touch, 1100.0);                   // another slot touching a held prop: denied
+    CHECK(!r.changed);
+    r = t.Request(id, owner, LeaseLevel::Touch, 1500.0);                   // the owner lets go: HOLD -> TOUCH
+    CHECK(r.changed && heard(r));
+    r = t.Request(id, owner, LeaseLevel::Touch, 2500.0);                   // its renewal
+    CHECK(!r.changed);
+    r = t.Release(id, owner);                                              // at rest: released (TOUCH -> FREE)
+    CHECK(r.changed && !heard(r));
+    r = t.Request(id, other, LeaseLevel::Touch, 3000.0);                   // another slot touches it
+    CHECK(r.changed && !heard(r));
+    r = t.Request(id, owner, LeaseLevel::Hold, 3100.0);                    // the owner picks it up: HOLD evicts the TOUCH
+    CHECK(r.changed && !heard(r));
+    const std::vector<uint64_t> lapsed = t.Tick(3100.0 + kLeaseLapseMs);   // its renewals stop: the lease lapses
+    CHECK(lapsed.size() == 1 && lapsed[0] == id);
+    LeaseResult freed;                                                     // the host broadcasts Grant(Free, kHostSlot)
+    freed.slot = kHostSlot; freed.level = LeaseLevel::Free; freed.granted = freed.changed = true;
+    CHECK(heard(freed));
+}
+
+// Contact islands (two-player test 6, section 2): a prop pushed by a prop this machine streams is claimed TOUCH too, so
+// one machine simulates the whole pile it disturbed instead of the host and the toucher each simulating a part.
+// "Streamed here" is view_.Streamer(prop) == my slot: my TOUCH / HOLD lease, or FREE while I am the host.
+static void TestContactClaimant() {
+    const uint8_t me = 3;
+    CHECK(ContactClaimant(me, OtherKind::OwnedFighter, false) == me);     // a fighter simulated here: today's behaviour
+    CHECK(ContactClaimant(me, OtherKind::OwnedWeapon, false) == me);      // a weapon in its hand: today's behaviour
+    CHECK(ContactClaimant(me, OtherKind::Prop, true) == me);              // a prop streamed here pushed it: the island is mine
+    CHECK(ContactClaimant(me, OtherKind::Prop, false) == 0);              // a prop streamed elsewhere: its streamer's island
+    // NEGATIVE CONTROL: a stand-in (or its weapon) is another machine's fighter and claims nothing, whatever else is true.
+    CHECK(ContactClaimant(me, OtherKind::StandIn, false) == 0);
+    CHECK(ContactClaimant(me, OtherKind::StandIn, true) == 0);
+    // No fighter of mine to credit: no claim, whatever touched it.
+    CHECK(ContactClaimant(0, OtherKind::OwnedFighter, false) == 0);
+    CHECK(ContactClaimant(0, OtherKind::Prop, true) == 0);
+}
+
 static void TestPropStreamDue() {
     CHECK(!PropStreamDue(LeaseLevel::Hold, 0.0, false, 15.9));            // a held prop: every frame, 60 Hz at most
     CHECK(PropStreamDue(LeaseLevel::Hold, 0.0, false, 16.0));
@@ -597,6 +687,7 @@ static void TestPropStreamDue() {
 
 int main() {
     TestDropIdentity(); TestMintDropPropId(); TestDropEpoch(); TestDropSignature(); TestResolveDropNow(); TestPropStreamDue();
+    TestDropNoticed(); TestDropNoticedFollowsTheTable(); TestContactClaimant();
     TestPropStateRoundTrip(); TestPropStateRejects();
     TestPropLeaseRoundTrip(); TestPropLeaseRejects(); TestPropIdBoundsOnDecode(); TestRequestFreeIsNoOp();
     TestGrantWhenFree(); TestTouchVsTouchFirstWins(); TestHoldBeatsTouch(); TestHoldVsHoldFirstWins();

@@ -274,6 +274,7 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     }
     if (st.place) a.rig.Shift(st.shift);
     if (st.have && st.pelvisErrUu >= 0.0) a.rig.Drive(st.cmd);
+    if (st.have) a.rig.ApplyGrip(target.grip);   // after Neutralise and Drive: the owner's grips on this stand-in's hands
     Record(s, st, now, target);
 }
 

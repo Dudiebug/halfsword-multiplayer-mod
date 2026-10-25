@@ -47,11 +47,24 @@ struct WeaponSample {
     V3 base, tip;            // blade base ("Root Scene") and tip ("TippyTipScene"), world
 };
 
+// How the owner's hands hold their weapon, read from the Willie's own variables (the game never gives the left hand a
+// "Weapon L" for a two-handed or half-sword grip: it adds a PhysicsConstraint L Hand and sets L Hand In Offhand
+// Attached; the fingers follow these values in ABP_Willie). All zero / false = nothing held in that way.
+struct GripState {
+    uint8_t gripR = 0, gripL = 0;   // R_GripType_Current, L_GripType_Current; 0 = no grip; 5 bits on the wire (0..31)
+    bool offhand = false;           // L Hand In Offhand Attached
+    bool altGrip = false;           // R Alt Grip
+    bool mordhau = false;           // Mordhau Grip
+    bool switched2H = false;        // 2H Switched Hands (Temp)
+    bool reverseR = false;          // R Hand Reverse Grip
+};
+
 struct PoseFrame {
     uint32_t tsMs = 0;       // owner clock, ms, the physics state's time
     uint16_t stepUs = 0;     // the owner's physics step that produced this state, microseconds
     std::array<BoneSample, kPoseBones> bones{};
     std::array<WeaponSample, kPoseWeapons> weapons{};
+    GripState grip{};        // wire codec v2; the stand-in writes it into its own Willie each frame
 };
 
 }  // namespace hsm::sync

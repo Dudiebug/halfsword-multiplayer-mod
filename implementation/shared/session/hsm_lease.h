@@ -136,6 +136,27 @@ inline bool ResolveDropNow(bool havePose, uint32_t poseHandClass, uint32_t copyC
     return havePose && copyClass != 0 && poseHandClass != copyClass;
 }
 
+// A lease change from the owner is a drop. A weapon in the hand of a fighter's stand-in here is that fighter's weapon
+// in its hand there, which its machine leases HOLD for as long as the game's "Parent Actor" names the fighter; the moment
+// it lets go (a drop, a throw, a disarm) the claim falls to TOUCH -- the throw is still its simulation -- or the lease
+// ends. The host's Grant for that (it answers changes only, a renewal is no Grant) comes well before the owner's pose
+// shows the hand empty, and before the hand matching (sync/hsm_handmatch.h) lets the copy go: it holds the last shown
+// class kReattachMinMs, and until then the copy sits in the stand-in's hand and the owner's stream does not drive it.
+// prev/prevSlot: the lease as this machine's view had it before the Grant (the streamer, kHostSlot when FREE);
+// now/nowSlot: the Grant. ownerSlot: the roster slot whose machine simulates the fighter whose stand-in holds the copy.
+// True only when standInHoldsIt (a prop this machine tracks sits in that stand-in's hand; an id it does not track is the
+// PendingDrop path of DropSignature) and either the owner's HOLD ended (a TOUCH or FREE follows, or another slot's lease)
+// or the owner is granted a TOUCH it did not have. A HOLD grant to the owner (a pick-up, its renewal), a TOUCH renewal,
+// a TOUCH ending (a rest release) and every grant to another slot release nothing.
+inline bool DropNoticed(LeaseLevel prev, uint8_t prevSlot, LeaseLevel now, uint8_t nowSlot, uint8_t ownerSlot, bool standInHoldsIt) {
+    if (!standInHoldsIt) return false;
+    const bool ownerHeld = prev == LeaseLevel::Hold && prevSlot == ownerSlot;
+    const bool ownerHolds = now == LeaseLevel::Hold && nowSlot == ownerSlot;
+    if (ownerHeld) return !ownerHolds;
+    const bool ownerTouchedBefore = prev == LeaseLevel::Touch && prevSlot == ownerSlot;
+    return now == LeaseLevel::Touch && nowSlot == ownerSlot && !ownerTouchedBefore;
+}
+
 // ---------------------------------------------------------------- PropState (unreliable)
 // Sent every tick by whoever currently streams the prop: the lessee when leased, otherwise the host (a FREE prop
 // is the host's to simulate, exactly as a WorldState object used to be). Everyone else applies it to the actor.
@@ -418,6 +439,25 @@ inline ClaimSend StepClaim(LeaseClaim& c, bool holding, double lastContactMs, bo
     if (want == c.sent && nowMs - c.sentMs < kClaimRenewMs) return ClaimSend::None;
     c.sent = want; c.sentMs = nowMs;
     return ClaimSend::Request;
+}
+
+// Contact islands. A contact between a prop and another object counts as touching for this machine (its claim above)
+// when the other object is this machine's: a fighter simulated here or a weapon in its hand (the first behaviour), or a
+// prop this machine streams (its own TOUCH / HOLD lease, or FREE while it is the host), so a prop pushed by a prop it
+// simulates is simulated here too and the pile one hit disturbed has one simulator (two-player test 6: the barrel the
+// touched stick held up stayed the host's, and the two copies moved differently). A prop streamed elsewhere is that
+// streamer's island; a stand-in, and the weapon in its hand, is another machine's fighter and claims nothing.
+// myEntity: the fighter of this machine the contact is credited to (for a fighter or its weapon its own, for a prop the one
+// that touched that prop last, else this machine's), 0 when there is none. Returns the entity to claim for, 0 for none.
+enum class OtherKind : uint8_t { OwnedFighter = 0, OwnedWeapon = 1, StandIn = 2, Prop = 3 };
+inline uint8_t ContactClaimant(uint8_t myEntity, OtherKind kind, bool otherStreamedHere) {
+    switch (kind) {
+    case OtherKind::OwnedFighter: return myEntity;
+    case OtherKind::OwnedWeapon: return myEntity;
+    case OtherKind::Prop: return otherStreamedHere ? myEntity : 0;
+    case OtherKind::StandIn: return 0;
+    }
+    return 0;
 }
 
 }  // namespace hsm

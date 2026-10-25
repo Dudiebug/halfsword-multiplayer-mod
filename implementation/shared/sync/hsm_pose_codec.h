@@ -1,5 +1,5 @@
 // Compact binary codec for PoseFrame (hsm_pose.h): one fighter's full physical state, 60 Hz over
-// UDP. Layout: 1-byte version, tsMs/stepUs/flags/pelvis-pos/skeleton-scale header (byte-aligned),
+// UDP. Layout: 1-byte version, tsMs/stepUs/flags/grip/pelvis-pos/skeleton-scale header (byte-aligned),
 // then a bit-packed body: pelvis world rotation (smallest-three, 15 bit); every other bone as a
 // rotation relative to its PARENT'S RECONSTRUCTED pose (smallest-three, 13 bit) so quantisation
 // never accumulates down a chain; bone positions by forward kinematics from kPoseRefT (SK_Body_Man
@@ -26,7 +26,8 @@
 
 namespace hsm::sync {
 
-constexpr uint8_t kPoseCodecVersion = 1;
+// 2: the header carries the grip state (2 bytes after the flags byte). A version-1 frame is refused, not guessed at.
+constexpr uint8_t kPoseCodecVersion = 2;
 
 // ---- quaternion / vector helpers (double precision; safe for NaN/Inf inputs where noted) -----
 
@@ -89,6 +90,13 @@ constexpr double kVLinMax = 10000.0;       // uu/s, mu-law full scale
 constexpr double kVAngMax = 5000.0;        // deg/s, mu-law full scale
 constexpr double kMuLaw = 255.0;
 
+// Grip state, a u16 after the flags byte: bits 0-4 gripR, 5-9 gripL, 10 offhand, 11 altGrip, 12 mordhau, 13 switched2H,
+// 14 reverseR, 15 spare (written 0, ignored when read).
+constexpr unsigned kGripTypeBits = 5;
+constexpr uint8_t kGripTypeMax = (1u << kGripTypeBits) - 1;
+constexpr unsigned kGripLShift = kGripTypeBits, kGripOffhandBit = 10, kGripAltBit = 11, kGripMordhauBit = 12,
+                   kGripSwitchedBit = 13, kGripReverseBit = 14;
+
 // FNV-1a of the class name with ASCII letters folded to lower case: a name's display casing is whichever casing its
 // FName registered first in that process, so two machines can spell one class differently.
 constexpr uint32_t WeaponClassHash(const char* s) {
@@ -97,8 +105,8 @@ constexpr uint32_t WeaponClassHash(const char* s) {
     return h;
 }
 
-// Header: version(1) + tsMs(4) + stepUs(2) + flags(1) + pelvis pos(4*3) + skeleton scale(2).
-constexpr size_t kPoseHeaderBytes = 1 + 4 + 2 + 1 + 4 * 3 + 2;
+// Header: version(1) + tsMs(4) + stepUs(2) + flags(1) + grip(2) + pelvis pos(4*3) + skeleton scale(2) = 24 bytes.
+constexpr size_t kPoseHeaderBytes = 1 + 4 + 2 + 1 + 2 + 4 * 3 + 2;
 
 namespace detail {
 
@@ -305,6 +313,30 @@ inline float ReadF32LE(const uint8_t* p) {
     return v;
 }
 
+// Grip types are saturated, never wrapped: a byte the game should not hold must not turn into a plausible grip type.
+constexpr unsigned SatGripType(uint8_t v) { return v > kGripTypeMax ? unsigned(kGripTypeMax) : unsigned(v); }
+inline uint16_t PackGrip(const GripState& g) {
+    uint16_t w = uint16_t(SatGripType(g.gripR));
+    w = uint16_t(w | (SatGripType(g.gripL) << kGripLShift));
+    if (g.offhand) w = uint16_t(w | (1u << kGripOffhandBit));
+    if (g.altGrip) w = uint16_t(w | (1u << kGripAltBit));
+    if (g.mordhau) w = uint16_t(w | (1u << kGripMordhauBit));
+    if (g.switched2H) w = uint16_t(w | (1u << kGripSwitchedBit));
+    if (g.reverseR) w = uint16_t(w | (1u << kGripReverseBit));
+    return w;
+}
+inline GripState UnpackGrip(uint16_t w) {
+    GripState g;
+    g.gripR = uint8_t(w & kGripTypeMax);
+    g.gripL = uint8_t((w >> kGripLShift) & kGripTypeMax);
+    g.offhand = ((w >> kGripOffhandBit) & 1u) != 0;
+    g.altGrip = ((w >> kGripAltBit) & 1u) != 0;
+    g.mordhau = ((w >> kGripMordhauBit) & 1u) != 0;
+    g.switched2H = ((w >> kGripSwitchedBit) & 1u) != 0;
+    g.reverseR = ((w >> kGripReverseBit) & 1u) != 0;
+    return g;
+}
+
 }  // namespace detail
 
 // ---- worst-case byte budget ---------------------------------------------------------------
@@ -337,6 +369,7 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
 
     const uint8_t flags = uint8_t((f.weapons[0].present ? 1 : 0) | (f.weapons[1].present ? 2 : 0));
     out.push_back(flags);
+    detail::AppendU16LE(out, detail::PackGrip(f.grip));
 
     const V3 pelvisPos = SafeV3(f.bones[0].pos);
     detail::AppendF32LE(out, float(pelvisPos.x));
@@ -423,6 +456,7 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
     const uint16_t stepUs = detail::ReadU16LE(data + p); p += 2;
     const uint8_t flags = data[p++];
     const bool present[kPoseWeapons] = {(flags & 0x01) != 0, (flags & 0x02) != 0};
+    const GripState grip = detail::UnpackGrip(detail::ReadU16LE(data + p)); p += 2;
     const float pelX = detail::ReadF32LE(data + p); p += 4;
     const float pelY = detail::ReadF32LE(data + p); p += 4;
     const float pelZ = detail::ReadF32LE(data + p); p += 4;
@@ -465,6 +499,7 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
     PoseFrame res{};
     res.tsMs = tsMs;
     res.stepUs = stepUs;
+    res.grip = grip;
     for (int i = 0; i < kPoseBones; ++i) {
         res.bones[i].pos = recPos[i];
         res.bones[i].rot = recRot[i];

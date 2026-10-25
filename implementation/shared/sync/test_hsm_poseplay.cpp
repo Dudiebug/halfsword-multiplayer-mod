@@ -605,6 +605,51 @@ static void TestNoNaNUnderRandomizedStream() {
     }
 }
 
+// The grip state rides the stream: every sampled frame (interpolated, extrapolated, held) carries it, taken from the
+// nearer of the two bracketing frames when it changes between them (it is discrete, like a weapon's hand and class).
+static GripState PlayGripA() {
+    GripState g;
+    g.gripR = 3; g.gripL = 7; g.offhand = true; g.altGrip = true; g.mordhau = true; g.switched2H = true; g.reverseR = false;
+    return g;
+}
+static GripState PlayGripB() {
+    GripState g;
+    g.gripR = 12; g.gripL = 0; g.offhand = false; g.altGrip = false; g.mordhau = false; g.switched2H = false; g.reverseR = true;
+    return g;
+}
+static bool SameGripState(const GripState& a, const GripState& b) {
+    return a.gripR == b.gripR && a.gripL == b.gripL && a.offhand == b.offhand && a.altGrip == b.altGrip &&
+           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR;
+}
+
+static void TestGripCarriedThroughPlayback() {
+    PosePlayer pp;
+    const V3 pos0{10.0, -5.0, 2.0}, vel{37.5, -12.25, 6.0};
+    const double period = 1000.0 / 60.0;
+    const double t0 = 10000.0;
+    for (int k = 0; k < 20; ++k) {
+        const double ts = t0 + k * period;
+        PoseFrame f = LinearFrame(static_cast<uint32_t>(std::llround(ts)), t0, pos0, vel);
+        f.grip = (k < 10) ? PlayGripA() : PlayGripB();          // frames 0..9 hold grip A, 10..19 grip B
+        CHECK(pp.Push(f, static_cast<int64_t>(std::llround(ts + 40.0))));
+    }
+    auto sampleAt = [&](double atTarget, PoseFrame& out, SampleInfo& info) {
+        const int64_t now = static_cast<int64_t>(std::llround(atTarget + pp.offsetMs() + pp.delayMs()));
+        return pp.Sample(now, out, &info);
+    };
+    PoseFrame out; SampleInfo info;
+    CHECK(sampleAt(t0 + 3.37 * period, out, info) && !info.extrapolated);
+    CHECK(SameGripState(out.grip, PlayGripA()));                 // interpolating inside a run of one grip
+    CHECK(sampleAt(t0 + 9.2 * period, out, info) && !info.extrapolated);
+    CHECK(SameGripState(out.grip, PlayGripA()));                 // between frames 9 (A) and 10 (B), nearer to 9
+    CHECK(sampleAt(t0 + 9.8 * period, out, info) && !info.extrapolated);
+    CHECK(SameGripState(out.grip, PlayGripB()));                 // ... nearer to 10
+    CHECK(sampleAt(t0 + 14.5 * period, out, info) && !info.extrapolated);
+    CHECK(SameGripState(out.grip, PlayGripB()));                 // inside the second run
+    CHECK(sampleAt(t0 + 19.0 * period + 15.0, out, info) && info.extrapolated);
+    CHECK(SameGripState(out.grip, PlayGripB()));                 // past the newest frame: its grip, verbatim
+}
+
 int main() {
     TestDuplicatesAndReorderingHandled();
     TestHermiteExactOnEndpointsAndConstantVelocity();
@@ -625,6 +670,7 @@ int main() {
     TestLookAheadKeepsVelocityPastClock();
     TestRotationsStayUnitLength();
     TestNoNaNUnderRandomizedStream();
+    TestGripCarriedThroughPlayback();
 
     if (g_fail == 0) {
         std::printf("test_hsm_poseplay: all passed\n");

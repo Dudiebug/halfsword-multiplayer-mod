@@ -12,6 +12,7 @@
 // the blocked tick); a freed grip is never restored (its template limits live in the native ConstraintInstance, which
 // this layer does not read), so a held weapon that stops being driven after its grip was freed is held still instead.
 #pragma once
+#include "gameplay/standin_slots.h"
 #include "sync/hsm_standin.h"
 #include "ue/engine.h"
 #include <array>
@@ -59,7 +60,14 @@ public:
     // collision on a schedule (every 0.5 s for the first 6 s after binding, then every 2 s, and after a weapon change).
     void Neutralise(double nowMs);
 
+    // Stand-in: writes the owner's grip state into this Willie, so its fingers and animation follow the owner's hands (the
+    // left hand of a two-handed grip never holds a Weapon L; the game marks it with L Hand In Offhand Attached). The two
+    // grip types go through sync::GripToApply: a hand that holds a weapon here never gets 0, which would destroy the
+    // weapon. Call every frame after Neutralise and Drive. Logs one line per change.
+    void ApplyGrip(const sync::GripState& g);
+
 private:
+    sync::GripState ReadGrip() const;             // the bound Willie's own grip variables (the owner's side)
     struct Weapon {
         ue::UObject* actor = nullptr;
         int32_t index = -1;
@@ -108,6 +116,10 @@ private:
     ue::UObject* gripLogged_[2] = {nullptr, nullptr};
     std::vector<int32_t> zeroDoubles_;                       // offsets of the zeroed double fields
     std::vector<ue::FProperty*> trueBools_, falseBools_;
+    int32_t gripTypeOffset_[2] = {-1, -1};                   // "R_GripType_Current" / "L_GripType_Current" (ByteProperty)
+    ue::FProperty* gripFlag_[5] = {};                        // offhand, alt, mordhau, switched, reverse (BoolProperty)
+    sync::GripState gripStateLogged_{};                      // the grip state ApplyGrip last logged
+    bool gripStateKnown_ = false;
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons
@@ -116,6 +128,7 @@ private:
     sync::V3 pelvis_{};                                      // this frame's Read
     bool pelvisRead_ = false;
     ue::UObject* failLogged_ = nullptr;                      // the fighter whose bind failure was logged
+    StandInSlots slots_;                                     // the sheathed weapons (standin_slots.h)
 };
 
 }  // namespace hsm::game

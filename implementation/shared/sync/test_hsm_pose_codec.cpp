@@ -263,7 +263,7 @@ static void TestNaNHeaderRejected() {
     uint8_t nanBytes[4];
     std::memcpy(nanBytes, &nanv, 4);
     std::vector<uint8_t> bad = buf;
-    for (int i = 0; i < 4; ++i) bad[8 + i] = nanBytes[i];  // pelvis.x, right after the 8-byte header prefix
+    for (int i = 0; i < 4; ++i) bad[10 + i] = nanBytes[i];  // pelvis.x, right after the 10-byte header prefix (v2: version, tsMs, stepUs, flags, grip)
     PoseFrame d{};
     CHECK(!DecodePose(bad.data(), bad.size(), d));
 
@@ -271,7 +271,7 @@ static void TestNaNHeaderRejected() {
     float infv = std::numeric_limits<float>::infinity();
     uint8_t infBytes[4];
     std::memcpy(infBytes, &infv, 4);
-    for (int i = 0; i < 4; ++i) inf[12 + i] = infBytes[i];  // pelvis.y
+    for (int i = 0; i < 4; ++i) inf[14 + i] = infBytes[i];  // pelvis.y
     CHECK(!DecodePose(inf.data(), inf.size(), d));
 }
 
@@ -316,6 +316,164 @@ static void TestWeaponClassHash() {
     CHECK(WeaponClassHash("\xC4") != WeaponClassHash("\xE4"));  // and only ASCII ones
 }
 
+// ---- codec v2: the grip state (hands' grip types and the five grip flags) in the header ----------------------------
+// Wire layout of the 2 bytes after the flags byte (header offsets 8 and 9, little-endian u16): bits 0-4 gripR, 5-9 gripL,
+// 10 offhand, 11 altGrip, 12 mordhau, 13 switched2H, 14 reverseR, 15 spare (written 0, ignored when read).
+static constexpr size_t kGripOff = 8;
+static constexpr size_t kV1HeaderBytes = 1 + 4 + 2 + 1 + 4 * 3 + 2;   // the documented v1 header: 22 bytes
+
+static uint16_t GripWord(const std::vector<uint8_t>& buf) { return uint16_t(buf[kGripOff] | (buf[kGripOff + 1] << 8)); }
+
+static bool SameGrip(const GripState& a, const GripState& b) {
+    return a.gripR == b.gripR && a.gripL == b.gripL && a.offhand == b.offhand && a.altGrip == b.altGrip &&
+           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR;
+}
+
+static GripState MakeGrip(unsigned r, unsigned l, bool off, bool alt, bool mord, bool sw, bool rev) {
+    GripState g;
+    g.gripR = uint8_t(r); g.gripL = uint8_t(l);
+    g.offhand = off; g.altGrip = alt; g.mordhau = mord; g.switched2H = sw; g.reverseR = rev;
+    return g;
+}
+
+static bool GripRoundTrips(const GripState& g) {
+    std::mt19937 rng(77);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+    f.grip = g;
+    std::vector<uint8_t> buf = EncodePose(f);
+    PoseFrame d{};
+    return DecodePose(buf.data(), buf.size(), d) && SameGrip(d.grip, g);
+}
+
+static void TestGripRoundTripExtremes() {
+    CHECK(kPoseCodecVersion == 2);
+    // Both grip types at both ends of the 5-bit range, independently and together, plus the bit-4 / bit-0 neighbours.
+    const unsigned vals[] = {0, 1, 15, 16, 30, 31};
+    for (unsigned r : vals) for (unsigned l : vals) CHECK(GripRoundTrips(MakeGrip(r, l, false, false, false, false, false)));
+    CHECK(GripRoundTrips(MakeGrip(31, 0, false, false, false, false, false)));   // R alone: swapped R/L shows here
+    CHECK(GripRoundTrips(MakeGrip(0, 31, false, false, false, false, false)));
+    // Each flag alone, then all five, then none: a dropped, merged or shifted flag shows here.
+    CHECK(GripRoundTrips(MakeGrip(0, 0, true,  false, false, false, false)));
+    CHECK(GripRoundTrips(MakeGrip(0, 0, false, true,  false, false, false)));
+    CHECK(GripRoundTrips(MakeGrip(0, 0, false, false, true,  false, false)));
+    CHECK(GripRoundTrips(MakeGrip(0, 0, false, false, false, true,  false)));
+    CHECK(GripRoundTrips(MakeGrip(0, 0, false, false, false, false, true)));
+    CHECK(GripRoundTrips(MakeGrip(31, 31, true, true, true, true, true)));
+    CHECK(GripRoundTrips(MakeGrip(0, 0, false, false, false, false, false)));
+    // Flags with grips in between do not bleed into each other.
+    CHECK(GripRoundTrips(MakeGrip(31, 0, true, false, true, false, true)));
+    CHECK(GripRoundTrips(MakeGrip(0, 31, false, true, false, true, false)));
+    // Every grip value 0..31 on each hand, across 2000 random frames' worth of bone data: the header is independent of the body.
+    std::mt19937 rng(0x6121Bu);
+    for (int i = 0; i < 2000; ++i) {
+        PoseFrame f = BuildFkFrame(rng, 1.0, int(rng() % 3));
+        f.grip = MakeGrip(rng() % 32, rng() % 32, rng() & 1, rng() & 1, rng() & 1, rng() & 1, rng() & 1);
+        std::vector<uint8_t> buf = EncodePose(f);
+        PoseFrame d{};
+        CHECK(DecodePose(buf.data(), buf.size(), d));
+        CHECK(SameGrip(d.grip, f.grip));
+    }
+}
+
+static void TestGripWireLayout() {
+    std::mt19937 rng(11);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 2);
+    PoseFrame none = f;                                         // grip all zero
+    PoseFrame full = f;
+    full.grip = MakeGrip(21, 10, true, false, true, false, true);   // gripR 10101, gripL 01010
+    std::vector<uint8_t> bn = EncodePose(none), bf = EncodePose(full);
+    CHECK(bn.size() == bf.size());
+    CHECK(GripWord(bn) == 0);
+    const uint16_t want = uint16_t(21 | (10 << 5) | (1 << 10) | (1 << 12) | (1 << 14));
+    CHECK(GripWord(bf) == want);
+    CHECK((GripWord(bf) & 0x8000) == 0);                        // the spare bit is written 0
+    // Nothing but those two bytes differs: the grip lives in the byte-aligned header, the body is untouched.
+    std::vector<uint8_t> a = bn, b = bf;
+    a.erase(a.begin() + kGripOff, a.begin() + kGripOff + 2);
+    b.erase(b.begin() + kGripOff, b.begin() + kGripOff + 2);
+    CHECK(a == b);
+    // Each field has its own bit(s).
+    PoseFrame g = f;
+    g.grip.gripR = 31;      CHECK(GripWord(EncodePose(g)) == 0x001F);
+    g.grip = GripState{}; g.grip.gripL = 31;      CHECK(GripWord(EncodePose(g)) == 0x03E0);
+    g.grip = GripState{}; g.grip.offhand = true;  CHECK(GripWord(EncodePose(g)) == 0x0400);
+    g.grip = GripState{}; g.grip.altGrip = true;  CHECK(GripWord(EncodePose(g)) == 0x0800);
+    g.grip = GripState{}; g.grip.mordhau = true;  CHECK(GripWord(EncodePose(g)) == 0x1000);
+    g.grip = GripState{}; g.grip.switched2H = true; CHECK(GripWord(EncodePose(g)) == 0x2000);
+    g.grip = GripState{}; g.grip.reverseR = true; CHECK(GripWord(EncodePose(g)) == 0x4000);
+}
+
+static void TestGripSaturatesNotWraps() {
+    // A byte the game should never hold (garbage read) must not wrap into a plausible grip type: 200 -> 31, 32 -> 31.
+    std::mt19937 rng(12);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 0);
+    f.grip.gripR = 200; f.grip.gripL = 32;
+    std::vector<uint8_t> buf = EncodePose(f);
+    PoseFrame d{};
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    CHECK(d.grip.gripR == 31 && d.grip.gripL == 31);
+    CHECK((GripWord(buf) & 0x7FFF) == 0x03FF);
+}
+
+static void TestGripSpareBitIgnored() {
+    std::mt19937 rng(13);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+    f.grip = MakeGrip(5, 9, false, true, false, false, false);
+    std::vector<uint8_t> buf = EncodePose(f);
+    PoseFrame ref{};
+    CHECK(DecodePose(buf.data(), buf.size(), ref));
+    buf[kGripOff + 1] |= 0x80;                                  // the spare bit set by a sender
+    PoseFrame d{};
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    CHECK(SameGrip(d.grip, ref.grip) && SameGrip(d.grip, f.grip));      // read into no flag and no grip type
+    for (int i = 0; i < kPoseBones; ++i) CHECK(Vec3Dist(d.bones[i].pos, ref.bones[i].pos) == 0.0);
+    // And with every grip bit zero except the spare one: still an all-zero grip.
+    f.grip = GripState{};
+    buf = EncodePose(f);
+    buf[kGripOff + 1] |= 0x80;
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    CHECK(SameGrip(d.grip, GripState{}));
+}
+
+static void TestVersionOneFrameRefused() {
+    std::mt19937 rng(14);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 2);
+    std::vector<uint8_t> v2 = EncodePose(f);
+    CHECK(v2[0] == 2);
+    // A real version-1 frame: version byte 1 and no grip bytes.
+    std::vector<uint8_t> v1 = v2;
+    v1.erase(v1.begin() + kGripOff, v1.begin() + kGripOff + 2);
+    v1[0] = 1;
+    PoseFrame d{};
+    CHECK(!DecodePose(v1.data(), v1.size(), d));
+    // The same bytes with the version byte flipped back to 1 (grip bytes present) are refused too.
+    std::vector<uint8_t> relabelled = v2;
+    relabelled[0] = 1;
+    CHECK(!DecodePose(relabelled.data(), relabelled.size(), d));
+    CHECK(DecodePose(v2.data(), v2.size(), d));      // sanity: the v2 frame itself decodes
+}
+
+static void TestHeaderGrewByExactlyTwoBytes() {
+    // Documented v2 header: version(1) + tsMs(4) + stepUs(2) + flags(1) + grip(2) + pelvis pos(4*3) + skeleton scale(2) = 24.
+    CHECK(kPoseHeaderBytes == kV1HeaderBytes + 2);
+    CHECK(kPoseHeaderBytes == 24);
+    CHECK(kPoseFrameMaxBytes == kV1HeaderBytes + 2 + (detail::kBitsMax + 7) / 8);
+    // An FK frame needs no overrides, so its size is exactly the header plus the bit-packed body.
+    std::mt19937 rng(15);
+    const size_t bodyBits0 = detail::kBitsRootQuat + detail::kBitsChildQuats + detail::kBitsVelAll + detail::kBitsOverrideMask;
+    const size_t bodyBits1 = bodyBits0 + detail::kBitsPerWeapon;
+    PoseFrame f0 = BuildFkFrame(rng, 1.0, 0), f1 = BuildFkFrame(rng, 1.0, 1);
+    CHECK(EncodePose(f0).size() == kV1HeaderBytes + 2 + (bodyBits0 + 7) / 8);
+    CHECK(EncodePose(f1).size() == kV1HeaderBytes + 2 + (bodyBits1 + 7) / 8);
+    // The size does not depend on the grip values.
+    f0.grip = MakeGrip(31, 31, true, true, true, true, true);
+    CHECK(EncodePose(f0).size() == kV1HeaderBytes + 2 + (bodyBits0 + 7) / 8);
+    // Anything shorter than the new header is refused, a header-only buffer is not a frame.
+    std::vector<uint8_t> buf = EncodePose(f0);
+    PoseFrame d{};
+    CHECK(!DecodePose(buf.data(), kPoseHeaderBytes - 1, d));
+}
+
 int main() {
     TestPropertyRoundTrip();
     TestDislocatedBoneOverridesExactly();
@@ -327,6 +485,12 @@ int main() {
     TestTruncationAlwaysRejected();
     TestHostileRandomBuffersNeverCrashAndStayFinite();
     TestWeaponClassHash();
+    TestGripRoundTripExtremes();
+    TestGripWireLayout();
+    TestGripSaturatesNotWraps();
+    TestGripSpareBitIgnored();
+    TestVersionOneFrameRefused();
+    TestHeaderGrewByExactlyTwoBytes();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");
     return g_fail != 0;

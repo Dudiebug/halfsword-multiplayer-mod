@@ -1,4 +1,5 @@
 #include "gameplay/equip_sync.h"
+#include "gameplay/standin_slots.h"
 #include "util/hsm_names.h"
 #include "log.h"
 #include "sync/hsm_handmatch.h"
@@ -316,7 +317,9 @@ bool EquipSync::Sheathe(UObject* standIn, const Read& r, int hand, int slot) {
         HSM_LOG("equip: stand-in %s did not sheathe %s in slot %d", ObjectName(standIn).c_str(), ObjectName(weapon).c_str(), slot);
         return false;
     }
-    return LetGo(standIn, hand);
+    const bool letGo = LetGo(standIn, hand);
+    if (letGo) StandInSlots::Anchor(standIn, true);   // the sheathed weapon goes with the body, not BoneCore (standin_slots.h)
+    return letGo;
 }
 
 // "Set Up ... Hand Weapon" with no weapon: the hand lets go of the (now sheathed) weapon, which keeps its slot.

@@ -205,6 +205,23 @@ inline std::vector<EquipStep> PlanEquip(const EquipStateMsg& owner, const EquipS
     return steps;
 }
 
+// Which sheath slots of a stand-in the client anchors to its body (standin_slots.cpp): the game spawns each slot weapon
+// under the actor and constrains its BaseMesh to a body component the mod then switches off and moves (BoneCore for the
+// waist slots), so a sheathed weapon is left behind at the spawn point. A slot is anchored when it holds an actor, its
+// sheath constraint is live (a dead one is left alone: it is logged) and its actor is in neither hand (a draw grabs the
+// weapon while the slot variable still holds it: the hand owns it then). slotActors / constraintLive as in
+// EquipSnapshot (slots / constrained); heldActors are the stand-in's "Weapon R" and "Weapon L".
+inline std::array<bool, kEquipSlots> SlotAnchorPlan(const std::array<const void*, kEquipSlots>& slotActors,
+                                                    const std::array<bool, kEquipSlots>& constraintLive,
+                                                    const std::array<const void*, 2>& heldActors) {
+    std::array<bool, kEquipSlots> out{};
+    for (int k = 0; k < kEquipSlots; ++k) {
+        const void* a = slotActors[size_t(k)];
+        out[size_t(k)] = a && constraintLive[size_t(k)] && a != heldActors[0] && a != heldActors[1];
+    }
+    return out;
+}
+
 // Sender side, per fighter: a state is due when it is the first, differs from the last one sent, or the last one is
 // kEquipResendMs old.
 class EquipSender {

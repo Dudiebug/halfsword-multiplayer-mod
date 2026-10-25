@@ -523,6 +523,12 @@ void PropSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObject*
         if (age >= sync::kAttachGraceMs && age < sync::kDrawGraceMs) f.mayBeDraw = env_.mayBeDraw(e, f.poseClass);
     }
     const sync::HandAct act = sh.match.Step(f, nowMs);
+    // A hand a lease change let go of (NoticeDrop) takes nothing until the owner's pose for it moves on: the pose may still
+    // show the weapon just dropped, and the hand would pick it straight up again from where it lies.
+    if (sh.leaseLetGo) {
+        if (!f.havePose || pose.sinceMs != sh.leaseLetGoPoseMs) sh.leaseLetGo = false;
+        else if (act == sync::HandAct::Attach) return;
+    }
     if (act == sync::HandAct::None) return;
     if (pose.sinceMs != sh.episodeMs) { sh.episodeMs = pose.sinceMs; sh.backoffMs = kRetryMs; sh.retryMs = 0; }
     if (nowMs < sh.retryMs) return;
@@ -754,9 +760,48 @@ void PropSync::Grant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     OnGrant(propId, g.slot, level);
 }
 
+// A lease change from the owner of a stand-in that holds this prop's copy is the owner letting go of it (DropNoticed):
+// the copy leaves the stand-in's hand now, not once the owner's pose has shown the hand empty and the hand matching's
+// holds are over (the last shown class for sync::kReattachMinMs, then the retry backoff -- test 6: seconds late, the copy
+// glued to the hand and undriven meanwhile). MatchHand stays as the fallback for a drop with no lease change. The host
+// answers changes only, so every change reaches OnGrant, on the host too (Grant applies its own), and a renewal never does.
+// OnGrant calls it with the lease as the view had it before the Grant, ahead of its early return for tracked ids.
+void PropSync::NoticeDrop(uint64_t propId, LeaseLevel prevLevel, uint8_t prevSlot, LeaseLevel level, uint8_t slot) {
+    auto known = props_.find(propId);
+    if (known == props_.end() || !standIns_) return;
+    UObject* copy = known->second.actor;
+    if (!adapter_->StillValid(copy, known->second.index)) return;
+    for (uint8_t e = 1; e <= kMaxWillies; ++e) {
+        UObject* standIn = standIns_->ActorOf(e);
+        if (!standIn) continue;
+        for (int h = 0; h < 2; ++h) {
+            if (ObjectField(standIn, h == 0 ? 1 : 2) != copy) continue;   // held in both hands: the right's pass lets both go
+            if (!DropNoticed(prevLevel, prevSlot, level, slot, OwnerSlotOf(e), true)) return;
+            const double nowMs = SteadyNowMs();
+            StandIns::PoseHandView pose;
+            const bool havePose = standIns_->PoseHandInfo(e, h, pose);   // the episode this hand lets go in, before the pose moves on
+            const DropResult r = DropFromHands(standIn, h, copy, ObjectName(copy));
+            if (r == DropResult::Dropped) {
+                ++n_.leaseReleased;
+                HSM_LOG("props: stand-in of e%u let go of %s from hand %d: its owner's lease changed", e, ObjectName(copy).c_str(), h);
+                LetLoose(e, h, copy, nowMs);
+                StandInHand& sh = standInHands_[e].hand[size_t(h)];
+                sh.leaseLetGo = havePose;
+                sh.leaseLetGoPoseMs = pose.sinceMs;
+                if (env_.handsChanged) env_.handsChanged(e);
+                ForgetHeld(e, standIn);
+            }
+            return;
+        }
+    }
+}
+
 // A drop heard of opens its one resolve window, with what that hand of the stand-in holds now as its witness.
 void PropSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
+    const LeaseLevel prevLevel = view_.Level(propId);
+    const uint8_t prevSlot = view_.Streamer(propId);
     view_.OnGrant(propId, slot, level);
+    NoticeDrop(propId, prevLevel, prevSlot, level, level == LeaseLevel::Free ? kHostSlot : slot);
     if (slot == MySlot() || props_.count(propId) || pending_.count(propId) || !DropSignature(propId, level, slot)) return;
     const double now = SteadyNowMs();
     if (auto g = givenUp_.find(propId); g != givenUp_.end()) {
@@ -1028,15 +1073,30 @@ void PropSync::NoteContact(UObject* a, UObject* b) {
         auto it = byActor_.find(side == 0 ? a : b);
         if (it == byActor_.end()) continue;
         UObject* other = side == 0 ? b : a;
-        // A fighter simulated here, or a weapon in its hand ("Parent Actor" only: a thrown weapon's "Last Parent" is not a touch).
+        // What touched it (ContactClaimant): a fighter simulated here, or a weapon in its hand ("Parent Actor" only: a thrown
+        // weapon's "Last Parent" is not a touch); a stand-in or its weapon claims nothing; and a prop this machine streams
+        // claims what it pushes, credited to whoever touched that prop last -- the pile one hit disturbed has one simulator.
         UObject* fighter = adapter_->IsWillie(other) ? other : adapter_->IsWeapon(other) ? ObjectField(other, 0) : nullptr;
-        const uint8_t entity = fighter ? env_.ownedEntity(fighter) : 0;
+        OtherKind kind = OtherKind::StandIn;
+        uint8_t entity = 0;
+        bool streamedHere = false;
+        if (fighter) {
+            entity = env_.ownedEntity(fighter);
+            if (entity) kind = adapter_->IsWillie(other) ? OtherKind::OwnedFighter : OtherKind::OwnedWeapon;
+        } else if (auto pusher = byActor_.find(other); pusher != byActor_.end()) {
+            kind = OtherKind::Prop;
+            streamedHere = view_.Streamer(pusher->second) == MySlot();
+            if (auto q = props_.find(pusher->second); q != props_.end()) entity = q->second.toucher;
+            if (!entity) entity = uint8_t(MySlot() + 1);   // this machine's fighter: the roster slot's entity
+        }
+        entity = ContactClaimant(entity, kind, streamedHere);
         if (!entity) continue;
         auto p = props_.find(it->second);
         if (p == props_.end()) continue;
         p->second.lastContactMs = SteadyNowMs();
         p->second.toucher = entity;
-        ++n_.contacts;
+        if (kind == OtherKind::Prop) ++n_.islands;
+        else ++n_.contacts;
     }
 }
 
@@ -1156,19 +1216,19 @@ std::string PropSync::HealthLine() {
     char line[1536];
     std::snprintf(line, sizeof line,
                   "props: live %zu pending %zu loose %zu | drops %llu minted %llu mintFailed %llu | resolved %llu forced %llu kept %llu "
-                  "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu | "
+                  "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu islands %llu | "
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
                   "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu "
-                  "released %llu selfDrops %llu reattached %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
+                  "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
                   "leftOut %zu purged %llu censuses %llu censusRejected %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
                   d(a.resolved, b.resolved), d(a.forced, b.forced), d(a.kept, b.kept), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
                   d(a.releaseFailed, b.releaseFailed), d(a.requests, b.requests), d(a.releases, b.releases),
-                  d(a.holdDenied, b.holdDenied), d(a.contacts, b.contacts), d(a.grants, b.grants), d(a.lapsed, b.lapsed),
+                  d(a.holdDenied, b.holdDenied), d(a.contacts, b.contacts), d(a.islands, b.islands), d(a.grants, b.grants), d(a.lapsed, b.lapsed),
                   d(a.leasesRejected, b.leasesRejected), d(a.statesSent, b.statesSent), d(a.statesApplied, b.statesApplied),
                   d(a.statesStale, b.statesStale), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
                   d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss),
-                  d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), level,
+                  d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased), level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
                   d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected));
