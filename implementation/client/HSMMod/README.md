@@ -127,9 +127,38 @@ All optional; several instances can share one install.
 
 The bridge takes one command per line and answers with one JSON line (`tools/hsmctl.py PORT CMD...`):
 `state`, `widgets`, `threads`, `stack [thread-id]`, `window`, `key NAME [tap|down|up]`, `click X Y`,
-`axis NAME VALUE MS`, `action NAME down|up|tap`, `open LEVEL`, `pause on|off`, `exec CONSOLE-COMMAND`, `shot`, `quit`.
+`axis NAME VALUE MS`, `action NAME down|up|tap`, `open LEVEL`, `pause on|off`, `exec CONSOLE-COMMAND`, `shot`, `quit`,
+`prof start [SECONDS] [TIMELINE_MIN_US]|stop|status` (the Blueprint profiler, below).
 `stack` suspends a thread for a moment and returns its unwound `module+offset` frames; resolve them with the Ghidra
 project in `re/`. If the game falls behind loading or rendering, a player pawn is spawned by the mod itself.
+
+## Blueprint profiler
+
+Shows where the game thread's time goes: every Blueprint function the game runs, every ProcessEvent call (ticks,
+input, hit and overlap delegates, timelines), and HSMMod's own hooks and subsystems. It works in any role except
+`role=off`, solo or online.
+
+1. In game, press **Ctrl+Shift+P**. A beep (and, in a match, a chat line) confirms the start.
+2. Play the part that is slow. The capture stops by itself after 30 s or when the level changes, or press
+   Ctrl+Shift+P again.
+3. Next to the game exe (`Binaries/Win64`) there are now two files:
+   - `HSMProfile-<date>-<time>.txt`: frame times (avg, p50, p95, p99, max), the top functions by **self** time (the
+     function's own Blueprint nodes and the native engine calls it makes directly) and by **inclusive** time (with
+     everything it called), per frame, with call counts and the longest single call, and the 10 slowest frames.
+   - `HSMProfile-<date>-<time>.json`: a timeline of every call of 20 µs or more and every frame. Open it in
+     <https://ui.perfetto.dev> (or `chrome://tracing`, or speedscope) and jump to a slow frame from the text report.
+
+Kinds in the report: `event` = called through ProcessEvent, `bp` = a Blueprint function body run by the script VM
+(also when another Blueprint called it), `hook` = HSMMod's hooks on that function, `mod` = an HSMMod subsystem
+(`HSMMod session tick`, `HSMMod pump: ...`). Native engine work that no Blueprint asked for (physics simulation,
+animation, rendering) happens outside these calls: compare the frame time with the top inclusive rows to see how
+much that is.
+
+Costs: nothing measurable when no capture runs. While recording, every Blueprint call costs about two timestamps
+and a table lookup on the game thread; the report prints the measured cost per call and the estimated total, which
+is included in the times shown, so frames run somewhat slower while recording. Stopping writes the files on the
+game thread (a short hitch; the timeline is capped at 1 million calls). The agent bridge's `prof start 120 50`
+records for 120 s (at most 300) with a 50 µs timeline threshold (`0` keeps every call).
 
 ## In-game test harness
 

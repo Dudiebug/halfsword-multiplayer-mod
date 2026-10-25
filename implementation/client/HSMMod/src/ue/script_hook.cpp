@@ -1,6 +1,7 @@
 #include "ue/script_hook.h"
 #include "ue/hook.h"
 #include "log.h"
+#include "ue/profiler.h"
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
@@ -55,14 +56,20 @@ void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
     ++g_hooked;
     bool block = false;
     int64_t t0 = Qpc();
-    for (const Hook& h : e.hooks) if (h.before) h.before(call);
-    for (const Hook& h : e.hooks) if (h.pre && h.pre(call)) block = true;
+    {
+        prof::Scope ours(call.function(), prof::Kind::kHook);
+        for (const Hook& h : e.hooks) if (h.before) h.before(call);
+        for (const Hook& h : e.hooks) if (h.pre && h.pre(call)) block = true;
+    }
     int64_t spent = Qpc() - t0;
     if (block) ++g_blocked;
     else {
         g_original(ctx, stack, result);
         int64_t t1 = Qpc();
-        for (const Hook& h : e.hooks) if (h.post) h.post(call);
+        {
+            prof::Scope ours(call.function(), prof::Kind::kHook);
+            for (const Hook& h : e.hooks) if (h.post) h.post(call);
+        }
         spent += Qpc() - t1;
     }
     g_hookNs += uint64_t(QpcNs(spent));
@@ -72,11 +79,17 @@ void RunHooked(const Entry& e, UObject* ctx, void* stack, void* result) {
 void RunObserved(const Entry& e, UObject* ctx, void* stack, void* result) {
     ScriptCall call(ctx, stack, result);
     int64_t t0 = Qpc();
-    for (const Hook& h : e.hooks) if (h.observer && h.before) h.before(call);
+    {
+        prof::Scope ours(call.function(), prof::Kind::kHook);
+        for (const Hook& h : e.hooks) if (h.observer && h.before) h.before(call);
+    }
     int64_t spent = Qpc() - t0;
     g_original(ctx, stack, result);
     int64_t t1 = Qpc();
-    for (const Hook& h : e.hooks) if (h.observer && h.post) h.post(call);
+    {
+        prof::Scope ours(call.function(), prof::Kind::kHook);
+        for (const Hook& h : e.hooks) if (h.observer && h.post) h.post(call);
+    }
     spent += Qpc() - t1;
     g_hookNs += uint64_t(QpcNs(spent));
 }
@@ -91,7 +104,9 @@ inline const Entry* Lookup(UFunction* node) {
 }
 
 void Detour(UObject* ctx, void* stack, void* result) {
-    const Entry* e = Lookup(Read<UFunction*>(stack, kFrameNode));
+    UFunction* const node = Read<UFunction*>(stack, kFrameNode);
+    prof::Scope body(node, prof::Kind::kScript);   // the Blueprint body, with our hooks on it
+    const Entry* e = Lookup(node);
     if (e && GetCurrentThreadId() == GameThreadId()) {
         if (t_bypass == 0) { RunHooked(*e, ctx, stack, result); return; }
         if (e->hasObserver) { RunObserved(*e, ctx, stack, result); return; }

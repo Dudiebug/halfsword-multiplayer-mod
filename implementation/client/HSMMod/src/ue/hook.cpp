@@ -1,6 +1,7 @@
 #include <atomic>
 #include "ue/hook.h"
 #include "log.h"
+#include "ue/profiler.h"
 #include <MinHook.h>
 #include <algorithm>
 #include <cstdio>
@@ -82,6 +83,7 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
     }
     bool block = false;
     if (GetCurrentThreadId() == g_gameThreadId.load(std::memory_order_relaxed)) ++g_allCalls;
+    prof::Scope call(fn, prof::Kind::kEvent);   // the whole call: our hooks and the original
     if (obj && fn) {
         const uint32_t gen = g_hookGen.load(std::memory_order_acquire);   // before the lookup: a later change stales the slot
         NoHookSlot& slot = NoHookSlotFor(fn);
@@ -107,6 +109,7 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
             const uint64_t discount0 = t_discountNs;
             {
                 InHooks in;
+                prof::Scope ours(fn, prof::Kind::kHook);
                 for (const PreHook& h : *hooks) if (h(obj, fn, params)) block = true;
             }
             if (timed) {

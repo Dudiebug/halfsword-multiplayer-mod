@@ -40,6 +40,7 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "log.h"
+#include "ue/profiler.h"
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_maps.h"
 #include "match/hsm_match.h"
@@ -250,7 +251,13 @@ public:
     // Damage counts under claims, a stand-in's native cut under severs or net).
     enum PumpPart : uint8_t { kPumpNet, kPumpStreams, kPumpServo, kPumpClaims, kPumpSevers, kPumpGore, kPumpGrabs, kPumpProps,
                               kPumpEquip, kPumpMatch, kPumpParts };
+    static constexpr const char* kPumpNames[kPumpParts] = {"net", "streams", "servo", "claims", "severs", "gore", "grabs",
+                                                           "props", "equip", "match"};
+    static constexpr const char* kPumpScopes[kPumpParts] = {"HSMMod pump: net", "HSMMod pump: streams", "HSMMod pump: servo",
+        "HSMMod pump: claims", "HSMMod pump: severs", "HSMMod pump: gore", "HSMMod pump: grabs", "HSMMod pump: props",
+        "HSMMod pump: equip", "HSMMod pump: match"};
     template <class F> void Timed(PumpPart part, F&& f) {
+        ue::prof::Scope scope(kPumpScopes[part], ue::prof::Kind::kMod);
         if (!sampling_ || tickMs_.size() >= kFrameSamples) { f(); return; }
         const auto t0 = std::chrono::steady_clock::now();
         f();
@@ -262,8 +269,7 @@ public:
 
     // " | pump ms/frame: net A streams B ... (max P x ms)": P is the part with the longest single run in the window.
     std::string PumpLine(double frames) const {
-        static constexpr const char* kNames[kPumpParts] = {"net", "streams", "servo", "claims", "severs", "gore", "grabs",
-                                                           "props", "equip", "match"};
+        const auto& kNames = kPumpNames;
         std::string line = " | pump ms/frame:";
         char b[48];
         size_t worst = 0;
@@ -276,10 +282,23 @@ public:
         return line + b;
     }
 
+    // The profiler's hotkey and frame mark (every game mode tick; PumpAgentEarly polls the key, every 50 ms, while none ticks).
+    void ProfilerTick(bool frame) {
+        std::string msg = frame ? ue::prof::Frame() : std::string();
+        if (msg.empty() && !ui::Typing()) msg = ue::prof::PollHotkey();
+        ShowProfilerMessage(msg);
+    }
+    void ShowProfilerMessage(const std::string& msg) {
+        if (msg.empty()) return;
+        MessageBeep(ue::prof::Recording() ? MB_ICONASTERISK : MB_OK);
+        ui::ShowLine("HSMMod", style::kBone, msg);
+    }
+
     void PumpAgentEarly() {
         uint32_t now = NowMs();
         if (now - lastModeTick_ < 1000 || now - lastEarlyPump_ < 50) return;
         lastEarlyPump_ = now;
+        ProfilerTick(false);
         // Paused game (actors frozen, widgets still tick) in a level we already know: the full command set is safe.
         if (lastGameMode_ && ObjectAt(lastGameModeIndex_) == lastGameMode_ && adapter_.World() == lastGameMode_) {   // never reads a freed mode
             agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
@@ -289,6 +308,7 @@ public:
             if (c.verb == "ping") return std::string("{\"ok\":true,\"early\":true}");
             if (c.verb == "widgets") return WidgetsJson();
             if (c.verb == "exec" || c.verb == "shot") { AgentCommand x = c; return HandleAgent(x); }
+            if (c.verb == "prof") return ue::prof::Command(c.args);
             return std::string("{\"ok\":false,\"error\":\"game mode not ticking yet; try widgets/key/click/exec\"}");
         });
     }
@@ -348,6 +368,7 @@ public:
         // Level change first: everything after this point must use the current world, never the old game mode.
         bool levelChanged = gameMode != lastGameMode_;
         if (levelChanged) FlushReflectionCache();     // the old level's classes are gone (again each retry: harmless)
+        if (levelChanged) ShowProfilerMessage(ue::prof::StopCapture());
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
         if (levelChanged) { lastGameMode_ = gameMode; lastGameModeIndex_ = ObjectIndex(gameMode); OnLevelLoaded(); }
         inFight_ = InFightLevel();
@@ -639,6 +660,7 @@ private:
         if (c.verb == "quit") { quitRequested_ = true; return ok(); }
         if (c.verb == "widgets") return WidgetsJson();
         if (c.verb == "pause" && c.args.size() == 1) { adapter_.SetGamePaused(c.args[0] == "on"); return ok(); }
+        if (c.verb == "prof") return ue::prof::Command(c.args);
         if (c.verb == "vmhook") return agent::VmHookCommand(c.args, [this] { return InFightLevel() ? adapter_.PlayerWillie(0) : nullptr; });
         if (c.verb == "mirror") return mirror_.Command(c.args, adapter_, net_ != nullptr, InFightLevel());
         if (c.verb == "shot") { adapter_.ConsoleCommand("HighResShot 1"); return ok(",\"note\":\"saved under Saved/Screenshots\""); }
@@ -778,6 +800,7 @@ private:
 
     bool OnOpenLevel(const std::string& level, bool absolute, const std::string& options) {
         pauseLiftArmed_ = false;                       // the old level's world is going away
+        ShowProfilerMessage(ue::prof::StopCapture());   // before the old level's functions are freed
         bool joined = steamMode() ? lobby_.InLobby() : net_ != nullptr;
         if (!joined || IsHost()) {                     // remembered even before hosting, for late joiners
             Travel t; t.level = level; t.absolute = absolute; t.options = options; t.settings = game::CaptureGameSettings();
@@ -2962,7 +2985,9 @@ bool StartMod(const Config& cfg) {
         float dt = 0.f;
         if (FProperty* p = FindProperty(fn, "DeltaSeconds")) std::memcpy(&dt, static_cast<uint8_t*>(params) + PropertyOffset(p), sizeof dt);
         if (!(dt > 0.f && dt < 1.f)) dt = 1.f / 60.f;
+        g_session->ProfilerTick(true);
         const auto t0 = std::chrono::steady_clock::now();
+        ue::prof::Scope scope("HSMMod session tick", ue::prof::Kind::kMod);
         g_session->Tick(obj, dt);
         const auto spent = std::chrono::steady_clock::now() - t0;
         DiscountHookTime(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(spent).count()));   // reported as the mod tick

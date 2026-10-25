@@ -11,7 +11,7 @@
 namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.6.2";   // bump with every release tag
+constexpr const char* kModVersion = "0.6.3";   // bump with every release tag
 
 struct LobbyMember { steam::SteamId id = 0; std::string name; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; };
 
