@@ -22,7 +22,9 @@ constexpr char kDefaultIni[] =
     "; host: the host simulates every fighter (the v0.3 behaviour). Only the host's setting matters.\n"
     "sync_mode=owner\n"
     "; the key that opens the chat: enter, t, y or u (Enter sends, Esc cancels)\n"
-    "chat_key=enter\n";
+    "chat_key=enter\n"
+    "; lock: the other players' hands hold their weapons firmly (default); free: each weapon is steered on its own\n"
+    "standin_grip=lock\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -54,6 +56,7 @@ Config LoadConfig() {
     c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
     const std::string chatKey = ReadString(ini, L"chat_key", "enter");
     if (!ParseChatKey(chatKey, c.chatKey)) HSM_LOG("config: chat_key=%s is not enter, t, y or u; using enter", chatKey.c_str());
+    c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (auto r = CmdArg(cl, "hsmrole")) c.role = *r == "host" ? Role::Host : *r == "client" ? Role::Client : *r == "off" ? Role::Off : Role::Steam;
@@ -63,8 +66,8 @@ Config LoadConfig() {
     if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) c.ownerSync = *m != "host";
     if (auto k = CmdArg(cl, "hsmchatkey"); k && !ParseChatKey(*k, c.chatKey))
         HSM_LOG("config: -hsmchatkey=%s is not enter, t, y or u; ignored", k->c_str());
-    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s", RoleName(c.role), c.hostAddress.c_str(),
-            c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey));
+    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s", RoleName(c.role), c.hostAddress.c_str(),
+            c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free");
     return c;
 }
 }  // namespace hsm

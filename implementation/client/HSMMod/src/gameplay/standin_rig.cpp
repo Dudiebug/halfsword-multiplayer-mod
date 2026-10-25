@@ -48,6 +48,8 @@ constexpr double kCapsuleTeleportUu = 150.0;  // HSMP main.lua:133 TELEPORT_DIST
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel
 constexpr uint8_t kIgnore = 0;                // ECollisionResponse::ECR_Ignore
 constexpr uint8_t kNoCollision = 0;           // ECollisionEnabled::NoCollision
+constexpr uint8_t kLocked = 2;                 // ELinearConstraintMotion::LCM_Locked, EAngularConstraintMotion::ACM_Locked
+bool g_gripLock = true;                        // standin_grip (SetStandInGripLock)
 constexpr uint8_t kFree = 0;                  // ELinearConstraintMotion::LCM_Free, EAngularConstraintMotion::ACM_Free
 constexpr uint8_t kAlwaysTickPose = 0;        // EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
 
@@ -361,6 +363,39 @@ bool FighterRig::GripWanted(int hand) const {
     return false;
 }
 
+// The game itself holds a weapon by locking the hand's grip joint once its soft hold has closed (Willie_BP ReceiveTick,
+// R Hand Soft Attach Distance reaching 0). A stand-in's ReceiveTick is blocked, so the rig locks it: the hand, which
+// follows the owner's pose closely, carries the weapon, and a knock cannot take it out of the hand. The off hand of a
+// two-handed grip holds no Weapon L; its joint (PhysicsConstraint L Hand) exists while L Hand In Offhand Attached.
+bool FighterRig::GripToLock(int hand) const {
+    if (!g_gripLock || !FieldAt(gripOffset_[hand])) return false;
+    UObject* held = FieldAt(weaponOffset_[hand]);
+    if (!held) return hand == 1 && gripStateLogged_.offhand;
+    for (const Weapon& wp : weapons_)
+        if (wp.actor == held && wp.fists) return false;
+    return true;
+}
+
+void FighterRig::LockGrip(int hand) {
+    UObject* c = FieldAt(gripOffset_[hand]);
+    if (!c || c == gripLocked_[hand]) return;
+    Call(c, "SetAngularDriveParams").set<float>("PositionStrength", 0.f).set<float>("VelocityStrength", 0.f)
+        .set<float>("InForceLimit", 0.f).invoke();
+    Call(c, "SetLinearXLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
+    Call(c, "SetLinearYLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
+    Call(c, "SetLinearZLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
+    Call(c, "SetAngularSwing1Limit").set<uint8_t>("MotionType", kLocked).set<float>("Swing1LimitAngle", 0.f).invoke();
+    Call(c, "SetAngularSwing2Limit").set<uint8_t>("MotionType", kLocked).set<float>("Swing2LimitAngle", 0.f).invoke();
+    Call(c, "SetAngularTwistLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("TwistLimitAngle", 0.f).invoke();
+    gripLocked_[hand] = c;
+    gripFreed_[hand] = nullptr;
+    gripLoose_[hand] = nullptr;   // a locked joint is not loose: HoldStill must not pin a weapon the hand carries
+    if (gripLogged_[hand] != c) {
+        gripLogged_[hand] = c;
+        HSM_LOG("rig: %s: %s locked", ObjectName(willie_).c_str(), kGripFields[hand]);
+    }
+}
+
 void FighterRig::FreeGrip(int hand) {
     UObject* c = FieldAt(gripOffset_[hand]);
     if (!c || c == gripFreed_[hand]) return;
@@ -375,6 +410,7 @@ void FighterRig::FreeGrip(int hand) {
     Call(c, "SetAngularSwing2Limit").set<uint8_t>("MotionType", kFree).set<float>("Swing2LimitAngle", 0.f).invoke();
     Call(c, "SetAngularTwistLimit").set<uint8_t>("ConstraintType", kFree).set<float>("TwistLimitAngle", 0.f).invoke();
     gripFreed_[hand] = c;
+    gripLocked_[hand] = nullptr;
     gripLoose_[hand] = c;
     gripLooseIndex_[hand] = ObjectIndex(c);
     if (gripLogged_[hand] != c) {
@@ -392,17 +428,21 @@ void FighterRig::Drive(const sync::FighterCommand& cmd) {
         setAng_.put(0, ToF(cmd.bones[i].angVelDeg)).put(1, false).put(2, bones_[i]);
         setAng_.invoke(mesh_);
     }
+    bool lock[2] = {GripToLock(0), GripToLock(1)};
     for (int w = 0; w < sync::kPoseWeapons; ++w) {
         Weapon& wp = weapons_[w];
-        wp.driven = cmd.weaponDrive[w] && wp.read && !Pinned(w);
+        // A weapon a locked hand carries is not servoed on its own: the joint and the servo would fight.
+        wp.driven = cmd.weaponDrive[w] && wp.read && !Pinned(w) && !lock[w];
         if (!wp.driven) continue;
         wp.setLin.put(0, ToF(cmd.weapons[w].vel)).put(1, false).put(2, FName{});
         wp.setLin.invoke(wp.root);
         wp.setAng.put(0, ToF(cmd.weapons[w].angVelDeg)).put(1, false).put(2, FName{});
         wp.setAng.invoke(wp.root);
     }
-    for (int h = 0; h < 2; ++h)
-        if (GripWanted(h)) FreeGrip(h);
+    for (int h = 0; h < 2; ++h) {
+        if (lock[h]) LockGrip(h);
+        else if (GripWanted(h)) FreeGrip(h);
+    }
     for (int w = 0; w < sync::kPoseWeapons; ++w)   // gravity is off: a loose, undriven weapon would drift
         if (weapons_[w].read && !weapons_[w].driven && !Pinned(w) && GripLoose(w)) HoldStill(weapons_[w]);
 }
@@ -556,8 +596,11 @@ void FighterRig::NeutraliseFull() {
     // Bones refreshed from physics even off screen, or the servo reads a stale pose (HSMP main.lua:4672).
     if (FProperty* p = FindProperty(ClassOf(mesh_), "VisibilityBasedAnimTickOption"); p && PropertySize(p) == 1)
         *(reinterpret_cast<uint8_t*>(mesh_) + PropertyOffset(p)) = kAlwaysTickPose;
+    gripLocked_[0] = gripLocked_[1] = nullptr;   // and locked again: a new grip joint after a re-grip
     gripFreed_[0] = gripFreed_[1] = nullptr;   // the grips are freed again on the next Drive: the BP may re-lock them
     slots_.Maintain(willie_);   // the sheathed weapons: diagnosis line (standin_slots.h)
 }
+
+void SetStandInGripLock(bool on) { g_gripLock = on; }
 
 }  // namespace hsm::game

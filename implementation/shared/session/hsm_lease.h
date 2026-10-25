@@ -10,7 +10,7 @@
 // Pose instead (protocol/hsm_owner.h) and never enter this table -- only loose/dropped weapons and level props do.
 //
 // The claim lifecycle (touch or hold -> request; let go -> keep a touch while the throw/push is still moving ->
-// release after kRestReleaseMs at rest), the rest threshold and the 20 Hz stream of bodies nobody leases follow
+// release after kRestReleaseMs at rest), the rest threshold and the stream of bodies nobody leases (as fast as a leased one while moving) follow
 // Cyrex0/HalfSword-MP's HSMPWorld (docs/development/subsystems/world-replication.md), Copyright (c) 2026 Cyrex0 and
 // the HalfSword-MP contributors, MIT (see THIRD_PARTY_NOTICES.md).
 //
@@ -51,7 +51,7 @@ constexpr double kContactKeepMs = 250.0;
 constexpr double kRestReleaseMs = 1500.0;     // a prop let go of and at rest this long is released (HSMPWorld)
 constexpr float kRestSpeed = 8.0f;            // cm/s; slower (and turning slower than kRestSpin) is at rest (HSMPWorld)
 constexpr float kRestSpin = 10.0f;            // deg/s
-constexpr double kFreeStreamMs = 50.0;        // the host streams a moving FREE prop at 20 Hz...
+constexpr double kFreeStreamMs = 16.0;        // the host streams a moving FREE prop as fast as a leased one (about 60 Hz)...
 constexpr double kFreeIdleMs = 1000.0;        // ... and one at rest once a second (a lost state, a late joiner)
 
 // ---------------------------------------------------------------- identity

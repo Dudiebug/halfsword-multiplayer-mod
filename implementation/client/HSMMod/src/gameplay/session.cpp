@@ -2705,6 +2705,7 @@ UClass* g_gameModeClass = nullptr;
 
 bool StartMod(const Config& cfg) {
     if (!Init()) return false;
+    game::SetStandInGripLock(cfg.standInGripLock);
     g_session = std::make_unique<SessionImpl>(cfg);
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));

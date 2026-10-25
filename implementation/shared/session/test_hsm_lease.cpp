@@ -408,8 +408,8 @@ static void TestPropAtRestAndFreeSchedule() {
     CHECK(!rest(5.f, 5.f, 5.f, 0, 0, 0));              // 8.7 cm/s overall, under 8 on every axis
     CHECK(!rest(0, 0, 0, 0, 10.f, 0));                 // 10 deg/s: turning
     CHECK(!rest(0, 0, 0, 6.f, -6.f, 6.f));             // 10.4 deg/s overall
-    CHECK(!FreeStreamDue(0.0, false, 49.9));           // moving: 20 Hz
-    CHECK(FreeStreamDue(0.0, false, 50.0));
+    CHECK(!FreeStreamDue(0.0, false, 15.9));           // moving: as fast as a leased prop (a thrown weapon), about 60 Hz
+    CHECK(FreeStreamDue(0.0, false, 16.0));
     CHECK(!FreeStreamDue(0.0, true, 999.0));           // at rest: once a second
     CHECK(FreeStreamDue(0.0, true, 1000.0));
     CHECK(FreeStreamDue(-1.0e9, true, 0.0));           // never sent
@@ -678,8 +678,8 @@ static void TestPropStreamDue() {
     CHECK(PropStreamDue(LeaseLevel::Touch, 0.0, false, 16.0));
     CHECK(!PropStreamDue(LeaseLevel::Touch, 0.0, true, 999.0));           // a touched prop at rest: once a second
     CHECK(PropStreamDue(LeaseLevel::Touch, 0.0, true, 1000.0));
-    CHECK(!PropStreamDue(LeaseLevel::Free, 0.0, false, 49.9));            // FREE: the host's schedule
-    CHECK(PropStreamDue(LeaseLevel::Free, 0.0, false, 50.0));
+    CHECK(!PropStreamDue(LeaseLevel::Free, 0.0, false, 15.9));            // FREE: the host's schedule, as fast as a lease while moving
+    CHECK(PropStreamDue(LeaseLevel::Free, 0.0, false, 16.0));
     CHECK(!PropStreamDue(LeaseLevel::Free, 0.0, true, 999.0));
     CHECK(PropStreamDue(LeaseLevel::Free, 0.0, true, 1000.0));
     CHECK(PropStreamDue(LeaseLevel::Touch, -1.0e9, true, 0.0));           // never sent

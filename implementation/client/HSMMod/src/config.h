@@ -18,7 +18,10 @@ struct Config {
     // Host only (clients take the host's choice from Welcome). true: every machine simulates its own fighter and the
     // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
     bool ownerSync = true;
-    ChatKey chatKey = ChatKey::Enter;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
+    ChatKey chatKey = ChatKey::Enter;
+    // true: a stand-in's hands lock their grip joints and carry the weapon (the game's own firm grip); false: the grips
+    // are freed and each weapon is servoed on its own (pre7 behaviour). Each machine's own setting applies to its stand-ins.
+    bool standInGripLock = true;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

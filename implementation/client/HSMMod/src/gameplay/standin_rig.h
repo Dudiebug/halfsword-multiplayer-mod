@@ -92,6 +92,8 @@ private:
     bool GripWanted(int hand) const;
     bool GripLoose(int hand) const;
     void FreeGrip(int hand);
+    bool GripToLock(int hand) const;              // standin_grip=lock: this hand holds a real weapon (or the off hand of a two-handed grip)
+    void LockGrip(int hand);                      // the game's firm grip: every limit of the hand's grip joint locked
     void HoldStill(Weapon& wp);
     bool Pinned(int w) const { return (pinned_ >> w) & 1u; }
     void NeutraliseFull();
@@ -111,6 +113,7 @@ private:
     int32_t weaponOffset_[sync::kPoseWeapons] = {-1, -1};   // "Weapon R" / "Weapon L" in the Willie
     int32_t gripOffset_[2] = {-1, -1};                       // "PhysicsConstraint R Hand" / "L Hand"
     ue::UObject* gripFreed_[2] = {nullptr, nullptr};         // freed per hand since the last full pass (null: free it again)
+    ue::UObject* gripLocked_[2] = {nullptr, nullptr};        // locked per hand since the last full pass (null: lock it again)
     ue::UObject* gripLoose_[2] = {nullptr, nullptr};         // freed at all (limits never restored), until a weapon change
     int32_t gripLooseIndex_[2] = {-1, -1};
     ue::UObject* gripLogged_[2] = {nullptr, nullptr};
@@ -130,5 +133,8 @@ private:
     ue::UObject* failLogged_ = nullptr;                      // the fighter whose bind failure was logged
     StandInSlots slots_;                                     // the sheathed weapons (standin_slots.h)
 };
+
+// standin_grip in HSMMod.ini (config.h): true locks the stand-ins' grip joints, false frees them (pre7). Set once at start.
+void SetStandInGripLock(bool on);
 
 }  // namespace hsm::game
