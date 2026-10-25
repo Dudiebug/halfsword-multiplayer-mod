@@ -226,6 +226,38 @@ static void TestGiveUpPill() {
     CHECK(BuildHudScene(Ffa(), l, kAt).pill.text == "FIRST TO 5");                         // Duel only
 }
 
+// Item 9c: the host's draw check marks a fighter down; its own pill says so while the round is fought, the board marks
+// the row, and holding G still shows the give-up hold over it.
+static void TestDownPill() {
+    MatchInfo d = Duel(); d.fighters[0].down = true;
+    HudScene s = BuildHudScene(d, Me(), kAt);
+    CHECK(s.pill.visible && s.pill.text == "DOWN - GET UP" && Same(s.pill.color, kBloodInk));
+    CHECK(BuildHudScene(d, Me(2), kAt).pill.text == "ROUND 2");                          // someone else is down
+    LocalHud g = Me(); g.giveUp = 0.5f;
+    CHECK(BuildHudScene(d, g, kAt).pill.text == "GIVING UP 50%");
+    MatchInfo gap = d; gap.roundGapLeftMs = 2400; gap.roundWinner = 2;
+    CHECK(BuildHudScene(gap, Me(), kAt).pill.text == "NEXT ROUND IN 3");
+    MatchInfo sd = d; sd.phase = uint8_t(MatchPhase::SuddenDeath);
+    CHECK(BuildHudScene(sd, Me(), kAt).pill.text == "DOWN - GET UP");
+    MatchInfo res = d; res.phase = uint8_t(MatchPhase::Results);
+    CHECK(BuildHudScene(res, Me(), kAt).pill.text != "DOWN - GET UP");
+    MatchInfo dead = d; dead.fighters[0].alive = false;                                   // dead is not down
+    CHECK(BuildHudScene(dead, Me(), kAt).pill.text != "DOWN - GET UP");
+    LocalHud gone = Me(); gone.dead = true; gone.diedAtMs = kAt;                          // ... nor dead here first
+    CHECK(BuildHudScene(d, gone, kAt).pill.text != "DOWN - GET UP");
+    LocalHud tab = Me(); tab.tab = true;
+    s = BuildHudScene(d, tab, kAt);
+    bool sawDown = false, sawUp = false;
+    for (const BoardRow& r : s.board.rows) {
+        if (r.name == "Host") { sawDown = r.down && !r.dead; }
+        if (r.name == "Ann") { sawUp = !r.down; }
+    }
+    CHECK(sawDown && sawUp);
+    dead.fighters[0].down = true;
+    s = BuildHudScene(dead, tab, kAt);
+    for (const BoardRow& r : s.board.rows) if (r.name == "Host") CHECK(r.dead && !r.down);
+}
+
 // The countdown before a Duel says how to give up a round, under the digits, in their look.
 static void TestDuelCountdownHint() {
     MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
@@ -454,7 +486,12 @@ static void TestFeedRows() {
     CHECK(r.mine && r.spans.size() == 2 && r.spans[0].text == "Bo" && r.spans[1].text == " gave up" && Same(r.spans[1].color, kIron));
     r = MakeFeedRow(t, {0, 4, 0}, 1);
     CHECK(r.spans.size() == 2 && r.spans[0].text == "Cy" && r.spans[1].text == " died");
-    for (Kill k : {Kill{2, 1, 0}, Kill{4, 2, 1}, Kill{3, 3, 2}, Kill{2, 3, 4}, Kill{0, 4, 0}, Kill{9, 8, 0}})
+    r = MakeFeedRow(t, {3, 2, 16}, 3);                                   // a drawn Duel round: both names in their inks
+    CHECK(r.mine && r.spans.size() == 4 && r.spans[0].text == "Ann" && Same(r.spans[0].color, TeamInk(1)) && r.spans[1].text == " and ");
+    CHECK(r.spans.size() == 4 && r.spans[2].text == "Bo" && Same(r.spans[2].color, TeamInk(0)) && Same(r.spans[3].color, kIron));
+    r = MakeFeedRow(t, {0, 2, 32}, 1);
+    CHECK(!r.mine && r.spans.size() == 2 && r.spans[1].text == " drew the round (no hits)" && Same(r.spans[1].color, kIron));
+    for (Kill k : {Kill{2, 1, 0}, Kill{4, 2, 1}, Kill{3, 3, 2}, Kill{2, 3, 4}, Kill{0, 4, 0}, Kill{9, 8, 0}, Kill{3, 2, 16}, Kill{3, 2, 32 | 8}, Kill{0, 2, 16}})
         CHECK(Joined(MakeFeedRow(t, k, 1)) == KillLine(t, k));       // the same words as the text HUD
 
     r = MakeFeedRow(Ffa(), {2, 3, 0}, 1);                              // no teams: bone names
@@ -555,7 +592,7 @@ int main() {
     TestOneFight();
     TestCountdownDigits();
     TestBannerFromShot();
-    TestGiveUpPill(); TestWaveBreakPill();
+    TestGiveUpPill(); TestWaveBreakPill(); TestDownPill();
     TestDuelCountdownHint();
     TestBannerTracker();
     TestDeadPanel();

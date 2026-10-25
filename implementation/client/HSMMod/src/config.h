@@ -22,6 +22,8 @@ struct Config {
     // true: a stand-in's hands lock their grip joints and carry the weapon (the game's own firm grip); false: the grips
     // are freed and each weapon is servoed on its own (pre7 behaviour). Each machine's own setting applies to its stand-ins.
     bool standInGripLock = true;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
+    // true: the host starts a match even while another player runs a different mod build (testing only).
+    bool allowBuildMismatch = false;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

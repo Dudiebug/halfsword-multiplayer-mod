@@ -115,8 +115,17 @@ inline std::string RespawnLine(const MatchInfo& m, uint32_t sinceDeathMs) {
     return sinceDeathMs < delay ? "Respawning in " + Seconds(delay - sinceDeathMs) : "Respawning...";
 }
 
+// A drawn Duel round (Kill flags 16/32): "Ann and Bo drew the round (both down)".
+inline std::string DrawnWhy(const Kill& k) { return (k.flags & 32) ? " drew the round (no hits)" : " drew the round (both down)"; }
+inline std::string DrawnLine(const MatchInfo& m, const Kill& k) {
+    std::string who = NameOf(m, k.victim);
+    if (k.killer != 0) who += " and " + NameOf(m, k.killer);
+    return who + DrawnWhy(k);
+}
+
 inline std::string KillLine(const MatchInfo& m, const Kill& k) {
     std::string victim = NameOf(m, k.victim);
+    if (k.flags & (16 | 32)) return DrawnLine(m, k);
     if (k.flags & 8) return victim + " gave up";
     if (k.flags & 2) return victim + " killed themselves";
     if ((k.flags & 4) || k.killer == 0) return victim + " died";

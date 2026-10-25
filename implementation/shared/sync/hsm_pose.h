@@ -45,6 +45,10 @@ struct WeaponSample {
     V3 vel;                  // root body linear velocity at the root origin, uu/s
     V3 angVelDeg;
     V3 base, tip;            // blade base ("Root Scene") and tip ("TippyTipScene"), world
+    // A flail's head: the last simulating body of its chain (the child SkeletalMeshComponent tagged "Flail"), world, the
+    // bone origin's velocity. Only sent with a present weapon.
+    bool hasHead = false;
+    BoneSample head{};
 };
 
 // How the owner's hands hold their weapon, read from the Willie's own variables (the game never gives the left hand a

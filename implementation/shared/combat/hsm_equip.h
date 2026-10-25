@@ -23,6 +23,7 @@
 #pragma once
 #include "hsm_protocol.h"
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -257,5 +258,24 @@ private:
     struct Last { EquipStateMsg state; double atMs = 0; };
     std::map<uint8_t, Last> last_;
 };
+
+// A sheathed weapon hangs from its sheath constraint by a point up its shaft (the weapon's local +Z), as the game's
+// Sheathe on Spawn sets it (Willie_BP.cpp:7022, SetConstraintReferencePosition on Frame1): 0.75 x its Length to Top R
+// Default, the root itself for grip types 5 and 6. A stand-in's waist constraint rebuilt at the root left the other
+// player's waist weapons hanging that much too high (two-player test 2026-10-25).
+constexpr double kSheathHangShare = 0.75;
+inline double SheathHang(double lengthToTop, uint8_t gripR) {
+    if (gripR == 5 || gripR == 6) return 0.0;
+    if (!std::isfinite(lengthToTop) || lengthToTop <= 0.0) return 0.0;
+    return lengthToTop * kSheathHangShare;
+}
+
+// Where the weapon's root goes for its hang point to sit at the socket, the weapon turned as the socket (rotation a unit
+// quaternion x, y, z, w): socket - rotation x (0, 0, hang).
+inline std::array<double, 3> HangRoot(const std::array<double, 3>& socket, const std::array<double, 4>& q, double hang) {
+    const double x = q[0], y = q[1], z = q[2], w = q[3];
+    const std::array<double, 3> up = {2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)};
+    return {socket[0] - up[0] * hang, socket[1] - up[1] * hang, socket[2] - up[2] * hang};
+}
 
 }  // namespace hsm::combat

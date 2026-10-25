@@ -7,6 +7,7 @@
 #pragma once
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_map_list.h"
+#include "session/hsm_build.h"
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -21,6 +22,7 @@ struct LobbyPlayer {
     bool host = false, ready = false, me = false;
     int team = kNoTeam;                 // their own pick (Auto: kNoTeam)
     int hostOverride = kNoTeam;         // where the host moved them
+    std::string build;                  // their mod build (session/hsm_build.h), empty until their member data comes
 };
 
 struct LobbyFound {                     // a public lobby from Find
@@ -35,6 +37,8 @@ struct LobbyLocal {
     bool host = false;                  // we own the lobby
     bool publicLobby = false;           // it is listed publicly (else friends only)
     std::string myName, status, version;
+    std::string myBuild;                // this mod's build (ModBuildString)
+    bool allowBuildMismatch = false;    // allow_build_mismatch=1: the host may start with other builds in
     MatchConfig config;
     std::string mapPick;                // the host's pick (package path), empty until picked
     std::vector<LobbyPlayer> players;
@@ -72,8 +76,9 @@ struct LobbyScene {
     std::vector<SettingRow> settings;
     std::string hostOnly;               // members: "Only the host can change these."
     std::vector<MapCard> maps;          // kMaps order
-    bool start = false;                 // START MATCH: the host
-    std::string waiting;                // members: "Waiting for the host"
+    bool start = false;                 // START MATCH: the host, while every known build matches (or the override is on)
+    std::string waiting;                // members: "Waiting for the host"; anyone: the build warning, which replaces it
+    bool buildMismatch = false;         // another player is on a different build (waiting says who)
 };
 
 // ------------------------------------------------------------------ steppers
@@ -320,8 +325,13 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         m.enabled = l.host && m.allowed;
         s.maps.push_back(m);
     }
-    s.start = l.host;
+    std::vector<PeerBuild> others;
+    for (const LobbyPlayer& p : l.players) if (!p.me) others.push_back({p.name, p.build});
+    const std::string warn = BuildWarning(l.myBuild, others);
+    s.buildMismatch = !warn.empty();
+    s.start = l.host && MayStartMatch(l.myBuild, others, l.allowBuildMismatch);
     if (!l.host) s.waiting = "Waiting for the host";
+    if (s.buildMismatch) s.waiting = l.host && l.allowBuildMismatch ? warn + " (allowed: allow_build_mismatch=1)" : warn;
     return s;
 }
 

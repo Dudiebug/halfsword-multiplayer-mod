@@ -147,6 +147,16 @@ inline bool Match::Forfeit(uint8_t entity, uint32_t nowMs) {
     return true;
 }
 
+inline bool Match::RoundInPlay() const {
+    return cfg_.format == Format::Duel && !roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath);
+}
+
+inline bool Match::Draw(uint32_t nowMs) {
+    if (!RoundInPlay()) return false;
+    roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = 0;
+    return true;
+}
+
 inline bool GiveUpHold::Update(bool down, uint32_t nowMs) {
     if (!down) { holding_ = fired_ = false; progress_ = 0.0f; return false; }
     if (fired_) return false;

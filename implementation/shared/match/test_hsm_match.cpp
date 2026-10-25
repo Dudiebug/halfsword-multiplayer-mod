@@ -689,12 +689,33 @@ static void TestHitAllowed() {
     CHECK(HitAllowed(true, 0, 1, false));                                     // enemies always
 }
 
+// Two-player test 2026-10-25: rounds with both fighters down and unable to act are drawn (hsm_draw.h): the round ends
+// with no point and no death, and after the gap both respawn as for any round.
+static void TestDuelDraw() {
+    Match m; m.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    CHECK(!m.RoundInPlay() && !m.Draw(100));                                    // countdown
+    m.Tick(Match::kCountdownMs);
+    uint32_t t = Match::kCountdownMs;
+    CHECK(m.RoundInPlay() && m.round() == 1);
+    CHECK(m.Draw(t + 10));
+    CHECK(!m.RoundInPlay() && m.roundWinner() == 0 && m.Score(1) == 0 && m.Score(2) == 0 && m.Alive(1) && m.Alive(2));
+    CHECK(m.Deaths(1) == 0 && m.Deaths(2) == 0 && m.RoundGapLeftMs(t + 10) == 5000 && m.phase() == MatchPhase::Live);
+    CHECK(!m.Draw(t + 20) && !m.Forfeit(1, t + 20));                            // the gap: decided
+    auto ev = m.Tick(t + 10 + 5000);
+    CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2}) && m.round() == 2 && m.RoundInPlay());
+    m.OnDeath(2, 1, t + 6000);
+    CHECK(!m.RoundInPlay() && !m.Draw(t + 6001) && m.Score(1) == 1);            // a won round is not drawn after
+    Match ffa; ffa.Start(Cfg(Format::FreeForAll, 5), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    ffa.Tick(Match::kCountdownMs);
+    CHECK(!ffa.RoundInPlay() && !ffa.Draw(t + 1));                              // Duel only
+}
+
 int main() {
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

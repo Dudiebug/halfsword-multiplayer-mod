@@ -417,6 +417,46 @@ static void TestQRotAgainstMatrixFormula() {
     }
 }
 
+// 15. Item 7c: a command never goes faster than 1.2x the owner's own speed (the COM feed-forward, the target's
+// angular velocity), nor is cut below the floors. Direction is kept; a command within the limits is unchanged.
+static double Len(const V3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+static void TestClampToOwnerSpeed() {
+    const BodyNow cur{ V3{ 0, 0, 0 }, Q4{ 0, 0, 0, 1 }, V3{ 0, 0, 0 } };
+    BodyTarget tg{ V3{ 0, 0, 0 }, Q4{ 0, 0, 0, 1 }, V3{ 1000, 0, 0 }, V3{ 0, 0, 500 } };
+    // within the limits: unchanged
+    ServoCommand c{ V3{ 1100, 0, 0 }, V3{ 0, 0, 550 } };
+    ServoCommand o = ClampToOwnerSpeed(c, cur, tg);
+    CHECK(Near(o.vel.x, 1100, 1e-9) && Near(o.angVelDeg.z, 550, 1e-9));
+    // past 1.2x: cut to 1.2x, direction kept
+    c = ServoCommand{ V3{ 1600, 1200, 0 }, V3{ 0, 900, 0 } };
+    o = ClampToOwnerSpeed(c, cur, tg);
+    CHECK(Near(Len(o.vel), 1200, 1e-9) && Near(o.vel.x / o.vel.y, 1600.0 / 1200.0, 1e-12));
+    CHECK(Near(Len(o.angVelDeg), 600, 1e-9) && Near(o.angVelDeg.x, 0, 1e-12) && o.angVelDeg.y > 0);
+    // an owner at rest: the floors
+    tg.vel = V3{}; tg.angVelDeg = V3{};
+    c = ServoCommand{ V3{ 0, 0, -540 }, V3{ 720, 0, 0 } };
+    o = ClampToOwnerSpeed(c, cur, tg);
+    CHECK(Near(Len(o.vel), kOwnerSpeedFloorLinUu, 1e-9) && o.vel.z < 0);
+    CHECK(Near(Len(o.angVelDeg), kOwnerSpeedFloorAngDeg, 1e-9) && o.angVelDeg.x > 0);
+    c = ServoCommand{ V3{ 0, 0, -250 }, V3{ 300, 0, 0 } };   // under the floors: unchanged
+    o = ClampToOwnerSpeed(c, cur, tg);
+    CHECK(Near(o.vel.z, -250, 1e-9) && Near(o.angVelDeg.x, 300, 1e-9));
+    CHECK(kOwnerSpeedFloorLinUu > ServoParams{}.impactCapUu);   // the impact yield still softens a body at rest
+    // the linear limit is the centre of mass's speed: a body turning about its origin moves its COM
+    const BodyNow off{ V3{ 0, 0, 0 }, Q4{ 0, 0, 0, 1 }, V3{ 100, 0, 0 } };
+    tg = BodyTarget{ V3{ 0, 0, 0 }, Q4{ 0, 0, 0, 1 }, V3{}, V3{ 0, 0, 360 } };   // COM at 100 uu, 2*pi rad/s: 628 uu/s
+    const double comSpeed = 100.0 * 2.0 * detail::kPi;
+    CHECK(Near(Len(FeedForwardCom(off, tg)), comSpeed, 1e-9));
+    c = ServoCommand{ V3{ 0, 2000, 0 }, V3{ 0, 0, 360 } };
+    o = ClampToOwnerSpeed(c, off, tg);
+    CHECK(Near(Len(o.vel), 1.2 * comSpeed, 1e-9));
+    CHECK(Near(Len(ClampToOwnerSpeed(c, cur, tg).vel), kOwnerSpeedFloorLinUu, 1e-9));   // no COM offset: the floor
+    // the feed-forward the clamp uses is ServoBody's: with no correction (gain 0) the command is exactly it, within the limit
+    const ServoCommand onTarget = ServoBody(off, tg, 1.0 / 60.0, 0.0, 900, 900);
+    CHECK(Near(Dist3(onTarget.vel, FeedForwardCom(off, tg)), 0, 1e-9));
+    CHECK(Near(Dist3(ClampToOwnerSpeed(onTarget, off, tg).vel, onTarget.vel), 0, 1e-12));
+}
+
 int main() {
     TestRestConverges();
     TestConstantVelocityTracking();
@@ -432,6 +472,7 @@ int main() {
     TestParityServoOneStep();
     TestParityAdvance();
     TestQRotAgainstMatrixFormula();
+    TestClampToOwnerSpeed();
     if (g_fail) { std::printf("test_hsm_servo: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_servo: all passed\n");
     return 0;

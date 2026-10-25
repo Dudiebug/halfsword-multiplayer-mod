@@ -10,6 +10,7 @@
 #include "hsm_owner.h"
 #include "sync/hsm_poseplay.h"
 #include "sync/hsm_roottrack.h"
+#include "sync/hsm_slowsend.h"
 #include "sync/hsm_standin.h"
 #include "sync/hsm_track.h"
 #include <array>
@@ -49,6 +50,7 @@ private:
     };
     std::array<std::unique_ptr<Owned>, kMaxWillies + 1> owned_{};
     double startMs_ = 0, prevDtS_ = 0;
+    sync::SlowFrameMeter slowFrames_;   // item 7a: this machine's frames past 25 ms (a pose still goes each one)
     uint64_t posesSent_ = 0, vitalsSent_ = 0, readFailed_ = 0;
 };
 
@@ -90,6 +92,11 @@ public:
     // Weapon slots (bit 0 "Weapon R", bit 1 "Weapon L") of an entity's stand-in that a stuck-blade joint holds to a local
     // fighter: the servo leaves them to the joint (FighterRig::SetPinnedWeapons).
     void SetHeldWeapons(std::function<uint32_t(uint8_t)> heldWeapons) { heldWeapons_ = std::move(heldWeapons); }
+    // Called after every driven step of a stand-in with what the servo read, the target and the rig (the mirror bench's
+    // tracking measures, mirror.h). Optional.
+    using StepObserver = std::function<void(uint8_t entity, const sync::DriverStep& step, const sync::FighterNow& now,
+                                            const sync::PoseFrame& target, const FighterRig& rig)>;
+    void SetStepObserver(StepObserver observer) { stepObserver_ = std::move(observer); }
     // Once per frame, before the physics step. avoid: local pelvises a stand-in must never be snapped onto.
     void Tick(Adapter& adapter, double nowMs, float dt, const std::vector<sync::V3>& avoid);
     std::string HealthLine();                            // since the previous call; empty with no stand-in
@@ -108,6 +115,8 @@ private:
         uint32_t handTs = 0;
         bool haveHands = false;
         uint64_t poses = 0, rejected = 0;
+        sync::SlowSenderMeter slow;   // item 7a: why this owner's poses come slowly (set on the first pose)
+        bool slowSet = false;
     };
     struct Actor {
         ue::UObject* willie = nullptr;
@@ -135,6 +144,7 @@ private:
     std::array<Slot, kMaxWillies + 1> slots_{};
     std::function<uint32_t(uint8_t)> deadBones_;
     std::function<uint32_t(uint8_t)> heldWeapons_;
+    StepObserver stepObserver_;
     double costSumMs_ = 0, costMaxMs_ = 0;
     uint64_t ticks_ = 0;
 };

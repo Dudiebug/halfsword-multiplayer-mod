@@ -68,6 +68,8 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
    - Host: `role=host`, and forward UDP `27777` (or your `port`) to the host machine.
    - Client: `role=client`, `host=<host IP>`.
 4. Logs go to `HSMMod.log` in the same folder.
+5. Every player needs the same HSMMod build. The lobby names anyone on another build ("Bob on 0.6.3 - update") and the
+   host cannot start a match until it matches; `allow_build_mismatch=1` in `HSMMod.ini` overrides this for testing.
 
 ## Matches, teams and bots (Phase 3)
 
@@ -124,6 +126,7 @@ All optional; several instances can share one install.
 | `-hsmquit=SECONDS` | quit cleanly after that long |
 | `-hsmtest=all` | run the in-game probes (below) |
 | `-hsmbridge=PORT` | agent bridge on `127.0.0.1:PORT` (never off-machine) |
+| `-hsmmirror=DELAY,JITTER,LOSS[,OFFSET]` | offline: the mirror test bench (a stand-in of your own fighter fed through a simulated link, see `mirror.h`) comes on in every fight level, e.g. `-hsmmirror=80,10,1` |
 
 The bridge takes one command per line and answers with one JSON line (`tools/hsmctl.py PORT CMD...`):
 `state`, `widgets`, `threads`, `stack [thread-id]`, `window`, `key NAME [tap|down|up]`, `click X Y`,

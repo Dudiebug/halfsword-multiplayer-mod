@@ -43,6 +43,9 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
     if (!Started()) return;
     const double stepS = prevDtS_ > 0 ? prevDtS_ : dt;   // the step that produced the state read now
     prevDtS_ = dt;
+    if (slowFrames_.Push(double(dt) * 1000.0, nowMs))
+        HSM_LOG("owner: slow sender (frame): %u of %u frames past %.0f ms in %.0f s, worst %.1f ms; a pose still goes every frame",
+                slowFrames_.Slow(), slowFrames_.Frames(), sync::kSlowGapMs, sync::kSlowWindowMs / 1000.0, slowFrames_.WorstMs());
     const uint16_t stepUs = static_cast<uint16_t>(std::clamp(stepS * 1e6, 0.0, 65535.0));
     std::array<bool, kMaxWillies + 1> live{};
     for (const auto& [e, w] : owned)
@@ -100,6 +103,13 @@ void StandIns::OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double now
     if (!s.feed->player.Push(frame, std::llround(nowMs))) { ++s.feed->rejected; return; }
     s.feed->root.Push(frame.tsMs, V3{m.rootX, m.rootY, m.rootZ}, m.yawDeg);
     ++s.feed->poses;
+    if (!s.feed->slowSet) { s.feed->slow = sync::SlowSenderMeter(m.entity > kMaxFighters ? kBotPoseEveryMs : kPoseEveryMs); s.feed->slowSet = true; }
+    if (s.feed->slow.Push(frame.tsMs, nowMs)) {
+        const sync::SlowReport& r = s.feed->slow.Last();
+        HSM_LOG("standins: slow sender (%s): entity %u, %u of %u pose gaps past %.0f ms (frame %u, network %u), worst owner gap %.0f ms, "
+                "worst arrival gap %.0f ms", sync::SlowCauseName(r.cause), m.entity, r.frame + r.network, r.gaps, s.feed->slow.SlowGapMs(),
+                r.frame, r.network, r.worstTsGapMs, r.worstArrivalGapMs);
+    }
     if (!s.feed->haveHands || SeqNewer(frame.tsMs, s.feed->handTs)) {
         for (int h = 0; h < sync::kPoseWeapons; ++h) {
             uint32_t cls = 0;
@@ -275,7 +285,9 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     if (st.place) a.rig.Shift(st.shift);
     if (st.have && st.pelvisErrUu >= 0.0) a.rig.Drive(st.cmd);
     if (st.have) a.rig.ApplyGrip(target.grip);   // after Neutralise and Drive: the owner's grips on this stand-in's hands
+    if (st.have) a.rig.ApplyHeld(target, now, nowMs);   // and the owner's seat of the weapon in the right hand
     Record(s, st, now, target);
+    if (stepObserver_) stepObserver_(entity, st, now, target, a.rig);
 }
 
 // As the mirror bench: the stand-in's body against the target it was servoed to; placement frames counted apart.

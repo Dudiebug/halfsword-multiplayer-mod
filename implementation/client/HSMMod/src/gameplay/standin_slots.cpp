@@ -23,6 +23,7 @@ constexpr double kLostAfterMs = 1000.0;                  // a slot weapon's cons
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel (standin_rig.cpp)
 constexpr uint8_t kIgnore = 0, kBlock = 2;               // ECollisionResponse::ECR_Ignore, ECR_Block
 constexpr size_t kMemory = 64;                           // constraints / weapons remembered
+constexpr double kSheathSlackCm = 5.0;                   // the game's sheath linear limits (Willie_BP.cpp:7023-7025)
 constexpr double kSnapBackCm = 15.0;                     // a waist weapon farther than this from its socket is put back first
 constexpr uint8_t kWorldSpace = 0;                       // ERelativeTransformSpace::RTS_World
 
@@ -92,14 +93,34 @@ const char* SocketOf(UObject* weapon, int slot) {
     return sheathSlot ? SlotSocket(*sheathSlot, slot) : nullptr;
 }
 
-// Distance in cm from the weapon body to that socket of the Mesh; -1 when either cannot be read.
-double SocketDistance(UObject* mesh, UObject* body, const char* socket) {
+// How far up its shaft the weapon hangs from its sheath socket (combat::SheathHang, as the game's Sheathe on Spawn).
+double HangOf(UObject* weapon) {
+    const double* length = weapon ? Field<double>(weapon, "Length to Top R Default") : nullptr;
+    const uint8_t* grip = weapon ? Field<uint8_t>(weapon, "Grip R Hand Default") : nullptr;
+    return length ? combat::SheathHang(*length, grip ? *grip : uint8_t(0)) : 0.0;
+}
+
+// Where the weapon's root sits when it hangs at that socket of the Mesh as the game hangs it, the weapon turned as the
+// socket (combat::HangRoot); false when the socket cannot be read.
+bool HangPlace(UObject* mesh, const char* socket, double hang, FTransform& out) {
+    if (!mesh || !socket) return false;
+    Call sock(mesh, "GetSocketTransform");
+    sock.setName("InSocketName", MakeName(socket)).set<uint8_t>("TransformSpace", kWorldSpace);
+    if (!sock.invoke()) return false;
+    out = sock.get<FTransform>("ReturnValue");
+    const std::array<double, 3> root = combat::HangRoot({out.translation.x, out.translation.y, out.translation.z},
+                                                        {out.rotation.x, out.rotation.y, out.rotation.z, out.rotation.w}, hang);
+    out.translation = FVector{root[0], root[1], root[2]};
+    return true;
+}
+
+// Distance in cm from the weapon body to where it hangs at that socket of the Mesh; -1 when either cannot be read.
+double SocketDistance(UObject* mesh, UObject* body, const char* socket, double hang) {
     if (!mesh || !body || !socket) return -1.0;
     Call at(body, "K2_GetComponentLocation");
-    Call sock(mesh, "GetSocketLocation");
-    sock.setName("InSocketName", MakeName(socket));
-    if (!at.invoke() || !sock.invoke()) return -1.0;
-    const FVector a = at.get<FVector>("ReturnValue"), b = sock.get<FVector>("ReturnValue");
+    FTransform t;
+    if (!at.invoke() || !HangPlace(mesh, socket, hang, t)) return -1.0;
+    const FVector a = at.get<FVector>("ReturnValue"), b = t.translation;
     return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
 }
 
@@ -183,14 +204,12 @@ void HoldStill(UObject* body) {
         .setName("BoneName", FName{}).invoke();
 }
 
-// Teleports the weapon body to the socket's world transform (its own scale kept), then at rest: a waist weapon that fell
-// while BoneCore had no collision, before the constraint is made again (it would keep the offset).
-bool SnapToSocket(UObject* mesh, UObject* body, const char* socket) {
-    Call sock(mesh, "GetSocketTransform");
-    sock.setName("InSocketName", MakeName(socket)).set<uint8_t>("TransformSpace", kWorldSpace);
+// Teleports the weapon body to where it hangs at the socket (HangPlace, its own scale kept), then at rest: a waist weapon
+// that fell while BoneCore had no collision, before the constraint is made again (it would keep the offset).
+bool SnapToSocket(UObject* mesh, UObject* body, const char* socket, double hang) {
     Call scale(body, "K2_GetComponentScale");
-    if (!sock.invoke() || !scale.invoke()) return false;
-    FTransform t = sock.get<FTransform>("ReturnValue");
+    FTransform t;
+    if (!HangPlace(mesh, socket, hang, t) || !scale.invoke()) return false;
     t.scale = scale.get<FVector>("ReturnValue");
     Call set(body, "K2_SetWorldTransform");
     set.set("NewTransform", t).set<bool>("bSweep", false).set<bool>("bTeleport", true);
@@ -210,7 +229,7 @@ void LogSlots(UObject* willie) {
         const std::string name = weapon ? ObjectName(weapon) : "-";
         const int w = std::snprintf(line + n, sizeof line - n, "%s %s %s c=%d sim=%d %.0fcm", k ? " |" : "", kSlotLabel[k], name.c_str(),
                                     ComponentLive(SlotConstraint(willie, k)) ? 1 : 0, Simulating(body) ? 1 : 0,
-                                    SocketDistance(mesh, body, SocketOf(weapon, k)));
+                                    SocketDistance(mesh, body, SocketOf(weapon, k), HangOf(weapon)));
         n = std::min(n + size_t(std::max(w, 0)), sizeof line - 1);
     }
     HSM_LOG("%s", line);
@@ -257,23 +276,34 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
                 // The new constraint keeps the weapon where it is: one that fell while BoneCore had no collision (the game
                 // makes the constraint a moment after spawning the weapon) goes back to its socket first.
                 const char* socket = SocketOf(s.weapon, k);
-                const double away = SocketDistance(mesh, s.body, socket);
-                if (away > kSnapBackCm && SnapToSocket(mesh, s.body, socket) && !Remembered(snapped, s.weapon)) {
+                const double hang = HangOf(s.weapon);
+                const double away = SocketDistance(mesh, s.body, socket, hang);
+                if (away > kSnapBackCm && SnapToSocket(mesh, s.body, socket, hang) && !Remembered(snapped, s.weapon)) {
                     Remember(snapped, s.weapon);
                     HSM_LOG("rig: %s slot %s snapped back from %.0fcm", ObjectName(willie).c_str(), kSlotLabel[k], away);
                 }
                 Call c(s.constraint, "SetConstrainedComponents");
                 c.set<UObject*>("Component1", s.body).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh)
                     .setName("BoneName2", MakeName("pelvis"));
-                if (c.invoke()) Remember(retargeted, s.constraint);
+                if (c.invoke()) {
+                    Remember(retargeted, s.constraint);
+                    // SetConstrainedComponents makes the frames again from where the weapon is: the game's hang point
+                    // and slack (Willie_BP.cpp:7022-7025) go back on, or the weapon hangs by its root.
+                    Call(s.constraint, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0)
+                        .set("RefPosition", FVector{0.0, 0.0, hang}).invoke();   // Frame1: the weapon
+                    Call(s.constraint, "SetLinearXLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kSheathSlackCm).invoke();   // LCM_Limited
+                    Call(s.constraint, "SetLinearYLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kSheathSlackCm).invoke();
+                    Call(s.constraint, "SetLinearZLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kSheathSlackCm).invoke();
+                }
             }
         } else if (s.place) {
             // Spawned away from the stand-in (about 6 m) and constrained a moment later: kept at its socket meanwhile, so
             // it never shows where it was spawned (the sheath flicker).
             SetBodyPolicy(s.body);
             const char* socket = SocketOf(s.weapon, k);
-            const double away = SocketDistance(mesh, s.body, socket);
-            if (away > kSnapBackCm && SnapToSocket(mesh, s.body, socket) && !Remembered(placed, s.weapon)) {
+            const double hang = HangOf(s.weapon);
+            const double away = SocketDistance(mesh, s.body, socket, hang);
+            if (away > kSnapBackCm && SnapToSocket(mesh, s.body, socket, hang) && !Remembered(placed, s.weapon)) {
                 Remember(placed, s.weapon);
                 HSM_LOG("rig: %s slot %s kept at its socket until its constraint is made (was %.0fcm away)",
                         ObjectName(willie).c_str(), kSlotLabel[k], away);

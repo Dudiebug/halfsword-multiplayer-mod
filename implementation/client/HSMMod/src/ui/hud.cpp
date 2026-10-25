@@ -249,7 +249,7 @@ void ApplyBoardLine(BoardLine& l, const BoardRow& r) {
     l.deaths.Set(band ? "" : std::to_string(r.deaths)); l.deaths.Color(r.ink);
     l.score.Set(std::to_string(r.score)); l.score.Color(r.ink);
     l.ping.Set(band || !r.pingMs ? "" : std::to_string(r.pingMs) + " ms");
-    l.status.Set(r.dead ? "DEAD" : "");
+    l.status.Set(r.dead ? "DEAD" : r.down ? "DOWN" : "");
 }
 
 void ApplyBoard(const Board& b) {

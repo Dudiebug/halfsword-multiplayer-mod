@@ -152,6 +152,44 @@ inline ServoCommand ServoBody(const BodyNow& cur, const BodyTarget& tg, double d
     return ServoCommand{ V3{ vx, vy, vz }, V3{ wx, wy, wz } };
 }
 
+// Item 7c: a stand-in body never moves much faster than its owner's did. ServoBody adds a correction of up to the caps
+// on top of the feed-forward, so a limb behind its target swings past it up to 900 uu/s faster than the owner's limb
+// ever moved (whip). The command's speed is clamped to kOwnerSpeedShare x the owner's: the centre-of-mass feed-forward
+// for linear, the target's angular velocity for angular. Never below the floors, so a body standing still can still be
+// pulled back onto its target (30 uu off at 60 Hz asks 540 uu/s at gain 0.3; the floor closes it in about 6 frames). The linear floor stays above
+// ServoParams::impactCapUu so the impact yield still softens a body at rest.
+inline constexpr double kOwnerSpeedShare = 1.2;
+inline constexpr double kOwnerSpeedFloorLinUu = 300.0;
+inline constexpr double kOwnerSpeedFloorAngDeg = 360.0;
+
+// The feed-forward velocity of the body's centre of mass, as ServoBody computes it: tg.vel + tg.angVelDeg x tc.
+inline V3 FeedForwardCom(const BodyNow& cur, const BodyTarget& tg) {
+    using namespace detail;
+    const V3 c = QRot(tg.rot, cur.comLocal);
+    const double wr = kPi / 180.0;
+    const double ax = tg.angVelDeg.x * wr, ay = tg.angVelDeg.y * wr, az = tg.angVelDeg.z * wr;
+    return V3{ tg.vel.x + ay * c.z - az * c.y, tg.vel.y + az * c.x - ax * c.z, tg.vel.z + ax * c.y - ay * c.x };
+}
+
+inline ServoCommand ClampToOwnerSpeed(const ServoCommand& c, const BodyNow& cur, const BodyTarget& tg) {
+    using namespace detail;
+    ServoCommand out = c;
+    const V3 f = FeedForwardCom(cur, tg);
+    const double limLin = std::max(kOwnerSpeedShare * Len3(f.x, f.y, f.z), kOwnerSpeedFloorLinUu);
+    const double lin = Len3(c.vel.x, c.vel.y, c.vel.z);
+    if (lin > limLin) {
+        const double k = limLin / lin;
+        out.vel = V3{ c.vel.x * k, c.vel.y * k, c.vel.z * k };
+    }
+    const double limAng = std::max(kOwnerSpeedShare * Len3(tg.angVelDeg.x, tg.angVelDeg.y, tg.angVelDeg.z), kOwnerSpeedFloorAngDeg);
+    const double ang = Len3(c.angVelDeg.x, c.angVelDeg.y, c.angVelDeg.z);
+    if (ang > limAng) {
+        const double k = limAng / ang;
+        out.angVelDeg = V3{ c.angVelDeg.x * k, c.angVelDeg.y * k, c.angVelDeg.z * k };
+    }
+    return out;
+}
+
 // Advances a target by aheadS seconds of constant velocity / constant angular velocity (no
 // acceleration: the acceleration estimate is a driver-level concern, out of scope for this pure
 // law). avatars_pure.lua adv_pos / adv_rot (PURE.advance without the optional `acc`).

@@ -50,6 +50,9 @@ constexpr double kHeldMaxUu = 150.0;          // a weapon (root to tip) farther 
 constexpr double kBoneComMaxUu = 80.0;        // a centre of mass this far from its bone origin is a bad read
 constexpr double kWeaponComMaxUu = 300.0;
 constexpr int kComTries = 120;                // frames a bad centre-of-mass read is retried before the origin is used
+constexpr const char* kFlailTag = "Flail";    // ModularWeaponBP's chain component (SetAllBodiesBelowSimulatePhysics('Joint1'))
+constexpr int kHeadScanEvery = 15;            // frames between searches for a flail chain's simulating head while none is found
+constexpr int32_t kFlailMaxBones = 64;
 constexpr double kFullEarlyEveryMs = 500.0, kFullEarlyForMs = 6000.0, kFullEveryMs = 2000.0;
 constexpr double kCapsuleTeleportUu = 150.0;  // HSMP main.lua:133 TELEPORT_DIST
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel
@@ -57,6 +60,8 @@ constexpr uint8_t kIgnore = 0;                // ECollisionResponse::ECR_Ignore
 constexpr uint8_t kNoCollision = 0;           // ECollisionEnabled::NoCollision
 constexpr uint8_t kLocked = 2;                 // ELinearConstraintMotion::LCM_Locked, EAngularConstraintMotion::ACM_Locked
 bool g_gripLock = true;                        // standin_grip (SetStandInGripLock)
+constexpr uint8_t kLimited = 1;               // ELinearConstraintMotion::LCM_Limited, EAngularConstraintMotion::ACM_Limited
+constexpr double kOffhandAngleDeg = 36.0;      // the game's MapRangeClamped(Soft Attach Dot 0.9, 0.5, 1, 180, 0), Willie_BP.cpp:18200
 constexpr uint8_t kFree = 0;                  // ELinearConstraintMotion::LCM_Free, EAngularConstraintMotion::ACM_Free
 constexpr uint8_t kWorldSpace = 0;            // ERelativeTransformSpace::RTS_World
 constexpr uint8_t kAlwaysTickPose = 0;        // EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
@@ -121,6 +126,29 @@ void CollisionOff(UObject* c) {
     Call get(c, "GetCollisionEnabled");
     if (get.invoke() && get.get<uint8_t>("ReturnValue") == kNoCollision) return;
     Call(c, "SetCollisionEnabled").set<uint8_t>("NewType", kNoCollision).invoke();
+}
+
+// The weapon's flail chain: its SkeletalMeshComponent tagged "Flail", or nullptr.
+UObject* FlailComponent(UObject* actor) {
+    UClass* skel = FindClass("SkeletalMeshComponent");
+    if (!skel) return nullptr;
+    Call byTag(actor, "GetComponentsByTag");
+    byTag.set<UClass*>("ComponentClass", skel).setName("Tag", MakeName(kFlailTag));
+    if (!byTag.invoke()) return nullptr;
+    const FObjArray* arr = static_cast<const FObjArray*>(byTag.paramPtr("ReturnValue"));
+    if (!arr || !arr->data || arr->num <= 0 || arr->num > 64) return nullptr;
+    return arr->data[0];
+}
+
+// A flail's chain simulates only below Joint1, and the game switches it on again after every BaseMesh.SetSimulatePhysics
+// (ModularWeaponBP Set_Up_Module:275, Refresh_Collisions:1657). The rig's own toggles of the root (ApplySeat, ApplyHeld)
+// must do the same, or the chain hangs stiff from the head of a re-seated flail.
+void RearmFlail(UObject* weapon) {
+    UObject* const flail = weapon ? FlailComponent(weapon) : nullptr;
+    if (!flail) return;
+    Call below(flail, "SetAllBodiesBelowSimulatePhysics");
+    below.setName("InBoneName", MakeName("Joint1")).set<bool>("bNewSimulate", true).set<bool>("bIncludeSelf", true);
+    if (!below.invoke()) HSM_LOG("rig: %s: flail chain NOT re-armed", ObjectName(weapon).c_str());
 }
 
 int ObjectType(UObject* c) {
@@ -241,8 +269,22 @@ void FighterRig::RefreshWeapon(int w) {
     wp.tip = ObjField(actor, "TippyTipScene");
     if (wp.base) wp.baseLoc = PreparedCall(ClassOf(wp.base), "K2_GetComponentLocation", {"ReturnValue"});
     if (wp.tip) wp.tipLoc = PreparedCall(ClassOf(wp.tip), "K2_GetComponentLocation", {"ReturnValue"});
-    HSM_LOG("rig: %s slot %d = %s (root %s, base %s, tip %s)", ObjectName(willie_).c_str(), w, cls.c_str(), ObjectName(root).c_str(),
-            wp.base ? "yes" : "no", wp.tip ? "yes" : "no");
+    if (UObject* flail = FlailComponent(actor)) {
+        const UClass* fc = ClassOf(flail);
+        wp.headSocket = PreparedCall(fc, "GetSocketTransform", {"InSocketName", "TransformSpace", "ReturnValue"});
+        wp.headSim = PreparedCall(fc, "IsSimulatingPhysics", {"BoneName", "ReturnValue"});
+        wp.headLinVelAt = PreparedCall(fc, "GetPhysicsLinearVelocityAtPoint", {"Point", "BoneName", "ReturnValue"});
+        wp.headAngVel = PreparedCall(fc, "GetPhysicsAngularVelocityInDegrees", {"BoneName", "ReturnValue"});
+        wp.headSetLin = PreparedCall(fc, "SetPhysicsLinearVelocity", {"NewVel", "bAddToCurrent", "BoneName"});
+        wp.headSetAng = PreparedCall(fc, "SetPhysicsAngularVelocityInDegrees", {"NewAngVel", "bAddToCurrent", "BoneName"});
+        if (wp.headSocket.valid() && wp.headSim.valid() && wp.headLinVelAt.valid() && wp.headAngVel.valid() && wp.headSetLin.valid() &&
+            wp.headSetAng.valid()) {
+            wp.flail = flail;
+            wp.flailIndex = ObjectIndex(flail);
+        }
+    }
+    HSM_LOG("rig: %s slot %d = %s (root %s, base %s, tip %s, flail %s)", ObjectName(willie_).c_str(), w, cls.c_str(),
+            ObjectName(root).c_str(), wp.base ? "yes" : "no", wp.tip ? "yes" : "no", wp.flail ? ObjectName(wp.flail).c_str() : "no");
 }
 
 // ---- reading ---------------------------------------------------------------------------------------------------------
@@ -264,6 +306,41 @@ bool FighterRig::ReadWeapon(int w, const V3& hand) {
     // dropped weapon still in the field, or one parked at the world origin, is not.
     if (SegmentDistance(hand, wp.pos, wp.tipPos) > kHeldMaxUu) return false;
     wp.read = true;
+    return true;
+}
+
+// The flail head: the chain's last simulating body (highest bone index; the chain runs parents first from Joint1). Searched
+// for while none is found, since a sheathed chain is kinematic; a frame where it is kinematic sends no head.
+bool FighterRig::ReadHead(Weapon& wp, sync::BoneSample& out) {
+    if (!wp.flail || !Live(wp.flail, wp.flailIndex)) return false;
+    if (!wp.haveHeadBone) {
+        if (wp.headTries++ % kHeadScanEvery != 0) return false;
+        Call count(wp.flail, "GetNumBones");
+        const int32_t n = count.invoke() ? std::min(count.get<int32_t>("ReturnValue"), kFlailMaxBones) : 0;
+        for (int32_t b = n - 1; b >= 0; --b) {
+            Call name(wp.flail, "GetBoneName");
+            name.set<int32_t>("BoneIndex", b);
+            if (!name.invoke()) continue;
+            const FName bone = name.get<FName>("ReturnValue");
+            wp.headSim.put(0, bone);
+            if (!wp.headSim.invoke(wp.flail) || !wp.headSim.take<bool>(1)) continue;
+            wp.headBone = bone;
+            wp.haveHeadBone = true;
+            HSM_LOG("rig: %s flail head = bone %s (%d of %d)", ObjectName(willie_).c_str(), NameToString(bone).c_str(), b, n);
+            break;
+        }
+        if (!wp.haveHeadBone) return false;
+    }
+    wp.headSim.put(0, wp.headBone);
+    if (!wp.headSim.invoke(wp.flail) || !wp.headSim.take<bool>(1)) return false;
+    wp.headSocket.put(0, wp.headBone);   // TransformSpace stays RTS_World (0), as for the bones
+    if (!wp.headSocket.invoke(wp.flail)) return false;
+    const FTransform t = wp.headSocket.take<FTransform>(2);
+    out = sync::BoneSample{ToV3(t.translation), ToQ4(t.rotation), V3{}, V3{}};
+    wp.headLinVelAt.put(0, t.translation).put(1, wp.headBone);
+    if (wp.headLinVelAt.invoke(wp.flail)) out.vel = ToV3(wp.headLinVelAt.take<FVector>(2));
+    wp.headAngVel.put(0, wp.headBone);
+    if (wp.headAngVel.invoke(wp.flail)) out.angVelDeg = ToV3(wp.headAngVel.take<FVector>(1));
     return true;
 }
 
@@ -323,6 +400,8 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
         RefreshWeapon(w);
         Weapon& wp = weapons_[w];
         const bool held = ReadWeapon(w, hand[w]);
+        sync::BoneSample head{};
+        const bool haveHead = held && (frame || now) && ReadHead(wp, head);
         if (frame) {
             sync::WeaponSample& s = frame->weapons[w];
             s = sync::WeaponSample{};
@@ -338,6 +417,8 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
                 if (wp.angVel.invoke(wp.root)) s.angVelDeg = ToV3(wp.angVel.take<FVector>(1));
                 s.base = wp.basePos;
                 s.tip = wp.tipPos;
+                s.hasHead = haveHead;
+                if (haveHead) s.head = head;
             }
         }
         if (now && held) {
@@ -352,6 +433,10 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
             }
             now->weapons[w] = sync::BodyNow{wp.pos, wp.rot, wp.comLocal};
             now->weaponValid[w] = true;
+            if (haveHead) {   // servoed about the bone origin, where its velocity is read and sent
+                now->heads[w] = sync::BodyNow{head.pos, head.rot, V3{}};
+                now->headValid[w] = true;
+            }
         }
     }
     if (frame) {
@@ -418,6 +503,7 @@ void FighterRig::LockGrip(int hand) {
     if (!c || c == gripLocked_[hand]) return;
     Call(c, "SetAngularDriveParams").set<float>("PositionStrength", 0.f).set<float>("VelocityStrength", 0.f)
         .set<float>("InForceLimit", 0.f).invoke();
+    if (hand == 1 && c == offJoint_ && HoldOffhand(c)) return;
     Call(c, "SetLinearXLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
     Call(c, "SetLinearYLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
     Call(c, "SetLinearZLimit").set<uint8_t>("ConstraintType", kLocked).set<float>("LimitSize", 0.f).invoke();
@@ -431,6 +517,47 @@ void FighterRig::LockGrip(int hand) {
         gripLogged_[hand] = c;
         HSM_LOG("rig: %s: %s locked", ObjectName(willie_).c_str(), kGripFields[hand]);
     }
+}
+
+// The off hand of a two-handed grip is not welded to the shaft by the game: once its soft hold closes (Willie_BP.cpp
+// :18205-18240, then :164ad) the joint keeps X/Y locked, lets the hand slide along the shaft (Z, limited to the weapon's
+// OffhandLimit, AltGrip1_Limit in the alt grip, locked with the hands switched or a hammer grip) under a position drive,
+// and leaves the angles limited where the hold closed (Soft Attach Dot >= 0.9: at most 36 degrees). Locking every limit
+// (3b0c7fb) welded the hand at the attach frame while the servo turned it toward the owner's hand: the two fought, the
+// off hand looked turned round on the shaft and the weapon wobbled. The rig now sets the game's own limits.
+bool FighterRig::HoldOffhand(UObject* c) {
+    UObject* const weaponR = FieldAt(weaponOffset_[0]);
+    if (!weaponR) return false;
+    const auto* base = reinterpret_cast<const uint8_t*>(willie_);
+    auto flag = [&](int i) {
+        bool v = false;
+        return gripFlag_[i] && GetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), v) && v;
+    };
+    const bool alt = flag(1), switched = flag(3);
+    const uint8_t gripR = gripTypeOffset_[0] >= 0 ? base[gripTypeOffset_[0]] : 0;
+    const double* limit = Field<double>(weaponR, alt ? "AltGrip1_Limit" : "OffhandLimit");
+    const double* str = Field<double>(weaponR, alt ? "AltGrip1_Str" : "OffhandStr");
+    if (!limit || !str) return false;
+    const uint8_t slide = gripR == 15 || switched ? kLocked : kLimited;
+    Call(c, "SetLinearXLimit").set<uint8_t>("ConstraintType", kLocked).setReal("LimitSize", 0.0).invoke();
+    Call(c, "SetLinearYLimit").set<uint8_t>("ConstraintType", kLocked).setReal("LimitSize", 0.0).invoke();
+    Call(c, "SetLinearZLimit").set<uint8_t>("ConstraintType", slide).setReal("LimitSize", *limit).invoke();
+    Call(c, "SetLinearPositionDrive").set<bool>("bEnableDriveX", true).set<bool>("bEnableDriveY", true)
+        .set<bool>("bEnableDriveZ", true).invoke();
+    Call(c, "SetLinearDriveParams").setReal("PositionStrength", *str).setReal("VelocityStrength", 0.0)
+        .setReal("InForceLimit", 0.0).invoke();
+    Call(c, "SetAngularSwing1Limit").set<uint8_t>("MotionType", kLimited).setReal("Swing1LimitAngle", kOffhandAngleDeg).invoke();
+    Call(c, "SetAngularSwing2Limit").set<uint8_t>("MotionType", kLimited).setReal("Swing2LimitAngle", kOffhandAngleDeg).invoke();
+    Call(c, "SetAngularTwistLimit").set<uint8_t>("ConstraintType", kLimited).setReal("TwistLimitAngle", kOffhandAngleDeg).invoke();
+    gripLocked_[1] = c;
+    gripFreed_[1] = nullptr;
+    gripLoose_[1] = nullptr;
+    if (gripLogged_[1] != c) {
+        gripLogged_[1] = c;
+        HSM_LOG("rig: %s: %s held on the shaft (slide %.1f, %s, angles %.0f)", ObjectName(willie_).c_str(), kGripFields[1],
+                *limit, slide == kLocked ? "locked" : "limited", kOffhandAngleDeg);
+    }
+    return true;
 }
 
 void FighterRig::FreeGrip(int hand) {
@@ -475,6 +602,14 @@ void FighterRig::Drive(const sync::FighterCommand& cmd) {
         wp.setLin.invoke(wp.root);
         wp.setAng.put(0, ToF(cmd.weapons[w].angVelDeg)).put(1, false).put(2, FName{});
         wp.setAng.invoke(wp.root);
+    }
+    for (int w = 0; w < sync::kPoseWeapons; ++w) {   // the flail heads, on their own chains (4b)
+        Weapon& wp = weapons_[w];
+        if (!cmd.headDrive[w] || !wp.read || Pinned(w) || !wp.haveHeadBone || !Live(wp.flail, wp.flailIndex)) continue;
+        wp.headSetLin.put(0, ToF(cmd.heads[w].vel)).put(1, false).put(2, wp.headBone);
+        wp.headSetLin.invoke(wp.flail);
+        wp.headSetAng.put(0, ToF(cmd.heads[w].angVelDeg)).put(1, false).put(2, wp.headBone);
+        wp.headSetAng.invoke(wp.flail);
     }
     for (int h = 0; h < 2; ++h) {
         if (lock[h]) LockGrip(h);
@@ -654,8 +789,10 @@ void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
                             : FVector{g->x + d->x, g->y + d->y, g->z + d->z};
     Call(r, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", refR).invoke();
     const bool off = offJoint_ && FieldAt(gripOffset_[1]) == offJoint_;
-    if (off)
+    if (off) {
         Call(offJoint_, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", on ? FVector{} : *o).invoke();
+        gripLocked_[1] = nullptr;   // HoldOffhand again: the switched hands lock the slide along the shaft
+    }
     HSM_LOG("rig: %s: hands %s along the shaft%s", ObjectName(willie_).c_str(), on ? "switched" : "switched back",
             off ? "" : " (right hand only)");
 }
@@ -711,20 +848,77 @@ bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
         t.translation = FVector{p.translation.x + off.x, p.translation.y + off.y, p.translation.z + off.z};
         SetWorldTransform(root, t);
     }
-    Call(r, "K2_AttachToComponent").set<UObject*>("Parent", mesh_).setName("SocketName", MakeName(socket))
-        .set<uint8_t>("LocationRule", 0).set<uint8_t>("RotationRule", 0).set<uint8_t>("ScaleRule", 0)
-        .set<bool>("bWeldSimulatedBodies", false).invoke();
-    Call cc(r, "SetConstrainedComponents");
-    cc.set<UObject*>("Component1", root).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh_)
-        .setName("BoneName2", MakeName(seat.lowerArm ? "lowerarm_r" : "hand_r"));
-    const bool ok = cc.invoke();
+    const bool ok = MakeGripJoint(r, root, socket, seat.lowerArm);
     SetWorldTransform(root, keep);
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+    RearmFlail(weaponR);
     gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
     switchOn_ = false;
     HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
             seat.flip == sync::SeatFlip::None ? "" : ", turned over", ok ? "" : " (joint NOT remade)");
     return true;
+}
+
+// The right hand's joint made again with the weapon where it now is: the joint keeps that seat.
+bool FighterRig::MakeGripJoint(UObject* joint, UObject* root, const char* socket, bool lowerArm) {
+    Call(joint, "K2_AttachToComponent").set<UObject*>("Parent", mesh_).setName("SocketName", MakeName(socket))
+        .set<uint8_t>("LocationRule", 0).set<uint8_t>("RotationRule", 0).set<uint8_t>("ScaleRule", 0)
+        .set<bool>("bWeldSimulatedBodies", false).invoke();
+    Call cc(joint, "SetConstrainedComponents");
+    cc.set<UObject*>("Component1", root).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh_)
+        .setName("BoneName2", MakeName(lowerArm ? "lowerarm_r" : "hand_r"));
+    return cc.invoke();
+}
+
+// ApplySeat guesses the seat from the owner's toggles; the owner's game does not always re-seat (an alt grip on an axe
+// slides the hand and keeps the weapon's turn), and the guess held the axe upside down (hsm_held.h). The pose says where
+// the owner's weapon sits in the owner's hand: when this stand-in's differs for long enough, the weapon goes there and
+// the joint is made again, as ApplySeat does. The hand switch moves the joints' reference positions (ApplySwitch) and a
+// shield (grips 6, 7) is held by the forearm: neither is re-seated here.
+void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow& now, double nowMs) {
+    if (!StillValid()) return;
+    UObject* const r = FieldAt(gripOffset_[0]);
+    UObject* const weaponR = FieldAt(weaponOffset_[0]);
+    if (r != heldJoint_ || weaponR != heldWeapon_) { heldJoint_ = r; heldWeapon_ = weaponR; heldCheck_.Forget(); }
+    const Weapon& wp = weapons_[0];
+    const sync::WeaponSample& ow = target.weapons[0];
+    const uint8_t gripR = gripTypeOffset_[0] >= 0 ? reinterpret_cast<const uint8_t*>(willie_)[gripTypeOffset_[0]] : 0;
+    const bool usable = r && weaponR && wp.actor == weaponR && wp.root && r == gripLocked_[0] && ow.present && ow.hand == 0 &&
+                        (!ow.classHash || !wp.classHash || ow.classHash == wp.classHash) && now.weaponValid[0] &&
+                        now.valid[sync::kBoneHandR] && !target.grip.switched2H && gripR != 6 && gripR != 7;
+    if (!usable) { heldCheck_.Reset(); return; }
+    const sync::BoneSample& oh = target.bones[sync::kBoneHandR];
+    const sync::BodyNow& sh = now.bones[sync::kBoneHandR];
+    const sync::HeldPose owner = sync::HeldIn(oh.pos, oh.rot, ow.pos, ow.rot);
+    const sync::HeldPose mine = sync::HeldIn(sh.pos, sh.rot, now.weapons[0].pos, now.weapons[0].rot);
+    if (!heldCheck_.Update(nowMs, owner, mine)) return;
+    FTransform keep;
+    if (!WorldTransform(wp.root, keep)) return;
+    V3 pos;
+    Q4 rot;
+    sync::HeldWorld(sh.pos, sh.rot, owner, &pos, &rot);
+    const sync::GripSeat seat = sync::SeatFor(gripR, offJoint_ != nullptr, false, false, false, 3);   // socket and bone only
+    Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
+    FTransform t = keep;
+    t.translation = ToF(pos);
+    t.rotation = ToFQuat(rot);
+    SetWorldTransform(wp.root, t);
+    const bool ok = MakeGripJoint(r, wp.root, seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket", seat.lowerArm);
+    SetWorldTransform(wp.root, keep);
+    Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+    RearmFlail(wp.actor);
+    gripLocked_[0] = nullptr;   // locked again on the next Drive
+    switchOn_ = false;
+    if (offJoint_) {            // the off hand is attached again to the weapon's new seat on the next ApplyGrip
+        Call br(willie_, "Break L Constraint");
+        br.set<bool>("Slide", false);
+        br.invoke();
+        offJoint_ = nullptr;
+        offTryMs_ = -1e18;
+    }
+    HSM_LOG("rig: %s: weapon re-seated in the right hand as the owner holds it (%.0f deg, %.1f uu off)%s",
+            ObjectName(willie_).c_str(), sync::QuatAngleDeg(owner.rot, mine.rot), sync::Vec3Dist(owner.pos, mine.pos),
+            ok ? "" : " (joint NOT remade)");
 }
 
 void FighterRig::SetBodyPolicy(UObject* body) {

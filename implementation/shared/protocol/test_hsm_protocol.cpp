@@ -10,15 +10,20 @@ static int g_fail = 0;
 using namespace hsm;
 
 static void TestHello() {
-    Hello h; h.buildKey = 0x1122334455667788ull; h.name = "player";
+    Hello h; h.buildKey = 0x1122334455667788ull; h.name = "player"; h.modBuild = "0.6.4 (v0.6.3-12-gdb82570)";
     auto b = Encode(h); Hello o;
     CHECK(Decode(b.data(), b.size(), o));
-    CHECK(o.buildKey == h.buildKey && o.name == "player" && o.revision == kProtocolRevision);
+    CHECK(o.buildKey == h.buildKey && o.name == "player" && o.revision == kProtocolRevision && o.modBuild == h.modBuild);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));      // truncation
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), o));  // trailing bytes
     auto bad = b; bad[2] = kProtocolRevision + 1; CHECK(!Decode(bad.data(), bad.size(), o));
     Hello longName; longName.name = std::string(100, 'x');
     auto lb = Encode(longName); CHECK(Decode(lb.data(), lb.size(), o) && o.name.size() == kMaxPlayerName);
+    Hello longBuild; longBuild.modBuild = std::string(200, 'b');   // rev 17: the mod build, cut to kMaxModBuild
+    auto bb = Encode(longBuild); CHECK(Decode(bb.data(), bb.size(), o) && o.modBuild == std::string(kMaxModBuild, 'b') && o.name.empty());
+    Hello noBuild; noBuild.name = "x";
+    auto nb = Encode(noBuild); CHECK(Decode(nb.data(), nb.size(), o) && o.modBuild.empty() && o.name == "x");
+    CHECK(nb.size() == Encode(Hello{}).size() + noBuild.name.size());   // an empty build costs its length byte only
 }
 
 static void TestInput() {
@@ -111,11 +116,16 @@ static void TestMatchInfoAndKill() {
     CHECK(m.fighters[0].pingMs == 0 && m.fighters[0].alive);                   // defaults: no ping known, alive
     m.gear = 2; m.tier = 5; m.round = 3; m.roundGapLeftMs = 4200; m.roundWinner = 9;   // rev 13: the rounds plan's fields
     m.fighters[0].pingMs = 87; m.fighters[1].alive = false; m.fighters[2].pingMs = 65535;
+    CHECK(!m.fighters[0].down);
+    m.fighters[2].down = true;                                                  // rev 17: the draw check has it down
     auto b = Encode(m); MatchInfo o;
     CHECK(Decode(b.data(), b.size(), o));
     CHECK(o.gear == 2 && o.tier == 5 && o.round == 3 && o.roundGapLeftMs == 4200 && o.roundWinner == 9);
     CHECK(o.fighters[0].pingMs == 87 && o.fighters[0].alive && !o.fighters[1].alive && o.fighters[1].pingMs == 0);
     CHECK(o.fighters[2].alive && o.fighters[2].pingMs == 65535);
+    CHECK(o.fighters[2].down && !o.fighters[0].down && !o.fighters[1].down);
+    { MatchInfo dd = m; dd.fighters[2].alive = false; auto e = Encode(dd); MatchInfo y;   // each bit on its own
+      CHECK(Decode(e.data(), e.size(), y) && !y.fighters[2].alive && y.fighters[2].down); }
     for (uint8_t g = 0; g < kGearCount; ++g)
         for (uint8_t tier = 0; tier <= 7; ++tier) {
             MatchInfo x = m; x.gear = g; x.tier = tier; x.round = uint16_t(1000 + tier); x.roundGapLeftMs = 0xFFFFFFFFu;
@@ -144,21 +154,27 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.scores.resize(kMaxWillies + 1); }));
     CHECK(bad([](MatchInfo& x) { x.gear = kGearCount; }));
     CHECK(bad([](MatchInfo& x) { x.tier = 8; }));
-    { auto e = Encode(m); CHECK(e.back() == 1); e.back() = 2; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive is 0 or 1
+    { auto e = Encode(m); CHECK(e.back() == 3); e.back() = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only
     { auto e = Encode(m); e.pop_back(); MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }                        // truncated
     b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));                  // trailing byte
     Kill k; k.killer = 3; k.victim = 4; k.flags = 1;
     auto kb = Encode(k); Kill ko; CHECK(Decode(kb.data(), kb.size(), ko) && ko.killer == 3 && ko.victim == 4 && ko.flags == 1);
     k.victim = 0; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));   // victim required
-    // Spec revision (rev 16): flag 8 is "gave up" (Duel, held G); 16 is the first unknown bit.
+    // Spec revision (rev 17): flag 8 is "gave up" (Duel, held G); 16 and 32 a drawn round; 64 is the first unknown bit.
     k.victim = 4; k.flags = 8; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 8);
-    k.flags = 16; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 16);   // rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
+    k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
+    k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 17);   // rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so
     auto smb = Encode(sm); CHECK(Decode(smb.data(), smb.size(), smo) && smo.syncMode == 0);
     sm.syncMode = 1; smb = Encode(sm); CHECK(Decode(smb.data(), smb.size(), smo) && smo.syncMode == 1 && smo.map == "m" && smo.snapshotHz == 60);
+    sm.modBuild = "0.6.4"; smb = Encode(sm);   // rev 17: Welcome carries the host's mod build
+    CHECK(Decode(smb.data(), smb.size(), smo) && smo.modBuild == "0.6.4" && smo.syncMode == 1);
+    for (size_t cut = 0; cut < smb.size(); ++cut) CHECK(!Decode(smb.data(), cut, smo));
+    sm.modBuild.clear();
     sm.syncMode = 2; smb = Encode(sm); CHECK(!Decode(smb.data(), smb.size(), smo));
     sm.syncMode = 0xFF; smb = Encode(sm); CHECK(!Decode(smb.data(), smb.size(), smo));
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required

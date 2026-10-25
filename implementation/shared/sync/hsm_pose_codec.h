@@ -7,7 +7,8 @@
 // median of the per-bone offset ratios), with an exact per-bone override wherever the live offset
 // differs from the reference by > 0.1 uu; per-body linear (uu/s) and angular (deg/s) velocity,
 // 8-bit mu-law; up to two weapons (world pose, velocities, blade base/tip in weapon space, hand,
-// 32-bit class hash). The encoder is closed-loop: every child quantity is measured against the
+// 32-bit class hash); then, after all weapons, each flail head (world rotation, position relative to its weapon's
+// decoded root, velocities), flagged by bit 2 + slot of the flags byte. The encoder is closed-loop: every child quantity is measured against the
 // parent pose the DECODER will rebuild, not the true parent pose, so a bone's error depends only
 // on its own quantisation, never on its ancestors'.
 //
@@ -27,6 +28,8 @@
 namespace hsm::sync {
 
 // 2: the header carries the grip state (2 bytes after the flags byte). A version-1 frame is refused, not guessed at.
+// Flail heads (flags bits 2 and 3, protocol rev 17) stay version 2: their blocks follow every weapon block, so a
+// decoder that ignores those bits reads the rest of the frame unchanged.
 constexpr uint8_t kPoseCodecVersion = 2;
 
 // ---- quaternion / vector helpers (double precision; safe for NaN/Inf inputs where noted) -----
@@ -82,10 +85,12 @@ constexpr unsigned kChildQBits = 13;       // every other bone / weapon rotation
 constexpr unsigned kOvrBits = 16;          // per-bone position override component
 constexpr unsigned kWeaponPosBits = 16;    // weapon position component, relative to pelvis
 constexpr unsigned kBladeBits = 16;        // weapon-space blade base/tip component
+constexpr unsigned kHeadPosBits = 16;      // flail head position component, relative to its weapon's root
 constexpr double kOverrideUu = 0.1;        // FK offset vs. reference beyond this: send exactly
 constexpr double kOvrStep = 1.0 / 64.0;
 constexpr double kWeaponPosStep = 1.0 / 8.0;
 constexpr double kBladeStep = 1.0 / 16.0;
+constexpr double kHeadPosStep = 1.0 / 16.0;   // +-2048 uu: far beyond any chain
 constexpr double kVLinMax = 10000.0;       // uu/s, mu-law full scale
 constexpr double kVAngMax = 5000.0;        // deg/s, mu-law full scale
 constexpr double kMuLaw = 255.0;
@@ -350,12 +355,14 @@ constexpr size_t kBitsOverrideValuesMax = size_t(kNumChildBones) * 3 * kOvrBits;
 constexpr size_t kBitsPerWeapon =
     1 /* hand */ + 32 /* classHash */ + 3 * kWeaponPosBits /* pos */ + QuatWireBits(kChildQBits) /* rot */ +
     3 * 8 + 3 * 8 /* vel, angVel */ + 3 * kBladeBits /* base */ + 3 * kBladeBits /* tip */;
-constexpr size_t kBitsWeaponsMax = size_t(kPoseWeapons) * kBitsPerWeapon;
+constexpr size_t kBitsPerHead =
+    3 * kHeadPosBits /* pos */ + QuatWireBits(kChildQBits) /* rot */ + 3 * 8 + 3 * 8 /* vel, angVel */;
+constexpr size_t kBitsWeaponsMax = size_t(kPoseWeapons) * (kBitsPerWeapon + kBitsPerHead);
 constexpr size_t kBitsMax =
     kBitsRootQuat + kBitsChildQuats + kBitsVelAll + kBitsOverrideMask + kBitsOverrideValuesMax + kBitsWeaponsMax;
 }  // namespace detail
 
-// Worst case: every non-root bone overridden, both weapon slots present.
+// Worst case: every non-root bone overridden, both weapon slots present, each with a flail head.
 constexpr size_t kPoseFrameMaxBytes = kPoseHeaderBytes + (detail::kBitsMax + 7) / 8;
 
 // ---- encode / decode ------------------------------------------------------------------------
@@ -367,7 +374,10 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
     detail::AppendU32LE(out, f.tsMs);
     detail::AppendU16LE(out, f.stepUs);
 
-    const uint8_t flags = uint8_t((f.weapons[0].present ? 1 : 0) | (f.weapons[1].present ? 2 : 0));
+    bool head[kPoseWeapons];
+    for (int wi = 0; wi < kPoseWeapons; ++wi) head[wi] = f.weapons[wi].present && f.weapons[wi].hasHead;
+    const uint8_t flags = uint8_t((f.weapons[0].present ? 1 : 0) | (f.weapons[1].present ? 2 : 0) | (head[0] ? 4 : 0) |
+                                  (head[1] ? 8 : 0));
     out.push_back(flags);
     detail::AppendU16LE(out, detail::PackGrip(f.grip));
 
@@ -424,17 +434,27 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
     w.Put(mask, kPoseBones - 1);
     for (size_t j = 0; j < nOvr; ++j) detail::PutV3(w, ovrVal[j], kOvrStep, kOvrBits);
 
+    std::array<V3, kPoseWeapons> recWeaponPos{};
     for (int wi = 0; wi < kPoseWeapons; ++wi) {
         const WeaponSample& wp = f.weapons[wi];
         if (!wp.present) continue;
         w.Put(uint32_t(wp.hand & 1), 1);
         w.Put(wp.classHash, 32);
-        detail::PutV3(w, Vec3Sub(SafeV3(wp.pos), pelvisPos), kWeaponPosStep, kWeaponPosBits);
+        recWeaponPos[wi] = Vec3Add(pelvisPos, detail::PutV3(w, Vec3Sub(SafeV3(wp.pos), pelvisPos), kWeaponPosStep, kWeaponPosBits));
         detail::PutQuat(w, SafeQ4(wp.rot), kChildQBits);
         detail::PutVelMu(w, SafeV3(wp.vel), kVLinMax);
         detail::PutVelMu(w, SafeV3(wp.angVelDeg), kVAngMax);
         detail::PutV3(w, SafeV3(wp.base), kBladeStep, kBladeBits);
         detail::PutV3(w, SafeV3(wp.tip), kBladeStep, kBladeBits);
+    }
+    // Heads after all weapons: one bit-packed block per flagged slot, slot 0 first.
+    for (int wi = 0; wi < kPoseWeapons; ++wi) {
+        if (!head[wi]) continue;
+        const BoneSample& h = f.weapons[wi].head;
+        detail::PutV3(w, Vec3Sub(SafeV3(h.pos), recWeaponPos[wi]), kHeadPosStep, kHeadPosBits);
+        detail::PutQuat(w, SafeQ4(h.rot), kChildQBits);
+        detail::PutVelMu(w, SafeV3(h.vel), kVLinMax);
+        detail::PutVelMu(w, SafeV3(h.angVelDeg), kVAngMax);
     }
 
     std::vector<uint8_t> body = w.Finish();
@@ -456,6 +476,8 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
     const uint16_t stepUs = detail::ReadU16LE(data + p); p += 2;
     const uint8_t flags = data[p++];
     const bool present[kPoseWeapons] = {(flags & 0x01) != 0, (flags & 0x02) != 0};
+    const bool head[kPoseWeapons] = {(flags & 0x04) != 0, (flags & 0x08) != 0};
+    if ((head[0] && !present[0]) || (head[1] && !present[1])) return false;   // a head without its weapon
     const GripState grip = detail::UnpackGrip(detail::ReadU16LE(data + p)); p += 2;
     const float pelX = detail::ReadF32LE(data + p); p += 4;
     const float pelY = detail::ReadF32LE(data + p); p += 4;
@@ -530,6 +552,17 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
             ws.tip = tip;
         }
         res.weapons[wi] = ws;
+    }
+    for (int wi = 0; wi < kPoseWeapons; ++wi) {
+        if (!head[wi]) continue;
+        BoneSample& h = res.weapons[wi].head;
+        V3 relPos;
+        if (!detail::GetV3(r, kHeadPosStep, kHeadPosBits, relPos) || !detail::GetQuat(r, kChildQBits, h.rot) ||
+            !detail::GetVelMu(r, kVLinMax, h.vel) || !detail::GetVelMu(r, kVAngMax, h.angVelDeg)) {
+            return false;
+        }
+        h.pos = Vec3Add(res.weapons[wi].pos, relPos);
+        res.weapons[wi].hasHead = true;
     }
 
     out = res;

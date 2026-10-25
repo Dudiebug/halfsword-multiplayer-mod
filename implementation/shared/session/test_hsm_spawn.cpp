@@ -198,10 +198,111 @@ static void TestNavigableRing() {
     CHECK(ledge == 1);
 }
 
+static void TestFloorFits() {
+    CHECK(!FloorFits(0.0, std::nullopt));                               // no floor (the pit) or a trap
+    CHECK(!FloorFits(0.0, NAN));
+    CHECK(FloorFits(std::nullopt, 500.0));                              // nothing to compare with: any floor
+    CHECK(FloorFits(NAN, -40.0));
+    CHECK(!FloorFits(std::nullopt, NAN) && !FloorFits(std::nullopt, INFINITY));   // nothing to compare with still needs a floor
+    CHECK(FloorFits(10.0, 10.0 + kSpotStepCm) && FloorFits(10.0, 10.0 - kSpotStepCm));
+    CHECK(!FloorFits(10.0, 10.0 + kSpotStepCm + 1) && !FloorFits(10.0, 10.0 - kSpotStepCm - 1));
+    CHECK(!FloorFits(0.0, 150.0));                                      // Yard: a body's head under the trace
+    CHECK(kSpotStepCm == 50);
+    std::vector<Point3> traced;
+    auto flat = [&](const Point3& q) { traced.push_back(q); return std::optional<double>(0.0); };
+    CHECK(FootprintFits(0.0, {100, 100, 7}, flat) && traced.size() == 5);
+    for (const Point3& q : traced) CHECK(q.z == 7 && (Flat(q, {100, 100, 0}) == 0 || std::fabs(Flat(q, {100, 100, 0}) - kFootprintCm) < 1e-9));
+    for (int hole = 0; hole < 5; ++hole) {                              // any one point without a floor fails it
+        int n = 0;
+        auto oneHole = [&](const Point3&) { return n++ == hole ? std::nullopt : std::optional<double>(0.0); };
+        CHECK(!FootprintFits(0.0, {0, 0, 0}, oneHole));
+    }
+    CHECK(!FootprintFits(0.0, {0, 0, 0}, [](const Point3& q) { return std::optional<double>(q.x > 50 ? 80.0 : 0.0); }));
+}
+
+// The Pit's spawners the level manager keeps in Free Mode (Map_Arena_Pit: _0 _1 _2 _4 _5 _6 _7 _10; the bridge's _8/_9
+// and the six-combatant ring _11.._14 are destroyed by BP_LevelManager::Spawn_Combatants).
+static std::vector<Point3> PitSpawners() {
+    return {{2, 509, 1}, {-391, -394, 1}, {2, -584, 1}, {346, 334, 1}, {-338, 334, -1}, {527, 9, 1}, {-524, -7, 1}, {356, -359, 2}};
+}
+static bool InPit(const Point3& p) { return std::fabs(p.x) < 270 && p.y > -300 && p.y < 230; }
+static bool BehindFence(const Point3& p) { return std::hypot(p.x, p.y) > 700; }
+
+static void TestAreaOf() {
+    const SpawnArea none = AreaOf({});
+    CHECK(none.Contains({1e7, -1e7, 0}));                              // no candidates: everywhere
+    const SpawnArea pit = AreaOf(PitSpawners());
+    double far = 0;
+    for (const Point3& c : PitSpawners()) far = std::fmax(far, Flat(c, pit.centre));
+    CHECK(std::fabs(pit.radius - (far + kAreaMarginCm)) < 1e-9);
+    for (const Point3& c : PitSpawners()) CHECK(pit.Contains(c));
+    CHECK(!pit.Contains({127, 726, 105}));                              // test 2026-10-25: the puppet behind the fence
+    const SpawnArea two = AreaOf({{0, 0, 0}, {100, 0, 0}});
+    CHECK(two.radius == kAreaMinRadiusCm && two.Contains({650, 0, 0}) && !two.Contains({700, 0, 0}));
+}
+
+// Test 2026-10-25, the Pit: respawns off a corpse at (-524,-7) and (2,509) went to (-274,-7), the lip of the pit, and
+// (127,726), behind the fence. With the floor, wall and area checks each goes to a slot a fighter can stand on.
+static void TestStandableSpotPit() {
+    const std::vector<Point3> cands = PitSpawners();
+    const SpawnArea area = AreaOf(cands);
+    std::vector<std::pair<Point3, Point3>> asked;
+    auto stands = [&](const Point3& c, const Point3& p) {
+        asked.push_back({c, p});
+        auto floorAt = [](const Point3& q) { return InPit(q) ? std::nullopt : std::optional<double>(0.0); };
+        return FootprintFits(0.0, p, floorAt) && !BehindFence(p);       // the wall: the fence ring
+    };
+    CHECK(!InPit({-274, -7, 0}));                                       // the lip itself has a floor under it...
+    CHECK(!stands({-524, -7, 1}, {-274, -7, 1}));                       // ...but not under the whole fighter
+    asked.clear();
+    const Point3 west{-524, -7, 1}, north{2, 509, 1};
+    CHECK(Flat(FreeSpot(west, {west}, 0, kMinFighterGapCm), {-274, -7, 0}) < 1);    // what 0.6.1 did
+    size_t skipped = 0;
+    const Point3 w = StandableSpot(west, {west}, 0, kMinFighterGapCm, area, stands, &skipped);
+    CHECK(!InPit(w) && !BehindFence(w) && Flat(w, west) >= kMinFighterGapCm - 1e-6);
+    CHECK(skipped == 1 && asked.front().first.x == west.x && asked.front().first.y == west.y);
+    const std::vector<Point3> bodies = {north, SpreadSlot(north, 1, kMinFighterGapCm)};
+    CHECK(Flat(FreeSpot(north, bodies, 0, kMinFighterGapCm), {127, 726, 0}) < 1);   // what 0.6.1 did
+    const Point3 n = StandableSpot(north, bodies, 0, kMinFighterGapCm, area, stands);
+    CHECK(!InPit(n) && !BehindFence(n) && area.Contains(n));
+    for (const Point3& b : bodies) CHECK(Flat(n, b) >= kMinFighterGapCm - 1e-6);
+}
+
+static void TestStandableSpotFallback() {
+    const Point3 c{100, 200, 5};
+    int calls = 0;
+    auto never = [&](const Point3&, const Point3&) { ++calls; return false; };
+    size_t skipped = 0;
+    Point3 s = StandableSpot(c, {c}, 0, kMinFighterGapCm, SpawnArea{}, never, &skipped);
+    CHECK(Flat(s, c) == 0 && s.z == c.z);                               // nothing passes: the spawner itself
+    CHECK(calls == int(kSpreadSlots) - 1 && skipped == kSpreadSlots - 1);
+    calls = 0;
+    s = StandableSpot(c, {}, 0, kMinFighterGapCm, SpawnArea{}, never);
+    CHECK(Flat(s, c) == 0 && calls == 0);                               // slot 0 is the spawner: never asked
+    const SpawnArea tiny{c, 10};
+    int always = 0;
+    s = StandableSpot(c, {c}, 0, kMinFighterGapCm, tiny, [&](const Point3&, const Point3&) { ++always; return true; });
+    CHECK(Flat(s, c) == 0 && always == 0);                              // outside the area: not even traced
+}
+
+static void TestStandableSpread() {
+    std::vector<Point3> cands = {{0, 0, 0}, {300, 0, 0}};
+    auto yes = [](const Point3&, const Point3&) { return true; };
+    auto a = StandableSpread(cands, 5, SpawnArea{}, yes);
+    auto b = SpreadPositions(cands, 5);
+    CHECK(a.size() == b.size());
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) CHECK(Flat(a[i], b[i]) == 0);
+    auto onlyEast = [](const Point3& c, const Point3& p) { return p.x >= c.x; };
+    auto e = StandableSpread(cands, 5, SpawnArea{}, onlyEast);
+    CHECK(e.size() == 5 && PairwiseApart(e, kMinFighterGapCm));
+    for (size_t i = 2; i < e.size(); ++i) CHECK(e[i].x >= 0);           // ring picks stay on the standable side
+}
+
 int main() {
     TestLine(); TestDistinctAndSpread(); TestFewerCandidatesAndDeterminism();
     TestSpreadSlotsKeepTheGap(); TestSpreadPositions(); TestFreeSpot(); TestSaneStandOffset(); TestStandableRing();
-    TestNavigableRing();
+    TestNavigableRing(); TestFloorFits(); TestAreaOf(); TestStandableSpotPit(); TestStandableSpotFallback();
+    TestStandableSpread();
     std::printf(g_fail ? "%d FAILED\n" : "all spawn tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

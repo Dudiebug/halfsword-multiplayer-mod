@@ -13,6 +13,7 @@
 // this layer does not read), so a held weapon that stops being driven after its grip was freed is held still instead.
 #pragma once
 #include "gameplay/standin_slots.h"
+#include "sync/hsm_held.h"
 #include "sync/hsm_standin.h"
 #include "ue/engine.h"
 #include <array>
@@ -42,7 +43,8 @@ public:
 
     // Sets every commanded body's linear and angular velocity. Frees a hand's grip constraint once the weapon it holds
     // is driven (or the hand holds fists or nothing), as HSMP does; a held weapon whose grip is free but which is not
-    // driven this frame is held still.
+    // driven this frame is held still. A flail head is driven whenever commanded and not pinned, also while a locked
+    // hand carries its weapon: the chain between them is free.
     void Drive(const sync::FighterCommand& cmd);
     // Weapon slots (bit w = slot w) another fighter holds with a stuck-blade joint (Severs::Hold): neither driven, held
     // still nor moved by Shift, so only the joint and the struck body move them. Set every frame before Shift and Drive.
@@ -68,6 +70,9 @@ public:
     void ApplyGrip(const sync::GripState& g);
     void ApplySwitch(bool on, ue::UObject* weaponR);   // the polearm hand switch's joint positions
     bool ApplySeat(const sync::GripState& g, ue::UObject* weaponR);   // the right hand's seat on the weapon (hsm_grip.h)
+    // Stand-in: when this weapon has sat in the right hand differently from the owner's for a while (hsm_held.h), the joint
+    // is made again at the owner's seat, read from the target pose's hand_r and weapon. Call after ApplyGrip.
+    void ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow& now, double nowMs);
 
 private:
     sync::GripState ReadGrip() const;             // the bound Willie's own grip variables (the owner's side)
@@ -84,6 +89,14 @@ private:
         uint32_t classHash = 0;
         sync::V3 comLocal{};
         ue::PreparedCall toWorld, simulating, linVelAt, angVel, setLin, setAng, com, baseLoc, tipLoc;
+        // A flail's chain: the SkeletalMeshComponent tagged "Flail" (ModularWeaponBP), whose bodies below Joint1 simulate.
+        // The head is the chain's last simulating body, looked up once the chain simulates.
+        ue::UObject* flail = nullptr;
+        int32_t flailIndex = -1;
+        ue::FName headBone{};
+        bool haveHeadBone = false;
+        int headTries = 0;
+        ue::PreparedCall headSocket, headSim, headLinVelAt, headAngVel, headSetLin, headSetAng;
         // this frame
         bool read = false, haveTip = false, driven = false;
         sync::V3 pos{}, basePos{}, tipPos{};
@@ -92,11 +105,13 @@ private:
     ue::UObject* FieldAt(int32_t offset) const;   // UObject* field of the bound Willie at a cached offset
     void RefreshWeapon(int w);                    // re-resolves slot w when its field changed
     bool ReadWeapon(int w, const sync::V3& handPos);
+    bool ReadHead(Weapon& wp, sync::BoneSample& out);   // the flail head of a held weapon, world
     bool GripWanted(int hand) const;
     bool GripLoose(int hand) const;
     void FreeGrip(int hand);
     bool GripToLock(int hand) const;              // standin_grip=lock: this hand holds a real weapon (or the off hand of a two-handed grip)
     void LockGrip(int hand);                      // the game's firm grip: every limit of the hand's grip joint locked
+    bool HoldOffhand(ue::UObject* joint);         // the off hand's firm grip: the game's own limits, sliding along the shaft
     void HoldStill(Weapon& wp);
     bool Pinned(int w) const { return (pinned_ >> w) & 1u; }
     void NeutraliseFull();
@@ -135,6 +150,10 @@ private:
     bool switchOn_ = false;                                  // ... and whether it set it switched
     ue::UObject* seatJoint_ = nullptr;                       // the right hand joint ApplySeat last seated
     uint8_t seatKey_ = 0;                                    // ... and the owner's toggles it was seated for (SeatKey)
+    sync::HeldCheck heldCheck_;                              // ApplyHeld: the stand-in's seat against the owner's
+    ue::UObject* heldJoint_ = nullptr;                       // ... for this right hand joint
+    ue::UObject* heldWeapon_ = nullptr;                      // ... and this right hand weapon
+    bool MakeGripJoint(ue::UObject* joint, ue::UObject* root, const char* socket, bool lowerArm);   // right hand, at the socket
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons

@@ -24,7 +24,9 @@ constexpr char kDefaultIni[] =
     "; the key that opens the chat: enter, t, y or u (Enter sends, Esc cancels)\n"
     "chat_key=enter\n"
     "; lock: the other players' hands hold their weapons firmly (default); free: each weapon is steered on its own\n"
-    "standin_grip=lock\n";
+    "standin_grip=lock\n"
+    "; 1: the host starts a match even when another player runs a different mod build (testing only)\n"
+    "allow_build_mismatch=0\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -57,6 +59,7 @@ Config LoadConfig() {
     const std::string chatKey = ReadString(ini, L"chat_key", "enter");
     if (!ParseChatKey(chatKey, c.chatKey)) HSM_LOG("config: chat_key=%s is not enter, t, y or u; using enter", chatKey.c_str());
     c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
+    c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (auto r = CmdArg(cl, "hsmrole")) c.role = *r == "host" ? Role::Host : *r == "client" ? Role::Client : *r == "off" ? Role::Off : Role::Steam;
@@ -66,8 +69,9 @@ Config LoadConfig() {
     if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) c.ownerSync = *m != "host";
     if (auto k = CmdArg(cl, "hsmchatkey"); k && !ParseChatKey(*k, c.chatKey))
         HSM_LOG("config: -hsmchatkey=%s is not enter, t, y or u; ignored", k->c_str());
-    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s", RoleName(c.role), c.hostAddress.c_str(),
-            c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free");
+    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
+            c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
+            c.allowBuildMismatch ? 1 : 0);
     return c;
 }
 }  // namespace hsm

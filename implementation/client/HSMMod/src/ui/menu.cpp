@@ -419,6 +419,8 @@ LobbyLocal Local(game::Lobby& lobby) {
     l.myName = steam::PersonaName(steam::MySteamId());
     l.status = lobby.status();
     l.version = game::kModVersion;
+    l.myBuild = game::ModBuild();
+    l.allowBuildMismatch = game::AllowBuildMismatch();
     l.maxPlayers = game::kMaxLobbyMembers;
     if (lobby.InLobby()) {
         l.config = lobby.config();
@@ -426,7 +428,7 @@ LobbyLocal Local(game::Lobby& lobby) {
         for (const game::LobbyMember& m : lobby.members()) {
             LobbyPlayer p;
             p.name = m.name; p.host = m.host; p.ready = m.ready; p.me = m.id == steam::MySteamId();
-            p.team = m.team; p.hostOverride = m.hostOverride;
+            p.team = m.team; p.hostOverride = m.hostOverride; p.build = m.build;
             l.players.push_back(p);
         }
     }

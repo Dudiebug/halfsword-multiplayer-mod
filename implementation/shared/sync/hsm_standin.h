@@ -30,6 +30,10 @@ inline constexpr double kAimAccMaxUu = 40000.0;   // uu/s^2, avatars_pure.lua PU
 inline constexpr double kAimAccMinGapMs = 2.0;    // consecutive samples closer than this keep the previous estimate, main.lua:4017
 inline constexpr double kAimAccMaxGapMs = 80.0;   // ... farther apart than this clear it, main.lua:4017-4029
 inline constexpr int kAimSlots = kPoseBones + kPoseWeapons;
+// A flail head is servoed softer than the bodies (gain and caps scaled by these): the chain between it and the weapon
+// stays simulated, so the servo only steers the head along the owner's swing, and a blow or the floor can still move it.
+inline constexpr double kHeadGainShare = 0.5;
+inline constexpr double kHeadCapShare = 0.5;
 // Bodies watched for blows: pelvis, spine_03, head, hand_l, hand_r (main.lua:3885 PX.CONTACT_BODIES).
 inline constexpr std::array<int, 5> kContactBones = { kBonePelvis, 3, kBoneHead, kBoneHandL, kBoneHandR };
 
@@ -112,6 +116,9 @@ struct FighterNow {
     std::array<bool, kPoseBones> velValid{};
     std::array<BodyNow, kPoseWeapons> weapons{};
     std::array<bool, kPoseWeapons> weaponValid{};
+    // The flail head of weapons[w] (its bone origin, comLocal zero), when that weapon is a flail whose chain simulates.
+    std::array<BodyNow, kPoseWeapons> heads{};
+    std::array<bool, kPoseWeapons> headValid{};
 };
 
 struct FighterCommand {
@@ -119,6 +126,8 @@ struct FighterCommand {
     std::array<bool, kPoseBones> drive{};
     std::array<ServoCommand, kPoseWeapons> weapons{};
     std::array<bool, kPoseWeapons> weaponDrive{};
+    std::array<ServoCommand, kPoseWeapons> heads{};
+    std::array<bool, kPoseWeapons> headDrive{};
 };
 
 // The aim for one body: advanced over the step, or -- while frozen on stale data -- the held pose standing
@@ -137,14 +146,21 @@ inline FighterCommand ServoFighter(const FighterNow& now, const PoseFrame& targe
     for (int i = 0; i < kPoseBones; ++i) {
         if (!kPoseHasBody[i] || !now.valid[i]) continue;
         const BodyTarget a = AimOrHold(TargetOf(target.bones[i]), aim.Acc(i), dtS, frozen);
-        out.bones[i] = ServoBody(now.bones[i], a, dtS, IsLegBone(i) ? p.legGain : p.gain, p.capLinUu, p.capAngDeg);
+        out.bones[i] = ClampToOwnerSpeed(ServoBody(now.bones[i], a, dtS, IsLegBone(i) ? p.legGain : p.gain, p.capLinUu, p.capAngDeg), now.bones[i], a);
         out.drive[i] = true;
     }
     for (int w = 0; w < kPoseWeapons; ++w) {
         if (!target.weapons[w].present || !now.weaponValid[w]) continue;
         const BodyTarget a = AimOrHold(TargetOf(target.weapons[w]), aim.Acc(kPoseBones + w), dtS, frozen);
-        out.weapons[w] = ServoBody(now.weapons[w], a, dtS, p.gain, p.capLinUu, p.capAngDeg);
+        out.weapons[w] = ClampToOwnerSpeed(ServoBody(now.weapons[w], a, dtS, p.gain, p.capLinUu, p.capAngDeg), now.weapons[w], a);
         out.weaponDrive[w] = true;
+        // The flail head of a commanded weapon, when the target has one and the stand-in's chain simulates. No
+        // acceleration estimate: the head swings on a chain, and its own velocity already leads the swing.
+        if (!target.weapons[w].hasHead || !now.headValid[w]) continue;
+        const BodyTarget h = AimOrHold(TargetOf(target.weapons[w].head), V3{}, dtS, frozen);
+        out.heads[w] = ClampToOwnerSpeed(ServoBody(now.heads[w], h, dtS, p.gain * kHeadGainShare, p.capLinUu * kHeadCapShare, p.capAngDeg * kHeadCapShare),
+                                         now.heads[w], h);
+        out.headDrive[w] = true;
     }
     return out;
 }
@@ -158,6 +174,7 @@ inline void OffsetPose(PoseFrame& f, const V3& d) {
         w.pos = Add(w.pos, d);
         w.base = Add(w.base, d);
         w.tip = Add(w.tip, d);
+        w.head.pos = Add(w.head.pos, d);
     }
 }
 
@@ -171,6 +188,7 @@ inline double BoneError(const FighterNow& now, const PoseFrame& target, int bone
 inline void ShiftFighterNow(FighterNow& n, const V3& d) {
     for (int i = 0; i < kPoseBones; ++i) if (n.valid[i]) n.bones[i].pos = sidetail::Add(n.bones[i].pos, d);
     for (int w = 0; w < kPoseWeapons; ++w) if (n.weaponValid[w]) n.weapons[w].pos = sidetail::Add(n.weapons[w].pos, d);
+    for (int w = 0; w < kPoseWeapons; ++w) if (n.headValid[w]) n.heads[w].pos = sidetail::Add(n.heads[w].pos, d);
 }
 
 // ---- the per-frame stand-in driver ------------------------------------------------------------------------------

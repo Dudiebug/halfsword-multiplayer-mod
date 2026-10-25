@@ -314,6 +314,10 @@ inline void ExtrapolateFrame(const PoseFrame& newest, const PoseFrame& prev, dou
         if (newest.weapons[w].present && prev.weapons[w].present) {
             ExtrapolateSlot(newest.weapons[w].pos, newest.weapons[w].rot, newest.weapons[w].vel, newest.weapons[w].angVelDeg, dispT, decay,
                              capUu, out.weapons[w].pos, out.weapons[w].rot, out.weapons[w].vel, out.weapons[w].angVelDeg);
+            const BoneSample& h = newest.weapons[w].head;
+            if (newest.weapons[w].hasHead && prev.weapons[w].hasHead)   // a flail head goes on with its own velocity
+                ExtrapolateSlot(h.pos, h.rot, h.vel, h.angVelDeg, dispT, decay, capUu, out.weapons[w].head.pos, out.weapons[w].head.rot,
+                                 out.weapons[w].head.vel, out.weapons[w].head.angVelDeg);
         }  // else left as newest's values verbatim (already copied via `out = newest`)
     }
 }
@@ -350,6 +354,15 @@ inline void InterpolateFrame(const PoseFrame& a, const PoseFrame& b, double at, 
             out.weapons[w].classHash = (s < 0.5) ? wa.classHash : wb.classHash;
             out.weapons[w].base = (s < 0.5) ? wa.base : wb.base;
             out.weapons[w].tip = (s < 0.5) ? wa.tip : wb.tip;
+            if (wa.hasHead && wb.hasHead) {   // a flail head in both: along its own swing, like the weapon
+                InterpolateSlot(wa.head.pos, wa.head.rot, wa.head.vel, wa.head.angVelDeg, wb.head.pos, wb.head.rot, wb.head.vel,
+                                 wb.head.angVelDeg, s, h, out.weapons[w].head.pos, out.weapons[w].head.rot, out.weapons[w].head.vel,
+                                 out.weapons[w].head.angVelDeg);
+                out.weapons[w].hasHead = true;
+            } else {                          // in one: the nearer frame's (a head that comes or goes is not blended)
+                out.weapons[w].hasHead = (s < 0.5) ? wa.hasHead : wb.hasHead;
+                out.weapons[w].head = (s < 0.5) ? wa.head : wb.head;
+            }
         } else {
             out.weapons[w] = (s < 0.5) ? wa : wb;  // taken from the nearer frame (neither present is fine too)
         }

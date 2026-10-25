@@ -67,6 +67,18 @@ static PoseFrame BuildFkFrame(std::mt19937& rng, double k, int numWeapons, doubl
     return f;
 }
 
+// A flail head on weapon slot wi: somewhere within a chain's reach of the root (up to ~1.5 m, any direction), any
+// rotation, velocities across the mu-law range.
+static void AddHead(std::mt19937& rng, PoseFrame& f, int wi) {
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    WeaponSample& w = f.weapons[wi];
+    w.hasHead = true;
+    w.head.pos = Vec3Add(w.pos, V3{u(rng) * 150.0, u(rng) * 150.0, u(rng) * 150.0});
+    w.head.rot = AxisAngleQuat(V3{u(rng), u(rng), u(rng) + 0.01}, u(rng) * 180.0);
+    w.head.vel = V3{u(rng) * kVLinMax, u(rng) * kVLinMax, u(rng) * kVLinMax};
+    w.head.angVelDeg = V3{u(rng) * kVAngMax, u(rng) * kVAngMax, u(rng) * kVAngMax};
+}
+
 static bool FiniteV3(const V3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 static bool FiniteQ4(const Q4& q) { return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w); }
 static bool AllFinite(const PoseFrame& f) {
@@ -76,6 +88,7 @@ static bool AllFinite(const PoseFrame& f) {
     for (int i = 0; i < kPoseWeapons; ++i) {
         const WeaponSample& w = f.weapons[i];
         if (!FiniteV3(w.pos) || !FiniteQ4(w.rot) || !FiniteV3(w.vel) || !FiniteV3(w.angVelDeg) || !FiniteV3(w.base) || !FiniteV3(w.tip)) return false;
+        if (!FiniteV3(w.head.pos) || !FiniteQ4(w.head.rot) || !FiniteV3(w.head.vel) || !FiniteV3(w.head.angVelDeg)) return false;
     }
     return true;
 }
@@ -101,7 +114,7 @@ static void TestPropertyRoundTrip() {
     std::uniform_real_distribution<double> ku(0.85, 1.2);
     std::uniform_int_distribution<int> wn(0, 2);
     const int N = 2000;
-    double maxPos = 0, maxRot = 0, maxLin = 0, maxAng = 0, maxWeaponPos = 0, maxBlade = 0;
+    double maxPos = 0, maxRot = 0, maxLin = 0, maxAng = 0, maxWeaponPos = 0, maxBlade = 0, maxHeadPos = 0, maxHeadRot = 0;
     std::array<double, kPoseBones> maxPosByBone{}, maxRotByBone{};
     size_t maxSize = 0;
 
@@ -109,6 +122,7 @@ static void TestPropertyRoundTrip() {
         double k = ku(rng);
         int nw = wn(rng);
         PoseFrame f = BuildFkFrame(rng, k, nw);
+        for (int wi = 0; wi < nw; ++wi) if (rng() & 1) AddHead(rng, f, wi);
         std::vector<uint8_t> buf = EncodePose(f);
         maxSize = std::max(maxSize, buf.size());
         CHECK(buf.size() <= kPoseFrameMaxBytes);
@@ -159,12 +173,24 @@ static void TestPropertyRoundTrip() {
             double te = Vec3Dist(tipTrueWorld, tipDecWorld);
             maxBlade = std::max(maxBlade, te);
             CHECK(te <= kMaxPosErrUu);
+            CHECK(d.weapons[wi].hasHead == f.weapons[wi].hasHead);
+            if (!f.weapons[wi].hasHead) continue;
+            const BoneSample& fh = f.weapons[wi].head;
+            const BoneSample& dh = d.weapons[wi].head;
+            const double hpe = Vec3Dist(dh.pos, fh.pos), hre = QuatAngleDeg(dh.rot, fh.rot);
+            maxHeadPos = std::max(maxHeadPos, hpe);
+            maxHeadRot = std::max(maxHeadRot, hre);
+            CHECK(hpe <= kMaxPosErrUu);
+            CHECK(hre <= kMaxRotErrDeg);
+            CHECK(VelOk(dh.vel.x, fh.vel.x, 2.0) && VelOk(dh.vel.y, fh.vel.y, 2.0) && VelOk(dh.vel.z, fh.vel.z, 2.0));
+            CHECK(VelOk(dh.angVelDeg.x, fh.angVelDeg.x, 1.0) && VelOk(dh.angVelDeg.y, fh.angVelDeg.y, 1.0) && VelOk(dh.angVelDeg.z, fh.angVelDeg.z, 1.0));
         }
     }
 
     std::printf("property test (%d frames): max pos err %.4f uu, max rot err %.4f deg, max lin vel err %.4f uu/s, "
                 "max ang vel err %.4f deg/s, max weapon pos err %.4f uu, max blade-tip world err %.4f uu, max size %zu B\n",
                 N, maxPos, maxRot, maxLin, maxAng, maxWeaponPos, maxBlade, maxSize);
+    std::printf("flail heads: max pos err %.4f uu, max rot err %.4f deg\n", maxHeadPos, maxHeadRot);
 
     // Error does not accumulate down a chain: clavicle_r (depth 6 from pelvis) vs. hand_r (3
     // joints further out, depth 9) should show the same order of magnitude of error, not ~4x.
@@ -281,6 +307,12 @@ static void TestTruncationAlwaysRejected() {
     PoseFrame d{};
     CHECK(DecodePose(buf.data(), buf.size(), d));  // sanity: the full buffer still decodes
     for (size_t cut = 0; cut < buf.size(); ++cut) CHECK(!DecodePose(buf.data(), cut, d));
+    PoseFrame h = BuildFkFrame(rng, 1.0, 2);
+    AddHead(rng, h, 0);
+    AddHead(rng, h, 1);
+    buf = EncodePose(h);
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    for (size_t cut = 0; cut < buf.size(); ++cut) CHECK(!DecodePose(buf.data(), cut, d));   // a cut inside a head block too
     CHECK(!DecodePose(nullptr, 0, d));
     CHECK(!DecodePose(buf.data(), 0, d));
 }
@@ -474,6 +506,135 @@ static void TestHeaderGrewByExactlyTwoBytes() {
     CHECK(!DecodePose(buf.data(), kPoseHeaderBytes - 1, d));
 }
 
+// ---- flail heads (protocol rev 17): flags bit 2 + slot, one block per head after every weapon block ------------------
+static constexpr size_t kFlagsOff = 7;   // version(1) + tsMs(4) + stepUs(2)
+
+static bool SameWeapon(const WeaponSample& a, const WeaponSample& b) {
+    return a.present == b.present && a.hand == b.hand && a.classHash == b.classHash && Vec3Dist(a.pos, b.pos) == 0.0 &&
+           QuatAngleDeg(a.rot, b.rot) == 0.0 && Vec3Dist(a.vel, b.vel) == 0.0 && Vec3Dist(a.angVelDeg, b.angVelDeg) == 0.0 &&
+           Vec3Dist(a.base, b.base) == 0.0 && Vec3Dist(a.tip, b.tip) == 0.0;
+}
+
+static void TestFlailHeadFlagsAndSize() {
+    std::mt19937 rng(21);
+    const PoseFrame f = BuildFkFrame(rng, 1.0, 2);
+    const size_t bodyBits = detail::kBitsRootQuat + detail::kBitsChildQuats + detail::kBitsVelAll + detail::kBitsOverrideMask +
+                            2 * detail::kBitsPerWeapon;
+    CHECK(EncodePose(f).size() == kPoseHeaderBytes + (bodyBits + 7) / 8);
+    // Each slot has its own bit, and each head adds exactly one head block.
+    for (int mask = 0; mask < 4; ++mask) {
+        PoseFrame g = f;
+        for (int wi = 0; wi < kPoseWeapons; ++wi) if (mask & (1 << wi)) AddHead(rng, g, wi);
+        const std::vector<uint8_t> buf = EncodePose(g);
+        const int heads = (mask & 1) + ((mask >> 1) & 1);
+        CHECK(buf[kFlagsOff] == uint8_t(3 | (mask << 2)));
+        CHECK(buf.size() == kPoseHeaderBytes + (bodyBits + size_t(heads) * detail::kBitsPerHead + 7) / 8);
+        PoseFrame d{};
+        CHECK(DecodePose(buf.data(), buf.size(), d));
+        CHECK(d.weapons[0].hasHead == ((mask & 1) != 0));
+        CHECK(d.weapons[1].hasHead == ((mask & 2) != 0));
+        // Each head decodes into its own slot.
+        for (int wi = 0; wi < kPoseWeapons; ++wi)
+            if (mask & (1 << wi)) CHECK(Vec3Dist(d.weapons[wi].head.pos, g.weapons[wi].head.pos) <= kMaxPosErrUu);
+    }
+    // The budget: 17.1 bytes a head (pos 3x16, rot 2+3x13, vel and angVel 6x8 bits); the worst case has both.
+    CHECK(detail::kBitsPerHead == 137);
+    CHECK(detail::kBitsWeaponsMax == 2 * (detail::kBitsPerWeapon + detail::kBitsPerHead));
+    CHECK(kPoseFrameMaxBytes == kPoseHeaderBytes + (detail::kBitsMax + 7) / 8);
+}
+
+static void TestFlailHeadOnlyWithItsWeapon() {
+    std::mt19937 rng(22);
+    // A head on an absent weapon slot is not sent and does not decode.
+    PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+    const std::vector<uint8_t> plain = EncodePose(f);
+    f.weapons[1].hasHead = true;
+    f.weapons[1].head.pos = V3{1, 2, 3};
+    const std::vector<uint8_t> buf = EncodePose(f);
+    CHECK(buf == plain);
+    PoseFrame d{};
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    CHECK(!d.weapons[1].hasHead && !d.weapons[1].present);
+    // A frame that flags a head for a slot with no weapon is refused, for either slot, even when the other slot holds one.
+    for (int wi = 0; wi < kPoseWeapons; ++wi) {
+        for (int other = 0; other < 2; ++other) {
+            PoseFrame g = BuildFkFrame(rng, 1.0, 2);
+            g.weapons[wi].present = false;
+            if (!other) g.weapons[1 - wi].present = false;
+            std::vector<uint8_t> b = EncodePose(g);
+            CHECK(DecodePose(b.data(), b.size(), d));
+            b[kFlagsOff] = uint8_t(b[kFlagsOff] | (4 << wi));
+            b.resize(b.size() + 32, 0);   // room for a head block: the refusal is the flag check, not truncation
+            CHECK(!DecodePose(b.data(), b.size(), d));
+        }
+    }
+}
+
+static void TestFlailHeadLeavesTheRestAlone() {
+    std::mt19937 rng(23);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 2);
+    PoseFrame g = f;
+    AddHead(rng, g, 0);
+    AddHead(rng, g, 1);
+    std::vector<uint8_t> plain = EncodePose(f), headed = EncodePose(g);
+    PoseFrame dp{}, dh{};
+    CHECK(DecodePose(plain.data(), plain.size(), dp));
+    CHECK(DecodePose(headed.data(), headed.size(), dh));
+    for (int i = 0; i < kPoseBones; ++i) CHECK(Vec3Dist(dp.bones[i].pos, dh.bones[i].pos) == 0.0);
+    for (int wi = 0; wi < kPoseWeapons; ++wi) CHECK(SameWeapon(dp.weapons[wi], dh.weapons[wi]));
+    // The head blocks follow every weapon block: with the head bits cleared, a headed frame reads as the plain one (the
+    // trailing head bytes are ignored), so a decoder that does not know the bits still reads both weapons.
+    headed[kFlagsOff] = uint8_t(headed[kFlagsOff] & ~0x0C);
+    PoseFrame dc{};
+    CHECK(DecodePose(headed.data(), headed.size(), dc));
+    for (int wi = 0; wi < kPoseWeapons; ++wi) CHECK(SameWeapon(dp.weapons[wi], dc.weapons[wi]) && !dc.weapons[wi].hasHead);
+}
+
+static void TestFlailHeadPositionIsClosedLoop() {
+    // The head goes relative to the weapon root the DECODER rebuilds (itself quantised to 1/8 uu), so the head's error is
+    // only its own 1/16 uu step, never the root's error on top.
+    std::mt19937 rng(24);
+    double maxErr = 0;
+    for (int i = 0; i < 500; ++i) {
+        PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+        f.bones[0].pos = V3{100.0, -200.0, 50.0};   // a float-exact pelvis: no pelvis rounding in the bound
+        f.weapons[0].pos = Vec3Add(f.bones[0].pos, V3{30.0 + 0.0611 * i, -20.0 - 0.0587 * i, 10.0 + 0.0533 * i});
+        AddHead(rng, f, 0);
+        f.weapons[0].head.pos = Vec3Add(f.weapons[0].pos, V3{40.03 + 0.0013 * i, -60.02, 75.01});
+        std::vector<uint8_t> buf = EncodePose(f);
+        PoseFrame d{};
+        CHECK(DecodePose(buf.data(), buf.size(), d));
+        const V3 e = Vec3Sub(d.weapons[0].head.pos, f.weapons[0].head.pos);
+        CHECK(std::fabs(e.x) <= kHeadPosStep / 2 + 1e-9 && std::fabs(e.y) <= kHeadPosStep / 2 + 1e-9 &&
+              std::fabs(e.z) <= kHeadPosStep / 2 + 1e-9);
+        maxErr = std::max(maxErr, Vec3Dist(d.weapons[0].head.pos, f.weapons[0].head.pos));
+    }
+    std::printf("flail head closed loop: max pos err %.4f uu (step 1/16 uu)\n", maxErr);
+}
+
+static void TestFlailHeadHostileValuesStayFinite() {
+    std::mt19937 rng(25);
+    PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    f.weapons[0].hasHead = true;
+    f.weapons[0].head.pos = V3{nan, inf, -inf};
+    f.weapons[0].head.rot = Q4{nan, 0, 0, 1};
+    f.weapons[0].head.vel = V3{inf, nan, 1e30};
+    f.weapons[0].head.angVelDeg = V3{-inf, nan, -1e30};
+    std::vector<uint8_t> buf = EncodePose(f);
+    PoseFrame d{};
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    CHECK(AllFinite(d) && d.weapons[0].hasHead);
+    // A head beyond the wire range saturates at the range, it does not wrap to the other side.
+    f = BuildFkFrame(rng, 1.0, 1);
+    AddHead(rng, f, 0);
+    f.weapons[0].head.pos = Vec3Add(f.weapons[0].pos, V3{5000.0, -5000.0, 0.0});
+    buf = EncodePose(f);
+    CHECK(DecodePose(buf.data(), buf.size(), d));
+    const V3 rel = Vec3Sub(d.weapons[0].head.pos, d.weapons[0].pos);
+    CHECK(rel.x > 2000.0 && rel.y < -2000.0 && std::fabs(rel.z) < 0.1);
+}
+
 int main() {
     TestPropertyRoundTrip();
     TestDislocatedBoneOverridesExactly();
@@ -491,6 +652,11 @@ int main() {
     TestGripSpareBitIgnored();
     TestVersionOneFrameRefused();
     TestHeaderGrewByExactlyTwoBytes();
+    TestFlailHeadFlagsAndSize();
+    TestFlailHeadOnlyWithItsWeapon();
+    TestFlailHeadLeavesTheRestAlone();
+    TestFlailHeadPositionIsClosedLoop();
+    TestFlailHeadHostileValuesStayFinite();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");
     return g_fail != 0;

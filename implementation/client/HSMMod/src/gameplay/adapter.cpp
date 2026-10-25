@@ -123,22 +123,22 @@ void Adapter::CaptureInput(bool on) {
         .set<bool>("bFlushInput", true).invoke();
 }
 
-bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, double& z, std::string* hitName) {
+// One LineTraceSingle on the visibility channel from `start` to `end`, looking through `ignore`: true on a hit, with
+// its impact point and the hit actor's name when asked for.
+bool Adapter::TraceLine(const FVector& start, const FVector& end, const std::vector<UObject*>& ignore, FVector* impact, std::string* hitName) {
     static UObject* ksl = nullptr;
     if (!ksl) if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
     struct ActorArray { UObject** data; int32_t num, max; };   // TArray<AActor*> view over our vector; the engine only reads it
     std::vector<UObject*> ignored = ignore;
     ActorArray skip{ignored.data(), int32_t(ignored.size()), int32_t(ignored.size())};
     Call t(ksl, "LineTraceSingle");
-    t.set<UObject*>("WorldContextObject", world_).set("Start", FVector{at.x, at.y, at.z + 150}).set("End", FVector{at.x, at.y, at.z - 600})
+    t.set<UObject*>("WorldContextObject", world_).set("Start", start).set("End", end)
      .set<uint8_t>("TraceChannel", 0).set<bool>("bTraceComplex", false).set("ActorsToIgnore", skip).set<uint8_t>("DrawDebugType", 0)
      .set<bool>("bIgnoreSelf", true).set<float>("DrawTime", 0.f);
     if (!t.invoke() || !t.get<bool>("ReturnValue")) return false;
     const uint8_t* hit = static_cast<const uint8_t*>(t.paramPtr("OutHit"));
     if (!hit) return false;
-    FVector ip; std::memcpy(&ip, hit + 40, sizeof ip);   // FHitResult::ImpactPoint
-    if (!std::isfinite(ip.z)) return false;
-    z = ip.z;
+    if (impact) std::memcpy(impact, hit + 40, sizeof *impact);   // FHitResult::ImpactPoint
     if (hitName) {
         Call b(statics_, "BreakHitResult");
         b.setFrom("Hit", hit);
@@ -146,6 +146,28 @@ bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, dou
         *hitName = actor ? ObjectName(actor) : std::string("nothing");
     }
     return true;
+}
+
+bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, double& z, std::string* hitName) {
+    FVector ip;
+    if (!TraceLine(FVector{at.x, at.y, at.z + 150}, FVector{at.x, at.y, at.z - 600}, ignore, &ip, hitName)) return false;
+    if (!std::isfinite(ip.z)) return false;
+    z = ip.z;
+    return true;
+}
+
+bool Adapter::LineClear(const FVector& from, const FVector& to, const std::vector<UObject*>& ignore, std::string* hitName) {
+    return !TraceLine(from, to, ignore, nullptr, hitName);
+}
+
+bool Adapter::BoneLocation(UObject* willie, const char* bone, FVector& out) {
+    UObject* mesh = willie ? MeshOf(willie) : nullptr;
+    if (!mesh || !bone) return false;
+    Call c(mesh, "GetSocketLocation");
+    c.setName("InSocketName", MakeName(bone));
+    if (!c.invoke()) return false;
+    out = c.get<FVector>("ReturnValue");
+    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
 // The Abyss' level script places each enemy this way before Spawn_NPC (decomp Maps/Abyss_Map_Open_EA.cpp:997, radius 500).
@@ -479,7 +501,11 @@ double Adapter::WorldSeconds() {
 
 std::vector<FVector> Adapter::SpawnCandidates() {
     std::vector<FVector> out;
-    for (UObject* a : FindInstances(kSpawnerClass)) out.push_back(ActorLocation(a));
+    for (UObject* a : FindInstances(kSpawnerClass)) {
+        if (IsGarbage(a) || BeingDestroyed(a)) continue;
+        const FVector v = ActorLocation(a);
+        if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0) out.push_back(v);   // (0,0,0): destroyed, its root gone
+    }
     return out;
 }
 

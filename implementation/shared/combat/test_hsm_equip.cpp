@@ -3,6 +3,7 @@
 // Wire layout is written out independently below (Wire()), in the order hsm_equip.h documents:
 //   header(Equip) entity:u8 seq:u16 handR:u8 handL:u8 sheathed:u8
 #include "combat/hsm_equip.h"
+#include <cmath>
 #include <cstdio>
 
 static int g_fail = 0;
@@ -459,7 +460,26 @@ void TestSlotPlace() {
 
 }  // namespace
 
+// Sheathed weapons hang as the game hangs them (Willie_BP.cpp:7022): 75% up the shaft, at the root for grips 5 and 6.
+static void TestSheathHang() {
+    CHECK(SheathHang(100.0, 0) == 75.0 && SheathHang(80.0, 4) == 60.0 && SheathHang(80.0, 7) == 60.0);
+    CHECK(SheathHang(100.0, 5) == 0.0 && SheathHang(100.0, 6) == 0.0);
+    CHECK(SheathHang(0.0, 0) == 0.0 && SheathHang(-3.0, 0) == 0.0 && SheathHang(NAN, 0) == 0.0 && SheathHang(INFINITY, 0) == 0.0);
+    auto near = [](const std::array<double, 3>& a, double x, double y, double z) {
+        return std::fabs(a[0] - x) < 1e-9 && std::fabs(a[1] - y) < 1e-9 && std::fabs(a[2] - z) < 1e-9;
+    };
+    CHECK(near(HangRoot({10, 20, 30}, {0, 0, 0, 1}, 60), 10, 20, -30));        // upright: straight below the socket
+    const double h = std::sqrt(0.5);
+    CHECK(near(HangRoot({0, 0, 0}, {h, 0, 0, h}, 10), 0, 10, 0));              // +90 deg about X: the shaft is -Y
+    CHECK(near(HangRoot({0, 0, 0}, {0, h, 0, h}, 10), -10, 0, 0));             // +90 deg about Y: the shaft is +X
+    CHECK(near(HangRoot({0, 0, 0}, {0, 0, h, h}, 10), 0, 0, -10));             // about Z: the shaft stays +Z
+    CHECK(near(HangRoot({1, 2, 3}, {1, 0, 0, 0}, 5), 1, 2, 8));                // upside down
+    CHECK(near(HangRoot({1, 2, 3}, {0.5, 0.5, 0.5, 0.5}, 4), -3, 2, 3));       // a turn about (1,1,1): the shaft is +X
+    CHECK(near(HangRoot({1, 2, 3}, {0.3, -0.1, 0.7, 0.640312}, 0), 1, 2, 3));  // no hang: the socket itself
+}
+
 int main() {
+    TestSheathHang();
     TestRoundTrip();
     TestFraming();
     TestRanges();

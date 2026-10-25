@@ -180,16 +180,21 @@ static void TestServoFighterSelection() {
     const EffectiveParams p{ 0.3, 0.5, 900, 900 };
     const double dt = 1.0 / 60.0;
     const FighterCommand c = ServoFighter(now, tg, ab, false, dt, p);
+    int clamped = 0;
     for (int i = 0; i < kPoseBones; ++i) {
         const bool want = kPoseHasBody[i] && i != 3;
         CHECK(c.drive[i] == want);
         if (!want) continue;
         const BodyTarget aim = AimBody(TargetOf(tg.bones[i]), V3{}, dt);
-        CHECK(SameCmd(c.bones[i], ServoBody(now.bones[i], aim, dt, IsLegBone(i) ? 0.5 : 0.3, 900, 900)));
+        const ServoCommand raw = ServoBody(now.bones[i], aim, dt, IsLegBone(i) ? 0.5 : 0.3, 900, 900);
+        CHECK(SameCmd(c.bones[i], ClampToOwnerSpeed(raw, now.bones[i], aim)));
+        if (!SameCmd(raw, c.bones[i])) ++clamped;   // item 7c: 20 uu behind, the legs ask more than 1.2x the owner
     }
+    CHECK(clamped > 0);
     CHECK(!c.drive[1]);
     // the leg/arm gains genuinely differ here (the body is 20 uu off)
-    CHECK(!SameCmd(ServoBody(now.bones[17], AimBody(TargetOf(tg.bones[17]), V3{}, dt), dt, 0.3, 900, 900), c.bones[17]));
+    const BodyTarget aim17 = AimBody(TargetOf(tg.bones[17]), V3{}, dt);
+    CHECK(!SameCmd(ClampToOwnerSpeed(ServoBody(now.bones[17], aim17, dt, 0.3, 900, 900), now.bones[17], aim17), c.bones[17]));
     CHECK(c.weaponDrive[0] && !c.weaponDrive[1]);
     CHECK(SameCmd(c.weapons[0], ServoBody(now.weapons[0], AimBody(TargetOf(tg.weapons[0]), V3{}, dt), dt, 0.3, 900, 900)));
     now.weaponValid[0] = false;
@@ -251,6 +256,63 @@ static void TestOffsetPoseAndError() {
     CHECK(std::fabs(BoneError(n, o, 0) - 3.0) < 1e-12 && std::fabs(BoneError(n, o, 2) - 5.0) < 1e-12);
     n.valid[0] = false;
     CHECK(BoneError(n, o, 0) == -1.0 && BoneError(n, o, -1) == -1.0 && BoneError(n, o, kPoseBones) == -1.0);
+}
+
+// 9b. A flail head is servoed with its own, softer gain and caps, about its bone origin, without the acceleration
+// estimate, and only when its weapon is commanded, the target carries it and the stand-in's chain simulates.
+static BoneSample HeadSample() { return BoneSample{ V3{ 80, 0, 60 }, QAxis(V3{ 1, 0, 0 }, 0.4), V3{ 400, 0, -100 }, V3{ 0, 0, 200 } }; }
+static void TestServoFighterFlailHead() {
+    PoseFrame a = MovingTarget(), b = MovingTarget();
+    a.weapons[0].hasHead = b.weapons[0].hasHead = true;
+    a.weapons[0].head = b.weapons[0].head = HeadSample();
+    b.weapons[0].vel.x += 50;   // the weapon slot's acceleration estimate is not zero
+    b.weapons[1].hasHead = true;   // ... and weapon 1, absent, carries a head that must not be driven
+    b.weapons[1].head = HeadSample();
+    AimBuilder ab;
+    ab.Observe(a, 0, false, false);
+    ab.Observe(b, 10, false, false);
+    CHECK(!Near(ab.Acc(kPoseBones), V3{}, 1.0));
+    FighterNow now = NowAtOffset(b, V3{ 20, 0, 0 });
+    for (int w = 0; w < kPoseWeapons; ++w) {
+        now.heads[w] = BodyNow{ V3{ 90, 4, 55 }, QAxis(V3{ 1, 0, 0 }, 0.1), V3{} };
+        now.headValid[w] = true;
+    }
+    const EffectiveParams p{ 0.3, 0.5, 900, 800 };
+    const double dt = 1.0 / 60.0;
+    const FighterCommand c = ServoFighter(now, b, ab, false, dt, p);
+    CHECK(c.headDrive[0] && !c.headDrive[1]);
+    const BodyTarget aim = AimBody(TargetOf(HeadSample()), V3{}, dt);
+    CHECK(SameCmd(c.heads[0], ServoBody(now.heads[0], aim, dt, 0.3 * kHeadGainShare, 900 * kHeadCapShare, 800 * kHeadCapShare)));
+    CHECK(!SameCmd(c.heads[0], ServoBody(now.heads[0], aim, dt, 0.3, 900, 800)));   // softer than a body
+    CHECK(kHeadGainShare > 0.0 && kHeadGainShare < 1.0 && kHeadCapShare > 0.0 && kHeadCapShare < 1.0);
+    FighterNow far = now;   // far off in place and turn: both caps bind, each at its own share
+    far.heads[0] = BodyNow{ V3{ 380, 0, 60 }, QAxis(V3{ 0, 0, 1 }, 2.5), V3{} };
+    const ServoCommand cf = ServoFighter(far, b, ab, false, dt, p).heads[0];
+    const double g = 0.3 * kHeadGainShare;
+    CHECK(SameCmd(cf, ServoBody(far.heads[0], aim, dt, g, 900 * kHeadCapShare, 800 * kHeadCapShare)));
+    CHECK(!SameCmd(cf, ServoBody(far.heads[0], aim, dt, g, 900, 800 * kHeadCapShare)));
+    CHECK(!SameCmd(cf, ServoBody(far.heads[0], aim, dt, g, 900 * kHeadCapShare, 800)));
+    CHECK(SameCmd(c.weapons[0], ServoBody(now.weapons[0], AimBody(TargetOf(b.weapons[0]), ab.Acc(kPoseBones), dt), dt, 0.3, 900, 800)));
+    FighterNow n2 = now;
+    n2.headValid[0] = false;   // the stand-in's chain does not simulate
+    CHECK(!ServoFighter(n2, b, ab, false, dt, p).headDrive[0]);
+    n2 = now;
+    n2.weaponValid[0] = false;   // the weapon itself is not read: neither is driven
+    CHECK(!ServoFighter(n2, b, ab, false, dt, p).headDrive[0]);
+    PoseFrame noHead = b;
+    noHead.weapons[0].hasHead = false;
+    CHECK(!ServoFighter(now, noHead, ab, false, dt, p).headDrive[0]);
+    FighterNow on = now;   // frozen and on the held head: commanded to stay
+    on.heads[0] = BodyNow{ HeadSample().pos, HeadSample().rot, V3{} };
+    const FighterCommand f = ServoFighter(on, b, ab, true, dt, p);
+    CHECK(f.headDrive[0] && Near(f.heads[0].vel, V3{}, 1e-9) && Near(f.heads[0].angVelDeg, V3{}, 1e-9));
+    // a placement and the mirror offset move the head with everything else
+    FighterNow moved = now;
+    ShiftFighterNow(moved, V3{ 1, 2, 3 });
+    CHECK(Near(moved.heads[0].pos, V3{ 91, 6, 58 }, 1e-12) && QAngle(moved.heads[0].rot, now.heads[0].rot) == 0.0);
+    PoseFrame off = b;
+    OffsetPose(off, V3{ 0, 250, -1 });
+    CHECK(Near(off.weapons[0].head.pos, V3{ 80, 250, 59 }, 1e-12) && Near(off.weapons[0].head.vel, HeadSample().vel, 0));
 }
 
 // ---- synthetic owner -----------------------------------------------------------------------------------------
@@ -812,6 +874,27 @@ static void TestDriverImpactDetection() {
     }
 }
 
+// 22. Item 7c: every driven body, weapons and flail heads too, is held to its owner's speed (+20%, floors at rest):
+// a stand-in 60 uu off an owner standing still is pulled back at the floor, not at the full correction cap.
+static void TestServoFighterOwnerSpeed() {
+    PoseFrame tg = StaticTarget(V3{ 0, 0, 95 });
+    tg.weapons[0].hasHead = true;
+    tg.weapons[0].head = BoneSample{ V3{ 80, 0, 60 }, QAxis(V3{ 1, 0, 0 }, 0.4), V3{}, V3{} };
+    FighterNow now = NowAtOffset(tg, V3{ 60, 0, 0 });
+    now.heads[0] = BodyNow{ V3{ 140, 0, 60 }, tg.weapons[0].head.rot, V3{} };
+    now.headValid[0] = true;
+    AimBuilder ab;
+    const EffectiveParams p{ 0.3, 0.5, 900, 900 };
+    const double dt = 1.0 / 60.0;
+    const FighterCommand c = ServoFighter(now, tg, ab, false, dt, p);
+    const auto len = [](const V3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); };
+    CHECK(c.drive[kBonePelvis] && std::fabs(len(c.bones[kBonePelvis].vel) - kOwnerSpeedFloorLinUu) < 1e-9);
+    CHECK(c.weaponDrive[0] && std::fabs(len(c.weapons[0].vel) - kOwnerSpeedFloorLinUu) < 1e-9);
+    CHECK(c.headDrive[0] && std::fabs(len(c.heads[0].vel) - kOwnerSpeedFloorLinUu) < 1e-9);
+    // unclamped, each would have asked far more (60 uu at gain 0.3 in one 60 Hz step: 1080 uu/s, capped at 900)
+    CHECK(len(ServoBody(now.weapons[0], AimOrHold(TargetOf(tg.weapons[0]), V3{}, dt, false), dt, 0.3, 900, 900).vel) > 2 * kOwnerSpeedFloorLinUu);
+}
+
 int main() {
     TestAimBody();
     TestAccGapRules();
@@ -822,6 +905,7 @@ int main() {
     TestServoFighterUsesAcc();
     TestServoFighterFrozen();
     TestOffsetPoseAndError();
+    TestServoFighterFlailHead();
     TestPosePipeIdeal();
     TestPipelineAcceptance();
     TestPipelineOtherLinks();
@@ -834,6 +918,7 @@ int main() {
     TestDriverCut();
     TestDriverImpactAndReset();
     TestDriverImpactDetection();
+    TestServoFighterOwnerSpeed();
     if (g_fail) { std::printf("test_hsm_standin: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_standin: all passed\n");
     return 0;

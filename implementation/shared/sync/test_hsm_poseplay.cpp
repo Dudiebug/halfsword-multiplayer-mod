@@ -650,6 +650,61 @@ static void TestGripCarriedThroughPlayback() {
     CHECK(SameGripState(out.grip, PlayGripB()));                 // past the newest frame: its grip, verbatim
 }
 
+// The flail head rides through playback like its weapon: interpolated when both frames carry it, extrapolated with its
+// own velocity, taken from the nearer frame when only one carries it.
+static void TestFlailHeadThroughPlayback() {
+    const V3 pos0{10.0, -5.0, 2.0}, vel{120.0, 30.0, 0.0}, headOff{30.0, 0.0, -20.0}, headVel{-200.0, 400.0, 50.0};
+    const double t0 = 10000.0, period = 1000.0 / 60.0;
+    auto headAt = [&](double ms) {
+        const double dt = (ms - t0) / 1000.0;
+        return V3{pos0.x + headOff.x + headVel.x * dt, pos0.y + headOff.y + headVel.y * dt, pos0.z + headOff.z + headVel.z * dt};
+    };
+    auto frame = [&](int k, bool head) {
+        const uint32_t ts = static_cast<uint32_t>(std::llround(t0 + k * period));
+        PoseFrame f = LinearFrame(ts, t0, pos0, vel);
+        f.weapons[0].hasHead = head;
+        f.weapons[0].head = BoneSample{headAt(ts), Q4{0, 0, 0, 1}, headVel, V3{0, 0, 90}};
+        return f;
+    };
+    {   // interpolation: the head's own constant-velocity line, exactly (Hermite)
+        const PoseFrame a = frame(3, true), b = frame(4, true);
+        PoseFrame out{};
+        const double at = (a.tsMs + b.tsMs) / 2.0;
+        ppdetail::InterpolateFrame(a, b, at, out);
+        CHECK(out.weapons[0].hasHead);
+        CHECK(Dist3(out.weapons[0].head.pos, headAt(at)) < 1e-6);
+        CHECK(Dist3(out.weapons[0].head.vel, headVel) < 1e-9 && !out.weapons[1].hasHead);
+        PoseFrame bNo = b;
+        bNo.weapons[0].hasHead = false;
+        ppdetail::InterpolateFrame(a, bNo, a.tsMs + 0.3 * (b.tsMs - a.tsMs), out);
+        CHECK(out.weapons[0].hasHead && Dist3(out.weapons[0].head.pos, a.weapons[0].head.pos) == 0.0);   // nearer: a
+        ppdetail::InterpolateFrame(a, bNo, a.tsMs + 0.7 * (b.tsMs - a.tsMs), out);
+        CHECK(!out.weapons[0].hasHead);                                                                   // nearer: b
+    }
+    {   // extrapolation: on along the head's own velocity while both newest frames carry it
+        const PoseFrame prev = frame(3, true), newest = frame(4, true);
+        PoseFrame out{};
+        ppdetail::Mode mode;
+        ppdetail::ExtrapolateFrame(newest, prev, 20.0, 0.0, out, mode);
+        CHECK(out.weapons[0].hasHead && Dist3(out.weapons[0].head.pos, headAt(newest.tsMs + 20.0)) < 1e-6);
+        CHECK(Dist3(out.weapons[0].head.vel, headVel) < 1e-9);
+        PoseFrame prevNo = prev;
+        prevNo.weapons[0].hasHead = false;
+        ppdetail::ExtrapolateFrame(newest, prevNo, 20.0, 0.0, out, mode);
+        CHECK(out.weapons[0].hasHead && Dist3(out.weapons[0].head.pos, newest.weapons[0].head.pos) == 0.0);
+    }
+    {   // the whole player: the head comes out with its frames' motion, finite
+        PosePlayer pp;
+        for (int k = 0; k < 20; ++k) CHECK(pp.Push(frame(k, true), static_cast<int64_t>(std::llround(t0 + k * period + 40.0))));
+        PoseFrame out;
+        SampleInfo info;
+        const double at = t0 + 7.4 * period;
+        CHECK(pp.Sample(static_cast<int64_t>(std::llround(at + pp.offsetMs() + pp.delayMs())), out, &info) && !info.extrapolated);
+        CHECK(out.weapons[0].hasHead && Dist3(out.weapons[0].head.pos, headAt(out.tsMs)) < 1.0);
+        CHECK(FiniteV3(out.weapons[0].head.pos) && FiniteQ4(out.weapons[0].head.rot));
+    }
+}
+
 int main() {
     TestDuplicatesAndReorderingHandled();
     TestHermiteExactOnEndpointsAndConstantVelocity();
@@ -671,6 +726,7 @@ int main() {
     TestRotationsStayUnitLength();
     TestNoNaNUnderRandomizedStream();
     TestGripCarriedThroughPlayback();
+    TestFlailHeadThroughPlayback();
 
     if (g_fail == 0) {
         std::printf("test_hsm_poseplay: all passed\n");

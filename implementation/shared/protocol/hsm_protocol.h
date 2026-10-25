@@ -13,9 +13,10 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 16;         // 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 17;         // 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
+constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
 constexpr size_t kMaxBodies = 64;
 constexpr size_t kMaxPacket = 16 * 1024;
@@ -92,6 +93,7 @@ struct Hello {
     uint8_t revision = kProtocolRevision;
     uint64_t buildKey = 0;   // PE TimeDateStamp << 32 | SizeOfImage of the game exe
     std::string name;
+    std::string modBuild;    // rev 17: the client's mod build (session/hsm_build.h ModBuildString)
 };
 struct Welcome {
     uint32_t sessionId = 0;
@@ -100,6 +102,7 @@ struct Welcome {
     uint16_t snapshotHz = 30;
     std::string map;
     uint8_t syncMode = 0;    // session/hsm_authority.h SyncMode: 0 the host simulates every fighter, 1 each owner its own
+    std::string modBuild;    // rev 17: the host's mod build
 };
 struct Reject { RejectReason reason = RejectReason::Malformed; };
 
@@ -175,6 +178,7 @@ struct FighterEntry {
     uint8_t entity = 0; int8_t team = -1; int16_t kills = 0, deaths = 0; std::string name;
     uint16_t pingMs = 0;                // round trip to the host, 0 = unknown (the host itself, bots)
     bool alive = true;
+    bool down = false;                  // rev 17: Duel, the host's draw check has it down (match/hsm_draw.h DrawCheck::Down)
 };
 struct MatchInfo {
     uint8_t format = 0;                 // hsm::Format
@@ -190,7 +194,7 @@ struct MatchInfo {
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
 };
-struct Kill { uint8_t killer = 0, victim = 0; uint8_t flags = 0; };   // flags: 1 teamkill, 2 suicide, 4 environment, 8 gave up (Duel)
+struct Kill { uint8_t killer = 0, victim = 0; uint8_t flags = 0; };   // flags: 1 teamkill, 2 suicide, 4 environment, 8 gave up (Duel); 16 the round drawn with both down, 32 drawn with no hits (Duel: victim and killer are the two fighters)
 
 // ---------------------------------------------------------------- byte stream helpers
 class Writer {
@@ -228,16 +232,16 @@ private:
 inline bool PeekType(const uint8_t* d, size_t n, MsgType& t) { Reader r(d, n); return r.header(t); }
 
 // ---------------------------------------------------------------- encoders / decoders
-inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); return w.buf; }
+inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); w.str(m.modBuild, kMaxModBuild); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Hello& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Hello) return false;
-    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); return r.done();
+    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); return r.done();
 }
 
-inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); return w.buf; }
+inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); w.str(m.modBuild, kMaxModBuild); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Welcome& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Welcome) return false;
-    m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8();
+    m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8(); m.modBuild = r.str(kMaxModBuild);
     return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1;
 }
 
@@ -410,7 +414,8 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     size_t nf = m.fighters.size() < 255 ? m.fighters.size() : 255; w.u8(uint8_t(nf));
     for (size_t i = 0; i < nf; ++i) {
         const FighterEntry& f = m.fighters[i];
-        w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); w.u16(f.pingMs); w.u8(f.alive ? 1 : 0);
+        w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); w.u16(f.pingMs);
+        w.u8(uint8_t((f.alive ? 1 : 0) | (f.down ? 2 : 0)));   // bit 0 alive, bit 1 down
     }
     return w.buf;
 }
@@ -428,9 +433,9 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     m.fighters.resize(nf);
     for (FighterEntry& f : m.fighters) {
         f.entity = r.u8(); f.team = int8_t(r.u8()); f.kills = r.i16(); f.deaths = r.i16(); f.name = r.str(kMaxPlayerName);
-        f.pingMs = r.u16(); uint8_t alive = r.u8(); f.alive = alive == 1;
+        f.pingMs = r.u16(); uint8_t alive = r.u8(); f.alive = (alive & 1) != 0; f.down = (alive & 2) != 0;
         if (f.entity == 0 || f.team < -1 || f.team > 7) return false;
-        if (alive > 1) return false;
+        if (alive > 3) return false;
     }
     return r.done();
 }
@@ -438,7 +443,7 @@ inline std::vector<uint8_t> Encode(const Kill& m) { Writer w; w.header(MsgType::
 inline bool Decode(const uint8_t* d, size_t n, Kill& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Kill) return false;
     m.killer = r.u8(); m.victim = r.u8(); m.flags = r.u8();
-    return r.done() && m.victim != 0 && m.flags < 16;
+    return r.done() && m.victim != 0 && m.flags < 64;
 }
 
 // ---------------------------------------------------------------- quantization

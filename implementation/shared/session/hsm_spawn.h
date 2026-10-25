@@ -137,4 +137,82 @@ std::vector<Point3> NavigableRing(const Point3& center, double centerFloorZ, Nav
     return out;
 }
 
+// Spots around a spawner on a floor with holes and walls (two-player test 2026-10-25, the Pit: FreeSpot moved respawns
+// off a corpse onto ring-1 slots 250 cm from good spawners, one at the lip of the pit in the middle, one behind the
+// fence). A slot is used only where a fighter can stand: the engine checks a floor under it and nothing between it and
+// its centre (a fence, a wall), and it stays inside the area the level's spawners span.
+constexpr double kSpotStepCm = 50.0;       // a slot's floor this far from its centre's: a hole, a ledge or something lying there
+constexpr double kWallProbeCm = 60.0;      // the wall check between a centre and its slot runs this high above the centre's floor
+constexpr double kAreaMarginCm = 100.0;    // SpawnArea: how far past the outermost spawner a slot may be
+constexpr double kAreaMinRadiusCm = 600.0; // SpawnArea: never smaller than this (one or two spawners span nothing)
+
+// The floor test of a slot: a floor under it (nullopt: no floor, or a trap), within kSpotStepCm of its centre's floor.
+// Without a centre floor to compare with, any floor.
+inline bool FloorFits(std::optional<double> centreFloor, std::optional<double> slotFloor, double step = kSpotStepCm) {
+    if (!slotFloor || !std::isfinite(*slotFloor)) return false;
+    if (!centreFloor || !std::isfinite(*centreFloor)) return true;
+    return std::fabs(*slotFloor - *centreFloor) <= step;
+}
+
+// A fighter is about a metre wide: a slot at the pit's lip (test 2026-10-25: (-274,-7), 4 cm past the mouth) has floor
+// under its centre and falls in. Its floor is traced at the slot and kFootprintCm from it in four directions;
+// floorAt(point) is that trace (nullopt: no floor, or a trap), and every one must fit the centre's floor.
+constexpr double kFootprintCm = 75.0;
+template <class FloorAt>
+bool FootprintFits(std::optional<double> centreFloor, const Point3& p, FloorAt floorAt) {
+    static constexpr double kDir[5][2] = {{0, 0}, {1, 0}, {0, 1}, {-1, 0}, {0, -1}};
+    for (const auto& d : kDir)
+        if (!FloorFits(centreFloor, floorAt(Point3{p.x + d[0] * kFootprintCm, p.y + d[1] * kFootprintCm, p.z}))) return false;
+    return true;
+}
+
+// The area a level's spawn candidates span: a circle around their mean through the outermost one plus kAreaMarginCm,
+// at least kAreaMinRadiusCm. Horizontal. No candidates: everywhere.
+struct SpawnArea {
+    Point3 centre;
+    double radius = INFINITY;
+    bool Contains(const Point3& p) const { return FlatDist2(p, centre) <= radius * radius; }
+};
+inline SpawnArea AreaOf(const std::vector<Point3>& candidates) {
+    SpawnArea a;
+    if (candidates.empty()) return a;
+    for (const Point3& c : candidates) { a.centre.x += c.x; a.centre.y += c.y; a.centre.z += c.z; }
+    const double n = double(candidates.size());
+    a.centre.x /= n; a.centre.y /= n; a.centre.z /= n;
+    double far2 = 0;
+    for (const Point3& c : candidates) far2 = std::fmax(far2, FlatDist2(c, a.centre));
+    a.radius = std::fmax(std::sqrt(far2) + kAreaMarginCm, kAreaMinRadiusCm);
+    return a;
+}
+
+// FreeSpot where a fighter can stand: the first spread slot around c, from `first` on, that no point of `taken` is
+// within `gap` of (horizontally), that lies in `area` and that stands(c, slot) accepts (the engine's floor and wall
+// checks; never asked for c itself). None: c itself, a known spawner, even with a body there (better than the pit).
+// `skipped`, when given, counts the slots clear of bodies that were turned down.
+template <class Stands>
+Point3 StandableSpot(const Point3& c, const std::vector<Point3>& taken, size_t first, double gap, const SpawnArea& area,
+                     Stands stands, size_t* skipped = nullptr) {
+    const double g2 = gap * gap - 1e-6;
+    for (size_t k = first; k < first + kSpreadSlots; ++k) {
+        const Point3 p = SpreadSlot(c, k, gap);
+        bool clear = true;
+        for (const Point3& body : taken) if (FlatDist2(p, body) < g2) { clear = false; break; }
+        if (!clear) continue;
+        if (k == 0 || (area.Contains(p) && stands(c, p))) return p;
+        if (skipped) ++*skipped;
+    }
+    return c;
+}
+
+// SpreadPositions with StandableSpot: each pick on the first standable slot around its candidate, from its ring on,
+// that keeps it `gap` from the places before it.
+template <class Stands>
+std::vector<Point3> StandableSpread(const std::vector<Point3>& candidates, size_t count, const SpawnArea& area, Stands stands,
+                                    double gap = kMinFighterGapCm) {
+    std::vector<Point3> out;
+    for (const SpawnPick& pk : SelectSpread(candidates, count))
+        out.push_back(StandableSpot(candidates[pk.index], out, size_t(pk.ring), gap, area, stands));
+    return out;
+}
+
 }  // namespace hsm

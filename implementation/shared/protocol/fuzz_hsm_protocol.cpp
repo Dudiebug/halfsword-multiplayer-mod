@@ -52,8 +52,8 @@ void TryAll(const uint8_t* d, size_t n) {
 
 std::vector<std::vector<uint8_t>> Seeds() {
     std::vector<std::vector<uint8_t>> s;
-    Hello h; h.buildKey = 0x8EFA122909712000ull; h.name = "seed"; s.push_back(Encode(h));
-    Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; s.push_back(Encode(w));
+    Hello h; h.buildKey = 0x8EFA122909712000ull; h.name = "seed"; h.modBuild = "0.6.4 (v0.6.3-12-gdb82570)"; s.push_back(Encode(h));
+    Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; s.push_back(Encode(w));
     Reject r; r.reason = RejectReason::Full; s.push_back(Encode(r));
     InputFrame f; f.seq = 7; f.axes[0] = 1; f.buttons = 5; s.push_back(Encode(f));
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
@@ -71,6 +71,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     sync::PoseFrame pf; pf.tsMs = 5000; pf.stepUs = 16667;
     for (int b = 0; b < sync::kPoseBones; ++b) { pf.bones[size_t(b)].pos = sync::V3{ 10.0 * b, 5, 90 }; pf.bones[size_t(b)].rot = sync::Q4{ 0, 0, 0, 1 }; }
     pf.weapons[0].present = true; pf.weapons[0].classHash = 7; pf.weapons[0].rot = sync::Q4{ 0, 0, std::sin(0.2), std::cos(0.2) };
+    pf.weapons[0].hasHead = true; pf.weapons[0].head.pos = sync::V3{ 60, 5, 40 }; pf.weapons[0].head.vel = sync::V3{ 300, 0, -200 };   // a flail
     PoseMsg pm; pm.entity = 2; pm.rootX = 1; pm.rootZ = 90; pm.yawDeg = 30; pm.pose = sync::EncodePose(pf); s.push_back(Encode(pm));
     VitalsMsg vm; vm.entity = 2; vm.flags = 2; vm.health = 50; vm.partHealth[3] = 9; vm.severed = 4; s.push_back(Encode(vm));
     combat::HitClaim hc; hc.claimId = 3; hc.attacker = 1; hc.victim = 2; hc.hitBone = "head"; hc.strikeComponent = "Blade";

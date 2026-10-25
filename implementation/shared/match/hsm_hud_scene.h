@@ -156,7 +156,10 @@ inline FeedRow MakeFeedRow(const MatchInfo& m, const Kill& k, uint8_t me) {
     FeedRow r;
     r.mine = k.victim == me || (k.killer == me && k.killer != 0);
     Span victim{NameOf(m, k.victim), FighterInk(m, k.victim)};
-    if (k.flags & 8) r.spans = {victim, {" gave up", style::kIron}};
+    if (k.flags & (16 | 32)) {
+        if (k.killer == 0) r.spans = {victim, {DrawnWhy(k), style::kIron}};
+        else r.spans = {victim, {" and ", style::kIron}, {NameOf(m, k.killer), FighterInk(m, k.killer)}, {DrawnWhy(k), style::kIron}};
+    } else if (k.flags & 8) r.spans = {victim, {" gave up", style::kIron}};
     else if (k.flags & 2) r.spans = {victim, {" killed themselves", style::kIron}};
     else if ((k.flags & 4) || k.killer == 0) r.spans = {victim, {" died", style::kIron}};
     else r.spans = {{NameOf(m, k.killer), FighterInk(m, k.killer)}, {(k.flags & 1) ? " killed teammate " : " killed ", style::kIron}, victim};
@@ -190,6 +193,7 @@ struct BoardRow {
     int kills = 0, deaths = 0, score = 0;
     uint16_t pingMs = 0;
     bool host = false, local = false, dead = false;
+    bool down = false;               // alive, and the host's draw check has it down (Duel)
 };
 struct Board { bool visible = false; std::string title, footer; std::vector<BoardRow> rows; };
 
@@ -308,6 +312,7 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
         r.ink = e.alive ? style::kBone : style::kIron;
         r.kills = e.kills; r.deaths = e.deaths; r.score = perEntity ? ScoreOf(m, e.entity) : e.kills;
         r.pingMs = e.pingMs; r.host = e.entity == l.host; r.local = e.entity == l.me; r.dead = !e.alive;
+        r.down = e.alive && e.down;
         rows.push_back({e.team, std::move(r)});
     }
     std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& c) {
@@ -346,6 +351,9 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     }
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
+    // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
+    if (const FighterEntry* mine = FighterOf(m, l.me); mine && mine->alive && mine->down && fought && !InRoundGap(m) && !l.dead)
+        s.pill = {true, "DOWN - GET UP", style::kBloodInk, 1, 1};
     if (l.giveUp > 0 && Format(m.format) == Format::Duel && fought && !InRoundGap(m))
         s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
     if (l.giveUp > 0 && InWaveBreak(m))          // the same G hold votes to skip the loot break

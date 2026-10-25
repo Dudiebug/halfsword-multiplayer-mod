@@ -46,6 +46,10 @@ public:
     void CaptureInput(bool on);
     // First hit straight down from just above `at`, looking through `ignore`; `hitName` gets the hit actor's name.
     bool FloorZ(const ue::FVector& at, const std::vector<ue::UObject*>& ignore, double& z, std::string* hitName = nullptr);
+    // Nothing between `from` and `to` (a fence, a wall), looking through `ignore`; `hitName` gets what is in the way.
+    bool LineClear(const ue::FVector& from, const ue::FVector& to, const std::vector<ue::UObject*>& ignore, std::string* hitName = nullptr);
+    // Where a bone (socket) of the fighter's Mesh is in the world; false without a Mesh or a finite position.
+    bool BoneLocation(ue::UObject* willie, const char* bone, ue::FVector& out);
     // A random point on the navmesh within `radius` of `origin`, as the Abyss places its enemies; false: no navmesh there.
     bool NavigablePoint(const ue::FVector& origin, double radius, ue::FVector& out);
     void DestroyActor(ue::UObject* actor);
@@ -64,7 +68,10 @@ public:
     // An actor the game is destroying (AActor::IsActorBeingDestroyed) or a component (UActorComponent::IsBeingDestroyed);
     // false for any other object. Each is asked its own class's function: the actor's reads garbage on a component.
     static bool BeingDestroyed(ue::UObject* o);
-    std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level
+    // BP_SpawnerPoint_Willies actors in the loaded level that the level kept: BP_LevelManager::Spawn_Combatants destroys
+    // every spawner not made for the current game, combat and play modes or the number of combatants (the Pit's bridge
+    // and outer ring in Free Mode), and a destroyed one reads (0,0,0), the middle of the Pit.
+    std::vector<ue::FVector> SpawnCandidates();
     ue::FVector ActorLocation(ue::UObject* actor);
     double ActorYaw(ue::UObject* actor);
     double WorldSeconds();                                 // game seconds since this world began play, -1 unreadable
@@ -133,11 +140,13 @@ public:
     void ApplyVitals(ue::UObject* willie, const WillieState& s);
     void TriggerDeath(ue::UObject* willie);
     size_t BoneCount() const { return bones_.size(); }
+    ue::UObject* GameInstance();
+    std::wstring SaveGamesDir();   // <Saved>/SaveGames/ (sweeps temporary slots left by a crash the first time); empty before the engine is up
 
 private:
+    bool TraceLine(const ue::FVector& start, const ue::FVector& end, const std::vector<ue::UObject*>& ignore, ue::FVector* impact,
+                   std::string* hitName);
     bool ResolveBones(ue::UObject* mesh);
-    ue::UObject* GameInstance();
-    std::wstring SaveGamesDir();
     std::string TempSlot();
     void DeleteSlot(const std::string& slot);
     std::wstring saveDir_;

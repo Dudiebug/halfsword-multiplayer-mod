@@ -11,9 +11,14 @@
 namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.6.3";   // bump with every release tag
+constexpr const char* kModVersion = "0.6.4";   // bump with every release tag
+// This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
+std::string ModBuild();
+// allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
+void SetAllowBuildMismatch(bool on);
+bool AllowBuildMismatch();
 
-struct LobbyMember { steam::SteamId id = 0; std::string name; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; };
+struct LobbyMember { steam::SteamId id = 0; std::string name; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
 
 struct LobbyListing {
     steam::SteamId id = 0;

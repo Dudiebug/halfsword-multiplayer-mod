@@ -1,6 +1,7 @@
 #include "gameplay/lobby.h"
 #include "hsm_protocol.h"
 #include "log.h"
+#include "session/hsm_build.h"
 #include "ue/engine.h"
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +16,16 @@ int IntOr(const std::string& s, int fallback) {
     return end && *end == 0 ? int(v) : fallback;
 }
 }  // namespace
+#ifndef HSM_GIT_DESCRIBE
+#define HSM_GIT_DESCRIBE ""
+#endif
+std::string ModBuild() { return ModBuildString(kModVersion, HSM_GIT_DESCRIBE); }
+namespace {
+bool g_allowBuildMismatch = false;
+}  // namespace
+void SetAllowBuildMismatch(bool on) { g_allowBuildMismatch = on; }
+bool AllowBuildMismatch() { return g_allowBuildMismatch; }
+
 namespace {
 std::string BuildKeyHex() { char b[32]; std::snprintf(b, sizeof b, "%016llx", (unsigned long long)ue::BuildKey()); return b; }
 std::string ProtocolStr() { return std::to_string(int(kProtocolRevision)); }
@@ -117,6 +128,7 @@ void Lobby::Join(steam::SteamId lobby) {
 void Lobby::Enter(steam::SteamId lobby) {
     lobby_ = lobby; state_ = State::InLobby; owner_ = steam::LobbyOwner(lobby);
     steam::SetMemberData(lobby_, "hsm_ver", kModVersion);
+    steam::SetMemberData(lobby_, "hsm_mod", ModBuild());   // the lobby names every other player on another build
     steam::SetRichPresence("connect", "+connect_lobby " + std::to_string(lobby_));
     steam::SetRichPresence("status", IsHost() ? "Hosting a Half Sword fight" : "In a Half Sword lobby");
     members_.clear();
@@ -201,6 +213,7 @@ void Lobby::RefreshMembers() {
         if (!id) continue;
         LobbyMember m; m.id = id; m.name = steam::PersonaName(id); m.host = id == owner_;
         m.ready = steam::MemberData(lobby_, id, "ready") == "1";
+        m.build = steam::MemberData(lobby_, id, "hsm_mod").substr(0, kMaxModBuild);   // peer-written
         auto team = [](int t) { return t >= -1 && t <= 3 ? t : -1; };   // peer-written; later narrowed to int8_t
         m.team = team(IntOr(steam::MemberData(lobby_, id, "hsm_team"), -1));
         m.hostOverride = team(IntOr(steam::LobbyData(lobby_, "hsm_ovr_" + std::to_string(id)), -1));

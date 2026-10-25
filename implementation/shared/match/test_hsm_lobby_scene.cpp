@@ -450,6 +450,34 @@ static void TestMaps() {
     CHECK(std::string(MapRefusal(Format::FreeForAll)) == "Not for this mode");
 }
 
+// Item 8: another player on a different mod build is named, and the host cannot start until it matches or the
+// override is on. Builds not known yet say nothing.
+static void TestBuildMismatch() {
+    LobbyLocal h = InLobby(true);
+    h.myBuild = "0.6.4";
+    h.players[1].build = "0.6.4";
+    LobbyScene s = BuildLobbyScene(h);
+    CHECK(s.start && !s.buildMismatch && s.waiting.empty());
+    h.players[1].build = "";                          // Bob's member data has not come yet
+    s = BuildLobbyScene(h);
+    CHECK(s.start && !s.buildMismatch);
+    h.players[1].build = "0.6.3";
+    s = BuildLobbyScene(h);
+    CHECK(!s.start && s.buildMismatch && s.waiting == "Bob on 0.6.3 - update");
+    h.players[0].build = "9.9.9";                     // my own row never counts against me
+    CHECK(BuildLobbyScene(h).waiting == "Bob on 0.6.3 - update");
+    h.allowBuildMismatch = true;
+    s = BuildLobbyScene(h);
+    CHECK(s.start && s.buildMismatch && s.waiting == "Bob on 0.6.3 - update (allowed: allow_build_mismatch=1)");
+    LobbyLocal m = InLobby(false);                    // a member sees the host's build named instead of "Waiting"
+    m.myBuild = "0.6.3";
+    m.players[0].build = "0.6.4";
+    s = BuildLobbyScene(m);
+    CHECK(!s.start && s.buildMismatch && s.waiting == "Ann on 0.6.4 - update");
+    m.players[0].build = "0.6.3";
+    CHECK(BuildLobbyScene(m).waiting == "Waiting for the host");
+}
+
 int main() {
     TestPrevNext();
     TestStepSetting();
@@ -469,6 +497,7 @@ int main() {
     TestReady();
     TestModes();
     TestMaps();
+    TestBuildMismatch();
     if (g_fail) { std::printf("%d lobby scene checks failed\n", g_fail); return 1; }
     std::printf("all lobby scene tests passed\n");
     return 0;

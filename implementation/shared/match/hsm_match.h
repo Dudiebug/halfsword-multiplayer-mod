@@ -95,6 +95,10 @@ public:
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
     // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
     bool Forfeit(uint8_t entity, uint32_t nowMs);
+    // Duel: the round being fought is drawn (nobody can finish it, hsm_draw.h): over now with no point to anyone, and the
+    // usual gap before every fighter respawns. False, and no effect, outside Duel or outside a fought round.
+    bool Draw(uint32_t nowMs);
+    bool RoundInPlay() const;                           // Duel: a round is being fought (Live or SuddenDeath, not the gap)
     Events Tick(uint32_t nowMs);
     void MarkRespawned(uint8_t entity);
     void Finish(int winnerKey, uint32_t nowMs);          // ends a running match now (no effect once over)
