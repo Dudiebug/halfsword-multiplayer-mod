@@ -99,6 +99,9 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **One world for everyone**: stock fighters that are not part of the match are removed on every machine, and the
   stock death/win screens are blocked during a session match (no slow motion, no input lock, and no Progression
   career reset on death).
+- **Pause menu**: in an owner-sync match (the default), Esc still opens the game's pause menu and it works, but the
+  fight does not pause. A paused game stopped your fighter on every other screen, and a host's pause sent the clients
+  back to the main menu after 7 s.
 - **HUD** inside the game's own `UI_HUD`: score line and clock, respawn countdown, kill feed, and a scoreboard while
   Tab is held.
 
@@ -147,15 +150,18 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
 
 ## Known gaps (next milestones)
 
-- Not yet verified in game. Everything above is compile-level plus offline tests; the harness above and
-  `docs/HUMAN_TESTING.md` are the runtime checks.
+- The sections above describe the original host-simulates-everyone sync (`sync_mode=host`). In owner sync (the
+  default) each machine simulates its own fighter, the others are stand-ins driven by a 60 Hz pose stream, hits are
+  claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore, grabs,
+  dropped weapons and level props are synced; the client-side delay and the unsynced gore listed below apply to
+  `sync_mode=host` only.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
 - Direct-IP (ENet) sessions have no lobby, so they always play Free-for-all with default settings.
 - Next: a spectator host (`role=server`): the retail game plus this mod hosting with no fighter of its own and
   automatic match start/rotation. It is a hosted retail instance, not a dedicated server build.
-- No client prediction: the client's own Willie responds with one round trip of delay (Phase 5).
-- Weapon transforms, grab constraints, dismemberment and gore are not synced (Phase 4). Blocking hit delegates also
-  mutes client-side hit sounds and blood.
+- `sync_mode=host`: no client prediction (the client's own Willie responds with one round trip of delay); weapon
+  transforms, grab constraints, dismemberment, gore and level props are not synced, and blocking hit delegates mutes
+  client-side hit sounds and blood.
 - SaveGame bytes returned by the engine are copied and left on the engine heap (a few KB per export, at most once
   per level per player).

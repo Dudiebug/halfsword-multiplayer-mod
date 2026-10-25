@@ -326,16 +326,23 @@ public:
         q.push_back(Clash{attackerTsMsEstimate, weapon});
         if (q.size() > kMaxClashHistory) q.pop_front();
     }
-    bool Cancels(const HitClaim& c) const {
+    // clashMinusClaimMs: when cancelled, the nearest matching clash (clash ts minus claim ts; a tie goes to the earlier).
+    bool Cancels(const HitClaim& c, int32_t* clashMinusClaimMs = nullptr) const {
         if (c.source == StrikeSource::Body) return false;   // a body strike never met a blade
         auto it = clashes_.find(c.attacker);
         if (it == clashes_.end()) return false;
+        bool cancels = false;
+        int32_t nearest = 0;
         for (const Clash& k : it->second) {
             if (k.weapon != c.source) continue;
             int32_t delta = int32_t(k.tsMs - c.attackerTsMs);   // clash ts minus claim ts, wrap-aware
-            if (delta >= -kParryBeforeMs && delta <= kParryAfterMs) return true;
+            if (delta < -kParryBeforeMs || delta > kParryAfterMs) continue;
+            const int32_t d = delta < 0 ? -delta : delta, n = nearest < 0 ? -nearest : nearest;
+            if (!cancels || d < n || (d == n && delta < nearest)) nearest = delta;
+            cancels = true;
         }
-        return false;
+        if (cancels && clashMinusClaimMs) *clashMinusClaimMs = nearest;
+        return cancels;
     }
     void Forget(uint8_t attacker) { clashes_.erase(attacker); }   // its id goes to the next fighter
 

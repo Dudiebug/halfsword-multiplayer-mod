@@ -255,6 +255,35 @@ static void TestParryWindowPerWeapon() {
     CHECK(pw.Cancels(right));                       // a clash after the Forget counts again
 }
 
+// Logs 3-9: one blow in seven was parried, and the log could not tell a blade sliding off in a bind (clash right before
+// the blow) from a swing that glanced off and went on into the body (clash up to 150 ms before it). Cancels reports
+// how far the nearest matching clash was from the blow (clash minus claim, in the attacker's ms) for the parried line.
+static void TestParryWindowDelta() {
+    ParryWindow pw;
+    pw.NoteClash(1, StrikeSource::WeaponRight, 1000);
+    pw.NoteClash(1, StrikeSource::WeaponLeft, 1100);   // the other weapon: never the one reported
+    pw.NoteClash(1, StrikeSource::WeaponRight, 1060);
+    HitClaim c; c.attacker = 1; c.source = StrikeSource::WeaponRight;
+
+    int32_t delta = 12345;
+    c.attackerTsMs = 1100; CHECK(pw.Cancels(c, &delta)); CHECK(delta == -40);   // nearest of 1000 and 1060
+    delta = 12345;
+    c.attackerTsMs = 1150; CHECK(pw.Cancels(c, &delta)); CHECK(delta == -90);   // 1000 is out of the window
+    delta = 12345;
+    c.attackerTsMs = 1050; CHECK(pw.Cancels(c, &delta)); CHECK(delta == 10);    // a clash just after the blow
+    delta = 12345;
+    c.attackerTsMs = 1030; CHECK(pw.Cancels(c, &delta)); CHECK(delta == -30);   // 1060 is nearer by distance but past kParryAfterMs
+    delta = 12345;
+    c.attackerTsMs = 1300; CHECK(!pw.Cancels(c, &delta)); CHECK(delta == 12345); // not parried: untouched
+    c.attackerTsMs = 1100; CHECK(pw.Cancels(c));                                 // the out pointer is optional
+
+    ParryWindow tie;
+    tie.NoteClash(1, StrikeSource::WeaponRight, 1010);
+    tie.NoteClash(1, StrikeSource::WeaponRight, 990);
+    c.attackerTsMs = 1000; delta = 12345;
+    CHECK(tie.Cancels(c, &delta)); CHECK(delta == -10);                          // a tie in distance goes to the earlier clash
+}
+
 // ---------------------------------------------------------------- body parts
 static void TestBodyPartOfBone() {
     // One target per part: the two neck bones of test 4's storm, the head, any casing (test 4 logged "Head").
@@ -743,6 +772,7 @@ int main() {
     TestReplayBoneOk();
     TestParryWindow();
     TestParryWindowPerWeapon();
+    TestParryWindowDelta();
     TestBodyPartOfBone();
     TestCoalescerNeckStorm();
     TestCoalescerWindow();

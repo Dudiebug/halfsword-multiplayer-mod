@@ -32,6 +32,10 @@ constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Bend Over Extr
 constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried again this often, not every frame
 constexpr const char* kWeaponFields[sync::kPoseWeapons] = {"Weapon R", "Weapon L"};   // slot = hand
 constexpr const char* kGripFields[2] = {"PhysicsConstraint R Hand", "PhysicsConstraint L Hand"};
+// The sheath slots (SheathSlots_Enum order, standin_slots.cpp SlotActor): a weapon the game puts in one is anchored on the
+// next pass (Neutralise).
+constexpr const char* kSlotFields[FighterRig::kSheathSlots] = {"Weapon Slot R 1", "Weapon Slot R 2", "Weapon Slot Back",
+                                                               "Weapon Slot L 1", "Weapon Slot L 2"};
 // The hands' grip variables (docs/TWO_PLAYER_TEST_6.md section 1): the fingers follow the two grip types and the offhand flag in
 // ABP_Willie; the other flags move the left hand's attach point. Order = GripState: offhand, alt, mordhau, switched, reverse.
 constexpr const char* kGripBoolFields[] = {"L Hand In Offhand Attached", "R Alt Grip", "Mordhau Grip", "2H Switched Hands (Temp)",
@@ -170,6 +174,8 @@ bool FighterRig::Bind(UObject* willie) {
         if (FProperty* p = TypedField(wc, kWeaponFields[w], "ObjectProperty")) weaponOffset_[w] = PropertyOffset(p);
     for (int h = 0; h < 2; ++h)
         if (FProperty* p = TypedField(wc, kGripFields[h], "ObjectProperty")) gripOffset_[h] = PropertyOffset(p);
+    for (int k = 0; k < kSheathSlots; ++k)
+        if (FProperty* p = TypedField(wc, kSlotFields[k], "ObjectProperty")) slotOffset_[k] = PropertyOffset(p);
     if (uint8_t* p = Field<uint8_t>(willie, "R_GripType_Current")) gripTypeOffset_[0] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
     if (uint8_t* p = Field<uint8_t>(willie, "L_GripType_Current")) gripTypeOffset_[1] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
     for (int i = 0; i < 5; ++i) gripFlag_[i] = TypedField(wc, kGripBoolFields[i], "BoolProperty");
@@ -528,7 +534,13 @@ void FighterRig::Neutralise(double nowMs) {
     for (FProperty* p : trueBools_) SetBoolValue(p, base + PropertyOffset(p), true);
     for (FProperty* p : falseBools_) SetBoolValue(p, base + PropertyOffset(p), false);
     if (boundAtMs_ < 0.0) boundAtMs_ = nowMs;
-    if (nowMs < nextFullMs_ && !weaponChanged_) return;
+    // A weapon the game just sheathed hangs from BoneCore, which the rig leaves behind when it moves the body: anchored
+    // (StandInSlots::Anchor) on this pass, not up to kFullEarlyEveryMs later. Two-player logs 8 and 9: each new stand-in's
+    // sheathed weapons were 4-25 m away until a pass about 520 ms after its hand weapons came.
+    bool slotsChanged = false;
+    for (int k = 0; k < kSheathSlots; ++k)
+        if (UObject* s = FieldAt(slotOffset_[k]); s != slotSeen_[k]) { slotSeen_[k] = s; slotsChanged = true; }
+    if (nowMs < nextFullMs_ && !weaponChanged_ && !slotsChanged) return;
     NeutraliseFull();
     weaponChanged_ = false;
     nextFullMs_ = nowMs + (nowMs - boundAtMs_ < kFullEarlyForMs ? kFullEarlyEveryMs : kFullEveryMs);

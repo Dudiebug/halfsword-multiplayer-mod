@@ -514,6 +514,7 @@ void PropSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObject*
     f.poseSinceMs = pose.sinceMs;
     f.tokenKnown = env_.equipToken(e, h, f.token);
     f.holding = sh.held != nullptr;
+    f.boundMs = standInHands_[e].boundMs;
     f.heldClass = sh.heldClass;
     // A prop is let go of quickly (its stream carries it on), unless Equip may be about to sheathe it: the owner shows a
     // slot this hand reaches holding a weapon the stand-in's slot does not have yet (EquipSync's stale-sheathe re-plan

@@ -170,6 +170,12 @@ inline size_t Match::LoadoutsAhead() const {
     return humans;
 }
 
+inline size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans) {
+    const Regear r = RegearFor(c, RespawnCause::Rematch);
+    if (r == Regear::Shared) return humans ? 1 : 0;
+    return r == Regear::Each ? humans : 0;
+}
+
 inline void GearPool::Use(uint8_t tier) {
     if (tier == tier_) return;
     blobs_.clear();

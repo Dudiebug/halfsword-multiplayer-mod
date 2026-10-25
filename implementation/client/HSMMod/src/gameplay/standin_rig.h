@@ -23,6 +23,7 @@ namespace hsm::game {
 
 class FighterRig {
 public:
+    static constexpr int kSheathSlots = 5;   // "Weapon Slot R 1" ... "Weapon Slot L 2"
     // Binds the fighter's Mesh and bones (a different or respawned fighter rebinds everything). False when it has no
     // Mesh, a pose bone is missing or a per-frame call does not resolve; the rig is then unbound.
     bool Bind(ue::UObject* willie);
@@ -114,6 +115,8 @@ private:
     std::array<Weapon, sync::kPoseWeapons> weapons_{};
     int32_t weaponOffset_[sync::kPoseWeapons] = {-1, -1};   // "Weapon R" / "Weapon L" in the Willie
     int32_t gripOffset_[2] = {-1, -1};                       // "PhysicsConstraint R Hand" / "L Hand"
+    int32_t slotOffset_[kSheathSlots] = {-1, -1, -1, -1, -1};
+    std::array<ue::UObject*, kSheathSlots> slotSeen_{};      // what each slot held at the last Neutralise
     ue::UObject* gripFreed_[2] = {nullptr, nullptr};         // freed per hand since the last full pass (null: free it again)
     ue::UObject* gripLocked_[2] = {nullptr, nullptr};        // locked per hand since the last full pass (null: lock it again)
     ue::UObject* gripLoose_[2] = {nullptr, nullptr};         // freed at all (limits never restored), until a weapon change

@@ -63,6 +63,31 @@ void TestAttach() {
     CHECK(m.Step(Holds(Shows(kSword, 1000), kSword, false), 9000) == kNone);
 }
 
+// Logs 3-9: a new or respawned stand-in's own loadout weapons arrive 0.85-1.2 s after it is bound, while the owner's pose
+// shows them in hand from the start. Log 8 (00:05:14) took a weapon lying within 600 uu into the hand meanwhile, and the
+// arriving loadout weapon then destroyed it on that machine only. Within kStandInSettleMs of binding no hand attaches.
+void TestSettle() {
+    HandMatch m;
+    HandFacts f = Shows(kSword, 10000);
+    f.boundMs = 10000;
+    CHECK(m.Step(f, 10000 + kAttachGraceMs) == kNone);
+    CHECK(m.Step(f, 10000 + kStandInSettleMs - 1) == kNone);
+    CHECK(m.Step(f, 10000 + kStandInSettleMs) == kAttach);   // then a pickup as before
+    CHECK(kStandInSettleMs >= 1300.0);                       // the slowest arrival seen (1209 ms), with a margin
+    // A pickup long after binding is unchanged.
+    HandMatch n;
+    f = Shows(kSword, 50000);
+    f.boundMs = 10000;
+    CHECK(n.Step(f, 50000 + kAttachGraceMs - 1) == kNone);
+    CHECK(n.Step(f, 50000 + kAttachGraceMs) == kAttach);
+    // Releases are not held back: a stand-in bound with a weapon the owner does not show lets it go as before.
+    HandMatch r;
+    f = Holds(Shows(kHandEmpty, 10000), kSword, true);
+    f.boundMs = 10000;
+    CHECK(r.Step(f, 10000) == kNone);
+    CHECK(r.Step(f, 10000 + kReleasePropMs) == kRelease);
+}
+
 void TestRelease() {
     // The stand-in holds what the pose shows: kept.
     HandMatch k;
@@ -327,6 +352,7 @@ void TestPickFar() {
 int main() {
     TestPickFar();
     TestAttach();
+    TestSettle();
     TestRelease();
     TestFlickerHold();
     TestPick();

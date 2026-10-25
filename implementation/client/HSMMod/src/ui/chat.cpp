@@ -189,8 +189,11 @@ void Poll(uint32_t now) {
 }
 
 void Draw(const ChatScene& s) {
-    if (!w.hudClass) w.hudClass = FindClass("UI_HUD_C");
-    if (!w.hudClass) return;
+    if (!w.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once per kScanEveryMs
+        const ULONGLONG now = GetTickCount64();
+        if (now < w.nextScan) return;
+        if (!(w.hudClass = FindClass("UI_HUD_C"))) { w.nextScan = now + kScanEveryMs; return; }
+    }
     if (!w.hud || ObjectAt(w.hudIndex) != w.hud || ClassOf(w.hud) != w.hudClass) {
         if (w.hud) { UClass* cls = w.hudClass; ULONGLONG next = w.nextScan; w = Widgets{}; w.hudClass = cls; w.nextScan = next; }
         ULONGLONG now = GetTickCount64();

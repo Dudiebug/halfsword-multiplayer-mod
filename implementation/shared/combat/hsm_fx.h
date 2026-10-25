@@ -166,6 +166,12 @@ inline double WoundRadius(double damageRawScaled, double impulseLen) {
     return std::clamp((damageRawScaled + impulseLen) * 0.005, 3.0, 10.0);
 }
 
+// A heavy blow's damage passed on to the parent bone: Get Damage calls itself with Location (0,0,0) and no Hit Box
+// (Willie_BP.cpp:4359). Its paint lands at the world origin, off the body, so it is no wound to show anywhere.
+inline bool IsPassedOnDamage(const V3& location, bool hasHitBox) {
+    return !hasHitBox && location.x == 0 && location.y == 0 && location.z == 0;
+}
+
 inline bool IsStripRequest(const PaintFxMsg& m) { return m.kind == FxKind::Armor && m.extraVelocity; }
 
 // Get Damage's own sounds for a blow (Willie_BP.cpp:4071, 4379-4385): the blunt cue by Damage Raw Scaled at

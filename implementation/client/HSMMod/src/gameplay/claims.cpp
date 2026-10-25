@@ -310,10 +310,13 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
 
 // A queued claim, at most kReplaysPerTick per victim per frame (Tick).
 void Claims::ReplayNow(const HitClaim& c, double nowMs) {
-    if (parry_.Cancels(c)) {
+    int32_t clashMs = 0;
+    if (parry_.Cancels(c, &clashMs)) {
         ++n_.parried;
-        HSM_LOG("claims: #%u from e%u parried (my weapon met their %s weapon around t=%u)", c.claimId, c.attacker,
-                c.source == StrikeSource::WeaponLeft ? "left" : "right", c.attackerTsMs);
+        const auto& i = c.hitImpulse;   // how hard the blow was: a real one cancelled, or a blade sliding off in a bind
+        HSM_LOG("claims: #%u from e%u parried (my weapon met their %s weapon %+d ms from the blow at t=%u; bone %s |impulse| %.0f cut %.2f)",
+                c.claimId, c.attacker, c.source == StrikeSource::WeaponLeft ? "left" : "right", int(clashMs), c.attackerTsMs, c.hitBone.c_str(),
+                std::sqrt(i.x * i.x + i.y * i.y + i.z * i.z), c.cuttingPower);
         return;
     }
     UObject* victim = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;

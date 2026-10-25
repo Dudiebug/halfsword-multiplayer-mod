@@ -155,21 +155,75 @@ UObject* ObjectAt(int32_t index) {
     return *reinterpret_cast<UObject**>(chunk + size_t(index % kItemsPerChunk) * kItemSize);
 }
 
+// Once a name has matched, its FName is remembered and later scans compare only that (a shipping build keeps one name
+// entry per case-insensitive string, trailing number split off, so no other FName reads as the same text). Before,
+// every scan built each of about 80k object names as a string, and FindClass of a blueprint class scans twice. An object
+// once found is checked at its object array slot (same object, name and class) before any scan: the callers look up types
+// (classes, structs), several of them on every spawn, removal or loadout.
 UObject* FindObject(const std::string& name, const char* className) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, uint64_t> known;   // name -> its FName key
+    struct Found { UObject* o; int32_t index; FName name; UClass* cls; };
+    static std::unordered_map<std::string, Found> found;      // name and class name -> the object last returned
+    const std::string where = name + '\0' + (className ? className : "");
+    uint64_t want = 0;
+    bool haveKey = false;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (auto it = found.find(where); it != found.end()) {
+            const Found& f = it->second;
+            if (ObjectAt(f.index) == f.o) {
+                const FName now = Read<FName>(f.o, kObjName);
+                if (now.index == f.name.index && now.number == f.name.number && ClassOf(f.o) == f.cls) return f.o;
+            }
+            found.erase(it);
+        }
+        if (auto it = known.find(name); it != known.end()) { want = it->second; haveKey = true; }
+    }
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (!o || !SameNameAscii(ObjectName(o), name)) continue;
+        if (!o) continue;
+        const FName on = Read<FName>(o, kObjName);
+        const uint64_t key = uint64_t(uint32_t(on.index)) << 32 | uint32_t(on.number);
+        if (haveKey ? key != want : !SameNameAscii(NameToString(on), name)) continue;
+        if (!haveKey) {
+            std::lock_guard<std::mutex> lock(mu);
+            known.emplace(name, key);
+            want = key; haveKey = true;
+        }
         if (className && !SameNameAscii(ClassName(o), className)) continue;
+        std::lock_guard<std::mutex> lock(mu);
+        found[where] = {o, i, on, ClassOf(o)};
         return o;
     }
     return nullptr;
 }
 
+// Per object only its class's FName is read; whether a name matches is decided once per name and remembered (a name's
+// text never changes: the name pool only grows). Building each object's class name as a string took 7-9 ms per scan
+// of about 80k objects (logs 8-9: the host's once-a-second stock-fighter scan, the 5 s census).
 std::vector<UObject*> FindInstances(const char* className) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::unordered_map<uint64_t, bool>> matches;   // className -> class FName -> match
     std::vector<UObject*> out;
+    std::lock_guard<std::mutex> lock(mu);
+    auto& seen = matches[className];
+    UClass* lastClass = nullptr;
+    bool lastMatch = false;
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (o && !IsDefaultObject(o) && SameNameAscii(ClassName(o), className)) out.push_back(o);
+        if (!o || IsDefaultObject(o)) continue;
+        UClass* c = ClassOf(o);
+        if (!c) continue;
+        if (c != lastClass) {
+            const FName name = Read<FName>(c, kObjName);
+            const uint64_t key = uint64_t(uint32_t(name.index)) << 32 | uint32_t(name.number);
+            auto it = seen.find(key);
+            if (it == seen.end()) it = seen.emplace(key, SameNameAscii(NameToString(name), className)).first;
+            lastClass = c;
+            lastMatch = it->second;
+        }
+        if (lastMatch) out.push_back(o);
     }
     return out;
 }
@@ -435,9 +489,30 @@ FName MakeName(const std::string& s) {
 
 uintptr_t ModuleBase() { return g_base; }
 
+// A class once found is checked at its object array slot (same object, name and class) before scanning all objects
+// again: spawns, removals and loadouts ask for the same few classes many times, a blueprint class at two passes each.
 UClass* FindClass(const std::string& name) {
+    struct Found { UObject* o; int32_t index; FName name; UClass* cls; };
+    static std::mutex mu;
+    static std::unordered_map<std::string, Found> found;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (auto it = found.find(name); it != found.end()) {
+            const Found& f = it->second;
+            if (ObjectAt(f.index) == f.o) {
+                const FName now = Read<FName>(f.o, kObjName);
+                if (now.index == f.name.index && now.number == f.name.number && ClassOf(f.o) == f.cls)
+                    return reinterpret_cast<UClass*>(f.o);
+            }
+            found.erase(it);
+        }
+    }
     for (const char* kind : {"Class", "BlueprintGeneratedClass", "WidgetBlueprintGeneratedClass", "AnimBlueprintGeneratedClass"})
-        if (UObject* o = FindObject(name, kind)) return reinterpret_cast<UClass*>(o);
+        if (UObject* o = FindObject(name, kind)) {
+            std::lock_guard<std::mutex> lock(mu);
+            found[name] = {o, ObjectIndex(o), Read<FName>(o, kObjName), ClassOf(o)};
+            return reinterpret_cast<UClass*>(o);
+        }
     return nullptr;
 }
 

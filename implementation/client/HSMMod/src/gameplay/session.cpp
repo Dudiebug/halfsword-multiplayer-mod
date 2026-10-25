@@ -293,6 +293,22 @@ public:
         });
     }
 
+    // Owner sync: the pause menu pauses the world (Esc: Willie_BP.cpp:11091 opens UI_Pause_Eng, whose Construct pauses),
+    // which stops the GameMode tick and with it this player's stream. The others saw them freeze, and a client whose host
+    // paused went back to the main menu after 7 s (logs 4, 7, 8). The check in Tick cannot see a pause that outlasts the
+    // frame; widgets still tick while paused (UI_Pause_Eng has its own Tick), so one of them lifts it. The menu stays
+    // open. Esc while it is open: Willie's pause action (it checks only IsGamePaused) opens a second menu, but both
+    // menus' Ticks see Esc held that frame and close, so Esc still closes the menu.
+    void LiftPauseFromWidgetTick() {
+        const uint32_t now = NowMs();
+        if (!pauseLiftArmed_ || now - lastModeTick_ < 200 || now - lastPauseCheck_ < 50) return;
+        lastPauseCheck_ = now;
+        if (!(lastGameMode_ && ObjectAt(lastGameModeIndex_) == lastGameMode_ && adapter_.World() == lastGameMode_)) return;
+        if (!adapter_.GamePaused()) return;
+        adapter_.SetGamePaused(false);
+        if (++unpaused_ % 100 == 1) HSM_LOG("session: game paused (pause menu?) during an owner-sync match; unpaused (%u time(s))", unpaused_);
+    }
+
     std::string WidgetsJson() {
         std::string j = "{\"ok\":true,\"widgets\":[";
         bool first = true;
@@ -348,6 +364,7 @@ public:
         adapter_.SetDestroyAware(net_ && OwnerMode());
         adapter_.SetSubclassWeapons(OwnerMode());   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel() && OwnerMode();
+        pauseLiftArmed_ = stockFlowGuard_;
         adapter_.SuppressStockScreens(joined && MatchLevel(), OwnerMode());
         if (stockFlowGuard_ && adapter_.GamePaused()) {   // owner sync: a paused game stops this player's stream
             adapter_.SetGamePaused(false);
@@ -427,8 +444,9 @@ public:
     }
 
     // Every fighter in the level and its state, next to the frame time: what grows when the game slows down (bodies left
-    // behind, fighters on the ground or bleeding). One object scan per 5 s window.
+    // behind, fighters on the ground or bleeding). Two object scans per 5 s window; their time ends the line.
     std::string CensusLine() {
+        const auto t0 = std::chrono::steady_clock::now();
         int total = 0, dead = 0, fallen = 0, out = 0, stand = 0;
         float bleeding = 0;
         for (UObject* w : adapter_.AllWillies()) {
@@ -441,10 +459,12 @@ public:
             out += (v.flags & 4) ? 1 : 0;
             bleeding += v.bleeding;
         }
+        const size_t weapons = adapter_.WeaponActors().size();
+        const double scanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         char b[256];
         std::snprintf(b, sizeof b, "census: fighters %d (stand-ins %d) dead %d fallen %d knocked out %d, bleeding total %.2f; "
-                      "weapons %zu, objects %d; stand-in timeline calls blocked %u",
-                      total, stand, dead, fallen, out, double(bleeding), adapter_.WeaponActors().size(), ObjectCount(), timelinesBlocked_);
+                      "weapons %zu, objects %d; stand-in timeline calls blocked %u; scan %.1f ms",
+                      total, stand, dead, fallen, out, double(bleeding), weapons, ObjectCount(), timelinesBlocked_, scanMs);
         timelinesBlocked_ = 0;
         std::string line = b;
         VitalsMsg mine;
@@ -474,8 +494,8 @@ public:
         frameMs_.clear();
         // Our share: the pump (stand-in servo, streams, our replays of claims including the game code they run), the VM
         // hook callbacks (claims, fx, ...) and the other ProcessEvent hooks (the hit hook on every contact, the tick and
-        // timeline filters; the pump runs inside one of them and is taken out). Not counted: the detours' lookup for calls
-        // nothing hooks. The rest of a frame is the game's own (physics, ragdolls, blood, rendering).
+        // timeline filters; the pump runs inside one of them and is taken out there, DiscountHookTime). Not counted: the
+        // detours' lookup for calls nothing hooks. The rest of a frame is the game's own (physics, ragdolls, blood, rendering).
         if (!tickMs_.empty()) {
             double sum = 0, mx = 0;
             for (double v : tickMs_) { sum += v; mx = std::max(mx, v); }
@@ -483,14 +503,15 @@ public:
             const ScriptHookStats vm = GetScriptHookStats();
             const double vmMs = double(vm.hookNs - vmNsAtWindow_) / 1e6 / frames;
             const ProcessEventHookStats pe = GetProcessEventHookStats();
-            const double peMs = std::max(0.0, double(pe.hookNs - peNsAtWindow_) / 1e6 / frames - sum / frames);
+            const double peMs = double(pe.hookNs - peNsAtWindow_) / 1e6 / frames;
             const double peCalls = double(pe.calls - peCallsAtWindow_) / frames;
             const double peAll = double(pe.all - peAllAtWindow_) / frames;
             std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls of %.0f)",
                           sum / frames, mx, vmMs, peMs, peCalls, peAll);
             line += b;
-            // Which hooks (two-player test 13: 65 ms/frame at 1100 calls late in a match); ReceiveTick includes the pump.
-            if (peMs >= 2.0) line += " [top hooks: " + TopHookFunctions(3, frames) + "]";
+            // Which hooks (two-player test 13: 65 ms/frame at 1100 calls late in a match; two-player logs 6 to 9: 2 to 3.5 ms
+            // in fights, from 15 to 25 us a call).
+            if (peMs >= 1.0) line += " [top hooks: " + TopHookFunctions(3, frames) + "]";
             else TopHookFunctions(0, frames);
             const ReflectionCacheStats rc = GetReflectionCacheStats();   // FindFunction/FindProperty: misses walk names
             std::snprintf(b, sizeof b, ", lookups %.0f/frame (%.1f walked)", double(rc.hits + rc.misses - lookupsAtWindow_) / frames,
@@ -742,7 +763,7 @@ private:
         held_.fill(Held{});
         hostLoss_ = HostLossMonitor(NowMs());
         // owner sync
-        standIns_.Clear(); grabs_.Clear(); streams_.Clear(); lives_.clear();
+        standIns_.Clear(); grabs_.Clear(); streams_.Clear(); lives_.clear(); respawnQueue_.clear();
         syncMode_ = SyncMode::Host; ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
     }
 
@@ -755,6 +776,7 @@ private:
     }
 
     bool OnOpenLevel(const std::string& level, bool absolute, const std::string& options) {
+        pauseLiftArmed_ = false;                       // the old level's world is going away
         bool joined = steamMode() ? lobby_.InLobby() : net_ != nullptr;
         if (!joined || IsHost()) {                     // remembered even before hosting, for late joiners
             Travel t; t.level = level; t.absolute = absolute; t.options = options; t.settings = game::CaptureGameSettings();
@@ -806,7 +828,7 @@ private:
         gore_.Clear();
         grabs_.Clear();
         props_.Clear();                              // every prop actor died with the level
-        lives_.clear(); ownDeathReported_ = false;
+        lives_.clear(); ownDeathReported_ = false; respawnQueue_.clear();
         if (!net_) return;
         if (IsHost()) { ShareHostLoadout(); return; }
         if (welcomed_) UploadLoadout();             // before Ready, so the host never spawns us in a stale loadout
@@ -1449,7 +1471,7 @@ private:
             props_.OnPropLease(d, n, peer.slot);          // LeaseFromPeerOk inside; Grants go out reliable to everyone
         } else if (OwnerMode() && t == MsgType::DeathReport) {
             DeathReport r; Decode(d, n, r);
-            if (!MayStream(peer.slot, r.victim) || !match_.Alive(r.victim)) return;
+            if (!MayStream(peer.slot, r.victim) || !match_.Alive(r.victim) || RespawnQueued(r.victim)) return;
             const uint32_t now = NowMs();
             const bool named = ValidEntity(r.killer) && r.killer != r.victim && match_.Has(r.killer);
             HandleDeath(r.victim, named ? r.killer : kills_.KillerOf(r.victim, now), now);
@@ -1734,11 +1756,17 @@ private:
         slotTeam_[slot] = ResolveTeams(req, match_.config().format)[slot];
     }
 
-    void StartMatch() {
+    // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
+    MatchConfig StartConfig() {
         MatchConfig cfg = steamMode() ? lobby_.config() : MatchConfig{};
-        bool progression = !adapter_.FreeModeActive();
-        if (progression) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
+        if (!adapter_.FreeModeActive()) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
         if (cfg.format == Format::Duel) cfg.friendlyFire = true;   // two fighters, no teams: every hit counts
+        return cfg;
+    }
+
+    void StartMatch() {
+        MatchConfig cfg = StartConfig();
+        bool progression = !adapter_.FreeModeActive();
         std::vector<TeamRequest> req;
         for (const RosterMember& m : roster_.members()) {
             TeamRequest r; r.slot = m.slot;
@@ -1751,6 +1779,7 @@ private:
         for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true});
         match_.Start(cfg, list, NowMs());
         kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression;
+        respawnQueue_.clear();
         Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own and bot formats
         bool gearApplied = startGear != Regear::None;
         progression_ = progression; oneFight_ = progression;
@@ -1772,7 +1801,8 @@ private:
             // Start once every member's fighter is in (the director's ready/loadout timeouts bound the wait).
             bool allIn = true;
             for (const RosterMember& m : roster_.members()) allIn = allIn && director_.Live(m.entity);
-            if (wanted && hostWillie_ && allIn) StartMatch(); else return;
+            if (!(wanted && hostWillie_ && allIn)) { if (wanted && OwnerMode()) MakeStartGearAhead(now); return; }
+            StartMatch();
         }
         if (now >= nextScan_) { nextScan_ = now + kScanIntervalMs; ScanStockWillies(); }
         DetectDeaths(now);
@@ -1796,8 +1826,11 @@ private:
             RegearSlots(match_.config(), slots, ev.regear, ev.rematch ? "rematch" : "respawn");
             infoDirty_ = true;
         }
-        for (uint8_t e : ev.respawn) RespawnEntity(e);
+        for (uint8_t e : ev.respawn)
+            if (!OwnerMode()) RespawnEntity(e);
+            else if (!RespawnQueued(e)) respawnQueue_.push_back(e);
         if (ev.rematch) RespawnAll();
+        if (!respawnQueue_.empty()) { const uint8_t e = respawnQueue_.front(); respawnQueue_.pop_front(); RespawnEntity(e); }
         if (progression_ && !bots_.empty() && match_.phase() == MatchPhase::Live) {
             bool anyBot = false;
             for (auto& [e, ref] : bots_) anyBot = anyBot || match_.Alive(e);
@@ -1816,7 +1849,7 @@ private:
         for (const RosterMember& m : roster_.members()) entities.push_back(m.entity);
         for (auto& [e, ref] : bots_) entities.push_back(e);
         for (uint8_t e : entities) {
-            if (!match_.Alive(e)) continue;
+            if (!match_.Alive(e) || RespawnQueued(e)) continue;   // its old body is still dead until its respawn
             if (OwnerMode() && e >= 2 && e <= kMaxFighters) {   // a client's fighter: its DeathReport, else its vitals
                 auto it = lives_.find(e);
                 if (it != lives_.end() && it->second.deadSince && now - it->second.deadSince >= kVitalsDeathMs) {
@@ -1838,6 +1871,7 @@ private:
             if (killer == 0) k.flags = 4;
             else if (killer == e) k.flags = 2;
             else if (match_.TeamOf(killer) != kNoTeam && match_.TeamOf(killer) == match_.TeamOf(e)) k.flags = 1;
+            HSM_LOG("host: entity %u died (killer %u, flags %u, round %d)", e, killer, unsigned(k.flags), match_.round());
             net_->Broadcast(kChanReliable, Encode(k), true);
             PushFeed(k);
             infoDirty_ = true;
@@ -1846,6 +1880,7 @@ private:
 
     // Held G: the fighter concedes the Duel round being fought (Match::Forfeit); the feed says they gave up.
     void HandleGiveUp(uint8_t e, uint32_t now) {
+        if (RespawnQueued(e)) return;                     // the new round has not reached its fighter yet
         if (!match_.Forfeit(e, now)) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
         HSM_LOG("match: #%u gave up the round", e);
         Kill k; k.victim = e; k.flags = 8;
@@ -1950,7 +1985,13 @@ private:
         if (w) QueueTint(w, team); else HSM_LOG("host: respawn of entity %u failed", e);
     }
 
+    // Owner sync: respawns wait here and go one per tick (about 60-120 ms each). A Duel round reset did them all in one
+    // tick (two-player log 9: 410-470 ms). The match counts a queued fighter alive, but its old body is still the dead
+    // one, so deaths, DeathReports and give-ups are ignored for it until its turn.
+    bool RespawnQueued(uint8_t e) const { return std::find(respawnQueue_.begin(), respawnQueue_.end(), e) != respawnQueue_.end(); }
+
     void RespawnAll() {
+        respawnQueue_.clear();
         for (const RosterMember& m : roster_.members()) RespawnEntity(m.entity);
         ClearBots();
         wave_ = 0;
@@ -2062,6 +2103,21 @@ private:
             else HSM_LOG("host: %s: new loadout for everyone (tier %u)", why, cfg.tier);
         }
         HSM_LOG("host: %d loadout(s) generated in %.1f ms (%s; %d made ahead)", generated, game::SteadyNowMs() - t0, why, ahead);
+    }
+
+    // Owner sync, before the match starts: its generated start loadouts, made one at a time while the players' fighters
+    // come in. Made at the start they stalled that frame along with everyone's respawn (two-player log 9: 208 ms of a
+    // 456 ms frame); RegearSlots takes them from the pool. Any not made by then are made there, as before.
+    void MakeStartGearAhead(uint32_t now) {
+        if (now < nextGearAhead_) return;
+        const MatchConfig cfg = StartConfig();
+        const size_t want = StartLoadoutsAhead(cfg, roster_.size());
+        if (!want || !gearPool_.Wants(cfg.tier, want)) return;
+        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, cfg.tier);
+        nextGearAhead_ = now + (blob.empty() ? 1000 : 250);
+        if (blob.empty()) return;
+        gearPool_.Put(cfg.tier, std::move(blob));
+        HSM_LOG("host: start loadout %zu of %zu made ahead (tier %u)", gearPool_.size(), want, unsigned(cfg.tier));
     }
 
     // The coming respawns' generated loadouts, made one at a time while nobody fights: each stalls the frame about
@@ -2220,6 +2276,7 @@ private:
         severs_.Forget(world_.myEntity());          // a new body: its stuck blades and holds start afresh
         claims_.Forget(world_.myEntity()); fx_.Forget(world_.myEntity()); equip_.Forget(world_.myEntity());
         UObject* w = adapter_.RespawnLocalPlayer(o);
+        bodyWork_ = true;
         snappedOwn_ = false;                         // input hooks are per function and follow myWillie_
         if (w) QueueTint(w, sp.team);
     }
@@ -2253,9 +2310,10 @@ private:
 
     void ClientTick(float dt) {
         bool hostGone = false;
+        bodyWork_ = false;
         Timed(kPumpNet, [&] {
             NetEvent ev;
-            while (net_->Poll(ev)) {
+            while (!bodyWork_ && net_->Poll(ev)) {   // the rest of the queue waits for the next frame (bodyWork_)
                 if (ev.kind == NetEvent::Connected) {
                     hostPeer_ = ev.peer;
                     SendHello();
@@ -2457,6 +2515,7 @@ private:
     }
 
     void CreatePuppets() {
+        if (bodyWork_) return;
         auto have = [this](uint32_t id) { return clientBlobs_.AtLeast(id) != nullptr; };
         for (const Spawn& sp : world_.PendingPuppets(have)) {
             game::Adapter::SpawnOptions o;
@@ -2466,12 +2525,15 @@ private:
             if (w) { puppets_[sp.entity].Set(w); QueueTint(w, sp.team); if (OwnerMode()) standIns_.Attach(sp.entity, w); }
             else HSM_LOG("client: puppet for entity %u failed to spawn", sp.entity);
             world_.MarkCreated(sp.entity);           // no retry loop on failure; the next level tries again
+            bodyWork_ = true;
+            break;                                   // one per frame
         }
     }
 
     void DestroyPuppet(uint8_t entity) {
         auto it = puppets_.find(entity);
         if (it == puppets_.end()) return;
+        bodyWork_ = true;
         if (OwnerMode()) { standIns_.Detach(entity); adapter_.DestroyFighter(it->second.obj, it->second.index); }
         else if (adapter_.StillValid(it->second.obj, it->second.index)) adapter_.DestroyActor(it->second.obj);
         puppets_.erase(it);
@@ -2705,6 +2767,7 @@ private:
     BannerTracker banner_;    // the centre banner the match's changes raise
     std::vector<Tint> tints_;
     bool ownDeadPending_ = false;
+    std::deque<uint8_t> respawnQueue_;   // host, owner sync: entities whose respawn waits for its tick (RespawnQueued)
     uint32_t ownDiedAt_ = 0;
     GiveUpHold giveUp_;
     DuelRoundWatch roundWatch_;
@@ -2715,6 +2778,9 @@ private:
     // client
     uint32_t hostPeer_ = 0, uploadId_ = 0;
     bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;
+    // A fighter was destroyed or spawned this tick (about 60 ms each): the next one waits for the next frame. A Duel
+    // round reset did four in one tick (two-player logs 8 and 9: 250 ms).
+    bool bodyWork_ = false;
     uint8_t mySlot_ = 0;
     ClientWorld world_;
     BlobStore clientBlobs_;
@@ -2724,6 +2790,7 @@ private:
     LevelSpawnGate levelGate_;                   // owner sync: the level's start-up cleanup is over (hsm_level_gate.h)
     uint32_t nextGateProbe_ = 0;
     bool managerProbed_ = false;   // this level's manager seen by ClientGateOpen (its Level Load Delay logged)
+    bool pauseLiftArmed_ = false;                    // LiftPauseFromWidgetTick: set per tick, cleared on travel
     bool stockFlowGuard_ = false;                    // GuardStockFlow's hooks block while set (per tick)
     uint32_t stockFlowBlocked_ = 0, unpaused_ = 0;
     RecreateLimiter recreate_;                   // owner sync: lost stand-ins, both sides
@@ -2765,7 +2832,7 @@ private:
     // agent bridge / auto-run
     std::array<Held, kAxisCount> held_{};
     bool quitRequested_ = false, automated_ = false;
-    uint32_t startedAt_ = 0, quitAfterMs_ = 0, nextAuto_ = 0, lastModeTick_ = 0, lastEarlyPump_ = 0, noPawnSince_ = 0;
+    uint32_t startedAt_ = 0, quitAfterMs_ = 0, nextAuto_ = 0, lastModeTick_ = 0, lastEarlyPump_ = 0, lastPauseCheck_ = 0, noPawnSince_ = 0;
     std::string autoLevel_;
     // owner sync (both roles)
     SyncMode syncMode_ = SyncMode::Host;
@@ -2803,8 +2870,12 @@ bool StartMod(const Config& cfg) {
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));
     // Pump the session from the GameMode's Blueprint tick (game thread, every frame, menus included).
-    // Widgets keep ticking while the game is paused: let them pump the agent bridge too.
-    HookFunctionsMatching([](const std::string& n) { return n == "Tick"; }, [](UObject*, UFunction*, void*) { g_session->PumpAgentEarly(); return false; });
+    // Widgets keep ticking while the game is paused: let them pump the agent bridge too, and lift a match's pause.
+    HookFunctionsMatching([](const std::string& n) { return n == "Tick"; }, [](UObject*, UFunction*, void*) {
+        g_session->LiftPauseFromWidgetTick();
+        g_session->PumpAgentEarly();
+        return false;
+    });
     HookFunctionsMatching([](const std::string& n) { return n == "ReceiveTick"; }, [](UObject* obj, UFunction* fn, void* params) {
         if (g_session->IsTickBlocked(obj)) return true;   // a stand-in: never ticks
         static int seenClasses = 0;
@@ -2824,7 +2895,9 @@ bool StartMod(const Config& cfg) {
         if (!(dt > 0.f && dt < 1.f)) dt = 1.f / 60.f;
         const auto t0 = std::chrono::steady_clock::now();
         g_session->Tick(obj, dt);
-        g_session->NoteTickCost(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        const auto spent = std::chrono::steady_clock::now() - t0;
+        DiscountHookTime(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(spent).count()));   // reported as the mod tick
+        g_session->NoteTickCost(std::chrono::duration<double, std::milli>(spent).count());
         return false;
     });
     // A stand-in's own timelines tick with its TimelineComponents, not with the blocked ReceiveTick. These ones run the

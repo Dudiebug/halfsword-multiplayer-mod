@@ -164,6 +164,10 @@ private:
 };
 
 // Generated loadouts made ahead, for one tier at a time: another tier empties it.
+// Before the match starts, while its fighters come in: how many loadouts its start will generate for `humans` players
+// (the start regears like a rematch, RegearFor), so the host can make them ahead in that wait.
+size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans);
+
 class GearPool {
 public:
     bool Wants(uint8_t tier, size_t ahead);                 // true while it holds fewer than `ahead` for `tier`

@@ -360,6 +360,21 @@ static void TestLoadoutsAhead() {
     CHECK(ffa.LoadoutsAhead() == 0);                                            // others still fight: not ahead
 }
 
+static void TestStartLoadoutsAhead() {
+    MatchConfig c = Cfg(Format::Duel, 2); c.gear = Gear::RandomTier;
+    CHECK(StartLoadoutsAhead(c, 2) == 2);                                       // one each, made while they come in
+    CHECK(StartLoadoutsAhead(c, 0) == 0);
+    MatchConfig mc = c; mc.gear = Gear::Mirror; mc.format = Format::FreeForAll;
+    CHECK(StartLoadoutsAhead(mc, 3) == 1);                                      // one shared by all
+    CHECK(StartLoadoutsAhead(mc, 0) == 0);                                      // nobody to wear it
+    MatchConfig oc = c; oc.gear = Gear::Own;
+    CHECK(StartLoadoutsAhead(oc, 2) == 0);                                      // own gear: nothing generated
+    MatchConfig bc = c; bc.format = Format::PlayersVsBots;
+    CHECK(StartLoadoutsAhead(bc, 2) == 0);                                      // gear is a PvP option
+    MatchConfig tc = c; tc.format = Format::TwoTeams;
+    CHECK(StartLoadoutsAhead(tc, 4) == 4);
+}
+
 static void TestGearPool() {
     GearPool p;
     CHECK(p.Wants(4, 2) && p.size() == 0 && p.Take(4).empty());
@@ -599,7 +614,7 @@ int main() {
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDuelRoundWatch(); TestLoadoutsAhead(); TestGearPool();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDuelRoundWatch(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -157,6 +157,15 @@ void TestWoundRadius() {
     CHECK(Near(WoundRadius(1900, 100), 10));
 }
 
+// Get Damage passing a heavy blow on to the parent bone calls itself with Location (0,0,0) and no Hit Box: no wound.
+void TestPassedOnDamage() {
+    CHECK(IsPassedOnDamage(V3{0, 0, 0}, false));
+    CHECK(!IsPassedOnDamage(V3{0, 0, 0}, true));            // a Hit Box paints the box, wherever Location is
+    CHECK(!IsPassedOnDamage(V3{0, 0, 1e-3}, false));        // a real hit near the world origin is still a wound
+    CHECK(!IsPassedOnDamage(V3{-120, 40, 95}, false));
+    CHECK(!IsPassedOnDamage(V3{std::numeric_limits<double>::quiet_NaN(), 0, 0}, false));
+}
+
 void TestLimiter() {
     FxLimiter l;
     int allowed = 0;
@@ -267,6 +276,7 @@ int main() {
     TestRanges();
     TestBoneFrame();
     TestWoundRadius();
+    TestPassedOnDamage();
     TestLimiter();
     if (g_fail) { std::printf("test_hsm_fx: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_fx: ok\n");

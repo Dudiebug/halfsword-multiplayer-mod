@@ -45,6 +45,7 @@ constexpr double kReattachMinMs = 2000.0;   // the hold above; prop_sync takes b
                                             // most this often
 constexpr double kAttachRadiusUu = 150.0;   // the pose's own "held" distance (standin_rig kHeldMaxUu)
 constexpr double kAttachFarRadiusUu = 600.0;   // PickAttachFar: a copy drifted this far still stands for the owner's (test 7)
+constexpr double kStandInSettleMs = 1500.0;    // a new stand-in's own loadout weapons arrive within this (logs 3-9: 0.85-1.2 s)
 
 struct HandFacts {
     bool havePose = false;
@@ -57,6 +58,7 @@ struct HandFacts {
     uint32_t heldClass = 0;                 // its class hash, 0 unknown
     bool heldIsProp = false;                // it is a synced prop (prop_sync tracks it)
     bool dropPending = false;               // prop_sync is resolving a drop of this hand's weapon
+    double boundMs = -kStandInSettleMs;     // local time the stand-in was bound (new or respawned); the default is settled
 };
 
 enum class HandAct : uint8_t { None, Attach, Release };
@@ -70,6 +72,7 @@ public:
         if (!f.havePose || f.poseClass == kHandUnknown) return HandAct::None;
         if (!f.holding) {
             if (f.poseClass == kHandEmpty || !f.tokenKnown || f.token != 0) return HandAct::None;
+            if (nowMs - f.boundMs < kStandInSettleMs) return HandAct::None;   // its own loadout is still on its way
             const double grace = f.mayBeDraw ? kDrawGraceMs : kAttachGraceMs;
             return nowMs - f.poseSinceMs >= grace ? HandAct::Attach : HandAct::None;
         }

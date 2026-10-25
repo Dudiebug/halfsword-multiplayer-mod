@@ -272,8 +272,11 @@ bool HudTabHeld() {
 }
 
 void HudTick(const HudScene& s) {
-    if (!g.hudClass) g.hudClass = FindClass("UI_HUD_C");
-    if (!g.hudClass) return;
+    if (!g.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once a second
+        const ULONGLONG now = GetTickCount64();
+        if (now < g.nextScan) return;
+        if (!(g.hudClass = FindClass("UI_HUD_C"))) { g.nextScan = now + 1000; return; }
+    }
     if (!g.hud || ObjectAt(g.hudIndex) != g.hud || ClassOf(g.hud) != g.hudClass) {
         if (g.hud) { UClass* cls = g.hudClass; ULONGLONG next = g.nextScan; g = State{}; g.hudClass = cls; g.nextScan = next; }
         ULONGLONG now = GetTickCount64();

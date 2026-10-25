@@ -7,6 +7,7 @@
 #include "ue/hook.h"
 #include "util/hsm_names.h"
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -343,6 +344,7 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
 }
 
 UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
+    const auto t0 = std::chrono::steady_clock::now();   // the line below says what the spawn took (round restarts: one a frame)
     UClass* willie = FindClass(kWillieClass);
     UClass* aiCtrl = o.brain && !o.stockBrain ? FindClass("AIController") : nullptr;
     if (!willie || (o.brain && !o.stockBrain && !aiCtrl)) { HSM_LOG("adapter: spawn classes missing"); return nullptr; }
@@ -373,7 +375,8 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
         if (!ctrl) HSM_LOG("adapter: spawned fighter has no controller");
         else SetBool(ctrl, "bSetControlRotationFromPawnOrientation", false);   // aim comes from the remote player
     }
-    HSM_LOG("adapter: spawned %s at (%.0f, %.0f, %.0f)%s", o.stockBrain ? "bot" : o.brain ? "fighter" : "puppet", o.at.x, o.at.y, o.at.z, o.blob || o.passport ? "" : " with default loadout");
+    HSM_LOG("adapter: spawned %s at (%.0f, %.0f, %.0f)%s in %.1f ms", o.stockBrain ? "bot" : o.brain ? "fighter" : "puppet", o.at.x, o.at.y, o.at.z,
+            o.blob || o.passport ? "" : " with default loadout", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return done;
 }
 
@@ -419,6 +422,7 @@ bool Adapter::StillValid(UObject* o, int32_t index) const {
 
 void Adapter::DestroyFighter(UObject* willie, int32_t index) {
     if (!StillValid(willie, index)) return;
+    const auto t0 = std::chrono::steady_clock::now();
     std::vector<UObject*> carried;
     for (const char* f : {"Weapon R", "Weapon L", "Attached Bolt Quiver"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p) carried.push_back(*p);
@@ -436,14 +440,17 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
             for (int32_t i = 0; i < arr->num; ++i) carried.push_back(arr->data[i]);
     std::sort(carried.begin(), carried.end());
     carried.erase(std::unique(carried.begin(), carried.end()), carried.end());
+    UClass* fighter = FindClass(kWillieClass);
     int destroyed = 0;
     for (UObject* a : carried) {
-        if (!a || a == willie || IsA(a, FindClass(kWillieClass))) continue;
+        if (!a || a == willie || IsA(a, fighter)) continue;
         DestroyActor(a);
         ++destroyed;
     }
+    const std::string name = ObjectName(willie);
     DestroyActor(willie);
-    HSM_LOG("adapter: destroyed %s and %d carried actor(s)", ObjectName(willie).c_str(), destroyed);
+    HSM_LOG("adapter: destroyed %s and %d carried actor(s) in %.1f ms", name.c_str(), destroyed,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 FVector Adapter::ActorLocation(UObject* actor) {

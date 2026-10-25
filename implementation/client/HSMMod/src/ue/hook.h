@@ -30,6 +30,9 @@ struct ProcessEventHookStats {
     uint64_t all = 0;      // every ProcessEvent call on the game thread, hooked or not
 };
 ProcessEventHookStats GetProcessEventHookStats();   // game thread
+// Takes ns out of the hook time of the outermost hooked call this thread is in: work done inside a hook but reported
+// apart (the session tick inside the GameMode's ReceiveTick hook). Game thread.
+void DiscountHookTime(uint64_t ns);
 // The n hooked functions that took longest since the last call, per frame ("Name 1.23 ms/45, ..."); resets. Game thread.
 std::string TopHookFunctions(int n, double frames);
 // Drop all rules (e.g. when a session ends).

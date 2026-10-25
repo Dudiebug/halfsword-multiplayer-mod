@@ -45,7 +45,7 @@ public:
 
 private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
-    struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, applied = 0,
+    struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
                       skipped = 0, failed = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
@@ -62,7 +62,8 @@ private:
     bool PlaySoundAt(ue::UObject* standIn, const char* cue, const sync::V3& at, double volume);
     void SendWound(uint8_t entity, ue::UObject* willie, ue::FName bone, const combat::Xform& boxWorld, const sync::V3& extent);
     bool Send(combat::PaintFxMsg& m, ue::UObject* willie, ue::FName bone, bool directions = true, const std::string& label = {});
-    void NoBone(const combat::PaintFxMsg& m, const char* why);
+    // reason 0: the bone is not on the mesh; 1: too far from the bone or degenerate (boneWorld: the bone measured from)
+    void NoBone(const combat::PaintFxMsg& m, int reason, const combat::Xform* boneWorld = nullptr);
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;
     void ApplyBlood(const combat::PaintFxMsg& m, ue::UObject* standIn, ue::UObject* mesh, const combat::Xform& boneWorld);
     void ApplyWound(const combat::PaintFxMsg& m, ue::UObject* standIn, ue::UObject* mesh, const combat::Xform& boneWorld);
@@ -76,6 +77,7 @@ private:
     ue::UClass* boxClass_ = nullptr;
     bool boxFailLogged_ = false;
     bool cueFailLogged_ = false;
+    uint32_t noBoneLogged_ = 0;                                      // one bit per (kind, reason) already logged
     bool replaying_ = false;                                         // inside our own Remove / Pick Up Armor on a stand-in
     std::set<std::pair<uint8_t, uint8_t>> stripped_;                 // (entity, slot) stripped here, awaiting the owner's report
     std::map<std::string, ue::UObject*> cues_;                       // Get Damage's sound cues, found once

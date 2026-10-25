@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <unordered_map>
 
 namespace hsm::game {
 
@@ -119,7 +120,8 @@ void FxSync::Stop() {
 
 // Get Damage paints its wound on Damaged Mesh at the hit: within its Hit Box when it has one, else at Location with a
 // radius from Damage Raw Scaled (a local of the call, still in the frame once it returned) and |Impulse|. It painted
-// nothing when Damage Raw Scaled stayed 0 (any of its early gates, Invulnerable first) or vertex paint is off.
+// nothing when Damage Raw Scaled stayed 0 (any of its early gates, Invulnerable first) or vertex paint is off, nor for
+// damage it passed on to the parent bone (combat::IsPassedOnDamage).
 void FxSync::OnGetDamage(ScriptCall& c) {
     if (!active_) return;
     UObject* self = c.self();
@@ -141,7 +143,8 @@ void FxSync::OnGetDamage(ScriptCall& c) {
         }
     }
     FVector location{}, impulse{};
-    c.get("Location", location);
+    if (!c.get("Location", location)) return;
+    if (combat::IsPassedOnDamage(ToV(location), box != nullptr)) { ++n_.passedOn; return; }
     c.get("Impulse", impulse);
     const double r = combat::WoundRadius(drs, Len(impulse));
     Xform at;
@@ -297,13 +300,23 @@ void FxSync::SendWound(uint8_t entity, UObject* willie, FName bone, const Xform&
     if (Send(m, willie, bone)) ++n_.wounds;
 }
 
-// A report not sent for want of a usable bone frame; the first ones say why (test 13 dropped 250-300 a machine).
-void FxSync::NoBone(const PaintFxMsg& m, const char* why) {
-    if (++n_.noBone > kLogFirst) return;
+// A report not sent for want of a usable bone frame; the first ones say why (test 13 dropped 250-300 a machine), and so
+// does the first of every kind and reason after them (log 9: one machine dropped 299 in two bursts).
+void FxSync::NoBone(const PaintFxMsg& m, int reason, const Xform* boneWorld) {
+    static const char* const kWhy[] = {"the bone is not on its mesh", "too far from the bone or degenerate"};
+    const uint32_t bit = 1u << ((uint32_t(m.kind) & 15u) * 2 + uint32_t(reason & 1));
+    const bool firstOfKind = !(noBoneLogged_ & bit);
+    noBoneLogged_ |= bit;
+    if (++n_.noBone > kLogFirst && !firstOfKind) return;
+    const char* why = kWhy[reason & 1];
     const Xform& x = m.local;
     const double rn = x.rot.x * x.rot.x + x.rot.y * x.rot.y + x.rot.z * x.rot.z + x.rot.w * x.rot.w;
-    HSM_LOG("fx: %s on e%u bone %s not sent: %s (at %.0f %.0f %.0f, rotation norm %.3f, scale %.3g %.3g %.3g)", KindName(m.kind),
-            m.entity, m.bone.c_str(), why, x.pos.x, x.pos.y, x.pos.z, rn, x.scale.x, x.scale.y, x.scale.z);
+    char frame[96] = "";   // a cut-off bone the game shrank would show here
+    if (boneWorld)
+        std::snprintf(frame, sizeof frame, "; the bone's world scale %.3g %.3g %.3g", boneWorld->scale.x, boneWorld->scale.y,
+                      boneWorld->scale.z);
+    HSM_LOG("fx: %s on e%u bone %s not sent: %s (at %.0f %.0f %.0f, rotation norm %.3f, scale %.3g %.3g %.3g%s)", KindName(m.kind),
+            m.entity, m.bone.c_str(), why, x.pos.x, x.pos.y, x.pos.z, rn, x.scale.x, x.scale.y, x.scale.z, frame);
 }
 
 // Moves m's world transform and directions into bone's frame on the fighter's own Mesh and sends it. The decoder's
@@ -312,11 +325,11 @@ bool FxSync::Send(PaintFxMsg& m, UObject* willie, FName bone, bool directions, c
     m.bone = NameToString(bone);
     if (m.bone.empty() || m.bone == "None" || m.bone.size() > combat::kMaxClaimString) { ++n_.noName; return false; }
     Xform boneWorld;
-    if (!BoneXform(adapter_->Mesh(willie), bone, boneWorld)) { NoBone(m, "the bone is not on its mesh"); return false; }
+    if (!BoneXform(adapter_->Mesh(willie), bone, boneWorld)) { NoBone(m, 0); return false; }
     if (!limiter_.Allow(m.entity, m.kind, SteadyNowMs())) { ++n_.limited; return false; }
     m.local = combat::FxToBone(boneWorld, m.local);
     if (!label.empty()) m.bone = label;   // ArmorOn: the frame is the pelvis, the bone field names the class
-    if (!combat::detail::LocalXformOk(m.local)) { NoBone(m, "too far from the bone or degenerate"); return false; }
+    if (!combat::detail::LocalXformOk(m.local)) { NoBone(m, 1, &boneWorld); return false; }
     if (directions) {
         m.velocity = ClampV(boneWorld.ToLocalDir(m.velocity), combat::kFxMaxVector);
         m.power = ClampV(boneWorld.ToLocalDir(m.power), combat::kFxMaxVector);
@@ -412,9 +425,13 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
     const sync::V3 at = boneWorld.FromLocal(m.local.pos);
     UObject* best = nullptr;
     double bestD = kArmorMatchUu * kArmorMatchUu;
+    std::unordered_map<UClass*, bool> ofClass;   // each class named once per pass, not each object
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
-        if (!o || IsDefaultObject(o) || IsGarbage(o) || ObjectName(reinterpret_cast<UObject*>(ClassOf(o))) != m.bone) continue;
+        if (!o || IsDefaultObject(o) || IsGarbage(o)) continue;
+        auto cls = ofClass.find(ClassOf(o));
+        if (cls == ofClass.end()) cls = ofClass.emplace(ClassOf(o), ObjectName(reinterpret_cast<UObject*>(ClassOf(o))) == m.bone).first;
+        if (!cls->second) continue;
         Call parent(o, "GetAttachParentActor");
         if (!parent.invoke() || parent.get<UObject*>("ReturnValue")) continue;   // worn or carried already
         const sync::V3 p = ToV(adapter_->ActorLocation(o));
@@ -597,8 +614,8 @@ std::string FxSync::HealthLine() {
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
     char line[320];
-    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu (limited %llu nobone %llu noname %llu) | replayed %llu (skipped %llu failed %llu)",
-                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.pains, b.pains), d(a.hits, b.hits), d(a.armor, b.armor), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName),
+    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu (limited %llu nobone %llu noname %llu passed-on %llu) | replayed %llu (skipped %llu failed %llu)",
+                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.pains, b.pains), d(a.hits, b.hits), d(a.armor, b.armor), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName), d(a.passedOn, b.passedOn),
                   d(a.applied, b.applied),
                   d(a.skipped, b.skipped), d(a.failed, b.failed));
     reported_ = n_;
