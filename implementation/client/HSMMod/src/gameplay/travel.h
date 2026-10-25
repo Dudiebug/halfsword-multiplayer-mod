@@ -19,5 +19,7 @@ void OpenLevel(ue::UObject* worldContext, const std::string& level, bool absolut
 // GI_Settings fields that define what a level load means (mode, foes, progression event...).
 std::vector<Setting> CaptureGameSettings();
 size_t ApplyGameSettings(const std::vector<Setting>& settings);   // returns how many were applied
+// The names of `want`'s settings whose value in the game instance differs now ("A, B"; empty: all the same).
+std::string ChangedGameSettings(const std::vector<Setting>& want);
 
 }  // namespace hsm::game

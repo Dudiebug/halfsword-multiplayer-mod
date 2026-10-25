@@ -4,8 +4,9 @@
 // game persists the game instance through its own Save Game from a dozen places (level loads, give-up, death screens,
 // the pause menu); a Progression death screen even makes a new character (Reset Player Character). Two-player test
 // 2026-10-25: a player found their single-player character gone after a session. So while a session is on, the save
-// is backed up, the game's own save/reset functions are blocked, and when it is over the backup is put back and the
-// game instance reloaded from it: a session leaves no trace in GameProgress.
+// is backed up, the game's own save/reset functions are blocked (and its Load Game, which would put the pre-session
+// settings back on a level load), and when it is over the backup is put back and the game instance reloaded from it:
+// a session leaves no trace in GameProgress.
 //
 // The guard comes on when the player joins a session (lobby or host). It stays on after the session ends while this
 // machine is still in a fight level: the level was set up as a session fight, and the game's own death or give-up in it

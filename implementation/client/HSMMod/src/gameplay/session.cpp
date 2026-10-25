@@ -835,9 +835,11 @@ private:
             Travel t; t.level = level; t.absolute = absolute; t.options = options; t.settings = game::CaptureGameSettings();
             lastTravel_ = t;
         }
+        fightSettings_.clear();
         if (!joined) return true;
         if (IsHost()) {
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
+            fightSettings_ = t.settings;
             if (net_) net_->Broadcast(kChanReliable, Encode(t), true);
             lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1), "");
             HSM_LOG("host: travel #%u to %s (%zu settings) sent to lobby", t.seq, level.c_str(), t.settings.size());
@@ -859,6 +861,12 @@ private:
         haveSnapshot_ = false; snappedOwn_ = false; picksValid_ = false;
         held_.fill(Held{});                          // agent-held axes do not carry into the next level
         groundValid_ = false; foesStopped_ = false;
+        if (InFightLevel() && !fightSettings_.empty()) {   // a session fight: the mode its travel set, whatever the load did
+            const std::string changed = game::ChangedGameSettings(fightSettings_);
+            if (!changed.empty())
+                HSM_LOG("session: the level load changed the fight's settings (%s); set back (%zu)", changed.c_str(),
+                        game::ApplyGameSettings(fightSettings_));
+        }
         oneFight_ = InFightLevel() && !adapter_.FreeModeActive();   // a client has the host's GI settings (Travel) by now
         if (!InFightLevel()) RestoreFoes();
         inputFixAt_ = net_ && InFightLevel() ? NowMs() + 1500 : 0;
@@ -1381,8 +1389,10 @@ private:
         return out;
     }
 
-    // Spawner-less maps (the Abyss): points near a ring around the host on the navmesh, the way the Abyss places its own
-    // enemies (NavigableRing); without two of those, the ring's points where a fighter can stand (StandableRing).
+    // Spawner-less maps (the Abyss): points near a ring around the host on the navmesh that the host can walk to
+    // (NavigableRing over ReachablePointNear); without two of those, the ring's points where a fighter can stand
+    // (StandableRing). Either way a point is kept only with nothing in the way from the host to it kWallProbeCm above
+    // the floor (test 2026-10-25: the Yard's 900 cm ring put fighters outside its fence, on navmesh past the fence).
     std::vector<Point3> RingCandidates(double radius, const std::vector<UObject*>& ignore) {
         UObject* host = adapter_.PlayerWillie(0);
         double hostFloor;
@@ -1395,18 +1405,27 @@ private:
         };
         auto navAt = [&](const Point3& aim, double tolerance) -> std::optional<Point3> {
             FVector v;
-            if (!adapter_.NavigablePoint({aim.x, aim.y, aim.z}, tolerance, v)) return std::nullopt;
+            if (!adapter_.ReachablePointNear(c, {aim.x, aim.y, aim.z}, tolerance, v)) return std::nullopt;
             return Point3{v.x, v.y, v.z};
         };
+        size_t walled = 0;
+        auto inView = [&](std::vector<Point3> pts) {   // points are at their floor height
+            std::vector<Point3> out;
+            for (const Point3& p : pts)
+                if (adapter_.LineClear({c.x, c.y, hostFloor + kWallProbeCm}, {p.x, p.y, p.z + kWallProbeCm}, ignore)) out.push_back(p);
+                else ++walled;
+            return out;
+        };
         const std::vector<Point3> fighters = BodiesExcept(1);
-        std::vector<Point3> nav = NavigableRing({c.x, c.y, c.z}, hostFloor, navAt, floorAt, fighters, radius);
+        std::vector<Point3> nav = inView(NavigableRing({c.x, c.y, c.z}, hostFloor, navAt, floorAt, fighters, radius));
         if (nav.size() >= 2) {
-            HSM_LOG("host: no spawners in %s; %zu navmesh points near a %.0f cm ring around the host", currentLevel_.c_str(), nav.size(), radius);
+            HSM_LOG("host: no spawners in %s; %zu navmesh points near a %.0f cm ring around the host (%zu behind a wall dropped)",
+                    currentLevel_.c_str(), nav.size(), radius, walled);
             return nav;
         }
-        std::vector<Point3> ring = StandableRing({c.x, c.y, c.z}, hostFloor, floorAt, fighters, radius);
-        HSM_LOG("host: no spawners in %s; %zu navmesh points, %zu of 8 points on a %.0f cm ring around the host can be stood on",
-                currentLevel_.c_str(), nav.size(), ring.size(), radius);
+        std::vector<Point3> ring = inView(StandableRing({c.x, c.y, c.z}, hostFloor, floorAt, fighters, radius));
+        HSM_LOG("host: no spawners in %s; %zu navmesh points, %zu of 8 points on a %.0f cm ring around the host can be stood on "
+                "(%zu behind a wall dropped)", currentLevel_.c_str(), nav.size(), ring.size(), radius, walled);
         return ring;
     }
 
@@ -2183,10 +2202,10 @@ private:
             sidePoints_.clear();
             sidePoints_ = SpawnerPoints(ignore);
             if (sidePoints_.size() < 2) sidePoints_ = RingCandidates(kSideRingCm, ignore);   // no spawners: a ring around the host
-            if (sidePoints_.size() < 2) {                  // nothing standable found: the ring unchecked
-                FVector c = hostWillie_ ? adapter_.ActorLocation(hostWillie_) : FVector{};
-                sidePoints_.clear();
-                for (int i = 0; i < 8; ++i) sidePoints_.push_back({c.x + std::cos(i * 0.785398) * kSideRingCm, c.y + std::sin(i * 0.785398) * kSideRingCm, c.z});
+            if (sidePoints_.size() < 2) sidePoints_ = RingCandidates(kNoSpawnerRingCm, ignore);   // a tighter one (a small yard)
+            if (sidePoints_.size() < 2) {                  // nothing standable in view: around the host itself (StandableNear
+                FVector c = hostWillie_ ? adapter_.ActorLocation(hostWillie_) : FVector{};   // spreads with the wall checks);
+                sidePoints_.assign(2, Point3{c.x, c.y, c.z});   // never an unchecked ring, which lands past fences
             }
             sides_ = PartitionSides(sidePoints_, std::max(TeamCount(match_.config().format), 1));
             sidesArea_ = AreaOf(sidePoints_);
@@ -2840,6 +2859,7 @@ private:
                 }
                 RememberFoes();
                 size_t applied = game::ApplyGameSettings(tr.settings);
+                fightSettings_ = tr.settings;
                 travelSeq_ = tr.seq; pendingLevel_ = tr.level;
                 HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
                 game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
@@ -3010,6 +3030,7 @@ private:
     std::map<uint32_t, Peer> peers_;
     std::array<Fighter, kMaxFighters> fighters_;
     std::optional<Travel> lastTravel_;
+    std::vector<Setting> fightSettings_;            // the settings of the session travel into this level (re-asserted on load)
     bool picksValid_ = false;
     FVector spawnCenter_;
     SpawnArea spawnArea_;                     // AreaOf the spawn candidates (picksValid_)

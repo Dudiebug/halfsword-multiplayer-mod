@@ -1,8 +1,8 @@
 // Keeps a multiplayer session out of the player's own game save (session/hsm_save_guard.h has the rule).
 //
 // While the guard is on: GameProgress.sav is backed up (HSMMP_backup_<pid>_GameProgress.sav next to it), and the
-// game instance's own Save Game, Reset Player Character, Override Player Character Equipment and Delete Save are
-// blocked in the script VM. When it goes off: the backup is put back if the game wrote the save anyway, the game
+// game instance's own Save Game, Reset Player Character, Override Player Character Equipment, Delete Save and Load
+// Game are blocked in the script VM. When it goes off: the backup is put back if the game wrote the save anyway, the game
 // instance is reloaded from it (Load Game) and the settings it had before the session (play mode, Free Mode, ...) are
 // written back, so the tavern after a session is the one before it. A backup whose process is gone (a crash) is put
 // back at the next start. Game thread only.

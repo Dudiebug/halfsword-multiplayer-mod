@@ -75,6 +75,12 @@ void SaveGuard::Hook() {
     n += HookScript(kHookOwner, "GI_Settings_C", "Reset Player Character", block("Reset Player Character"));
     n += HookScript(kHookOwner, "GI_Settings_C", "Override Player Character Equipment", block("Override Player Character Equipment"));
     n += HookScript(kHookOwner, "GI_Settings_C", "Delete Save", block("Delete Save"));
+    // The game reloads the game instance from GameProgress on its level loads (it saved it just before, so the pair
+    // kept the session's settings). With the save blocked, the load brought back the pre-session ones: test 2026-10-25,
+    // every lobby fight came up in Progression (Free Mode Activated false), so Duel ran as Progression co-op, with the
+    // players' own save loadouts and no spawners for the mode. While the guard is on, the game instance in memory is
+    // the truth; Restore's own Load Game runs after the guard is off.
+    n += HookScript(kHookOwner, "GI_Settings_C", "Load Game", block("Load Game"));
     hooked_ = n > 0;
     if (hooked_ || !hookFailLogged_) HSM_LOG("save: %d game save function(s) hooked", n);
     hookFailLogged_ = !hooked_;

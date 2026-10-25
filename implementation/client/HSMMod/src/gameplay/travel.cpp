@@ -96,4 +96,13 @@ size_t ApplyGameSettings(const std::vector<Setting>& settings) {
     return applied;
 }
 
+std::string ChangedGameSettings(const std::vector<Setting>& want) {
+    const std::vector<Setting> now = CaptureGameSettings();
+    std::string out;
+    for (const Setting& w : want)
+        for (const Setting& s : now)
+            if (s.name == w.name && s.value != w.value) out += (out.empty() ? "" : ", ") + s.name;
+    return out;
+}
+
 }  // namespace hsm::game

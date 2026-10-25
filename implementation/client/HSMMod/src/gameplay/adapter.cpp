@@ -170,17 +170,29 @@ bool Adapter::BoneLocation(UObject* willie, const char* bone, FVector& out) {
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
-// The Abyss' level script places each enemy this way before Spawn_NPC (decomp Maps/Abyss_Map_Open_EA.cpp:997, radius 500).
-bool Adapter::NavigablePoint(const FVector& origin, double radius, FVector& out) {
+// A navigable point near `aim` that the navmesh connects to `from` (the host). The Abyss' level script places its
+// enemies with K2_GetRandomLocationInNavigableRadius (decomp Maps/Abyss_Map_Open_EA.cpp:997), which also answers on
+// navmesh islands the fighters cannot walk to: test 2026-10-25, the Yard's ring spawns landed outside its fence. So
+// the points are drawn reachable from `from` within its distance to `aim` plus the tolerance, and the one nearest
+// `aim` is kept if it is within `tolerance` of it.
+bool Adapter::ReachablePointNear(const FVector& from, const FVector& aim, double tolerance, FVector& out) {
     static UObject* nav = nullptr;
     if (!nav) if (UObject* cls = FindObject("NavigationSystemV1", "Class")) nav = DefaultObject(reinterpret_cast<UClass*>(cls));
     if (!nav || !world_) return false;
-    Call c(nav, "K2_GetRandomLocationInNavigableRadius");
-    c.set<UObject*>("WorldContextObject", world_).set("Origin", origin).setReal("Radius", radius)
-     .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
-    if (!c.invoke() || !c.get<bool>("ReturnValue")) return false;
-    out = c.get<FVector>("RandomLocation");
-    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+    const double reach = std::hypot(aim.x - from.x, aim.y - from.y) + tolerance;
+    double best = tolerance * tolerance;
+    bool found = false;
+    for (int i = 0; i < 24; ++i) {
+        Call c(nav, "K2_GetRandomReachablePointInRadius");
+        c.set<UObject*>("WorldContextObject", world_).set("Origin", from).setReal("Radius", reach)
+         .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
+        if (!c.invoke() || !c.get<bool>("ReturnValue")) return found;
+        const FVector v = c.get<FVector>("RandomLocation");
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) continue;
+        const double d2 = (v.x - aim.x) * (v.x - aim.x) + (v.y - aim.y) * (v.y - aim.y);
+        if (d2 <= best) { best = d2; out = v; found = true; }
+    }
+    return found;
 }
 
 // What a floor trace for a spawn must look through (test 5: it hit the fighter already standing at the spot): every

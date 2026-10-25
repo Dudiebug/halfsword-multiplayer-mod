@@ -50,8 +50,8 @@ public:
     bool LineClear(const ue::FVector& from, const ue::FVector& to, const std::vector<ue::UObject*>& ignore, std::string* hitName = nullptr);
     // Where a bone (socket) of the fighter's Mesh is in the world; false without a Mesh or a finite position.
     bool BoneLocation(ue::UObject* willie, const char* bone, ue::FVector& out);
-    // A random point on the navmesh within `radius` of `origin`, as the Abyss places its enemies; false: no navmesh there.
-    bool NavigablePoint(const ue::FVector& origin, double radius, ue::FVector& out);
+    // A navmesh point within `tolerance` of `aim` that the navmesh connects to `from`; false: none found.
+    bool ReachablePointNear(const ue::FVector& from, const ue::FVector& aim, double tolerance, ue::FVector& out);
     void DestroyActor(ue::UObject* actor);
     // Destroys a fighter (when it is still the object spawned at index) with what it carries: its weapons ("Weapon R",
     // "Weapon L") and quiver are actors of their own and its armour pieces are attached actors, none of which the
