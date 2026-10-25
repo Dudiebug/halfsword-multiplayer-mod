@@ -297,17 +297,26 @@ void FxSync::SendWound(uint8_t entity, UObject* willie, FName bone, const Xform&
     if (Send(m, willie, bone)) ++n_.wounds;
 }
 
+// A report not sent for want of a usable bone frame; the first ones say why (test 13 dropped 250-300 a machine).
+void FxSync::NoBone(const PaintFxMsg& m, const char* why) {
+    if (++n_.noBone > kLogFirst) return;
+    const Xform& x = m.local;
+    const double rn = x.rot.x * x.rot.x + x.rot.y * x.rot.y + x.rot.z * x.rot.z + x.rot.w * x.rot.w;
+    HSM_LOG("fx: %s on e%u bone %s not sent: %s (at %.0f %.0f %.0f, rotation norm %.3f, scale %.3g %.3g %.3g)", KindName(m.kind),
+            m.entity, m.bone.c_str(), why, x.pos.x, x.pos.y, x.pos.z, rn, x.scale.x, x.scale.y, x.scale.z);
+}
+
 // Moves m's world transform and directions into bone's frame on the fighter's own Mesh and sends it. The decoder's
 // bounds are applied here too, so a report the receivers would reject is never sent.
 bool FxSync::Send(PaintFxMsg& m, UObject* willie, FName bone, bool directions, const std::string& label) {
     m.bone = NameToString(bone);
     if (m.bone.empty() || m.bone == "None" || m.bone.size() > combat::kMaxClaimString) { ++n_.noName; return false; }
     Xform boneWorld;
-    if (!BoneXform(adapter_->Mesh(willie), bone, boneWorld)) { ++n_.noBone; return false; }
+    if (!BoneXform(adapter_->Mesh(willie), bone, boneWorld)) { NoBone(m, "the bone is not on its mesh"); return false; }
     if (!limiter_.Allow(m.entity, m.kind, SteadyNowMs())) { ++n_.limited; return false; }
     m.local = combat::FxToBone(boneWorld, m.local);
     if (!label.empty()) m.bone = label;   // ArmorOn: the frame is the pelvis, the bone field names the class
-    if (!combat::detail::LocalXformOk(m.local)) { ++n_.noBone; return false; }   // too far from the bone to stand for it
+    if (!combat::detail::LocalXformOk(m.local)) { NoBone(m, "too far from the bone or degenerate"); return false; }
     if (directions) {
         m.velocity = ClampV(boneWorld.ToLocalDir(m.velocity), combat::kFxMaxVector);
         m.power = ClampV(boneWorld.ToLocalDir(m.power), combat::kFxMaxVector);

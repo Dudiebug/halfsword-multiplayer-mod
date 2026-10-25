@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 15;         // 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 16;         // 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -58,6 +58,7 @@ enum class MsgType : uint8_t {
     Equip = 32,       // owner -> host -> others, reliable: which sheathed weapons an owned fighter has drawn (combat/hsm_equip.h)
     SeverNotice = 33, // owner -> host -> others, reliable: a sever the owner's own fighter took natively (combat/hsm_sever.h)
     PropCensus = 34,  // host -> client, reliable: the level's physics props and their indices (session/hsm_prop_census.h)
+    GiveUp = 35,      // client -> host, reliable: the sender's fighter concedes the Duel round (held G)
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
@@ -189,7 +190,7 @@ struct MatchInfo {
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
 };
-struct Kill { uint8_t killer = 0, victim = 0; uint8_t flags = 0; };   // flags: 1 teamkill, 2 suicide, 4 environment
+struct Kill { uint8_t killer = 0, victim = 0; uint8_t flags = 0; };   // flags: 1 teamkill, 2 suicide, 4 environment, 8 gave up (Duel)
 
 // ---------------------------------------------------------------- byte stream helpers
 class Writer {
@@ -304,6 +305,13 @@ inline bool Decode(const uint8_t* d, size_t n, DeathReport& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::DeathReport) return false;
     m.victim = r.u8(); m.killer = r.u8();
     return r.done() && m.victim >= 1 && m.victim <= kMaxWillies && m.killer <= kMaxWillies;
+}
+struct GiveUpMsg { uint8_t entity = 0; };
+inline std::vector<uint8_t> Encode(const GiveUpMsg& m) { Writer w; w.header(MsgType::GiveUp); w.u8(m.entity); return w.buf; }
+inline bool Decode(const uint8_t* d, size_t n, GiveUpMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::GiveUp) return false;
+    m.entity = r.u8();
+    return r.done() && m.entity >= 1 && m.entity <= kMaxWillies;
 }
 inline std::vector<uint8_t> Encode(const Snapshot& m) {
     Writer w; w.header(MsgType::Snapshot); w.u32(m.tick); w.u32(m.ackInputSeq); w.u8(uint8_t(m.willies.size()));
@@ -430,7 +438,7 @@ inline std::vector<uint8_t> Encode(const Kill& m) { Writer w; w.header(MsgType::
 inline bool Decode(const uint8_t* d, size_t n, Kill& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Kill) return false;
     m.killer = r.u8(); m.victim = r.u8(); m.flags = r.u8();
-    return r.done() && m.victim != 0 && m.flags < 8;
+    return r.done() && m.victim != 0 && m.flags < 16;
 }
 
 // ---------------------------------------------------------------- quantization

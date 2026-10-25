@@ -62,6 +62,7 @@ private:
     bool PlaySoundAt(ue::UObject* standIn, const char* cue, const sync::V3& at, double volume);
     void SendWound(uint8_t entity, ue::UObject* willie, ue::FName bone, const combat::Xform& boxWorld, const sync::V3& extent);
     bool Send(combat::PaintFxMsg& m, ue::UObject* willie, ue::FName bone, bool directions = true, const std::string& label = {});
+    void NoBone(const combat::PaintFxMsg& m, const char* why);
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;
     void ApplyBlood(const combat::PaintFxMsg& m, ue::UObject* standIn, ue::UObject* mesh, const combat::Xform& boneWorld);
     void ApplyWound(const combat::PaintFxMsg& m, ue::UObject* standIn, ue::UObject* mesh, const combat::Xform& boneWorld);

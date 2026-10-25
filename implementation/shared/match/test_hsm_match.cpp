@@ -287,6 +287,111 @@ static void TestDuelRounds() {
     CHECK(ffa.round() == 0 && ffa.RoundGapLeftMs(t + 2) == 0 && ffa.roundWinner() == 0);
 }
 
+// Hold G to give up (2026-10-25 request): a Duel round can be conceded; it scores as the forfeiter falling, without a
+// kill for the opponent, and only while the round is being fought.
+static void TestDuelForfeit() {
+    Match m; m.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    CHECK(!m.Forfeit(1, 100) && m.Alive(1));                                    // countdown: nothing to give up
+    m.Tick(Match::kCountdownMs);
+    uint32_t t = Match::kCountdownMs;
+    CHECK(!m.Forfeit(9, t + 1));                                                // not in the match
+    CHECK(m.Forfeit(1, t + 1));
+    CHECK(!m.Alive(1) && m.Score(2) == 1 && m.Kills(2) == 0 && m.roundWinner() == 2 && m.RoundGapLeftMs(t + 1) == 5000);
+    CHECK(m.Deaths(1) == 1 && m.phase() == MatchPhase::Live);
+    CHECK(!m.Forfeit(2, t + 2) && m.Alive(2) && m.Score(1) == 0);               // round gap: already decided
+    auto ev = m.Tick(t + 1 + 5000);
+    CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2}) && m.Alive(1));   // the forfeiter comes back
+    CHECK(m.Forfeit(1, t + 6000) && m.phase() == MatchPhase::Results && m.winner() == 2);   // and can concede the match
+    CHECK(!m.Forfeit(2, t + 6001));                                             // results: no round to give up
+    Match three; three.Start(Cfg(Format::Duel, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+    three.Tick(Match::kCountdownMs);
+    CHECK(three.Forfeit(3, t + 1) && three.roundWinner() == 0);                 // two still standing: the round goes on
+    CHECK(!three.Forfeit(3, t + 2));                                            // already out of this round
+    CHECK(three.Forfeit(2, t + 3) && three.roundWinner() == 1 && three.Score(1) == 1);
+    Match ffa; ffa.Start(Cfg(Format::FreeForAll, 5), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    ffa.Tick(Match::kCountdownMs);
+    CHECK(!ffa.Forfeit(1, t + 1) && ffa.Alive(1) && ffa.Score(1) == 0 && ffa.Score(2) == 0);   // Duel only
+}
+
+static void TestGiveUpHold() {
+    GiveUpHold h;
+    CHECK(!h.Update(false, 0) && h.progress() == 0.0f);
+    CHECK(!h.Update(true, 1000) && h.progress() == 0.0f);                       // the hold starts
+    CHECK(!h.Update(true, 1750) && h.progress() > 0.49f && h.progress() < 0.51f);
+    CHECK(!h.Update(true, 1000 + GiveUpHold::kHoldMs - 1) && h.progress() < 1.0f);
+    CHECK(h.Update(true, 1000 + GiveUpHold::kHoldMs));                          // fires once at the full hold
+    CHECK(h.progress() == 0.0f);
+    CHECK(!h.Update(true, 5000) && !h.Update(true, 9000) && h.progress() == 0.0f);   // keeps holding: no repeat
+    CHECK(!h.Update(false, 9001));
+    CHECK(!h.Update(true, 9002) && !h.Update(true, 9002 + GiveUpHold::kHoldMs - 1));
+    CHECK(!h.Update(false, 9002 + GiveUpHold::kHoldMs) && h.progress() == 0.0f);   // let go just short: cancelled
+    CHECK(!h.Update(true, 20000) && h.Update(true, 20000 + GiveUpHold::kHoldMs + 500));   // a late frame still fires
+    GiveUpHold w;
+    CHECK(!w.Update(true, 0xFFFFFF00u) && w.Update(true, 0xFFFFFF00u + GiveUpHold::kHoldMs));   // clock wrap
+}
+
+static void TestLoadoutsAhead() {
+    MatchConfig c = Cfg(Format::Duel, 2); c.gear = Gear::RandomTier;
+    Match m; m.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    CHECK(m.LoadoutsAhead() == 0);                                              // countdown
+    m.Tick(Match::kCountdownMs);
+    uint32_t t = Match::kCountdownMs;
+    CHECK(m.LoadoutsAhead() == 0);                                              // fighting: never
+    m.OnDeath(1, 2, t + 1);
+    CHECK(m.LoadoutsAhead() == 2);                                              // the round gap: both come back
+    m.Tick(t + 1 + 5000);
+    CHECK(m.LoadoutsAhead() == 0);
+    m.OnDeath(1, 2, t + 6000);
+    CHECK(m.phase() == MatchPhase::Results && m.LoadoutsAhead() == 2);          // the rematch regears everyone
+    MatchConfig mc = c; mc.gear = Gear::Mirror;
+    Match mirror; mirror.Start(mc, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    mirror.Tick(Match::kCountdownMs);
+    mirror.OnDeath(2, 1, t + 1);
+    CHECK(mirror.LoadoutsAhead() == 1);                                         // one loadout shared by all
+    MatchConfig oc = c; oc.gear = Gear::Own;
+    Match own; own.Start(oc, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    own.Tick(Match::kCountdownMs);
+    own.OnDeath(2, 1, t + 1);
+    CHECK(own.LoadoutsAhead() == 0);                                            // own gear: nothing generated
+    MatchConfig fc = c; fc.format = Format::FreeForAll;
+    Match ffa; ffa.Start(fc, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    ffa.Tick(Match::kCountdownMs);
+    ffa.OnDeath(2, 1, t + 1);
+    CHECK(ffa.LoadoutsAhead() == 0);                                            // others still fight: not ahead
+}
+
+static void TestGearPool() {
+    GearPool p;
+    CHECK(p.Wants(4, 2) && p.size() == 0 && p.Take(4).empty());
+    p.Put(4, {1});
+    p.Put(4, {});                                                               // a failed generation
+    CHECK(p.size() == 1 && p.Wants(4, 2));
+    p.Put(4, {2});
+    CHECK(!p.Wants(4, 2) && p.Wants(4, 3) && !p.Wants(4, 0));
+    CHECK(p.Take(4) == std::vector<uint8_t>({1}) && p.Take(4) == std::vector<uint8_t>({2}) && p.Take(4).empty());
+    p.Put(4, {3});
+    CHECK(p.Take(5).empty() && p.size() == 0);                                  // another tier empties it
+    p.Put(5, {5});
+    CHECK(p.Wants(6, 1) && p.size() == 0);
+    p.Put(6, {6});
+    p.Put(7, {7});
+    CHECK(p.size() == 1 && p.Take(7) == std::vector<uint8_t>({7}));
+}
+
+static void TestDuelRoundWatch() {
+    DuelRoundWatch w;
+    CHECK(!w.Observe(Format::Duel, 1));                                         // the first round seen: nothing before it
+    CHECK(!w.Observe(Format::Duel, 1));
+    CHECK(w.Observe(Format::Duel, 2) && !w.Observe(Format::Duel, 2));          // once per new round
+    CHECK(w.Observe(Format::Duel, 3));
+    CHECK(w.Observe(Format::Duel, 1));                                          // the rematch
+    CHECK(!w.Observe(Format::FreeForAll, 0) && !w.Observe(Format::FreeForAll, 2));   // Duel only
+    CHECK(!w.Observe(Format::Duel, 2));                                         // another format forgot the round
+    CHECK(!w.Observe(Format::Duel, 0) && !w.Observe(Format::Duel, 3));          // so does round 0 (no match)
+    CHECK(w.Observe(Format::Duel, 4));
+    CHECK(!w.Observe(Format::TwoTeams, 5));                               // another format never fires
+}
+
 // Sudden death ends on the next deciding event, as the HUD says (NEXT ROUND WINS, NEXT POINT WINS): in Duel the next
 // round that leaves one leader, in the bot formats the next wave cleared. Neither waits for the score limit.
 static void TestSuddenDeathEnds() {
@@ -494,7 +599,7 @@ int main() {
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDuelRoundWatch(); TestLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

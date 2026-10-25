@@ -198,6 +198,34 @@ static void TestCountdownDigits() {
     s = BuildHudScene(m, Me(), kAt + 5000); CHECK(!s.banner.visible);  // run out before Live arrives: no "0"
 }
 
+// Hold G to give up: while held in a fought Duel round the pill says so, with how far the hold is.
+static void TestGiveUpPill() {
+    LocalHud l = Me(); l.giveUp = 0.5f;
+    HudScene s = BuildHudScene(Duel(), l, kAt);
+    CHECK(s.pill.visible && s.pill.text == "GIVING UP 50%" && Same(s.pill.color, kBloodInk));
+    l.giveUp = 0.999f; CHECK(BuildHudScene(Duel(), l, kAt).pill.text == "GIVING UP 99%");   // never shows 100 before it fires
+    l.giveUp = 0.004f; CHECK(BuildHudScene(Duel(), l, kAt).pill.text == "GIVING UP 0%");
+    CHECK(BuildHudScene(Duel(), Me(), kAt).pill.text == "ROUND 2");                       // not held
+    MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::SuddenDeath); l.giveUp = 0.25f;
+    CHECK(BuildHudScene(d, l, kAt).pill.text == "GIVING UP 25%");
+    d = Duel(); d.roundGapLeftMs = 2400; d.roundWinner = 2;
+    CHECK(BuildHudScene(d, l, kAt).pill.text == "NEXT ROUND IN 3");                       // the gap: nothing to give up
+    d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
+    CHECK(BuildHudScene(d, l, kAt).pill.text == "MATCH STARTS IN");
+    CHECK(BuildHudScene(Ffa(), l, kAt).pill.text == "FIRST TO 5");                         // Duel only
+}
+
+// The countdown before a Duel says how to give up a round, under the digits, in their look.
+static void TestDuelCountdownHint() {
+    MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
+    HudScene s = BuildHudScene(d, Me(), kAt);
+    CHECK(s.banner.text == "3" && s.bannerSub.visible && s.bannerSub.text == "HOLD G TO GIVE UP A ROUND");
+    CHECK(Same(s.bannerSub.color, kIron) && Near(s.bannerSub.opacity, s.banner.opacity) && Near(s.bannerSub.scale, 1));
+    d.timeLeftMs = 0; CHECK(!BuildHudScene(d, Me(), kAt).bannerSub.visible);            // no digit, no hint
+    MatchInfo f = Ffa(); f.phase = uint8_t(MatchPhase::Countdown); f.timeLeftMs = 3000;
+    CHECK(!BuildHudScene(f, Me(), kAt).bannerSub.visible);                               // Duel only
+}
+
 static void TestBannerFromShot() {
     LocalHud l = Me(); l.banner = {"FIGHT", "ROUND 2", kBloodInk, 2000};
     HudScene s = BuildHudScene(Duel(), l, 2000);
@@ -411,6 +439,8 @@ static void TestFeedRows() {
     CHECK(r.spans.size() == 2 && r.spans[0].text == "Bo" && Same(r.spans[0].color, TeamInk(0)) && r.spans[1].text == " killed themselves" && Same(r.spans[1].color, kIron));
     r = MakeFeedRow(t, {2, 3, 4}, 1);
     CHECK(r.spans.size() == 2 && r.spans[1].text == " died");
+    r = MakeFeedRow(t, {0, 3, 8}, 3);                                    // held G (Duel)
+    CHECK(r.mine && r.spans.size() == 2 && r.spans[0].text == "Bo" && r.spans[1].text == " gave up" && Same(r.spans[1].color, kIron));
     r = MakeFeedRow(t, {0, 4, 0}, 1);
     CHECK(r.spans.size() == 2 && r.spans[0].text == "Cy" && r.spans[1].text == " died");
     for (Kill k : {Kill{2, 1, 0}, Kill{4, 2, 1}, Kill{3, 3, 2}, Kill{2, 3, 4}, Kill{0, 4, 0}, Kill{9, 8, 0}})
@@ -514,6 +544,8 @@ int main() {
     TestOneFight();
     TestCountdownDigits();
     TestBannerFromShot();
+    TestGiveUpPill();
+    TestDuelCountdownHint();
     TestBannerTracker();
     TestDeadPanel();
     TestFeedRows();

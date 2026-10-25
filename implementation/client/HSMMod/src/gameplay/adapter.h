@@ -90,6 +90,9 @@ public:
     bool IsBodyWeapon(ue::UObject* actor);
     std::vector<ue::UObject*> AllWillies();                // live Willie_BP_C instances in the loaded level
     std::vector<ue::UObject*> WeaponActors();              // live weapon actors (IsWeapon), sheathed, held and dropped
+    // Destroys every weapon lying loose that a fighter once held: no "Parent Actor" (a drop clears it, Willie_BP.cpp:5987,
+    // 6299) but a "Last Parent" (set by every grab, :6073, 6394). Level weapons nobody picked up stay. Returns how many.
+    int DestroyDroppedWeapons();
     std::vector<ue::UObject*> BodiesAndGear();             // every Willie, what is attached to it (armor, weapons) and every weapon
     // Re-tints the fabric of every armor piece attached to the Willie; returns how many pieces changed.
     int TintArmor(ue::UObject* willie, float r, float g, float b);

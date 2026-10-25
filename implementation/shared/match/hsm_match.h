@@ -90,12 +90,18 @@ public:
     void AddFighter(const FighterInfo& f);              // joins mid-match: alive, no score change
     void RemoveFighter(uint8_t entity);
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
+    // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
+    // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
+    bool Forfeit(uint8_t entity, uint32_t nowMs);
     Events Tick(uint32_t nowMs);
     void MarkRespawned(uint8_t entity);
     void Finish(int winnerKey, uint32_t nowMs);          // ends a running match now (no effect once over)
     bool Has(uint8_t e) const { return fighters_.count(e) != 0; }
     int wave() const { return wave_; }
     int round() const { return round_; }                // Duel: 1 at the start and the rematch, +1 per reset; else 0
+    // How many generated loadouts the coming respawns take, to be made ahead while nobody fights (the Duel round gap,
+    // the results before a rematch): the game's generator stalls the frame about 110 ms a loadout (test 13). Else 0.
+    size_t LoadoutsAhead() const;
     uint8_t roundWinner() const { return roundWinner_; }   // Duel's gap: who took the round, 0 = drawn / not in the gap
     uint32_t RoundGapLeftMs(uint32_t nowMs) const;      // Duel: time left before the next round, 0 outside the gap
     int botsLeft() const;
@@ -142,6 +148,41 @@ private:
     uint32_t roundEnd_ = 0;
     int round_ = 0;
     uint8_t roundWinner_ = 0;
+};
+
+// Hold-to-give-up: Update with whether the key is down each frame; true once, on the frame the hold reaches kHoldMs.
+// Another give-up needs the key released first. progress() is 0..1 for the HUD while held, 0 once fired or released.
+class GiveUpHold {
+public:
+    static constexpr uint32_t kHoldMs = 1500;
+    bool Update(bool down, uint32_t nowMs);
+    float progress() const { return progress_; }
+private:
+    bool holding_ = false, fired_ = false;
+    uint32_t since_ = 0;
+    float progress_ = 0.0f;
+};
+
+// Generated loadouts made ahead, for one tier at a time: another tier empties it.
+class GearPool {
+public:
+    bool Wants(uint8_t tier, size_t ahead);                 // true while it holds fewer than `ahead` for `tier`
+    void Put(uint8_t tier, std::vector<uint8_t> blob);      // an empty blob (a failed generation) is not kept
+    std::vector<uint8_t> Take(uint8_t tier);                // the oldest one made for `tier`; empty when none
+    size_t size() const { return blobs_.size(); }
+private:
+    void Use(uint8_t tier);
+    uint8_t tier_ = 0xFF;
+    std::vector<std::vector<uint8_t>> blobs_;
+};
+
+// Duel: true once each time the round number moves on from one already seen (the next round, or the rematch's round 1):
+// the moment each machine clears the weapons dropped in the rounds before. Another format or round 0 forgets the round.
+class DuelRoundWatch {
+public:
+    bool Observe(Format f, uint16_t round);
+private:
+    uint16_t seen_ = 0;
 };
 
 // Wave sizes. Survival: one bot per player plus one per wave (max 30), tier + wave/2.

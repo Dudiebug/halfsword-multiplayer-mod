@@ -137,6 +137,7 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Pose: { PoseMsg m; return Decode(d, n, m); }
         case MsgType::Vitals: { VitalsMsg m; return Decode(d, n, m); }
         case MsgType::DeathReport: { DeathReport m; return Decode(d, n, m); }
+        case MsgType::GiveUp: { GiveUpMsg m; return Decode(d, n, m); }
         case MsgType::HitClaim: { HitClaimMsg m; return Decode(d, n, m); }
         case MsgType::SeverClaim: { combat::SeverClaimMsg m; return Decode(d, n, m); }
         case MsgType::SeverNotice: { combat::SeverNoticeMsg m; return Decode(d, n, m); }
@@ -236,6 +237,7 @@ public:
             const ProcessEventHookStats pe = GetProcessEventHookStats();
             peNsAtWindow_ = pe.hookNs;
             peCallsAtWindow_ = pe.calls;
+            peAllAtWindow_ = pe.all;
             const ReflectionCacheStats rc = GetReflectionCacheStats();
             lookupsAtWindow_ = rc.hits + rc.misses;
             lookupMissesAtWindow_ = rc.misses;
@@ -366,6 +368,7 @@ public:
             if (info_.phase == uint8_t(MatchPhase::Results)) ui::ChatDrop("match over");
             chatPhase_ = info_.phase;
         }
+        GiveUpTick();
         HudScene hud = BuildHud();
         ui::HudTick(hud);
         ui::ChatTick(hud);
@@ -482,9 +485,13 @@ public:
             const ProcessEventHookStats pe = GetProcessEventHookStats();
             const double peMs = std::max(0.0, double(pe.hookNs - peNsAtWindow_) / 1e6 / frames - sum / frames);
             const double peCalls = double(pe.calls - peCallsAtWindow_) / frames;
-            std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls)",
-                          sum / frames, mx, vmMs, peMs, peCalls);
+            const double peAll = double(pe.all - peAllAtWindow_) / frames;
+            std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls of %.0f)",
+                          sum / frames, mx, vmMs, peMs, peCalls, peAll);
             line += b;
+            // Which hooks (two-player test 13: 65 ms/frame at 1100 calls late in a match); ReceiveTick includes the pump.
+            if (peMs >= 2.0) line += " [top hooks: " + TopHookFunctions(3, frames) + "]";
+            else TopHookFunctions(0, frames);
             const ReflectionCacheStats rc = GetReflectionCacheStats();   // FindFunction/FindProperty: misses walk names
             std::snprintf(b, sizeof b, ", lookups %.0f/frame (%.1f walked)", double(rc.hits + rc.misses - lookupsAtWindow_) / frames,
                           double(rc.misses - lookupMissesAtWindow_) / frames);
@@ -1446,6 +1453,10 @@ private:
             const uint32_t now = NowMs();
             const bool named = ValidEntity(r.killer) && r.killer != r.victim && match_.Has(r.killer);
             HandleDeath(r.victim, named ? r.killer : kills_.KillerOf(r.victim, now), now);
+        } else if (t == MsgType::GiveUp) {
+            GiveUpMsg g;
+            if (!Decode(d, n, g) || !MayStream(peer.slot, g.entity)) { ++streamsDropped_; return; }
+            HandleGiveUp(g.entity, NowMs());
         } else if (t == MsgType::Input) {
             if (OwnerMode()) return;                    // every owner plays its own fighter
             InputFrame f; Decode(d, n, f);
@@ -1770,7 +1781,9 @@ private:
         if (ev.waveStarted) HSM_LOG("host: wave %d starts (%d bots)", match_.wave() + 1, match_.botsLeft());
         if (ev.waveCleared) HSM_LOG("host: wave cleared");
         if (ev.roundReset) HSM_LOG("host: duel round reset");
+        if (roundWatch_.Observe(match_.config().format, uint16_t(match_.round()))) ClearDroppedWeapons();
         if (ev.ended) HSM_LOG("host: match over, winner key %d", match_.winner());
+        MakeGearAhead(now);
         if (ev.rematch && progression_) {                // Progression fights end back in the Tavern, like the stock game
             HSM_LOG("host: Progression fight over; returning everyone to the hub");
             HostTravel(kHubLevel);
@@ -1829,6 +1842,44 @@ private:
             PushFeed(k);
             infoDirty_ = true;
         }
+    }
+
+    // Held G: the fighter concedes the Duel round being fought (Match::Forfeit); the feed says they gave up.
+    void HandleGiveUp(uint8_t e, uint32_t now) {
+        if (!match_.Forfeit(e, now)) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
+        HSM_LOG("match: #%u gave up the round", e);
+        Kill k; k.victim = e; k.flags = 8;
+        net_->Broadcast(kChanReliable, Encode(k), true);
+        PushFeed(k);
+        infoDirty_ = true;
+    }
+
+    // Duel: each new round starts without the weapons dropped in the rounds before (they piled up 5 -> 36 in test 13).
+    // Both machines clear their own copies; the prop sync lets go of the ones it was moving.
+    void ClearDroppedWeapons() {
+        if (!OwnerMode() || !MatchLevel()) return;
+        HSM_LOG("duel: new round, %d dropped weapon(s) cleared", adapter_.DestroyDroppedWeapons());
+    }
+
+    // Hold G in a fought Duel round to give it up (GiveUpHold): the host's own fighter here, a client's by asking the host.
+    void GiveUpTick() {
+        const uint32_t now = NowMs();
+        bool down = false;
+        const bool fought = info_.phase == uint8_t(MatchPhase::Live) || info_.phase == uint8_t(MatchPhase::SuddenDeath);
+        UObject* own = adapter_.PlayerWillie(0);
+        if (MatchLevel() && info_.format == uint8_t(Format::Duel) && fought && !InRoundGap(info_) && !ui::Typing()
+            && own && !adapter_.IsDead(own) && EntityAlive(MyEntity())) {
+            if (GetAsyncKeyState('G') & 0x8000) {   // the key first: asking whose window is in front is the dearer call
+                DWORD pid = 0;
+                if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
+                down = pid == GetCurrentProcessId();
+            }
+        }
+        if (!giveUp_.Update(down, now)) return;
+        const uint8_t me = MyEntity();
+        HSM_LOG("match: G held %u ms: giving up the round (#%u)", unsigned(GiveUpHold::kHoldMs), me);
+        if (IsHost()) HandleGiveUp(me, now);
+        else if (hostPeer_) { GiveUpMsg g; g.entity = me; net_->Send(hostPeer_, kChanReliable, Encode(g), true); }
     }
 
     // Team side point for a (re)spawn, farthest from living enemies; each entity has its own spread slot around it
@@ -1986,11 +2037,17 @@ private:
     void RegearSlots(const MatchConfig& cfg, const std::vector<uint8_t>& slots, Regear mode, const char* why) {
         if (mode == Regear::None || slots.empty()) return;
         const double t0 = game::SteadyNowMs();
+        int ahead = 0;
+        auto next = [&] {                                // one made ahead in the gap if there is one, else made now
+            std::vector<uint8_t> b = gearPool_.Take(cfg.tier);
+            if (!b.empty()) { ++ahead; return b; }
+            return game::RandomPassportBlob(adapter_, cfg.tier);
+        };
         std::vector<uint8_t> shared;
-        if (mode == Regear::Shared) shared = game::RandomPassportBlob(adapter_, cfg.tier);
+        if (mode == Regear::Shared) shared = next();
         int generated = mode == Regear::Shared && !shared.empty() ? 1 : 0, stored = 0;
         for (uint8_t slot : slots) {
-            std::vector<uint8_t> blob = mode == Regear::Shared ? shared : game::RandomPassportBlob(adapter_, cfg.tier);
+            std::vector<uint8_t> blob = mode == Regear::Shared ? shared : next();
             if (blob.empty()) { HSM_LOG("host: no generated gear for slot %u; it keeps its loadout", slot); continue; }
             if (mode == Regear::Each) {
                 ++generated;
@@ -2004,7 +2061,22 @@ private:
             if (match_.round()) HSM_LOG("host: round %d: new loadout for everyone (tier %u)", match_.round(), cfg.tier);
             else HSM_LOG("host: %s: new loadout for everyone (tier %u)", why, cfg.tier);
         }
-        HSM_LOG("host: %d loadout(s) generated in %.1f ms (%s)", generated, game::SteadyNowMs() - t0, why);
+        HSM_LOG("host: %d loadout(s) generated in %.1f ms (%s; %d made ahead)", generated, game::SteadyNowMs() - t0, why, ahead);
+    }
+
+    // The coming respawns' generated loadouts, made one at a time while nobody fights: each stalls the frame about
+    // 110 ms, and made together at the round reset they stalled it 230-260 ms just as the round began (test 13).
+    // The first waits a second into the gap (not on the deciding blow), the next a quarter second after it.
+    void MakeGearAhead(uint32_t now) {
+        const uint8_t tier = match_.config().tier;
+        const size_t want = match_.LoadoutsAhead();
+        if (!want) { nextGearAhead_ = now + 1000; return; }
+        if (now < nextGearAhead_ || !gearPool_.Wants(tier, want)) return;
+        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, tier);
+        nextGearAhead_ = now + (blob.empty() ? 1000 : 250);
+        if (blob.empty()) return;
+        gearPool_.Put(tier, std::move(blob));
+        HSM_LOG("host: loadout %zu of %zu made ahead (tier %u)", gearPool_.size(), want, unsigned(tier));
     }
 
     // A fighter joining a running match takes its generated gear: the current shared loadout, or a fresh one.
@@ -2087,6 +2159,7 @@ private:
         if (const MapInfo* map = FindMap(currentLevel_)) l.map = map->display;
         l.banner = banner_.shot();
         l.feed.assign(feed_.begin(), feed_.end());
+        l.giveUp = giveUp_.progress();
         return BuildHudScene(info_, l, now);
     }
 
@@ -2107,9 +2180,12 @@ private:
             cands.push_back({f.entity, f.team, EntityAlive(f.entity)});
         }
         spectate_.Refresh(me, myTeam, cands);
-        bool fg = false;
-        if (HWND w = GetForegroundWindow()) { DWORD pid = 0; GetWindowThreadProcessId(w, &pid); fg = pid == GetCurrentProcessId(); }
-        bool right = fg && (GetAsyncKeyState(VK_RIGHT) & 0x8000), left = fg && (GetAsyncKeyState(VK_LEFT) & 0x8000);
+        bool right = GetAsyncKeyState(VK_RIGHT) & 0x8000, left = GetAsyncKeyState(VK_LEFT) & 0x8000;
+        if (right || left) {   // the keys first: asking whose window is in front costs more
+            DWORD pid = 0;
+            if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
+            if (pid != GetCurrentProcessId()) right = left = false;
+        }
         if (right && !spectateKeyDown_) spectate_.Next();
         if (left && !spectateKeyDown_) spectate_.Prev();
         spectateKeyDown_ = right || left;
@@ -2470,6 +2546,7 @@ private:
             case MsgType::MatchInfo: {
                 MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
+                if (roundWatch_.Observe(Format(info_.format), info_.round)) ClearDroppedWeapons();
                 break;
             }
             case MsgType::Kill: { Kill k; Decode(d, n, k); PushFeed(k); break; }
@@ -2629,6 +2706,10 @@ private:
     std::vector<Tint> tints_;
     bool ownDeadPending_ = false;
     uint32_t ownDiedAt_ = 0;
+    GiveUpHold giveUp_;
+    DuelRoundWatch roundWatch_;
+    GearPool gearPool_;
+    uint32_t nextGearAhead_ = 0;
     uint32_t ownBlob_ = 0;    // the loadout blob of this machine's last own Spawn (client): a change is new gear
     uint8_t chatPhase_ = 0;   // the match phase the chat last saw (MatchPhase)
     // client
@@ -2707,7 +2788,7 @@ private:
     std::array<double, kPumpParts> pumpMs_{}, pumpMaxMs_{};   // Timed: per part, this window
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;
-    uint64_t peNsAtWindow_ = 0, peCallsAtWindow_ = 0;
+    uint64_t peNsAtWindow_ = 0, peCallsAtWindow_ = 0, peAllAtWindow_ = 0;
     uint64_t lookupsAtWindow_ = 0, lookupMissesAtWindow_ = 0;
 };
 

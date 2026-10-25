@@ -780,6 +780,19 @@ std::vector<UObject*> Adapter::WeaponActors() {
     return out;
 }
 
+int Adapter::DestroyDroppedWeapons() {
+    int destroyed = 0;
+    for (UObject* w : WeaponActors()) {
+        if (IsBodyWeapon(w)) continue;
+        UObject** parent = Field<UObject*>(w, "Parent Actor");
+        UObject** last = Field<UObject*>(w, "Last Parent");
+        if (!parent || *parent || !last || !*last) continue;
+        DestroyActor(w);
+        ++destroyed;
+    }
+    return destroyed;
+}
+
 int Adapter::TintArmor(UObject* willie, float r, float g, float b) {
     Call att(willie, "GetAttachedActors");
     att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);

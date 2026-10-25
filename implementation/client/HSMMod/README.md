@@ -80,6 +80,11 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   suicide costs a point; deaths with nobody to blame cost nothing. The first to the score limit wins; with a time
   limit the leader wins when time runs out, and a tie goes to sudden death. A 10 s results screen is followed by an
   in-place rematch (everyone respawns, no level reload).
+- **Duel** is fought in rounds: the last one standing takes the round, and the first to the score limit wins. After
+  the respawn delay everyone comes back together, and the weapons dropped in earlier rounds are cleared. Hold **G**
+  for 1.5 s during a round to give it up: you are out of that round (one on one, it goes to the other), no kill is credited, and the kill
+  feed says "gave up". G is also the game's talk key: while it is held the game's own give-up already shows on your
+  fighter (it slows down and cowers), and letting go before 1.5 s cancels both.
 - **Kill credit** comes from weapon hit events: the last weapon holder to hit a fighter within 10 s gets the kill.
   With friendly fire off, weapon hits between teammates are dropped before the game computes damage.
 - **Respawns** after the respawn delay at the team's side of the map: the level's Willie spawn points are split

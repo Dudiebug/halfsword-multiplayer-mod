@@ -27,8 +27,11 @@ unsigned long GameThreadId();
 struct ProcessEventHookStats {
     uint64_t calls = 0;
     uint64_t hookNs = 0;
+    uint64_t all = 0;      // every ProcessEvent call on the game thread, hooked or not
 };
 ProcessEventHookStats GetProcessEventHookStats();   // game thread
+// The n hooked functions that took longest since the last call, per frame ("Name 1.23 ms/45, ..."); resets. Game thread.
+std::string TopHookFunctions(int n, double frames);
 // Drop all rules (e.g. when a session ends).
 void ClearHooks();
 

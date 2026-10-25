@@ -2,6 +2,8 @@
 #include "ue/hook.h"
 #include "log.h"
 #include <MinHook.h>
+#include <algorithm>
+#include <cstdio>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
@@ -42,7 +44,9 @@ void Classify(UFunction* fn) {
 std::atomic<unsigned long> g_gameThreadId{0};
 
 // Stats (GetProcessEventHookStats): game thread only. t_inHooks is the depth of hook callbacks this thread is in.
-uint64_t g_hookCalls = 0, g_hookNs = 0;
+uint64_t g_hookCalls = 0, g_hookNs = 0, g_allCalls = 0;
+struct FnCost { uint64_t calls = 0, ns = 0; };
+std::unordered_map<UFunction*, FnCost> g_fnCost;   // per hooked function, since the last TopHookFunctions
 thread_local int t_inHooks = 0;
 
 int64_t QpcNs(int64_t ticks) {
@@ -65,6 +69,7 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
         HSM_LOG("hook: first ProcessEvent call (%s)", fn ? ObjectName(reinterpret_cast<UObject*>(fn)).c_str() : "?");
     }
     bool block = false;
+    if (GetCurrentThreadId() == g_gameThreadId.load(std::memory_order_relaxed)) ++g_allCalls;
     if (obj && fn) {
         HookList hooks;
         {
@@ -87,7 +92,14 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
                 InHooks in;
                 for (const PreHook& h : *hooks) if (h(obj, fn, params)) block = true;
             }
-            if (timed) { ++g_hookCalls; g_hookNs += uint64_t(QpcNs(Qpc() - t0)); }
+            if (timed) {
+                const uint64_t ns = uint64_t(QpcNs(Qpc() - t0));
+                ++g_hookCalls;
+                g_hookNs += ns;
+                FnCost& f = g_fnCost[fn];
+                ++f.calls;
+                f.ns += ns;
+            }
         }
     }
     if (!block) g_original(obj, fn, params);
@@ -145,10 +157,26 @@ void ClearHooks() {
 
 unsigned long GameThreadId() { return g_gameThreadId.load(); }
 
+std::string TopHookFunctions(int n, double frames) {
+    std::vector<std::pair<UFunction*, FnCost>> v(g_fnCost.begin(), g_fnCost.end());
+    g_fnCost.clear();
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+    if (frames < 1.0) frames = 1.0;
+    std::string out;
+    char b[200];
+    for (int i = 0; i < n && i < int(v.size()); ++i) {
+        std::snprintf(b, sizeof b, "%s%s %.2f ms/%.0f", out.empty() ? "" : ", ", ObjectName(reinterpret_cast<UObject*>(v[size_t(i)].first)).c_str(),
+                      double(v[size_t(i)].second.ns) / 1e6 / frames, double(v[size_t(i)].second.calls) / frames);
+        out += b;
+    }
+    return out;
+}
+
 ProcessEventHookStats GetProcessEventHookStats() {
     ProcessEventHookStats s;
     s.calls = g_hookCalls;
     s.hookNs = g_hookNs;
+    s.all = g_allCalls;
     return s;
 }
 

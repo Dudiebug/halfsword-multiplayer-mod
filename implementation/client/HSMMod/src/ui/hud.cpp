@@ -265,9 +265,10 @@ void ApplyBoard(const Board& b) {
 }  // namespace
 
 bool HudTabHeld() {
+    if (!(GetAsyncKeyState(VK_TAB) & 0x8000)) return false;   // the key first: asking whose window is in front costs more
     DWORD pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    return pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_TAB) & 0x8000);
+    return pid == GetCurrentProcessId();
 }
 
 void HudTick(const HudScene& s) {

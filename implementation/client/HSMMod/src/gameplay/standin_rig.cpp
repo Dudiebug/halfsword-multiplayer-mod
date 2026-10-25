@@ -1,5 +1,6 @@
 #include "gameplay/standin_rig.h"
 #include "sync/hsm_grip.h"
+#include "sync/hsm_pose_codec.h"
 #include "util/hsm_names.h"
 #include "log.h"
 #include <algorithm>
@@ -53,9 +54,27 @@ constexpr uint8_t kNoCollision = 0;           // ECollisionEnabled::NoCollision
 constexpr uint8_t kLocked = 2;                 // ELinearConstraintMotion::LCM_Locked, EAngularConstraintMotion::ACM_Locked
 bool g_gripLock = true;                        // standin_grip (SetStandInGripLock)
 constexpr uint8_t kFree = 0;                  // ELinearConstraintMotion::LCM_Free, EAngularConstraintMotion::ACM_Free
+constexpr uint8_t kWorldSpace = 0;            // ERelativeTransformSpace::RTS_World
 constexpr uint8_t kAlwaysTickPose = 0;        // EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
 
 V3 ToV3(const FVector& v) { return {v.x, v.y, v.z}; }
+FQuat ToFQuat(const Q4& q) { return {q.x, q.y, q.z, q.w}; }
+// FRotator::Quaternion (UE 5, degrees).
+Q4 RotatorQuat(double pitch, double yaw, double roll) {
+    constexpr double kHalf = 3.14159265358979323846 / 360.0;
+    const double sp = std::sin(pitch * kHalf), cp = std::cos(pitch * kHalf), sy = std::sin(yaw * kHalf), cy = std::cos(yaw * kHalf);
+    const double sr = std::sin(roll * kHalf), cr = std::cos(roll * kHalf);
+    return {cr * sp * sy - sr * cp * cy, -cr * sp * cy - sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy};
+}
+bool WorldTransform(UObject* c, FTransform& out) {
+    Call t(c, "K2_GetComponentToWorld");
+    if (!t.invoke()) return false;
+    out = t.get<FTransform>("ReturnValue");
+    return true;
+}
+bool SetWorldTransform(UObject* c, const FTransform& t) {
+    return Call(c, "K2_SetWorldTransform").set("NewTransform", t).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
+}
 FVector ToF(const V3& v) { return {v.x, v.y, v.z}; }
 Q4 ToQ4(const FQuat& q) { return {q.x, q.y, q.z, q.w}; }
 V3 Sub(const V3& a, const V3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -329,7 +348,17 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
             now->weaponValid[w] = true;
         }
     }
-    if (frame) frame->grip = ReadGrip();
+    if (frame) {
+        frame->grip = ReadGrip();
+        // The sender's side of the grip toggles (two-player test 12 asked whether a mordhau was ever sent).
+        const sync::GripState& g = frame->grip;
+        const int toggles = sync::SeatKey(g.altGrip, g.mordhau, g.reverseR) | (g.switched2H ? 8 : 0);
+        if (toggles != ownToggles_) {
+            ownToggles_ = toggles;
+            HSM_LOG("rig: %s sends grips R %u L %u%s%s%s%s", ObjectName(willie_).c_str(), unsigned(g.gripR), unsigned(g.gripL),
+                    g.altGrip ? " alt" : "", g.mordhau ? " mordhau" : "", g.switched2H ? " switched" : "", g.reverseR ? " reverse" : "");
+        }
+    }
     if (!typesLogged_) {
         typesLogged_ = true;
         auto type = [this](int w) { const Weapon& wp = weapons_[w]; return Live(wp.root, wp.rootIndex) ? ObjectType(wp.root) : -1; };
@@ -550,6 +579,14 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     UObject* const weaponR = FieldAt(weaponOffset_[0]);
     UObject* const weaponL = FieldAt(weaponOffset_[1]);
     const bool wantOff = g.offhand && weaponR && (!weaponL || weaponL == weaponR);
+    if (ApplySeat(g, weaponR) && offJoint_) {
+        // The off hand's attach point follows the alt / mordhau flags (Willie_BP.cpp:1831): made again at once.
+        Call br(willie_, "Break L Constraint");
+        br.set<bool>("Slide", false);
+        br.invoke();
+        offJoint_ = nullptr;
+        offTryMs_ = -1e18;
+    }
     if (wantOff && (!offJoint_ || FieldAt(gripOffset_[1]) != offJoint_)) {
         const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - offTryMs_ >= kOffhandRetryMs) {
@@ -568,7 +605,7 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
         HSM_LOG("rig: %s: off hand released", ObjectName(willie_).c_str());
     }
     if (gripFlag_[0]) SetBoolValue(gripFlag_[0], base + PropertyOffset(gripFlag_[0]), offJoint_ != nullptr);
-    ApplySwitch(g.switched2H, weaponR);
+    ApplySwitch(g.switched2H && !g.mordhau, weaponR);   // mordhau sets the flag too, but is a seat (ApplySeat), not a slide
     applied.offhand = offJoint_ != nullptr;
     const sync::GripState& l = gripStateLogged_;
     if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
@@ -609,6 +646,73 @@ void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
         Call(offJoint_, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", on ? FVector{} : *o).invoke();
     HSM_LOG("rig: %s: hands %s along the shaft%s", ObjectName(willie_).c_str(), on ? "switched" : "switched back",
             off ? "" : " (right hand only)");
+}
+
+// The alt grip, mordhau and reverse grip move the weapon in the right hand: the game re-seats it in its ReceiveTick
+// (Willie_BP.cpp:18042-18066), which a stand-in does not run, so writing the flags alone (0.5.0) left the hand where it
+// was. The rig re-seats it as the game does whenever the owner's toggles differ from what this joint was seated for:
+// the weapon goes to the hand socket, turned by the reverse grip, then so the chosen attach point sits in the hand; the
+// joint is made again there and the weapon goes back, for the locked joint to carry it to its new seat.
+bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
+    UObject* const r = FieldAt(gripOffset_[0]);
+    if (r != seatJoint_) { seatJoint_ = r; seatKey_ = 0; }   // the game makes a new joint at the weapon's default seat
+    const uint8_t key = sync::SeatKey(g.altGrip, g.mordhau, g.reverseR);
+    if (!r || !weaponR || key == seatKey_ || !GripToLock(0)) return false;
+    seatKey_ = key;
+    const auto* base = reinterpret_cast<const uint8_t*>(willie_);
+    const uint8_t gripR = gripTypeOffset_[0] >= 0 ? base[gripTypeOffset_[0]] : 0;
+    const uint8_t* revType = Field<uint8_t>(willie_, "R Weapon Reverse Grip Type");
+    const sync::GripSeat seat = sync::SeatFor(gripR, offJoint_ != nullptr, g.altGrip, g.mordhau, g.reverseR, revType ? *revType : 3);
+    const char* const pointName = seat.point == sync::SeatPoint::Reverse ? "Grip R Hand Default Pos Reverse"
+                                  : seat.point == sync::SeatPoint::Alt   ? "Grip R Hand Alt Pos"
+                                                                         : "Grip R Hand Default Pos";
+    UObject* const root = ObjField(weaponR, "BaseMesh");
+    UObject* const point = ObjField(weaponR, pointName);
+    Call par(point, "GetAttachParent");
+    UObject* const parent = point && par.invoke() ? par.get<UObject*>("ReturnValue") : nullptr;
+    const FVector* const relLoc = point ? Field<FVector>(point, "RelativeLocation") : nullptr;
+    const FRotator* const relRot = point ? Field<FRotator>(point, "RelativeRotation") : nullptr;
+    const char* const socket = seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket";
+    Call sock(mesh_, "GetSocketTransform");
+    sock.setName("InSocketName", MakeName(socket)).set<uint8_t>("TransformSpace", kWorldSpace);
+    FTransform keep;
+    if (!root || !parent || !relLoc || !relRot || !sock.invoke() || !WorldTransform(root, keep)) {
+        HSM_LOG("rig: %s: re-seat FAILED (no %s on %s)", ObjectName(willie_).c_str(), pointName, ObjectName(weaponR).c_str());
+        return false;
+    }
+    const FTransform s = sock.get<FTransform>("ReturnValue");
+    const Q4 flip = seat.flip == sync::SeatFlip::Yaw180     ? RotatorQuat(0, 180, 0)
+                    : seat.flip == sync::SeatFlip::Pitch180 ? RotatorQuat(180, 0, 0)
+                                                            : Q4{};
+    Call(root, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
+    FTransform t = keep;
+    t.translation = s.translation;
+    t.rotation = ToFQuat(sync::QuatMul(ToQ4(s.rotation), flip));
+    SetWorldTransform(root, t);
+    FTransform p;
+    if (WorldTransform(parent, p)) {   // turned so the point's rotation is the hand's ...
+        t.rotation = ToFQuat(sync::QuatMul(ToQ4(p.rotation), RotatorQuat(-relRot->pitch, -relRot->yaw, -relRot->roll)));
+        SetWorldTransform(root, t);
+    }
+    if (WorldTransform(parent, p)) {   // ... and moved so the point sits in it
+        const V3 off = sync::QuatRotateVec(ToQ4(p.rotation), V3{-relLoc->x * p.scale.x, -relLoc->y * p.scale.y, -relLoc->z * p.scale.z});
+        t.translation = FVector{p.translation.x + off.x, p.translation.y + off.y, p.translation.z + off.z};
+        SetWorldTransform(root, t);
+    }
+    Call(r, "K2_AttachToComponent").set<UObject*>("Parent", mesh_).setName("SocketName", MakeName(socket))
+        .set<uint8_t>("LocationRule", 0).set<uint8_t>("RotationRule", 0).set<uint8_t>("ScaleRule", 0)
+        .set<bool>("bWeldSimulatedBodies", false).invoke();
+    Call cc(r, "SetConstrainedComponents");
+    cc.set<UObject*>("Component1", root).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh_)
+        .setName("BoneName2", MakeName(seat.lowerArm ? "lowerarm_r" : "hand_r"));
+    const bool ok = cc.invoke();
+    SetWorldTransform(root, keep);
+    Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+    gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
+    switchOn_ = false;
+    HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
+            seat.flip == sync::SeatFlip::None ? "" : ", turned over", ok ? "" : " (joint NOT remade)");
+    return true;
 }
 
 void FighterRig::SetBodyPolicy(UObject* body) {

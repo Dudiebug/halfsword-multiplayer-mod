@@ -41,7 +41,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
-    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -104,6 +104,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
     PropCensusMsg pc; pc.seq = 3; pc.part = 1; pc.parts = 2;
     pc.entries = {CensusEntry{0, 0x1234u, 10, -20, 30}, CensusEntry{9, 0xBEEFu, -500, 0.5f, 120}}; s.push_back(Encode(pc));
+    GiveUpMsg gu; gu.entity = 2; s.push_back(Encode(gu));
     return s;
 }
 }  // namespace
@@ -116,7 +117,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::PropCensus))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::GiveUp))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

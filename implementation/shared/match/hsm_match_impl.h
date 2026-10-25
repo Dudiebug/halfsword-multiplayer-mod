@@ -139,6 +139,62 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     if (phase_ == MatchPhase::SuddenDeath) { int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
 }
 
+inline bool Match::Forfeit(uint8_t entity, uint32_t nowMs) {
+    if (cfg_.format != Format::Duel || roundOver_) return false;
+    if (phase_ != MatchPhase::Live && phase_ != MatchPhase::SuddenDeath) return false;
+    if (!Alive(entity)) return false;
+    OnDeath(entity, 0, nowMs);                             // as a fall: the round to whoever is left, no kill
+    return true;
+}
+
+inline bool GiveUpHold::Update(bool down, uint32_t nowMs) {
+    if (!down) { holding_ = fired_ = false; progress_ = 0.0f; return false; }
+    if (fired_) return false;
+    if (!holding_) { holding_ = true; since_ = nowMs; progress_ = 0.0f; return false; }
+    uint32_t held = nowMs - since_;
+    if (held >= kHoldMs) { fired_ = true; progress_ = 0.0f; return true; }
+    progress_ = float(held) / float(kHoldMs);
+    return false;
+}
+
+inline size_t Match::LoadoutsAhead() const {
+    RespawnCause cause;
+    if (phase_ == MatchPhase::Results) cause = RespawnCause::Rematch;
+    else if (roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath)) cause = RespawnCause::RoundReset;
+    else return 0;
+    const Regear r = RegearFor(cfg_, cause);
+    if (r == Regear::Shared) return 1;
+    if (r != Regear::Each) return 0;
+    size_t humans = 0;
+    for (const auto& [e, f] : fighters_) humans += f.human ? 1 : 0;
+    return humans;
+}
+
+inline void GearPool::Use(uint8_t tier) {
+    if (tier == tier_) return;
+    blobs_.clear();
+    tier_ = tier;
+}
+inline bool GearPool::Wants(uint8_t tier, size_t ahead) { Use(tier); return blobs_.size() < ahead; }
+inline void GearPool::Put(uint8_t tier, std::vector<uint8_t> blob) {
+    Use(tier);
+    if (!blob.empty()) blobs_.push_back(std::move(blob));
+}
+inline std::vector<uint8_t> GearPool::Take(uint8_t tier) {
+    Use(tier);
+    if (blobs_.empty()) return {};
+    std::vector<uint8_t> b = std::move(blobs_.front());
+    blobs_.erase(blobs_.begin());
+    return b;
+}
+
+inline bool DuelRoundWatch::Observe(Format f, uint16_t round) {
+    if (f != Format::Duel || round == 0) { seen_ = 0; return false; }
+    bool moved = seen_ != 0 && round != seen_;
+    seen_ = round;
+    return moved;
+}
+
 inline Match::Events Match::Tick(uint32_t nowMs) {
     Events ev = Advance(nowMs);
     if (!ev.respawn.empty() || ev.rematch) {

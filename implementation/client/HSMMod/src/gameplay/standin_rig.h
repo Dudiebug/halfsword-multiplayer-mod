@@ -66,6 +66,7 @@ public:
     // weapon. Call every frame after Neutralise and Drive. Logs one line per change.
     void ApplyGrip(const sync::GripState& g);
     void ApplySwitch(bool on, ue::UObject* weaponR);   // the polearm hand switch's joint positions
+    bool ApplySeat(const sync::GripState& g, ue::UObject* weaponR);   // the right hand's seat on the weapon (hsm_grip.h)
 
 private:
     sync::GripState ReadGrip() const;             // the bound Willie's own grip variables (the owner's side)
@@ -124,10 +125,13 @@ private:
     ue::FProperty* gripFlag_[5] = {};                        // offhand, alt, mordhau, switched, reverse (BoolProperty)
     sync::GripState gripStateLogged_{};                      // the grip state ApplyGrip last logged
     bool gripStateKnown_ = false;
+    int ownToggles_ = -1;                                    // the owner's grip toggles last logged when sending (-1 none)
     ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)
     ue::UObject* switchJoint_ = nullptr;                     // the right hand joint ApplySwitch last set
     bool switchOn_ = false;                                  // ... and whether it set it switched
+    ue::UObject* seatJoint_ = nullptr;                       // the right hand joint ApplySeat last seated
+    uint8_t seatKey_ = 0;                                    // ... and the owner's toggles it was seated for (SeatKey)
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons

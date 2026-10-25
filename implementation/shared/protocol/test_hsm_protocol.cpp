@@ -150,8 +150,10 @@ static void TestMatchInfoAndKill() {
     Kill k; k.killer = 3; k.victim = 4; k.flags = 1;
     auto kb = Encode(k); Kill ko; CHECK(Decode(kb.data(), kb.size(), ko) && ko.killer == 3 && ko.victim == 4 && ko.flags == 1);
     k.victim = 0; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));   // victim required
-    k.victim = 4; k.flags = 8; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 15);   // rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    // Spec revision (rev 16): flag 8 is "gave up" (Duel, held G); 16 is the first unknown bit.
+    k.victim = 4; k.flags = 8; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 8);
+    k.flags = 16; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 16);   // rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so
@@ -192,6 +194,14 @@ static void TestOwnerStateAndDeath() {
     DeathReport env = d; env.killer = 0; std::vector<uint8_t> eb = Encode(env); CHECK(Decode(eb.data(), eb.size(), dback) && dback.killer == 0);
     DeathReport bad = d; bad.victim = 0; std::vector<uint8_t> bb = Encode(bad); CHECK(!Decode(bb.data(), bb.size(), dback));
     DeathReport big = d; big.killer = uint8_t(kMaxWillies + 1); std::vector<uint8_t> gb = Encode(big); CHECK(!Decode(gb.data(), gb.size(), dback));
+    GiveUpMsg g; g.entity = 3;
+    std::vector<uint8_t> ub = Encode(g);
+    GiveUpMsg gback; MsgType gt;
+    CHECK(Decode(ub.data(), ub.size(), gback) && gback.entity == 3 && PeekType(ub.data(), ub.size(), gt) && gt == MsgType::GiveUp);
+    for (size_t n = 0; n < ub.size(); ++n) CHECK(!Decode(ub.data(), n, gback));
+    std::vector<uint8_t> ul = ub; ul.push_back(0); CHECK(!Decode(ul.data(), ul.size(), gback));   // trailing byte
+    for (uint8_t e : {uint8_t(0), uint8_t(kMaxWillies + 1)}) { GiveUpMsg x; x.entity = e; std::vector<uint8_t> xb = Encode(x); CHECK(!Decode(xb.data(), xb.size(), gback)); }
+    CHECK(!Decode(db.data(), db.size(), gback));                                // another message's bytes
 }
 
 int main() {

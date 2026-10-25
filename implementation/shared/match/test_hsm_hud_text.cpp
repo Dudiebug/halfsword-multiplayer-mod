@@ -42,6 +42,7 @@ static void TestKillLine() {
     CHECK(KillLine(m, {1, 3, 1}) == "Host killed teammate Bo");
     CHECK(KillLine(m, {3, 3, 2}) == "Bo killed themselves");
     CHECK(KillLine(m, {0, 2, 4}) == "Ann died");
+    CHECK(KillLine(m, {0, 2, 8}) == "Ann gave up" && KillLine(m, {2, 2, 8 | 2}) == "Ann gave up");   // held G (Duel)
     CHECK(KillLine(m, {9, 2, 0}) == "#9 killed Ann");                           // unknown entity: number
 }
 

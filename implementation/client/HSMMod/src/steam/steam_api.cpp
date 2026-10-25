@@ -277,7 +277,15 @@ bool Poll(Event& out) {
     return true;
 }
 
-SteamId MySteamId() { return g_ready ? g.GetSteamID(g_user) : 0; }
+// The signed-in user never changes while the game runs, and the session asks for it on every hit event (Lobby::IsHost):
+// under Proton every Steam call crosses from Wine into the Linux client, far slower than on Windows, so it is read once.
+SteamId MySteamId() {
+    static std::atomic<SteamId> mine{0};
+    if (!g_ready) return 0;
+    SteamId id = mine.load(std::memory_order_relaxed);
+    if (!id) mine.store(id = g.GetSteamID(g_user), std::memory_order_relaxed);
+    return id;
+}
 std::string PersonaName(SteamId user) {
     if (!g_ready) return {};
     const char* n = user == MySteamId() ? g.GetPersonaName(g_friends) : g.GetFriendPersonaName(g_friends, user);

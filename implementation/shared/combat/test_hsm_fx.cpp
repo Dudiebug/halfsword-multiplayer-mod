@@ -214,7 +214,7 @@ void TestSoundAndArmorKinds() {
         CHECK(NearV(o.velocity, m.velocity) && o.extraVelocity == m.extraVelocity && NearV(o.local.pos, m.local.pos));
         CHECK(Dec(Wire(m)));
     }
-    CHECK(hsm::kProtocolRevision == 15);
+    CHECK(hsm::kProtocolRevision >= 15);                                        // the kinds above came with rev 15
     { PaintFxMsg m = Voice(); m.rate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Armor(); m.rate = kFxArmorSlots; CHECK(!Dec(Wire(m))); }      // a slot is a byte enum below 64
     { PaintFxMsg m = Armor(); m.rate = kFxArmorSlots - 1; CHECK(Dec(Wire(m))); }

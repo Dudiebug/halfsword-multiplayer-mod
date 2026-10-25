@@ -105,6 +105,7 @@ inline std::string RespawnLine(const MatchInfo& m, uint32_t sinceDeathMs) {
 
 inline std::string KillLine(const MatchInfo& m, const Kill& k) {
     std::string victim = NameOf(m, k.victim);
+    if (k.flags & 8) return victim + " gave up";
     if (k.flags & 2) return victim + " killed themselves";
     if ((k.flags & 4) || k.killer == 0) return victim + " died";
     return NameOf(m, k.killer) + ((k.flags & 1) ? " killed teammate " : " killed ") + victim;

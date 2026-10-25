@@ -43,11 +43,68 @@ static void TestExhaustiveInvariants() {
     }
 }
 
+// The two-player test 12 longsword: half-sword grip 15 (alt), then Event Reverse Grip makes mordhau (grip 10, reverse,
+// reverse type 1); the default two-handed grip is 13.
+static void TestSeatPoint() {
+    CHECK(SeatFor(13, true, false, false, false, 1).point == SeatPoint::Default);    // two hands on the grip
+    CHECK(SeatFor(13, false, false, false, false, 1).point == SeatPoint::Alt);       // 13/14/16 one-handed: the alt place
+    CHECK(SeatFor(14, false, false, false, false, 1).point == SeatPoint::Alt);
+    CHECK(SeatFor(16, false, false, false, false, 1).point == SeatPoint::Alt);
+    CHECK(SeatFor(16, true, false, false, false, 1).point == SeatPoint::Default);
+    CHECK(SeatFor(3, true, false, false, false, 1).point == SeatPoint::Alt);         // grip 3 always
+    CHECK(SeatFor(15, true, true, false, false, 1).point == SeatPoint::Alt);         // half-sword
+    CHECK(SeatFor(10, true, true, true, true, 1).point == SeatPoint::Reverse);       // mordhau, alt flag or not
+    CHECK(SeatFor(10, true, false, true, true, 1).point == SeatPoint::Reverse);
+    CHECK(SeatFor(1, false, false, true, false, 0).point == SeatPoint::Reverse);
+    // Negative control: every other grip type with no flags holds at the default place.
+    for (unsigned g = 0; g < 32; ++g) {
+        if (g == 3 || g == 13 || g == 14 || g == 16) continue;
+        CHECK(SeatFor(uint8_t(g), false, false, false, false, 1).point == SeatPoint::Default);
+        CHECK(SeatFor(uint8_t(g), true, false, false, false, 1).point == SeatPoint::Default);
+    }
+}
+
+static void TestSeatFlip() {
+    CHECK(SeatFor(10, true, false, true, true, 1).flip == SeatFlip::Pitch180);       // mordhau turns the sword over
+    CHECK(SeatFor(1, false, false, false, true, 0).flip == SeatFlip::Yaw180);
+    CHECK(SeatFor(1, false, false, false, true, 1).flip == SeatFlip::Pitch180);
+    CHECK(SeatFor(1, false, false, false, true, 2).flip == SeatFlip::Pitch180);
+    CHECK(SeatFor(1, false, false, false, true, 3).flip == SeatFlip::None);
+    for (unsigned t = 0; t < 4; ++t) {                                                 // not reversed: never turned
+        CHECK(SeatFor(1, false, false, false, false, uint8_t(t)).flip == SeatFlip::None);
+        CHECK(SeatFor(10, true, false, true, false, uint8_t(t)).flip == SeatFlip::None);
+    }
+}
+
+static void TestSeatSocketAndBone() {
+    for (unsigned g = 0; g < 32; ++g) {
+        const GripSeat s = SeatFor(uint8_t(g), false, false, false, false, 1);
+        CHECK(s.hammerSocket == (g == 5 || g == 8 || g == 15));
+        CHECK(s.lowerArm == (g == 6 || g == 7));
+    }
+    CHECK(SeatFor(15, true, true, false, false, 1).hammerSocket);
+    CHECK(!SeatFor(10, true, true, true, true, 1).hammerSocket);                      // mordhau is grip 10: the plain socket
+}
+
+static void TestSeatKey() {
+    bool seen[8] = {};
+    for (int a = 0; a < 2; ++a) for (int m = 0; m < 2; ++m) for (int r = 0; r < 2; ++r) {
+        const uint8_t k = SeatKey(a != 0, m != 0, r != 0);
+        CHECK(k < 8);
+        if (k < 8) { CHECK(!seen[k]); seen[k] = true; }                                // every toggle changes the key
+    }
+    CHECK(SeatKey(false, false, false) == 0);                                          // a new joint's seat
+}
+
 int main() {
     TestHolderNeverGetsZeroFromThePose();
     TestNonZeroPoseGripIsAppliedUnchanged();
     TestEmptyHandGetsThePoseValue();
     TestExhaustiveInvariants();
+    TestSeatPoint();
+    TestSeatFlip();
+    TestSeatSocketAndBone();
+    TestSeatKey();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");
     return g_fail != 0;

@@ -156,7 +156,8 @@ inline FeedRow MakeFeedRow(const MatchInfo& m, const Kill& k, uint8_t me) {
     FeedRow r;
     r.mine = k.victim == me || (k.killer == me && k.killer != 0);
     Span victim{NameOf(m, k.victim), FighterInk(m, k.victim)};
-    if (k.flags & 2) r.spans = {victim, {" killed themselves", style::kIron}};
+    if (k.flags & 8) r.spans = {victim, {" gave up", style::kIron}};
+    else if (k.flags & 2) r.spans = {victim, {" killed themselves", style::kIron}};
     else if ((k.flags & 4) || k.killer == 0) r.spans = {victim, {" died", style::kIron}};
     else r.spans = {{NameOf(m, k.killer), FighterInk(m, k.killer)}, {(k.flags & 1) ? " killed teammate " : " killed ", style::kIron}, victim};
     return r;
@@ -174,6 +175,7 @@ struct LocalHud {
     bool oneFight = false;           // a Progression fight (Free Mode off): the host plays it as one fight, no waves
     BannerShot banner;               // BannerTracker::shot()
     std::vector<FeedItem> feed;      // oldest first
+    float giveUp = 0;                // Duel: how far the give-up key hold is (GiveUpHold::progress), 0 = not held
 };
 
 struct SceneText { bool visible = false; std::string text; Rgba color = style::kBone; float opacity = 1, scale = 1; };
@@ -342,10 +344,14 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
         s.clock = Clock(m.timeLeftMs);
     }
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
+    const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
+    if (l.giveUp > 0 && Format(m.format) == Format::Duel && fought && !InRoundGap(m))
+        s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
     if (m.phase == uint8_t(MatchPhase::Countdown)) {
         if (m.timeLeftMs) {                      // the digits, each popping as it appears
             Look look = BannerLook((1000 - m.timeLeftMs % 1000) % 1000);
             s.banner = {true, Seconds(m.timeLeftMs), style::kBone, look.opacity, look.scale};
+            if (Format(m.format) == Format::Duel) s.bannerSub = {true, "HOLD G TO GIVE UP A ROUND", style::kIron, look.opacity, 1};
         }
     } else if (!l.banner.text.empty()) {
         uint32_t age = AgeMs(l.banner.atMs, nowMs);
