@@ -184,6 +184,7 @@ private:
                  requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
                  attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
+                 spawned = 0, spawnFailed = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0;
     };
 
@@ -200,6 +201,8 @@ private:
     void SelfDropped(uint8_t entity, ue::UObject* standIn, int hand, StandInHand& sh, std::array<ue::UObject*, 2>& cur, double nowMs);
     bool Attach(uint8_t entity, ue::UObject* standIn, int hand, const StandIns::PoseHandView& pose, double nowMs);
     bool TakeIntoHand(ue::UObject* standIn, int hand, ue::UObject* weapon);
+    bool SpawnIntoHand(uint8_t entity, ue::UObject* standIn, int hand, uint32_t classHash);   // no copy here: one of that class
+    ue::UClass* WeaponClassByHash(uint32_t classHash, double nowMs);   // a loaded weapon class by sync::WeaponClassHash
     void LetLoose(uint8_t entity, int hand, ue::UObject* weapon, double nowMs);   // falls here: a prop again, or loose_
     void TickLoose(double nowMs);
     bool Adopt(uint64_t propId, uint8_t owner, int hand, const PendingDrop& d, double nowMs);
@@ -251,6 +254,8 @@ private:
     std::vector<Loose> loose_;
     std::vector<Candidate> weapons_;
     double weaponsMs_ = -1e18;                                       // when weapons_ was last refreshed
+    std::unordered_map<uint32_t, std::pair<ue::UClass*, int32_t>> weaponClasses_;   // class hash -> loaded class, its slot
+    double weaponClassesMs_ = -1e18;                                 // when weaponClasses_ was last walked
     std::map<const ue::UClass*, std::unique_ptr<RootCalls>> calls_;
     std::array<std::unordered_map<const ue::UClass*, int32_t>, 3> fieldOff_{};   // ObjectField: offset per class, -1 none
     // Level props. levelSinceMs_: when this level was first ticked in a fight level (-1: not yet); censusMs_: the next walk

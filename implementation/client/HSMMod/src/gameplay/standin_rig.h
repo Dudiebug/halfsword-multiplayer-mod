@@ -123,6 +123,8 @@ private:
     ue::FProperty* gripFlag_[5] = {};                        // offhand, alt, mordhau, switched, reverse (BoolProperty)
     sync::GripState gripStateLogged_{};                      // the grip state ApplyGrip last logged
     bool gripStateKnown_ = false;
+    ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
+    double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons

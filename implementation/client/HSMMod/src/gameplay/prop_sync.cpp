@@ -38,6 +38,9 @@ constexpr double kRetryMaxMs = 4000.0;        // doubling up to this, until the 
 constexpr double kLooseKeepMs = 10000.0;      // a weapon a stand-in let go of here waits this long for its drop to be heard of
 constexpr double kWeaponsRefreshMs = 10000.0; // the attach's list of weapon actors (WeaponActors walks every object) is read
                                               // again at most this often; props and loose_ are always looked at
+constexpr double kSpawnAfterMs = 1500.0;      // a pose showing a class no weapon here has for this long gets one spawned in
+                                              // the stand-in's hand (round start: the loadout fills the hand within 0.2 s)
+constexpr double kClassWalkMs = 10000.0;      // the loaded weapon classes are walked again (on a miss) at most this often
 constexpr uint64_t kLogFirst = 10;            // the first attaches, releases, self-drops and adoptions are logged in full
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kBlock = 2;   // ECollisionChannel / ECollisionResponse
 constexpr double kCensusFirstMs = 3000.0;     // a fight level's first census walk (and a client's first match) waits this
@@ -625,6 +628,10 @@ bool PropSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::PoseHa
     if (pick < 0 && (pick = sync::PickAttachFar(loose, pose.classHash, pose.pos, pose.firstPos)) >= 0)
         HSM_LOG("props: stand-in of e%u hand %d: the owner's weapon matched one of its class within %.0f uu here (drifted)", e, h,
                 sync::kAttachFarRadiusUu);
+    // No copy of that class lies anywhere here (a prop the levels disagree on, a weapon this machine never spawned): once
+    // the pose has shown it long enough that it is no round-start loadout still on its way, the hand gets one of its own.
+    if (pick < 0 && loose.empty() && nowMs - pose.sinceMs >= kSpawnAfterMs && WeaponClassByHash(pose.classHash, nowMs))
+        return SpawnIntoHand(e, standIn, h, pose.classHash);
     if (pick < 0) {
         if (n_.attachMiss < kLogFirst)
             HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class within %.0f uu here (%zu of that class loose)",
@@ -640,6 +647,53 @@ bool PropSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::PoseHa
     if (n_.attached < kLogFirst)
         HSM_LOG("props: stand-in of e%u took %s%s into hand %d: the owner's pose shows it picked one up", e, ObjectName(w).c_str(),
                 byActor_.count(w) ? " (a prop)" : "", h);
+    return true;
+}
+
+// Every loaded weapon class has a default object, so a walk over the object array's default objects finds them all
+// (ue::IsDefaultObject, then the class chain; no names are made but the weapon classes'). Walked again on a miss at most
+// every kClassWalkMs; an entry whose slot no longer holds its class (a level change unloaded it) counts as a miss.
+UClass* PropSync::WeaponClassByHash(uint32_t classHash, double nowMs) {
+    auto known = weaponClasses_.find(classHash);
+    if (known != weaponClasses_.end() && ObjectAt(known->second.second) == reinterpret_cast<UObject*>(known->second.first))
+        return known->second.first;
+    if (nowMs - weaponClassesMs_ < kClassWalkMs) return nullptr;
+    weaponClassesMs_ = nowMs;
+    weaponClasses_.clear();
+    UClass* base = FindClass("ModularWeaponBP_C");
+    if (!base) return nullptr;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || !IsDefaultObject(o)) continue;
+        UClass* c = ClassOf(o);
+        if (c == base || !IsChildOf(c, base)) continue;   // the bare base has no look of its own (its passport gives it one)
+        weaponClasses_[sync::WeaponClassHash(ObjectName(reinterpret_cast<UObject*>(c)).c_str())] = {c, ObjectIndex(reinterpret_cast<UObject*>(c))};
+    }
+    known = weaponClasses_.find(classHash);
+    return known != weaponClasses_.end() ? known->second.first : nullptr;
+}
+
+// The game's own spawn: "Set Up Right/Left Hand Weapon" with no weapon and a class spawns one of that class at the hand's
+// socket, gives it the (here empty) Weapon Passport and takes it into the hand (Willie_BP.cpp:6044). An empty passport
+// leaves a built weapon's own modules (only the bare ModularWeaponBP_C, never spawned here, takes its look from it).
+bool PropSync::SpawnIntoHand(uint8_t e, UObject* standIn, int h, uint32_t classHash) {
+    UClass* cls = weaponClasses_.count(classHash) ? weaponClasses_[classHash].first : nullptr;
+    bool ok = false;
+    if (cls) {
+        Call c(standIn, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
+        c.set<UClass*>("Weapon Class", cls);
+        ok = c.valid() && c.invoke();
+    }
+    UObject* w = ok ? ObjectField(standIn, h == 0 ? 1 : 2) : nullptr;
+    ok = w && ClassHashOf(w) == classHash && ObjectField(w, 0) == standIn;
+    if (!ok) {
+        if (++n_.spawnFailed <= kLogFirst) HSM_LOG("props: stand-in of e%u hand %d: spawning its own %s failed", e, h,
+                                                    cls ? ObjectName(reinterpret_cast<UObject*>(cls)).c_str() : "weapon");
+        return false;
+    }
+    if (++n_.spawned <= kLogFirst)
+        HSM_LOG("props: stand-in of e%u hand %d: no %s lies here, so it got one of its own (%s)", e, h,
+                ObjectName(reinterpret_cast<UObject*>(cls)).c_str(), ObjectName(w).c_str());
     return true;
 }
 
@@ -1221,7 +1275,7 @@ std::string PropSync::HealthLine() {
                   "props: live %zu pending %zu loose %zu | drops %llu minted %llu mintFailed %llu | resolved %llu forced %llu kept %llu "
                   "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu islands %llu | "
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
-                  "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu "
+                  "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu spawned %llu (failed %llu) "
                   "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
                   "leftOut %zu purged %llu censuses %llu censusRejected %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
@@ -1230,7 +1284,7 @@ std::string PropSync::HealthLine() {
                   d(a.holdDenied, b.holdDenied), d(a.contacts, b.contacts), d(a.islands, b.islands), d(a.grants, b.grants), d(a.lapsed, b.lapsed),
                   d(a.leasesRejected, b.leasesRejected), d(a.statesSent, b.statesSent), d(a.statesApplied, b.statesApplied),
                   d(a.statesStale, b.statesStale), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
-                  d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss),
+                  d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss), d(a.spawned, b.spawned), d(a.spawnFailed, b.spawnFailed),
                   d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased), level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),

@@ -3,6 +3,7 @@
 #include "util/hsm_names.h"
 #include "log.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
 
@@ -27,6 +28,7 @@ constexpr const char* kStandInTrueBoolFields[] = {
     "Block Arm Muscles", "Invulnerable", "Force Disable Dismemberment"};
 constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Bend Over Extreme"};
 
+constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried again this often, not every frame
 constexpr const char* kWeaponFields[sync::kPoseWeapons] = {"Weapon R", "Weapon L"};   // slot = hand
 constexpr const char* kGripFields[2] = {"PhysicsConstraint R Hand", "PhysicsConstraint L Hand"};
 // The hands' grip variables (docs/TWO_PLAYER_TEST_6.md section 1): the fingers follow the two grip types and the offhand flag in
@@ -370,7 +372,7 @@ bool FighterRig::GripWanted(int hand) const {
 bool FighterRig::GripToLock(int hand) const {
     if (!g_gripLock || !FieldAt(gripOffset_[hand])) return false;
     UObject* held = FieldAt(weaponOffset_[hand]);
-    if (!held) return hand == 1 && gripStateLogged_.offhand;
+    if (!held) return hand == 1 && offJoint_ && FieldAt(gripOffset_[1]) == offJoint_;
     for (const Weapon& wp : weapons_)
         if (wp.actor == held && wp.fists) return false;
     return true;
@@ -538,9 +540,35 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
         if (held && v == 0) continue;                // the weapon's own default is 0 too: leave the game's value, 0 destroys it
         base[gripTypeOffset_[h]] = v;
     }
+    // The off hand of a two-handed grip: the game's own Attach L Hand To Offhand Position makes its joint (PhysicsConstraint
+    // L Hand to the right hand's weapon, Willie_BP.cpp:1829) and sets L Hand In Offhand Attached; Break L Constraint undoes
+    // both (:1980). Writing the flag alone (pre9) left the off hand with no joint, flailing beside the shaft. GripToLock
+    // then locks the joint like the right hand's. The alt / mordhau flags are written first: the attach point follows them.
     const bool flags[5] = {g.offhand, g.altGrip, g.mordhau, g.switched2H, g.reverseR};
-    for (int i = 0; i < 5; ++i)
+    for (int i = 1; i < 5; ++i)
         if (gripFlag_[i]) SetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), flags[i]);
+    UObject* const weaponR = FieldAt(weaponOffset_[0]);
+    UObject* const weaponL = FieldAt(weaponOffset_[1]);
+    const bool wantOff = g.offhand && weaponR && (!weaponL || weaponL == weaponR);
+    if (wantOff && (!offJoint_ || FieldAt(gripOffset_[1]) != offJoint_)) {
+        const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - offTryMs_ >= kOffhandRetryMs) {
+            offTryMs_ = now;
+            UObject* const before = FieldAt(gripOffset_[1]);
+            Call at(willie_, "Attach L Hand To Offhand Position");
+            UObject* const after = at.valid() && at.invoke() ? FieldAt(gripOffset_[1]) : nullptr;
+            offJoint_ = after && after != before ? after : nullptr;
+            HSM_LOG("rig: %s: off hand %s", ObjectName(willie_).c_str(), offJoint_ ? "attached to the shaft" : "attach FAILED");
+        }
+    } else if (!wantOff && offJoint_) {
+        Call br(willie_, "Break L Constraint");
+        br.set<bool>("Slide", false);
+        br.invoke();
+        offJoint_ = nullptr;
+        HSM_LOG("rig: %s: off hand released", ObjectName(willie_).c_str());
+    }
+    if (gripFlag_[0]) SetBoolValue(gripFlag_[0], base + PropertyOffset(gripFlag_[0]), offJoint_ != nullptr);
+    applied.offhand = offJoint_ != nullptr;
     const sync::GripState& l = gripStateLogged_;
     if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
         l.altGrip == applied.altGrip && l.mordhau == applied.mordhau && l.switched2H == applied.switched2H && l.reverseR == applied.reverseR)
