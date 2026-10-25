@@ -52,6 +52,11 @@ implementation/shared/run_fuzz.sh 300000         # protocol decoder fuzzing
 `implementation/shared` is the game-independent, unit-tested logic it builds on.
 See [implementation/client/HSMMod/README.md](implementation/client/HSMMod/README.md) for details.
 
+## License
+
+HSMMod is released under the [MIT License](LICENSE). Share builds and modified versions freely; keep the
+copyright and license notice.
+
 ## Credits
 
 Parts of the sync design are ported from [Cyrex0/HalfSword-MP](https://github.com/Cyrex0/HalfSword-MP),
