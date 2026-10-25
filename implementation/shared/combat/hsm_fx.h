@@ -1,4 +1,4 @@
-// Blood and wound paint in owner sync (protocol rev 10, MsgType::PaintFx).
+// Blood and wound paint in owner sync (protocol rev 10, MsgType::PaintFx); voice lines, hit sounds, armour off and on (rev 15).
 //
 // Stand-ins carry Invulnerable, and the game's paint and blood paths start with !Invulnerable (Box Vertex Paint,
 // Willie_BP.cpp:1872; Get Damage, 3892), so a blow that lands on a stand-in shows no cut and no blood: only the
@@ -10,6 +10,16 @@
 //   Wound  a wound painted by Get Damage (no Hit Box: a cube of WoundRadius at the hit) or by Box Vertex Paint (its
 //          box): a box, the bone, the body part and Damage Rate (Additional). Replayed through the stand-in's own
 //          Box Vertex Paint with Invulnerable lowered for that one call.
+//   Voice     rev 15: a voice line the owner's Voice Audio just played (pain, curse, exertion, ...): bone is the cue's
+//             object name, rate its volume multiplier. Played on the stand-in's own Voice Audio.
+//   HitSound  rev 15: a blow Get Damage took (not Inside): local.pos the hit in the bone's frame, velocity.x |Impulse|,
+//             velocity.y Damage Raw Scaled, extraVelocity Lower Threshold; the receiver plays PlanHitSound's cues there.
+//   Armor     rev 15: "Remove Armor" on the owner's fighter (rate: the slot, local: the spawn transform in the bone's
+//             frame). Replayed through the stand-in's own Remove Armor, so its loose piece appears where the owner's did.
+//             With extraVelocity set it is a strip request instead: sent to the owner by whoever stripped its fallen
+//             fighter's stand-in; the owner removes the piece only if its fighter is fallen, and reports it as usual.
+//   ArmorOn   rev 15: "Pick Up Armor" on the owner's fighter: bone is the piece's class, local its location in the pelvis
+//             frame; the receiver puts the nearest loose piece of that class on the stand-in.
 // Transforms and directions travel in the named bone's frame (as hit claims do), so the paint lands on the same spot of
 // the stand-in's bone even though the stand-in trails its owner. Pure types, no engine headers.
 //
@@ -30,7 +40,7 @@
 
 namespace hsm::combat {
 
-enum class FxKind : uint8_t { Blood = 1, Wound = 2 };
+enum class FxKind : uint8_t { Blood = 1, Wound = 2, Voice = 3, HitSound = 4, Armor = 5, ArmorOn = 6 };
 
 constexpr uint8_t kFxBodyParts = 8;                 // BodyPart_Enum 0..7 (Willie_BP.cpp:1880, the paint bone switch)
 constexpr uint8_t kFxMaxLoops = 10;                 // Get Damage clamps Spawn Blood's Loop Count to 1..10 (4197)
@@ -39,6 +49,7 @@ constexpr double kFxMaxExtent = 500.0;              // uu, box half-extent
 constexpr double kFxMaxRate = 1000.0;               // Spawn Rate (Get Damage passes at most 50 x Damage Rate) / Damage Rate
 constexpr double kFxMaxVector = 1e7;                // velocity / power components
 constexpr double kFxMaxBleeding = 1e4;
+constexpr double kFxArmorSlots = 64;               // ArmorSlots_Enum is a byte enum; slots are whole and below this
 constexpr int kFxMaxPerSecond = 30;                 // per (fighter, kind), sender side
 
 struct PaintFxMsg {
@@ -114,7 +125,7 @@ inline bool Decode(const uint8_t* d, size_t n, PaintFxMsg& m) {
     o.gatePart = r.u8();
     if (!r.done() || !numOk) return false;
     if (o.entity < 1 || o.entity > kMaxWillies) return false;
-    if (kind != uint8_t(FxKind::Blood) && kind != uint8_t(FxKind::Wound)) return false;
+    if (kind < uint8_t(FxKind::Blood) || kind > uint8_t(FxKind::ArmorOn)) return false;
     if (extra > 1) return false;
     o.kind = FxKind(kind);
     o.extraVelocity = extra == 1;
@@ -128,6 +139,8 @@ inline bool Decode(const uint8_t* d, size_t n, PaintFxMsg& m) {
     if (!detail::InRange(o.bleeding, 0, kFxMaxBleeding)) return false;
     if (!detail::InRange(o.gateLastRate, 0, kFxMaxRate) || !detail::InRange(o.gateSpRate, 0, kFxMaxRate)) return false;
     if (o.gatePart >= kFxBodyParts) return false;
+    if (o.kind == FxKind::Armor && !(o.rate < kFxArmorSlots && std::floor(o.rate) == o.rate)) return false;
+    if (o.kind == FxKind::HitSound && !(o.velocity.x >= 0 && o.velocity.y >= 0)) return false;
     m = std::move(o);
     return true;
 }
@@ -153,6 +166,27 @@ inline double WoundRadius(double damageRawScaled, double impulseLen) {
     return std::clamp((damageRawScaled + impulseLen) * 0.005, 3.0, 10.0);
 }
 
+inline bool IsStripRequest(const PaintFxMsg& m) { return m.kind == FxKind::Armor && m.extraVelocity; }
+
+// Get Damage's own sounds for a blow (Willie_BP.cpp:4071, 4379-4385): the blunt cue by Damage Raw Scaled at
+// clamp(|Impulse| * 0.0005 * (Lower Threshold ? 3 : 1)) when above 0.1, the bone crack at clamp(Damage Raw Scaled *
+// 0.0008 * (Lower Threshold ? 3 : 1)) from 1000 damage up; nothing when the blow went Inside. Its slash cue's volume is
+// |Impulse| * 0 * Cutting Power, never above its 0.1 gate, so there is none.
+enum class BluntCue : uint8_t { None, Light, WetHard, BluntHard };
+struct HitSoundPlan { BluntCue blunt = BluntCue::None; double bluntVolume = 0, boneVolume = 0; };
+inline HitSoundPlan PlanHitSound(double impulseLen, double damageRawScaled, bool lowerThreshold, bool inside) {
+    HitSoundPlan p;
+    if (inside || !std::isfinite(impulseLen) || !std::isfinite(damageRawScaled)) return p;
+    const double k = lowerThreshold ? 3.0 : 1.0;
+    const double blunt = std::clamp(impulseLen * 0.0005 * k, 0.0, 1.0);
+    if (blunt > 0.1) {
+        p.bluntVolume = blunt;
+        p.blunt = damageRawScaled >= 3000 ? BluntCue::BluntHard : damageRawScaled >= 1000 ? BluntCue::WetHard : BluntCue::Light;
+    }
+    if (damageRawScaled >= 1000) p.boneVolume = std::clamp(damageRawScaled * 0.0008 * k, 0.0, 1.0);
+    return p;
+}
+
 // Sender side: at most kFxMaxPerSecond reports per (fighter, kind) per one-second window.
 class FxLimiter {
 public:
@@ -171,7 +205,7 @@ public:
 
 private:
     struct Window { double startMs = 0; int count = 0; };
-    std::map<std::pair<uint8_t, uint8_t>, Window> windows_;   // at most kMaxWillies x 2 entries
+    std::map<std::pair<uint8_t, uint8_t>, Window> windows_;   // at most kMaxWillies x 6 entries (one per kind)
 };
 
 }  // namespace hsm::combat

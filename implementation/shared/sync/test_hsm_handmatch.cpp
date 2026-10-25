@@ -306,7 +306,26 @@ void TestAdoptCandidate() {
 
 }  // namespace
 
+// Test 7: the owner picked up a weapon whose copy here had drifted past kAttachRadiusUu, and the stand-in's hand stayed
+// empty. PickAttachFar is the fallback once PickAttach found none: the nearest of the class within kAttachFarRadiusUu.
+void TestPickFar() {
+    const V3 now{1000, 0, 100}, picked{0, 0, 20};
+    CHECK(kAttachFarRadiusUu == 600.0 && kAttachFarRadiusUu > kAttachRadiusUu);
+    std::vector<LooseWeapon> w = {{{1400, 0, 100}, kSword}, {{1300, 0, 100}, kSword}, {{1010, 0, 100}, kShield}};
+    CHECK(PickAttach(w, kSword, now, picked) == -1);
+    CHECK(PickAttachFar(w, kSword, now, picked) == 1);
+    w = {{{1000 + kAttachFarRadiusUu, 0, 100}, kSword}};
+    CHECK(PickAttachFar(w, kSword, now, picked) == 0);                       // inclusive
+    w = {{{1000 + kAttachFarRadiusUu + 0.01, 0, 100}, kSword}};
+    CHECK(PickAttachFar(w, kSword, now, picked) == -1);
+    w = {{{0, 0, 20 - kAttachFarRadiusUu}, kSword}};
+    CHECK(PickAttachFar(w, kSword, now, picked) == 0);                       // or near where it was picked up
+    CHECK(PickAttachFar(w, kShield, now, picked) == -1);
+    CHECK(PickAttachFar(w, kHandEmpty, now, picked) == -1 && PickAttachFar(w, kHandUnknown, now, picked) == -1);
+}
+
 int main() {
+    TestPickFar();
     TestAttach();
     TestRelease();
     TestFlickerHold();

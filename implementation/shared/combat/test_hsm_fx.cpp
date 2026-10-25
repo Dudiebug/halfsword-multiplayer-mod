@@ -84,7 +84,7 @@ void TestRanges() {
     { PaintFxMsg m = Blood(); m.entity = 17; CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Blood(); m.entity = 1; CHECK(Dec(Wire(m))); }
     CHECK(!Dec(Wire(Blood(), 0, 1)));
-    CHECK(!Dec(Wire(Blood(), 3, 1)));
+    CHECK(!Dec(Wire(Blood(), 7, 1)));                          // rev 15: kinds 1..6 (3 Voice, 4 HitSound, 5 Armor, 6 ArmorOn)
     CHECK(!Dec(Wire(Blood(), 1, 2)));                          // extraVelocity is 0 or 1
     { PaintFxMsg m = Blood(); m.bone = ""; CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Blood(); m.bone = std::string(64, 'b'); CHECK(Dec(Wire(m))); }
@@ -177,9 +177,91 @@ void TestLimiter() {
     CHECK(!m.Allow(0, FxKind::Blood, 0));            // entity 0 is never a fighter
 }
 
+PaintFxMsg Voice() {
+    PaintFxMsg m;
+    m.entity = 2; m.kind = FxKind::Voice; m.seq = 9; m.bone = "Pain_Big_Cue"; m.rate = 0.75;   // bone: the cue
+    return m;
+}
+PaintFxMsg HitSound() {
+    PaintFxMsg m;
+    m.entity = 2; m.kind = FxKind::HitSound; m.seq = 10; m.bone = "spine_03"; m.local.pos = {3, 1, -2};
+    m.extraVelocity = true; m.velocity = {1200, 2500, 0};   // |Impulse|, Damage Raw Scaled; extraVelocity: Lower Threshold
+    return m;
+}
+PaintFxMsg Armor() {
+    PaintFxMsg m;
+    m.entity = 5; m.kind = FxKind::Armor; m.seq = 11; m.bone = "pelvis"; m.local.pos = {150, 20, 0}; m.rate = 7;
+    return m;
+}
+
+PaintFxMsg ArmorOn() {
+    PaintFxMsg m;
+    m.entity = 5; m.kind = FxKind::ArmorOn; m.seq = 12; m.bone = "BP_Armor_Helmet_C"; m.local.pos = {40, -10, 60};   // bone: the class
+    return m;
+}
+PaintFxMsg StripRequest() {
+    PaintFxMsg m = Armor();
+    m.extraVelocity = true;   // sent by the one who stripped the fallen fighter, to its owner
+    return m;
+}
+
+// Rev 15: a fighter's voice lines, its blunt hit and bone sounds, and an armour piece it took off travel as PaintFx too.
+void TestSoundAndArmorKinds() {
+    for (const PaintFxMsg& m : {Voice(), HitSound(), Armor(), ArmorOn(), StripRequest()}) {
+        PaintFxMsg o;
+        CHECK(Dec(Encode(m), o));
+        CHECK(o.kind == m.kind && o.entity == m.entity && o.bone == m.bone && Near(o.rate, m.rate));
+        CHECK(NearV(o.velocity, m.velocity) && o.extraVelocity == m.extraVelocity && NearV(o.local.pos, m.local.pos));
+        CHECK(Dec(Wire(m)));
+    }
+    CHECK(hsm::kProtocolRevision == 15);
+    { PaintFxMsg m = Voice(); m.rate = kFxMaxRate + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Armor(); m.rate = kFxArmorSlots; CHECK(!Dec(Wire(m))); }      // a slot is a byte enum below 64
+    { PaintFxMsg m = Armor(); m.rate = kFxArmorSlots - 1; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Armor(); m.rate = 2.5; CHECK(!Dec(Wire(m))); }                // and whole
+    { PaintFxMsg m = Armor(); m.rate = -1; CHECK(!Dec(Wire(m))); }
+    CHECK(IsStripRequest(StripRequest()) && !IsStripRequest(Armor()) && !IsStripRequest(HitSound()));
+    { PaintFxMsg m = HitSound(); m.velocity.x = -1; CHECK(!Dec(Wire(m))); }        // a length and a damage: not negative
+    { PaintFxMsg m = HitSound(); m.velocity.y = -1; CHECK(!Dec(Wire(m))); }
+}
+
+// Get Damage's sounds (Willie_BP.cpp:4071, 4379-4385), none when the blow went Inside:
+//   blunt  volume clamp(|Impulse| * 0.0005 * (Lower Threshold ? 3 : 1), 0, 1), played when > 0.1; the cue by Damage
+//          Raw Scaled: < 1000 light, < 3000 wet hard, else blunt hard;
+//   bone   volume clamp(Damage Raw Scaled * 0.0008 * (Lower Threshold ? 3 : 1), 0, 1), only from 1000 damage up.
+// (Its slash cue is played at |Impulse| * 0 * Cutting Power: never above the 0.1 gate, so it is not mirrored.)
+void TestHitSoundPlan() {
+    HitSoundPlan p = PlanHitSound(1000, 500, false, false);
+    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 0.5) && Near(p.boneVolume, 0));
+    p = PlanHitSound(1000, 500, true, false);
+    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 1.0));
+    p = PlanHitSound(300, 1000, true, false);
+    CHECK(Near(p.bluntVolume, 0.45) && Near(p.boneVolume, 1.0));   // Lower Threshold triples both (the blunt one below its clamp here)
+    p = PlanHitSound(300, 400, true, false);
+    CHECK(Near(p.boneVolume, 0));
+    p = PlanHitSound(200, 500, false, false);
+    CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0));     // 0.1 is not above the gate
+    p = PlanHitSound(201, 500, false, false);
+    CHECK(p.blunt == BluntCue::Light);
+    p = PlanHitSound(1000, 1000, false, false);
+    CHECK(p.blunt == BluntCue::WetHard && Near(p.boneVolume, 0.8));
+    p = PlanHitSound(1000, 999.9, false, false);
+    CHECK(p.blunt == BluntCue::Light && Near(p.boneVolume, 0));
+    p = PlanHitSound(1000, 3000, false, false);
+    CHECK(p.blunt == BluntCue::BluntHard && Near(p.boneVolume, 1.0));
+    p = PlanHitSound(1000, 1000, true, false);
+    CHECK(Near(p.boneVolume, 1.0));
+    p = PlanHitSound(5000, 5000, false, true);
+    CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0) && Near(p.boneVolume, 0));   // Inside: no sound
+    p = PlanHitSound(std::numeric_limits<double>::quiet_NaN(), 5000, false, false);
+    CHECK(p.blunt == BluntCue::None);
+}
+
 }  // namespace
 
 int main() {
+    TestSoundAndArmorKinds();
+    TestHitSoundPlan();
     TestRoundTrip();
     TestFraming();
     TestRanges();

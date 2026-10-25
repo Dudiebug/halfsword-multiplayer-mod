@@ -621,7 +621,10 @@ bool PropSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::PoseHa
     for (const Loose& l : loose_) consider(l.actor, l.index, 0);
     for (const auto& kv : props_) consider(kv.second.actor, kv.second.index, 0);
     for (const Candidate& c : weapons_) consider(c.actor, c.index, c.classHash);
-    const int pick = sync::PickAttach(loose, pose.classHash, pose.pos, pose.firstPos);
+    int pick = sync::PickAttach(loose, pose.classHash, pose.pos, pose.firstPos);
+    if (pick < 0 && (pick = sync::PickAttachFar(loose, pose.classHash, pose.pos, pose.firstPos)) >= 0)
+        HSM_LOG("props: stand-in of e%u hand %d: the owner's weapon matched one of its class within %.0f uu here (drifted)", e, h,
+                sync::kAttachFarRadiusUu);
     if (pick < 0) {
         if (n_.attachMiss < kLogFirst)
             HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class within %.0f uu here (%zu of that class loose)",

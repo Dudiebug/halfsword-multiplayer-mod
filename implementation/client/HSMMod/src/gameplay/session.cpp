@@ -844,9 +844,12 @@ private:
         // Blood and wounds on fighters simulated here, shown on every other machine's stand-in of them.
         game::FxSync::Env fenv;
         fenv.ownedEntity = [this](const UObject* w) { return OwnedEntityOf(w); };
+        fenv.ownedActor = [this](uint8_t e) { return OwnedActorOf(e); };
         fenv.send = [this](const combat::PaintFxMsg& m) {
             if (!net_) return;
-            if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
+            if (IsHost() && combat::IsStripRequest(m)) {   // to the fallen fighter's owner only
+                if (std::optional<uint32_t> to = PeerOfSlot(OwnerSlotOf(m.entity))) net_->Send(*to, kChanReliable, Encode(m), true);
+            } else if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
             else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
         };
         fx_.Start(adapter_, standIns_, std::move(fenv));
@@ -1406,7 +1409,16 @@ private:
             RouteHostStuck(peer.slot, m);
         } else if (OwnerMode() && t == MsgType::PaintFx) {
             combat::PaintFxMsg m;
-            if (!Decode(d, n, m) || !MayStream(peer.slot, m.entity)) { ++streamsDropped_; return; }
+            if (!Decode(d, n, m)) { ++streamsDropped_; return; }
+            if (combat::IsStripRequest(m)) {
+                // A strip of a fighter the sender does not own goes to that fighter's owner alone, who checks it is fallen.
+                const uint8_t owner = OwnerSlotOf(m.entity);
+                if (owner == 0xFF || owner == peer.slot) { ++streamsDropped_; return; }
+                if (owner == kHostSlot) fx_.Apply(m);
+                else if (std::optional<uint32_t> to = PeerOfSlot(owner)) net_->Send(*to, kChanReliable, ev.data, true);
+                return;
+            }
+            if (!MayStream(peer.slot, m.entity)) { ++streamsDropped_; return; }
             fx_.Apply(m);
             for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                 if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, ev.data, true);
@@ -2537,7 +2549,7 @@ private:
             }
             case MsgType::PaintFx: {
                 combat::PaintFxMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.entity != world_.myEntity()) fx_.Apply(m);
+                if (OwnerMode() && Decode(d, n, m) && (m.entity != world_.myEntity()) != combat::IsStripRequest(m)) fx_.Apply(m);
                 break;
             }
             case MsgType::Equip: {

@@ -44,6 +44,7 @@ constexpr double kReleaseOtherMs = 3000.0;
 constexpr double kReattachMinMs = 2000.0;   // the hold above; prop_sync takes back a weapon that left a hand by itself at
                                             // most this often
 constexpr double kAttachRadiusUu = 150.0;   // the pose's own "held" distance (standin_rig kHeldMaxUu)
+constexpr double kAttachFarRadiusUu = 600.0;   // PickAttachFar: a copy drifted this far still stands for the owner's (test 7)
 
 struct HandFacts {
     bool havePose = false;
@@ -117,14 +118,15 @@ struct LooseWeapon {
 
 // Index into loose of the weapon of class cls nearest to either point (the owner's weapon now, and where the pose first
 // showed it), within kAttachRadiusUu; -1 when none, and always for the empty or unknown class. Ties: the first.
-inline int PickAttach(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt) {
+namespace detail {
+inline int PickAttachWithin(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt, double radius) {
     if (cls == kHandEmpty || cls == kHandUnknown) return -1;
     auto dist2 = [](const V3& a, const V3& b) {
         const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
         return dx * dx + dy * dy + dz * dz;
     };
     int best = -1;
-    double bestD2 = kAttachRadiusUu * kAttachRadiusUu;
+    double bestD2 = radius * radius;
     for (size_t i = 0; i < loose.size(); ++i) {
         if (loose[i].classHash != cls) continue;
         const double a = dist2(loose[i].pos, now), b = dist2(loose[i].pos, firstAt);
@@ -132,6 +134,15 @@ inline int PickAttach(const std::vector<LooseWeapon>& loose, uint32_t cls, const
         if (d2 <= bestD2 && (best < 0 || d2 < bestD2)) { best = int(i); bestD2 = d2; }
     }
     return best;
+}
+}  // namespace detail
+inline int PickAttach(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt) {
+    return detail::PickAttachWithin(loose, cls, now, firstAt, kAttachRadiusUu);
+}
+// The fallback once PickAttach found none (test 7: a loose copy here had drifted past kAttachRadiusUu from the owner's,
+// and the stand-in's hand stayed empty): the same pick within kAttachFarRadiusUu.
+inline int PickAttachFar(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt) {
+    return detail::PickAttachWithin(loose, cls, now, firstAt, kAttachFarRadiusUu);
 }
 
 }  // namespace hsm::sync
