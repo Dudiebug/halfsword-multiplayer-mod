@@ -241,16 +241,16 @@ bool EquipSync::OwnerToken(uint8_t entity, int hand, uint8_t& token) const {
     return true;
 }
 
-bool EquipSync::MayBeDraw(uint8_t entity, int hand, uint32_t classHash) const {
+bool EquipSync::MayBeDraw(uint8_t entity, uint32_t classHash) const {
     auto it = owner_.find(entity);
     UObject* standIn = active_ && it != owner_.end() ? standIns_->ActorOf(entity) : nullptr;
     if (!standIn) return false;
+    std::array<uint32_t, kEquipSlots> slotClass{};
     for (int k = 0; k < kEquipSlots; ++k) {
-        if (!combat::HandReachesSlot(hand, k) || !(it->second.sheathed & (1u << k))) continue;
         UObject** slot = SlotField(standIn, k);
-        if (slot && *slot && !Adapter::BeingDestroyed(*slot) && ClassHash(*slot) == classHash) return true;
+        if (slot && *slot && !Adapter::BeingDestroyed(*slot)) slotClass[size_t(k)] = ClassHash(*slot);
     }
-    return false;
+    return combat::MayBeDrawFrom(it->second.sheathed, slotClass, classHash);
 }
 
 bool EquipSync::MayBeSheathe(uint8_t entity, int hand) const {

@@ -40,7 +40,8 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "log.h"
-#include "match/hsm_hud_text.h"
+#include "match/hsm_hud_scene.h"
+#include "match/hsm_maps.h"
 #include "match/hsm_match.h"
 #include "match/hsm_spectate.h"
 #include "net/steam_transport.h"
@@ -84,12 +85,13 @@ namespace {
 
 constexpr const char* kGameModeClass = "BP_HalfSwordGameMode_C";
 constexpr uint64_t kHostKey = 0;                 // roster key of the host itself (SteamIDs and ENet keys are never 0)
-constexpr double kRingRadius = 120.0;            // cm between fighters sharing one spawn point
+constexpr double kNoSpawnerRingCm = 400.0;       // spawner-less maps: candidates on a ring this far around the host
+constexpr double kSideRingCm = 900.0;            // spawner-less maps: team sides on a ring this far around the host
 constexpr double kTeleportDistance = 300.0;
 constexpr size_t kHitImpactPointOffset = 40;     // FHitResult: FaceIndex, Time, Distance, Location(24) then ImpactPoint           // off: first live test showed puppets missing on that path      // client: snap its own fighter on the first snapshot if farther
 constexpr uint8_t kFirstBotEntity = kMaxFighters + 1, kLastBotEntity = uint8_t(kMaxWillies);
 static_assert(Match::kMaxBotsAlive <= kLastBotEntity - kFirstBotEntity + 1, "every live bot needs an entity");
-constexpr uint32_t kInfoIntervalMs = 1000, kScanIntervalMs = 1000, kFeedMs = 6000, kTintRetryMs = 500;
+constexpr uint32_t kInfoIntervalMs = 1000, kScanIntervalMs = 1000, kTintRetryMs = 500;
 constexpr int kTintTries = 8;
 constexpr uint32_t kKeepAliveMs = 1000;          // owner sync: the host's own traffic when it streams nothing (HostLossMonitor)
 constexpr uint32_t kVitalsDeathMs = 1500;        // owner sync: a fighter its owner reports dead this long without a DeathReport
@@ -199,6 +201,7 @@ public:
         };
         lobby_.onMemberJoined = [this](steam::SteamId id) { if (steamNet_ && lobby_.IsHost()) steamNet_->AllowPeer(id); };
         lobby_.onMemberLeft = [this](steam::SteamId id) { if (steamNet_) steamNet_->DropPeer(id); };
+        ui::ChatSetup(cfg_.chatKey, [this](bool on) { adapter_.CaptureInput(on); }, [this] { return adapter_.GamePaused(); });
     }
 
     bool Start() {
@@ -233,6 +236,9 @@ public:
             const ProcessEventHookStats pe = GetProcessEventHookStats();
             peNsAtWindow_ = pe.hookNs;
             peCallsAtWindow_ = pe.calls;
+            const ReflectionCacheStats rc = GetReflectionCacheStats();
+            lookupsAtWindow_ = rc.hits + rc.misses;
+            lookupMissesAtWindow_ = rc.misses;
         }
         tickMs_.push_back(ms);
     }
@@ -302,6 +308,9 @@ public:
 
     void Tick(UObject* gameMode, float dt) {
         lastModeTick_ = NowMs();
+        fighterOfFrame_.clear();
+        spawnIgnoreState_ = SpawnIgnoreState::InTick;
+        struct EndOfTick { SpawnIgnoreState& s; ~EndOfTick() { s = SpawnIgnoreState::Outside; } } endOfTick{spawnIgnoreState_};
         sampling_ = net_ && InFightLevel();                               // sampled only where the health line is logged
         if (!sampling_) { frameMs_.clear(); tickMs_.clear(); ClearPumpCost(); }
         else if (frameMs_.size() < kFrameSamples) frameMs_.push_back(double(dt) * 1000.0);
@@ -320,6 +329,7 @@ public:
         if (steamMode()) lobby_.Tick();
         // Level change first: everything after this point must use the current world, never the old game mode.
         bool levelChanged = gameMode != lastGameMode_;
+        if (levelChanged) FlushReflectionCache();     // the old level's classes are gone (again each retry: harmless)
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
         if (levelChanged) { lastGameMode_ = gameMode; lastGameModeIndex_ = ObjectIndex(gameMode); OnLevelLoaded(); }
         inFight_ = InFightLevel();
@@ -341,17 +351,22 @@ public:
             adapter_.SetGamePaused(false);
             if (++unpaused_ % 100 == 1) HSM_LOG("session: game was paused during an owner-sync match; unpaused (%u time(s))", unpaused_);
         }
-        if (!net_) { ui::HudTick({}); return; }
+        if (!net_) { ui::HudTick({}); ui::ChatDrop("session over"); return; }
         if (IsHost()) HostTick(dt); else ClientTick(dt);
         TintTick();
-        if (inputFixAt_ && NowMs() >= inputFixAt_) {   // twice: after the level's own setup, then once more
+        // Twice: after the level's own setup, then once more; never while the chat holds the keyboard (it gives it back).
+        if (inputFixAt_ && NowMs() >= inputFixAt_ && !ui::Typing()) {
             adapter_.RestoreGameInput();
             HSM_LOG("session: game input mode restored");
             inputFixAt_ = inputFixRepeat_ ? 0 : NowMs() + 3000; inputFixRepeat_ = !inputFixRepeat_;
         }
         if (net_) SpectateTick();
         if (net_ && InFightLevel() && NowMs() >= nextHealth_) { nextHealth_ = NowMs() + 5000; LogHealth(); }
-        ui::HudModel hud = BuildHud();
+        if (info_.phase != chatPhase_) {   // the results: a line being typed is dropped, a new one may be opened
+            if (info_.phase == uint8_t(MatchPhase::Results)) ui::ChatDrop("match over");
+            chatPhase_ = info_.phase;
+        }
+        HudScene hud = BuildHud();
         ui::HudTick(hud);
         ui::ChatTick(hud);
         if (std::optional<std::string> line = ui::TakeOutgoing(); line && net_) SendChat(*line);
@@ -470,6 +485,10 @@ public:
             std::snprintf(b, sizeof b, " | mod tick avg %.2f max %.1f ms, vm hooks %.2f ms/frame, other hooks %.2f ms/frame (%.0f calls)",
                           sum / frames, mx, vmMs, peMs, peCalls);
             line += b;
+            const ReflectionCacheStats rc = GetReflectionCacheStats();   // FindFunction/FindProperty: misses walk names
+            std::snprintf(b, sizeof b, ", lookups %.0f/frame (%.1f walked)", double(rc.hits + rc.misses - lookupsAtWindow_) / frames,
+                          double(rc.misses - lookupMissesAtWindow_) / frames);
+            line += b;
             line += PumpLine(frames);
         }
         tickMs_.clear();
@@ -490,7 +509,7 @@ public:
     void SendChat(const std::string& text) {
         ChatLine c; c.fromSlot = 0; c.text = SanitizeChat(text);
         if (c.text.empty()) return;
-        if (IsHost()) { net_->Broadcast(kChanReliable, Encode(c), true); ui::ShowLine(MyName(), c.text); }
+        if (IsHost()) { net_->Broadcast(kChanReliable, Encode(c), true); ui::ShowLine(MyName(), ChatNameInk(info_, 1), c.text); }
         else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(c), true);
     }
 
@@ -700,7 +719,9 @@ private:
         roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); blobVersion_.fill(0); hostExport_.clear();
         picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; feed_.clear(); tints_.clear(); ownDeadPending_ = false;
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; feed_.clear(); banner_.Reset(); tints_.clear();
+        ownDeadPending_ = false;
+        mirrorBlob_.clear(); ownBlob_ = 0;
         // client
         for (auto& [e, ref] : puppets_) {
             if (OwnerMode()) adapter_.DestroyFighter(ref.obj, ref.index);   // a stand-in: its weapons go too
@@ -748,20 +769,25 @@ private:
     void OnLevelLoaded() {
         currentLevel_ = ObjectName(OuterOf(OuterOf(lastGameMode_)));   // GameMode -> PersistentLevel -> World
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
+        ui::ChatDrop("level change");   // the new level's controller starts with the game's input
         agent::VmHookFlush();
         mirror_.OnLevel();
         if (ScriptHookActive()) ResolveScriptHooks();   // the level's Blueprint classes and overrides are loaded now
         haveSnapshot_ = false; snappedOwn_ = false; picksValid_ = false;
         held_.fill(Held{});                          // agent-held axes do not carry into the next level
         groundValid_ = false; foesStopped_ = false;
+        oneFight_ = InFightLevel() && !adapter_.FreeModeActive();   // a client has the host's GI settings (Travel) by now
         if (!InFightLevel()) RestoreFoes();
         inputFixAt_ = net_ && InFightLevel() ? NowMs() + 1500 : 0;
         severedSent_.clear(); worldTracker_ = WorldTracker{}; worldView_ = WorldView{}; jitter_.clear(); placed_.clear();
+        hitKind_.clear(); fighterOfFrame_.clear(); otherActorOffset_.clear();   // the old level's classes and functions are gone
+        spawnIgnore_.clear();
         // Host side: every actor of the old level is gone.
         for (Fighter& f : fighters_) { f.actor.Clear(); f.input.ReleaseAll(); f.wasDead = false; }
         director_.OnLevel(InFightLevel(), NowMs(), travelSeq_);
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; feed_.clear(); tints_.clear();
-        ownDeadPending_ = false; ownDiedAt_ = 0;
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; feed_.clear(); banner_.Reset();
+        tints_.clear();
+        ownDeadPending_ = false; ownDiedAt_ = 0; mirrorBlob_.clear(); ownBlob_ = 0;
         // Client side: puppets died with the level; the host re-announces them after Ready.
         world_.OnLevel(); puppets_.clear();
         levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
@@ -810,6 +836,9 @@ private:
         env.allowed = [this](uint8_t attacker, uint8_t victim) {
             return HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
         };
+        env.prop = [this](UObject* actor, game::PropSync::Touch& out) { return props_.PropOf(actor, out); };
+        env.propActor = [this](uint64_t id) { return props_.ActorOf(id); };
+        env.myEntity = [this]() { return IsHost() ? uint8_t(1) : world_.myEntity(); };
         if (!claims_.Start(adapter_, standIns_, streams_, std::move(env)))
             HSM_LOG("session: WARNING owner sync without the script VM hook: blows between this machine and stand-ins do nothing");
         // Blood and wounds on fighters simulated here, shown on every other machine's stand-in of them.
@@ -848,6 +877,7 @@ private:
             return HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
         };
         sev.nativeShown = [this](uint8_t e, uint8_t part) { gore_.NoteNativeSever(e, part); };
+        sev.nativeLost = [this](uint8_t e, uint8_t part) { gore_.NoteNativeLost(e, part); };
         severs_.Start(adapter_, standIns_, streams_, std::move(sev));
         game::StandInGore::Env gore;
         gore.standInActor = [this](uint8_t e) { return standIns_.ActorOf(e); };
@@ -877,7 +907,7 @@ private:
         };
         // Stand-in hands matched to their owners' poses (pickups, leftover weapons): Equip's view of each hand, gore's cut-off hands.
         penv.equipToken = [this](uint8_t e, int hand, uint8_t& token) { return equip_.OwnerToken(e, hand, token); };
-        penv.mayBeDraw = [this](uint8_t e, int hand, uint32_t cls) { return equip_.MayBeDraw(e, hand, cls); };
+        penv.mayBeDraw = [this](uint8_t e, uint32_t cls) { return equip_.MayBeDraw(e, cls); };
         penv.mayBeSheathe = [this](uint8_t e, int hand) { return equip_.MayBeSheathe(e, hand); };
         penv.deadBones = [this](uint8_t e) { return gore_.DeadBones(e); };
         penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
@@ -1168,41 +1198,100 @@ private:
 
     // Spawn height: the stock spawner put the host's body at the right height above its floor; every spawn point
     // gets that same height above the floor under it (spawner actors sit at varying heights, so players popped out of
-    // the ground). Unchanged when a trace fails.
-    FVector Grounded(FVector at) {
+    // the ground).
+    // The trace looks through every fighter and what it carries (test 5: a respawn landed on top of the fighter standing
+    // at the spot); the stand height is measured once per level and never negative (SaneStandOffset; the Abyss read
+    // -96 cm), so a spawn is never put below the floor it traced. Unchanged when a trace fails.
+    FVector Grounded(FVector at, const std::vector<UObject*>& ignore) {
         UObject* host = adapter_.PlayerWillie(0);
         if (!groundValid_) {
             double fz;
-            if (!host || !adapter_.FloorZ(adapter_.ActorLocation(host), host, fz)) return at;
-            groundOffset_ = adapter_.ActorLocation(host).z - fz; groundValid_ = true;
-            HSM_LOG("host: fighters stand %.0f cm above the floor in %s", groundOffset_, currentLevel_.c_str());
+            std::string hit;
+            if (!host || !adapter_.FloorZ(adapter_.ActorLocation(host), ignore, fz, &hit)) return at;
+            const double raw = adapter_.ActorLocation(host).z - fz;
+            groundOffset_ = SaneStandOffset(raw); groundValid_ = true;
+            if (groundOffset_ != raw)
+                HSM_LOG("host: the floor under the host traced %.0f cm below it in %s (hit %s); fighters stand %.0f cm above the floor",
+                        raw, currentLevel_.c_str(), hit.c_str(), groundOffset_);
+            else HSM_LOG("host: fighters stand %.0f cm above the floor in %s (hit %s)", groundOffset_, currentLevel_.c_str(), hit.c_str());
         }
         double fz;
-        if (adapter_.FloorZ(at, host, fz)) at.z = fz + groundOffset_;
+        if (adapter_.FloorZ(at, ignore, fz)) at.z = fz + groundOffset_;
         return at;
     }
 
-    // Spawn points: the host's own fighter is candidate 0, the level's Willie spawners follow; farthest-point
-    // sampling then gives slot k its own spot, spreading out from the host.
+    // What a spawn's floor traces look through (Adapter::BodiesAndGear). That walks the object array, so the spawns of
+    // one Tick (a round start, a wave) share one walk; never kept past it (garbage collection runs between frames and
+    // the engine dereferences the list), and a spawn outside Tick (a lobby button) walks on its own.
+    const std::vector<UObject*>& SpawnIgnore() {
+        if (spawnIgnoreState_ == SpawnIgnoreState::Cached) return spawnIgnore_;
+        spawnIgnore_ = adapter_.BodiesAndGear();
+        if (spawnIgnoreState_ == SpawnIgnoreState::InTick) spawnIgnoreState_ = SpawnIgnoreState::Cached;
+        return spawnIgnore_;
+    }
+
+    // Where every body of the session lies or stands now (corpses too), but `self`'s: a (re)spawn keeps clear of them.
+    std::vector<Point3> BodiesExcept(uint8_t self) {
+        std::vector<Point3> out;
+        auto add = [&](uint8_t e) {
+            if (e == self) return;
+            if (UObject* w = EntityActor(e)) { FVector v = adapter_.ActorLocation(w); out.push_back({v.x, v.y, v.z}); }
+        };
+        for (const RosterMember& m : roster_.members()) add(m.entity);
+        for (auto& [e, ref] : bots_) add(e);
+        return out;
+    }
+
+    // Spawner-less maps (the Abyss): points near a ring around the host on the navmesh, the way the Abyss places its own
+    // enemies (NavigableRing); without two of those, the ring's points where a fighter can stand (StandableRing).
+    std::vector<Point3> RingCandidates(double radius, const std::vector<UObject*>& ignore) {
+        UObject* host = adapter_.PlayerWillie(0);
+        double hostFloor;
+        if (!host || !adapter_.FloorZ(adapter_.ActorLocation(host), ignore, hostFloor)) return {};
+        const FVector c = adapter_.ActorLocation(host);
+        auto floorAt = [&](const Point3& p) -> std::optional<double> {
+            double z;
+            if (!adapter_.FloorZ({p.x, p.y, p.z}, ignore, z)) return std::nullopt;
+            return z;
+        };
+        auto navAt = [&](const Point3& aim, double tolerance) -> std::optional<Point3> {
+            FVector v;
+            if (!adapter_.NavigablePoint({aim.x, aim.y, aim.z}, tolerance, v)) return std::nullopt;
+            return Point3{v.x, v.y, v.z};
+        };
+        const std::vector<Point3> fighters = BodiesExcept(1);
+        std::vector<Point3> nav = NavigableRing({c.x, c.y, c.z}, hostFloor, navAt, floorAt, fighters, radius);
+        if (nav.size() >= 2) {
+            HSM_LOG("host: no spawners in %s; %zu navmesh points near a %.0f cm ring around the host", currentLevel_.c_str(), nav.size(), radius);
+            return nav;
+        }
+        std::vector<Point3> ring = StandableRing({c.x, c.y, c.z}, hostFloor, floorAt, fighters, radius);
+        HSM_LOG("host: no spawners in %s; %zu navmesh points, %zu of 8 points on a %.0f cm ring around the host can be stood on",
+                currentLevel_.c_str(), nav.size(), ring.size(), radius);
+        return ring;
+    }
+
+    // Spawn points: the host's own fighter is candidate 0, the level's Willie spawners (or, without any, a ring of
+    // standable points) follow; farthest-point sampling gives slot k its own spot, SpreadPositions keeps every spot
+    // kMinFighterGapCm from the others, and FreeSpot from the bodies standing there by now (a late join).
     FVector SpawnPoint(uint8_t slot, double& yawDeg) {
+        const std::vector<UObject*>& ignore = SpawnIgnore();
         if (!picksValid_) {
             UObject* host = adapter_.PlayerWillie(0);
             spawnCenter_ = host ? adapter_.ActorLocation(host) : FVector{};
             std::vector<Point3> cands{{spawnCenter_.x, spawnCenter_.y, spawnCenter_.z}};
             for (const FVector& v : adapter_.SpawnCandidates())
                 if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0) cands.push_back({v.x, v.y, v.z});   // (0,0,0) = unread spawner
-            spawnCands_ = cands;
-            picks_ = SelectSpread(cands, kMaxFighters);
-            picksValid_ = true;
             HSM_LOG("host: %zu spawn candidates in %s", cands.size() - 1, currentLevel_.c_str());
+            if (cands.size() == 1) for (const Point3& p : RingCandidates(kNoSpawnerRingCm, ignore)) cands.push_back(p);
+            spawnSpots_ = SpreadPositions(cands, kMaxFighters);
+            picksValid_ = true;
         }
-        const SpawnPick& pk = picks_[slot];
-        const Point3& c = spawnCands_[pk.index];
-        double angle = slot * (6.283185307179586 / kMaxFighters);
-        FVector at{c.x + std::cos(angle) * kRingRadius * pk.ring, c.y + std::sin(angle) * kRingRadius * pk.ring, c.z};
+        const Point3 c = FreeSpot(spawnSpots_[slot], BodiesExcept(Roster::EntityForSlot(slot)), 0, kMinFighterGapCm);
+        FVector at{c.x, c.y, c.z};
         double dx = spawnCenter_.x - at.x, dy = spawnCenter_.y - at.y;
         yawDeg = (dx == 0 && dy == 0) ? 0 : std::atan2(dy, dx) * 57.29577951308232;   // face the host
-        return Grounded(at);
+        return Grounded(at, ignore);
     }
 
     void SpawnDue() {
@@ -1220,6 +1309,7 @@ private:
                 QueueTint(host, sp.team);
             } else {
                 at = sp.team != kNoTeam ? SidePoint(sp.team, sp.entity, yaw) : SpawnPoint(slot, yaw);
+                if (match_.phase() != MatchPhase::Idle && !match_.Has(sp.entity)) JoinerGear(slot);   // joins a running match
                 uint32_t id = director_.BlobFor(slot);
                 const std::vector<uint8_t>* blob = hostBlobs_.Get(id);
                 sp.blobId = blob ? id : 0;
@@ -1365,7 +1455,7 @@ private:
             if (!peer.chat.Allow(NowMs())) return;
             c.fromSlot = peer.slot;
             net_->Broadcast(kChanReliable, Encode(c), true);
-            ui::ShowLine(NameOfSlot(peer.slot), c.text);
+            ui::ShowLine(NameOfSlot(peer.slot), ChatNameInk(info_, Roster::EntityForSlot(peer.slot)), c.text);
         } else if (t == MsgType::BlobChunk) {
             BlobChunk c; Decode(d, n, c);
             std::vector<uint8_t> blob;
@@ -1499,12 +1589,17 @@ private:
         if (off < 0) return false;
         UObject* other = *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off);
         if (owner) props_.NoteContact(obj, other);
-        bool selfWeapon = adapter_.IsWeapon(obj), otherWeapon = other && adapter_.IsWeapon(other);
+        // Cheap first (test 5: bodies against the ground were most of the 8970 calls of one Abyss frame): a contact
+        // with no weapon on either side has no attacker, so it is never blocked, credited or bled for; what a class
+        // is gets looked up once per class, whom an actor belongs to once per frame.
+        const HitKind selfKind = HitKindOf(obj), otherKind = HitKindOf(other);
+        const bool selfWeapon = selfKind == HitKind::Weapon, otherWeapon = otherKind == HitKind::Weapon;
         if (selfWeapon && otherWeapon) { if (owner) NoteWeaponClash(obj, other); return false; }
-        UObject* weapon = selfWeapon ? obj : otherWeapon ? other : nullptr;
-        UObject* victim = selfWeapon ? adapter_.FighterOf(other) : obj;
-        if (!victim || !adapter_.IsWillie(victim)) return false;
-        UObject* attacker = weapon ? adapter_.FighterOf(weapon) : nullptr;
+        if (!selfWeapon && !otherWeapon) return false;
+        UObject* weapon = selfWeapon ? obj : other;
+        UObject* victim = selfWeapon ? (otherKind == HitKind::Willie ? other : FighterOfThisFrame(other)) : obj;
+        if (!victim || HitKindOf(victim) != HitKind::Willie) return false;
+        UObject* attacker = FighterOfThisFrame(weapon);
         uint8_t ve = owner ? OwnedEntityOf(victim) : LocalEntityOf(victim);
         uint8_t ae = !attacker ? 0 : owner ? OwnedEntityOf(attacker) : LocalEntityOf(attacker);
         if (!ve) return false;                        // not a session fighter (e.g. a stock foe being removed), or a stand-in
@@ -1518,11 +1613,36 @@ private:
     }
 
     void NoteWeaponClash(UObject* a, UObject* b) {
-        UObject* fa = adapter_.FighterOf(a);
-        UObject* fb = adapter_.FighterOf(b);
+        UObject* fa = FighterOfThisFrame(a);
+        UObject* fb = FighterOfThisFrame(b);
         const uint8_t sa = standIns_.EntityOf(fa), sb = standIns_.EntityOf(fb);
         if (sa && !sb && OwnedEntityOf(fb)) claims_.NoteClash(sa, a, game::SteadyNowMs());
         else if (sb && !sa && OwnedEntityOf(fa)) claims_.NoteClash(sb, b, game::SteadyNowMs());
+    }
+
+    // What a contact's actor is, per class: hit events fire thousands of times a frame. Not remembered while the
+    // fighter class is not known yet (a Willie would read as other); dropped on a level change and when owner sync
+    // (which decides what counts as a weapon) is switched.
+    enum class HitKind : uint8_t { Other, Willie, Weapon };
+    HitKind HitKindOf(UObject* o) {
+        if (!o) return HitKind::Other;
+        const bool owner = OwnerMode();
+        if (owner != hitKindOwner_) { hitKind_.clear(); hitKindOwner_ = owner; }
+        UClass* c = ClassOf(o);
+        auto it = hitKind_.find(c);
+        if (it != hitKind_.end()) return it->second;
+        const HitKind k = adapter_.IsWillie(o) ? HitKind::Willie : adapter_.IsWeapon(o) ? HitKind::Weapon : HitKind::Other;
+        if (k != HitKind::Other || adapter_.WillieClassKnown()) hitKind_.emplace(c, k);
+        return k;
+    }
+    // Adapter::FighterOf (attach parents, a weapon's holder) once per actor per frame; Tick starts each frame empty.
+    UObject* FighterOfThisFrame(UObject* actor) {
+        if (!actor) return nullptr;
+        auto it = fighterOfFrame_.find(actor);
+        if (it != fighterOfFrame_.end()) return it->second;
+        UObject* f = adapter_.FighterOf(actor);
+        fighterOfFrame_.emplace(actor, f);
+        return f;
     }
 
     // Hit events fire thousands of times a second: the parameter offset is looked up once per function.
@@ -1594,7 +1714,7 @@ private:
     void StartMatch() {
         MatchConfig cfg = steamMode() ? lobby_.config() : MatchConfig{};
         bool progression = !adapter_.FreeModeActive();
-        if (progression) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; }   // co-op against the event's opponents
+        if (progression) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
         if (cfg.format == Format::Duel) cfg.friendlyFire = true;   // two fighters, no teams: every hit counts
         std::vector<TeamRequest> req;
         for (const RosterMember& m : roster_.members()) {
@@ -1608,13 +1728,15 @@ private:
         for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true});
         match_.Start(cfg, list, NowMs());
         kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression;
-        bool gearApplied = !progression && !IsBotFormat(cfg.format) && cfg.gear != Gear::Own;   // gear is a PvP option
-        if (gearApplied) AssignMatchGear(cfg);
-        progression_ = progression;
-        sidesValid_ = false; infoDirty_ = true;
+        Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own and bot formats
+        bool gearApplied = startGear != Regear::None;
+        progression_ = progression; oneFight_ = progression;
+        sidesValid_ = false;
         HSM_LOG("host: match started (format %d, limit %u, time %us, friendly fire %s)%s", int(cfg.format), cfg.scoreLimit, cfg.timeLimitS,
                 cfg.friendlyFire ? "on" : "off", progression ? " - Progression co-op" : "");
         HSM_LOG("host: match gear %d, tier %u", int(cfg.gear), cfg.tier);
+        RegearSlots(match_.config(), AllSlots(), startGear, "match start");
+        BroadcastInfo(NowMs());                          // the clients know the match's gear before their Spawns arrive
         if (TeamCount(cfg.format) > 0 || gearApplied) RespawnAll();   // team sides / generated loadouts take effect
     }
 
@@ -1641,6 +1763,13 @@ private:
             HSM_LOG("host: Progression fight over; returning everyone to the hub");
             HostTravel(kHubLevel);
             return;
+        }
+        if (ev.regear != Regear::None) {                 // the blobs go out on the reliable channel before the Spawns
+            std::vector<uint8_t> slots;
+            if (ev.rematch) slots = AllSlots();
+            else for (uint8_t e : ev.respawn) if (e >= 1 && e <= kMaxFighters && roster_.BySlot(uint8_t(e - 1))) slots.push_back(uint8_t(e - 1));
+            RegearSlots(match_.config(), slots, ev.regear, ev.rematch ? "rematch" : "respawn");
+            infoDirty_ = true;
         }
         for (uint8_t e : ev.respawn) RespawnEntity(e);
         if (ev.rematch) RespawnAll();
@@ -1690,15 +1819,18 @@ private:
         }
     }
 
-    // Team side point for a (re)spawn, farthest from living enemies; small per-entity offset so batches never stack.
+    // Team side point for a (re)spawn, farthest from living enemies; each entity has its own spread slot around it
+    // (SpreadSlot: humans on ring 1, bots further out), moved on to the next free one when a body is there.
     FVector SidePoint(int8_t team, uint8_t entity, double& yawDeg) {
+        const std::vector<UObject*>& ignore = SpawnIgnore();
         if (!sidesValid_) {
             sidePoints_.clear();
             for (const FVector& v : adapter_.SpawnCandidates()) sidePoints_.push_back({v.x, v.y, v.z});
-            if (sidePoints_.size() < 2) {                  // no spawners: a ring around where the host stands
+            if (sidePoints_.size() < 2) sidePoints_ = RingCandidates(kSideRingCm, ignore);   // no spawners: a ring around the host
+            if (sidePoints_.size() < 2) {                  // nothing standable found: the ring unchecked
                 FVector c = hostWillie_ ? adapter_.ActorLocation(hostWillie_) : FVector{};
                 sidePoints_.clear();
-                for (int i = 0; i < 8; ++i) sidePoints_.push_back({c.x + std::cos(i * 0.785398) * 900, c.y + std::sin(i * 0.785398) * 900, c.z});
+                for (int i = 0; i < 8; ++i) sidePoints_.push_back({c.x + std::cos(i * 0.785398) * kSideRingCm, c.y + std::sin(i * 0.785398) * kSideRingCm, c.z});
             }
             sides_ = PartitionSides(sidePoints_, std::max(TeamCount(match_.config().format), 1));
             sidesValid_ = true;
@@ -1707,9 +1839,8 @@ private:
         for (const RosterMember& m : roster_.members()) AddEnemy(enemies, m.entity, team, entity);
         for (auto& [e, ref] : bots_) AddEnemy(enemies, e, team, entity);
         const Point3& p = sidePoints_[PickRespawn(sidePoints_, sides_, team, enemies)];
-        double angle = entity * 1.0471975511965976;
-        FVector at{p.x + std::cos(angle) * kRingRadius, p.y + std::sin(angle) * kRingRadius, p.z};
-        at = Grounded(at);
+        const Point3 spot = FreeSpot(p, BodiesExcept(entity), entity, kMinFighterGapCm);
+        FVector at = Grounded({spot.x, spot.y, spot.z}, ignore);
         double cx = 0, cy = 0;
         for (const Point3& q : sidePoints_) { cx += q.x; cy += q.y; }
         cx /= double(sidePoints_.size()); cy /= double(sidePoints_.size());
@@ -1832,15 +1963,51 @@ private:
         infoDirty_ = true;
     }
 
-    // Random-by-tier gear: a fresh generated loadout per player; Mirror: one generated loadout for everyone.
-    void AssignMatchGear(const MatchConfig& cfg) {
+    std::vector<uint8_t> AllSlots() const {
+        std::vector<uint8_t> s;
+        for (const RosterMember& m : roster_.members()) s.push_back(m.slot);
+        return s;
+    }
+
+    // Generated gear (RegearFor): Each rolls a fresh loadout per slot, Shared one loadout for all of them. StoreAndRelay
+    // makes it the slot's blob for its next Spawn; the chunks precede that Spawn on the reliable channel.
+    void RegearSlots(const MatchConfig& cfg, const std::vector<uint8_t>& slots, Regear mode, const char* why) {
+        if (mode == Regear::None || slots.empty()) return;
+        const double t0 = game::SteadyNowMs();
         std::vector<uint8_t> shared;
-        if (cfg.gear == Gear::Mirror) shared = game::RandomPassportBlob(adapter_, cfg.tier);
-        for (const RosterMember& m : roster_.members()) {
-            std::vector<uint8_t> blob = cfg.gear == Gear::Mirror ? shared : game::RandomPassportBlob(adapter_, cfg.tier);
-            if (blob.empty()) { HSM_LOG("host: no generated gear for slot %u; it keeps its own loadout", m.slot); continue; }
-            StoreAndRelay(m.slot, std::move(blob), 0);
+        if (mode == Regear::Shared) shared = game::RandomPassportBlob(adapter_, cfg.tier);
+        int generated = mode == Regear::Shared && !shared.empty() ? 1 : 0, stored = 0;
+        for (uint8_t slot : slots) {
+            std::vector<uint8_t> blob = mode == Regear::Shared ? shared : game::RandomPassportBlob(adapter_, cfg.tier);
+            if (blob.empty()) { HSM_LOG("host: no generated gear for slot %u; it keeps its loadout", slot); continue; }
+            if (mode == Regear::Each) {
+                ++generated;
+                HSM_LOG("host: entity %u respawns with a new tier-%u loadout", unsigned(Roster::EntityForSlot(slot)), cfg.tier);
+            }
+            StoreAndRelay(slot, std::move(blob), 0); ++stored;
+            if (slot == 0) NewGearNotice(cfg.tier);
         }
+        if (mode == Regear::Shared && stored) {
+            mirrorBlob_ = shared;
+            if (match_.round()) HSM_LOG("host: round %d: new loadout for everyone (tier %u)", match_.round(), cfg.tier);
+            else HSM_LOG("host: %s: new loadout for everyone (tier %u)", why, cfg.tier);
+        }
+        HSM_LOG("host: %d loadout(s) generated in %.1f ms (%s)", generated, game::SteadyNowMs() - t0, why);
+    }
+
+    // A fighter joining a running match takes its generated gear: the current shared loadout, or a fresh one.
+    void JoinerGear(uint8_t slot) {
+        const MatchConfig& c = match_.config();
+        if (RegearFor(c, RespawnCause::Rematch) == Regear::Shared && !mirrorBlob_.empty()) {
+            StoreAndRelay(slot, mirrorBlob_, 0);
+            HSM_LOG("host: entity %u joins with the match's shared loadout", unsigned(Roster::EntityForSlot(slot)));
+        } else RegearSlots(c, {slot}, RegearFor(c, RespawnCause::Individual), "join");
+    }
+
+    uint16_t PingOfSlot(uint8_t slot) {
+        if (!net_ || slot == 0) return 0;
+        for (const auto& [peer, p] : peers_) if (p.slot == slot) return uint16_t(std::min<uint32_t>(net_->RoundTripMs(peer), 65535u));
+        return 0;
     }
 
     void BroadcastInfo(uint32_t now) {
@@ -1850,20 +2017,28 @@ private:
         m.format = uint8_t(c.format); m.scoreLimit = c.scoreLimit; m.timeLimitS = c.timeLimitS; m.respawnDelayS = c.respawnDelayS;
         m.friendlyFire = c.friendlyFire; m.phase = uint8_t(match_.phase()); m.timeLeftMs = match_.TimeLeftMs(now);
         m.winner = int16_t(match_.winner());
+        m.gear = uint8_t(IsBotFormat(c.format) ? Gear::Own : c.gear); m.tier = c.tier;   // the gear in effect
+        m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
         for (const auto& [key, score] : match_.scores()) if (m.scores.size() < kMaxWillies) m.scores.push_back({int16_t(key), int16_t(score)});
         for (const RosterMember& r : roster_.members())
-            m.fighters.push_back({r.entity, match_.TeamOf(r.entity), int16_t(match_.Kills(r.entity)), int16_t(match_.Deaths(r.entity)), r.name});
+            m.fighters.push_back({r.entity, match_.TeamOf(r.entity), int16_t(match_.Kills(r.entity)), int16_t(match_.Deaths(r.entity)), r.name,
+                                  PingOfSlot(r.slot), match_.Alive(r.entity)});
         for (auto& [e, ref] : bots_)
-            if (m.fighters.size() < kMaxWillies) m.fighters.push_back({e, kBotTeam, int16_t(match_.Kills(e)), int16_t(match_.Deaths(e)), "Bot"});
+            if (m.fighters.size() < kMaxWillies)
+                m.fighters.push_back({e, kBotTeam, int16_t(match_.Kills(e)), int16_t(match_.Deaths(e)), "Bot", 0, match_.Alive(e)});
         net_->Broadcast(kChanReliable, Encode(m), true);
-        info_ = std::move(m);
+        info_ = std::move(m); infoAt_ = now;
+        banner_.Observe(info_, MyEntity(), now);
     }
 
     // ------------------------------------------------------------------ match (both)
+    uint8_t MyEntity() const { return IsHost() ? uint8_t(1) : world_.myEntity(); }
     void PushFeed(const Kill& k) {
-        feed_.push_back({NowMs(), KillLine(info_, k)});
-        while (feed_.size() > 4) feed_.pop_front();
+        feed_.push_back({NowMs(), MakeFeedRow(info_, k, MyEntity())});
+        while (feed_.size() > kFeedRows) feed_.pop_front();
     }
+    // This machine's fighter comes back in generated gear.
+    void NewGearNotice(uint8_t tier) { banner_.Fire("NEW GEAR", "TIER " + std::to_string(tier), style::kWarn, NowMs()); }
 
     void QueueTint(UObject* w, int8_t team) {
         if (team == kNoTeam || !w) return;
@@ -1884,24 +2059,23 @@ private:
         std::erase_if(tints_, [](const Tint& t) { return t.tries <= 0; });
     }
 
-    ui::HudModel BuildHud() {
-        ui::HudModel h;
-        h.visible = MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle);
-        if (!h.visible) return h;
-        uint8_t me = IsHost() ? uint8_t(1) : world_.myEntity();
-        h.status = StatusLine(info_, me);
+    HudScene BuildHud() {
+        if (!MatchLevel() || info_.phase == uint8_t(MatchPhase::Idle)) return {};
         uint32_t now = NowMs();
         UObject* own = adapter_.PlayerWillie(0);
         bool dead = own && adapter_.IsDead(own);
         if (dead && !ownDiedAt_) ownDiedAt_ = now;
         if (!dead && !ownDeadPending_) ownDiedAt_ = 0;
-        if (ownDiedAt_ && info_.phase != uint8_t(MatchPhase::Results)) {
-            uint32_t delay = uint32_t(info_.respawnDelayS) * 1000u, since = now - ownDiedAt_;
-            h.respawn = since < delay ? "Respawning in " + Seconds(delay - since) : "Respawning...";
-        }
-        for (const auto& [at, line] : feed_) if (now - at < kFeedMs) h.feed += line + "\n";
-        h.scoreboard = Scoreboard(info_);
-        return h;
+        LocalHud l;
+        l.me = MyEntity();
+        l.infoAtMs = infoAt_;            // MatchInfo comes once a second; the scene runs its clocks on between
+        l.dead = ownDiedAt_ != 0; l.diedAtMs = ownDiedAt_;
+        l.tab = ui::HudTabHeld();
+        l.oneFight = oneFight_;
+        if (const MapInfo* map = FindMap(currentLevel_)) l.map = map->display;
+        l.banner = banner_.shot();
+        l.feed.assign(feed_.begin(), feed_.end());
+        return BuildHudScene(info_, l, now);
     }
 
     // Dead and waiting: watch living fighters (teammates first); Left/Right arrows cycle.
@@ -1948,6 +2122,11 @@ private:
         ownDeadPending_ = false;
         placed_.erase(world_.myEntity());
         const std::vector<uint8_t>* assigned = sp.blobId ? clientBlobs_.Get(sp.blobId) : nullptr;   // e.g. generated gear
+        bool generated = info_.gear != uint8_t(Gear::Own);   // own gear: the Spawn names this client's upload, never relayed back
+        if (generated && sp.blobId && !assigned)
+            HSM_LOG("client: own Spawn names loadout %08x, which has not arrived; respawning in the uploaded loadout", sp.blobId);
+        if (generated && assigned && ownBlob_ && sp.blobId != ownBlob_) NewGearNotice(info_.tier);
+        ownBlob_ = sp.blobId;
         game::Adapter::SpawnOptions o; o.blob = assigned ? assigned : lastUpload_.empty() ? nullptr : &lastUpload_;
         o.at = {sp.x, sp.y, sp.z}; o.yawDeg = sp.yaw; o.teamInt = 1;
         severs_.Forget(world_.myEntity());          // a new body: its stuck blades and holds start afresh
@@ -2276,9 +2455,17 @@ private:
                 if (dp.entity == world_.myEntity()) ownDeadPending_ = true;   // a respawn follows
                 break;
             }
-            case MsgType::MatchInfo: { MatchInfo m; Decode(d, n, m); info_ = std::move(m); break; }
+            case MsgType::MatchInfo: {
+                MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
+                banner_.Observe(info_, world_.myEntity(), infoAt_);
+                break;
+            }
             case MsgType::Kill: { Kill k; Decode(d, n, k); PushFeed(k); break; }
-            case MsgType::Chat: { ChatLine c; Decode(d, n, c); ui::ShowLine(NameOfSlot(c.fromSlot), c.text); break; }
+            case MsgType::Chat: {
+                ChatLine c; Decode(d, n, c);
+                ui::ShowLine(NameOfSlot(c.fromSlot), ChatNameInk(info_, Roster::EntityForSlot(c.fromSlot)), c.text);
+                break;
+            }
             case MsgType::WorldState: {
                 WorldState ws; Decode(d, n, ws);
                 worldView_.Apply(ws);
@@ -2400,13 +2587,13 @@ private:
     BlobStore hostBlobs_;
     std::array<uint32_t, kMaxWillies> blobVersion_{};
     std::vector<uint8_t> hostExport_;
+    std::vector<uint8_t> mirrorBlob_;            // the match's shared generated loadout (Everyone identical), for joiners
     std::map<uint32_t, Peer> peers_;
     std::array<Fighter, kMaxFighters> fighters_;
     std::optional<Travel> lastTravel_;
     bool picksValid_ = false;
     FVector spawnCenter_;
-    std::vector<Point3> spawnCands_;
-    std::vector<SpawnPick> picks_;
+    std::vector<Point3> spawnSpots_;           // SpreadPositions per slot (picksValid_)
     uint32_t tick_ = 0, eventSeq_ = 0, sessionId_ = NowMs();
     // match (host)
     struct Tint { ActorRef actor; int8_t team = kNoTeam; int tries = 0; uint32_t next = 0; };
@@ -2416,6 +2603,7 @@ private:
     std::map<uint8_t, ActorRef> bots_;
     UObject* hostWillie_ = nullptr;
     bool adoptStock_ = false, wavesEnabled_ = false, sidesValid_ = false, infoDirty_ = false, progression_ = false;
+    bool oneFight_ = false;                          // this level holds a Progression fight: the HUD shows one fight, no waves
     int wave_ = 0;
     uint32_t nextCorpseSweep_ = 0;
     uint32_t nextScan_ = 0, nextInfo_ = 0;
@@ -2423,10 +2611,14 @@ private:
     std::vector<int8_t> sides_;
     // match (both)
     MatchInfo info_;
-    std::deque<std::pair<uint32_t, std::string>> feed_;
+    uint32_t infoAt_ = 0;     // when info_ was made (host) or arrived (client), for Extrapolate
+    std::deque<FeedItem> feed_;
+    BannerTracker banner_;    // the centre banner the match's changes raise
     std::vector<Tint> tints_;
     bool ownDeadPending_ = false;
     uint32_t ownDiedAt_ = 0;
+    uint32_t ownBlob_ = 0;    // the loadout blob of this machine's last own Spawn (client): a change is new gear
+    uint8_t chatPhase_ = 0;   // the match phase the chat last saw (MatchPhase)
     // client
     uint32_t hostPeer_ = 0, uploadId_ = 0;
     bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;
@@ -2453,6 +2645,12 @@ private:
     bool hooksBound_ = false;
     std::map<uint8_t, uint32_t> lastBloodAt_;
     std::unordered_map<UFunction*, int32_t> otherActorOffset_;
+    std::unordered_map<UClass*, HitKind> hitKind_;
+    bool hitKindOwner_ = false;
+    std::unordered_map<UObject*, UObject*> fighterOfFrame_;
+    enum class SpawnIgnoreState : uint8_t { Outside, InTick, Cached };
+    std::vector<UObject*> spawnIgnore_;     // SpawnIgnore, this Tick only
+    SpawnIgnoreState spawnIgnoreState_ = SpawnIgnoreState::Outside;
     bool inFight_ = false;          // InFightLevel() cached per tick for the hit hook
     HostLossMonitor hostLoss_{0};
     ReservationTable reservations_;
@@ -2498,6 +2696,7 @@ private:
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;
     uint64_t peNsAtWindow_ = 0, peCallsAtWindow_ = 0;
+    uint64_t lookupsAtWindow_ = 0, lookupMissesAtWindow_ = 0;
 };
 
 std::unique_ptr<SessionImpl> g_session;

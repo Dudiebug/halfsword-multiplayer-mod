@@ -4,6 +4,7 @@
 // not exactly the rest of the message or not a valid pose, unknown flag bits, trailing or missing bytes, a claim
 // whose attacker is its victim, and one message type decoded as another.
 #include "hsm_owner.h"
+#include "session/hsm_lease.h"
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -165,6 +166,19 @@ static void TestClaims() {
     m = c; m.attacker = uint8_t(kMaxWillies); CHECK(!bad(m));
     std::vector<uint8_t> b = claimBytes; b.push_back(0); CHECK(!Decode(b.data(), b.size(), hc));
     b = claimBytes; b.pop_back(); CHECK(!Decode(b.data(), b.size(), hc));
+    // Test 5: a rock thrown at a stand-in is a claim struck by that prop, with its id and its velocity at the contact.
+    combat::HitClaim rock = c;
+    combat::Xform bone;
+    bone.rot = sync::Q4{ 0, 0, 0, 1 };
+    combat::StruckByProp(rock, MakeLevelPropId(14), V3{ 300, 0, -50 }, bone);
+    const auto rockBytes = Encode(HitClaimMsg{ rock });
+    CHECK(Decode(rockBytes.data(), rockBytes.size(), hc));
+    CHECK(hc.claim.striker == combat::StrikerKind::Prop && hc.claim.propId == MakeLevelPropId(14));
+    CHECK(hc.claim.propVelocity.x == 300 && hc.claim.propVelocity.z == -50 && hc.claim.source == combat::StrikeSource::Body);
+    const auto rockFx = Encode(HitFxMsg{ rock });
+    CHECK(Decode(rockFx.data(), rockFx.size(), fx) && fx.claim.propId == MakeLevelPropId(14));
+    m = rock; m.source = combat::StrikeSource::WeaponRight; CHECK(bad(m));
+    m = rock; m.propId = 0; CHECK(bad(m));
 }
 
 int main() {

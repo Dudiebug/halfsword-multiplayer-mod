@@ -73,6 +73,15 @@ void StandInGore::NoteNativeSever(uint8_t entity, uint8_t part) {
     if (w) e.rec.did.native |= 1u << part;
 }
 
+void StandInGore::NoteNativeLost(uint8_t entity, uint8_t part) {
+    if (!active_ || entity == 0 || entity > kMaxWillies || part >= sync::kGoreSeveredBits) return;
+    Entry& e = entries_[entity];
+    Bind(entity, e);
+    e.tracker.NoteNativeLost(part);
+    e.rec.did.NativeLost(part);
+    if (++n_.nativeLost <= kLogFirst) HSM_LOG("gore: e%u part %u: the game's cut did not finish here, the fallback hides it", entity, part);
+}
+
 void StandInGore::Tick(double nowMs) {
     if (!active_) return;
     for (size_t entity = 1; entity <= kMaxWillies; ++entity) {
@@ -282,9 +291,9 @@ std::string StandInGore::HealthLine() {
     char line[320];
     std::snprintf(line, sizeof line,
                   "gore: vitals %llu (resets %llu) | fallbacks %llu (nothing to hide %llu reasserted %llu failed %llu) "
-                  "game cuts noted %llu | joints freed %llu (back to normal %llu) | new stand-ins %llu (rebuilt %llu)",
+                  "game cuts noted %llu (unfinished %llu) | joints freed %llu (back to normal %llu) | new stand-ins %llu (rebuilt %llu)",
                   d(a.vitals, b.vitals), d(a.resets, b.resets), d(a.fallbacks, b.fallbacks), d(a.nothing, b.nothing),
-                  d(a.reasserted, b.reasserted), d(a.failed, b.failed), d(a.native, b.native), d(a.dislocated, b.dislocated),
+                  d(a.reasserted, b.reasserted), d(a.failed, b.failed), d(a.native, b.native), d(a.nativeLost, b.nativeLost), d(a.dislocated, b.dislocated),
                   d(a.relocated, b.relocated), d(a.actors, b.actors), d(a.swaps, b.swaps));
     reported_ = n_;
     return line;

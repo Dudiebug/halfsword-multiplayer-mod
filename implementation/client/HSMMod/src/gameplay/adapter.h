@@ -40,22 +40,30 @@ public:
     };
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
-    void RestoreGameInput();
-    bool FloorZ(const ue::FVector& at, ue::UObject* ignore, double& z);   // first hit straight down from just above `at`                               // game-only input, no cursor (as the stock death screens do)
+    void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
+    // The chat's keyboard: on, UI-only input with the pressed keys flushed (the game's own UI_DeathDoor on open), so the
+    // viewport ignores keys while the player types; off, RestoreGameInput.
+    void CaptureInput(bool on);
+    // First hit straight down from just above `at`, looking through `ignore`; `hitName` gets the hit actor's name.
+    bool FloorZ(const ue::FVector& at, const std::vector<ue::UObject*>& ignore, double& z, std::string* hitName = nullptr);
+    // A random point on the navmesh within `radius` of `origin`, as the Abyss places its enemies; false: no navmesh there.
+    bool NavigablePoint(const ue::FVector& origin, double radius, ue::FVector& out);
     void DestroyActor(ue::UObject* actor);
     // Destroys a fighter (when it is still the object spawned at index) with what it carries: its weapons ("Weapon R",
     // "Weapon L") and quiver are actors of their own and its armour pieces are attached actors, none of which the
     // engine or Willie_BP removes with it. Attached fighters are never destroyed.
     void DestroyFighter(ue::UObject* willie, int32_t index);
     bool StillValid(ue::UObject* o, int32_t index) const;  // index from ue::ObjectIndex at spawn time
-    // Owner sync: StillValid and AllWillies also treat an actor the game is destroying (AActor::IsActorBeingDestroyed)
-    // as gone, instead of until garbage collection frees its slot; AllWillies also skips destroyed ones (IsGarbage). Off in host sync, which keeps its old behaviour.
+    // Owner sync: StillValid and AllWillies also treat an object the game is destroying (BeingDestroyed) or has destroyed
+    // (IsGarbage) as gone, instead of until garbage collection frees its slot. Off in host sync, which keeps its old behaviour.
     void SetDestroyAware(bool on) { destroyAware_ = on; }
     // Owner sync: IsWeapon (and so FighterOf) also counts every Blueprint derived from ModularWeaponBP_C: the forged and
     // premade weapons, shields, fists and feet. Host sync keeps the old test, ModularWeaponBP_C exactly (the level's and
     // the procedural weapons only).
     void SetSubclassWeapons(bool on) { subclassWeapons_ = on; }
-    static bool BeingDestroyed(ue::UObject* actor);
+    // An actor the game is destroying (AActor::IsActorBeingDestroyed) or a component (UActorComponent::IsBeingDestroyed);
+    // false for any other object. Each is asked its own class's function: the actor's reads garbage on a component.
+    static bool BeingDestroyed(ue::UObject* o);
     std::vector<ue::FVector> SpawnCandidates();            // BP_SpawnerPoint_Willies actors in the loaded level
     ue::FVector ActorLocation(ue::UObject* actor);
     double ActorYaw(ue::UObject* actor);
@@ -65,6 +73,7 @@ public:
 
     // Match support (Phase 3)
     bool IsWillie(ue::UObject* o);
+    bool WillieClassKnown() const { return willieClass_ != nullptr; }   // until then IsWillie answers false for everything
     bool FreeModeActive();
     void PrepareFreeModeFight(int foes = -1);
     int FreeModeFoes();                                    // GI "Free Mode Foes Amount", -1 if unreadable
@@ -81,6 +90,7 @@ public:
     bool IsBodyWeapon(ue::UObject* actor);
     std::vector<ue::UObject*> AllWillies();                // live Willie_BP_C instances in the loaded level
     std::vector<ue::UObject*> WeaponActors();              // live weapon actors (IsWeapon), sheathed, held and dropped
+    std::vector<ue::UObject*> BodiesAndGear();             // every Willie, what is attached to it (armor, weapons) and every weapon
     // Re-tints the fabric of every armor piece attached to the Willie; returns how many pieces changed.
     int TintArmor(ue::UObject* willie, float r, float g, float b);
     // Spawns a fresh fighter for local player 0 and possesses it; the old pawn is destroyed.
@@ -129,6 +139,7 @@ private:
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;
+    bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;
     ue::FName weaponName_{};                       // ModularWeaponBP_C, once a class chain has shown it
     bool weaponNameKnown_ = false;

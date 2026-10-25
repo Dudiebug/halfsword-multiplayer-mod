@@ -347,6 +347,67 @@ static void TestRecordRefusesRepeats() {
     CHECK(rec.PartsToShow(o.due) == 0);
 }
 
+
+// Test 5: the game's cut ran its Initiate on a stand-in but its Delayed half (the limb spawn and the bone hide) never did,
+// eight times of eight. Such a part is owed to the fallback again, at the grace deadline counted from its first report.
+static void TestNativeLostIsOwedToTheFallback() {
+    GoreTracker t;
+    CHECK(t.OnVitals(kArmR, 0, 0.0).showFallback == 0);
+    t.NoteNativeSever(3 /* ArmR */);
+    CHECK(t.Tick(100.0).showFallback == 0);
+    t.NoteNativeLost(3);                                         // the Delayed half was lost 100 ms after Initiate
+    CHECK(t.Tick(kSeverGraceMs - 1.0).showFallback == 0);        // not before the grace deadline of the first report
+    CHECK(t.Tick(kSeverGraceMs).showFallback == kArmR);          // then due
+    CHECK(t.Tick(kSeverGraceMs + 50.0).showFallback == 0);       // once
+    // Lost long after the deadline: due on the next tick.
+    GoreTracker late;
+    late.OnVitals(kArmR, 0, 0.0);
+    late.NoteNativeSever(3);
+    CHECK(late.Tick(5000.0).showFallback == 0);
+    late.NoteNativeLost(3);
+    CHECK(late.Tick(5001.0).showFallback == kArmR);
+    // Noted and lost before any report: the report starts the grace timer as for a part no cut covered.
+    GoreTracker early;
+    early.NoteNativeSever(3);
+    early.NoteNativeLost(3);
+    CHECK(early.OnVitals(kArmR, 0, 10.0).showFallback == 0);
+    CHECK(early.Tick(10.0 + kSeverGraceMs).showFallback == kArmR);
+    // Noted before the report, lost after it: the grace counts from that report, not from the note or the loss.
+    GoreTracker first;
+    first.NoteNativeSever(3);
+    CHECK(first.OnVitals(kArmR, 0, 1000.0).showFallback == 0);
+    first.NoteNativeLost(3);
+    CHECK(first.Tick(1100.0).showFallback == 0);
+    CHECK(first.Tick(1000.0 + kSeverGraceMs - 1.0).showFallback == 0);
+    CHECK(first.Tick(1000.0 + kSeverGraceMs).showFallback == kArmR);
+    // Negative control: noted native and not lost stays suppressed for good.
+    GoreTracker kept;
+    kept.OnVitals(kArmR, 0, 0.0);
+    kept.NoteNativeSever(3);
+    CHECK(kept.Tick(1e6).showFallback == 0);
+    // Only that part: another native part stays suppressed; an out-of-range part is ignored.
+    GoreTracker two;
+    two.OnVitals(kArmR | kArmL, 0, 0.0);
+    two.NoteNativeSever(3);
+    two.NoteNativeSever(6);
+    two.NoteNativeLost(6);
+    two.NoteNativeLost(15);
+    two.NoteNativeLost(255);
+    CHECK(two.Tick(kSeverGraceMs).showFallback == kArmL);
+    // Lost on a part never reported and never noted: nothing is owed until a report.
+    GoreTracker none;
+    none.NoteNativeLost(3);
+    CHECK(none.Tick(1e6).showFallback == 0);
+    // The record lets the fallback show a part whose native cut was lost, and only that part.
+    GoreRecord rec;
+    rec.native = kArmR | kArmL;
+    rec.NativeLost(3);
+    CHECK(rec.native == kArmL);
+    CHECK(rec.PartsToShow(kArmR | kArmL) == kArmR);
+    rec.NativeLost(200);
+    CHECK(rec.native == kArmL);
+}
+
 // Pose-bone bit (sync/hsm_pose.h numbering) helpers for the dead-bone tests.
 static constexpr uint32_t B(int pose) { return 1u << pose; }
 constexpr int kBNeck01 = 6, kBNeck02 = 7, kBHead = 8, kBHandL = 12, kBUpperArmR = 14, kBLowerArmR = 15, kBHandR = 16;
@@ -419,6 +480,7 @@ int main() {
     TestAwaitWholeEnds();
     TestOwedAccumulates();
     TestRecordRefusesRepeats();
+    TestNativeLostIsOwedToTheFallback();
     TestRootsMatchTheGame();
     TestDeadBones();
     std::printf(g_fail ? "%d FAILED\n" : "all gore state machine tests passed\n", g_fail);

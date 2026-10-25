@@ -64,6 +64,11 @@ void RequestLobbyList(const std::string& filterKey, const std::string& filterVal
 void InviteOverlay(SteamId lobby);
 void SetRichPresence(const std::string& key, const std::string& value);
 
+// Avatars (optional exports). MediumAvatar: the 64 x 64 avatar's image handle; 0 none (no avatar, or no export), -1
+// Steam is still fetching it (ask again later). AvatarRGBA: its pixels, top row first, four bytes each (R G B A).
+int MediumAvatar(SteamId user);
+bool AvatarRGBA(int image, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba);
+
 // Networking (ISteamNetworkingMessages; relayed, NAT-traversing)
 void InitRelay();
 bool Send(SteamId to, int channel, const void* data, uint32_t size, int flags);

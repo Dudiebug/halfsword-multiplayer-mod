@@ -397,7 +397,7 @@ Severs::Run Severs::Begin(UObject* willie, const SeverClaim& c, double nowMs, bo
         DestroyBoxes(a);
         return before ? Run::InProcess : Run::Refused;
     }
-    due_.push_back(DueDelayed{nowMs + combat::kSeverDelayedMs, std::move(a), c.victim, standIn});
+    due_.push_back(DueDelayed{nowMs + combat::kSeverDelayedMs, std::move(a), c.victim, standIn, c.claimId});
     return Run::Accepted;
 }
 
@@ -482,8 +482,11 @@ bool Severs::Invoke(const char* function, const Rebuilt& a, bool standIn) {
 
 void Severs::CallDelayed(DueDelayed& d) {
     const Rebuilt& a = d.args;
-    if (!Live(a.willie) || !Live(a.mesh) || !Live(a.box1) || !Live(a.box2) || !Invoke(kDelayed, a, d.standIn)) {
-        ++n_.delayedLost;
+    const char* lost = !Live(a.willie) ? "the fighter is gone" : !Live(a.mesh) ? "its mesh is gone" : !Live(a.box1) ? "VP box 1 is gone"
+                     : !Live(a.box2) ? "VP box 2 is gone" : !Invoke(kDelayed, a, d.standIn) ? "the function could not be called" : nullptr;
+    if (lost) {
+        if (++n_.delayedLost <= kLogFirst) HSM_LOG("severs: #%u Delayed on e%u lost: %s", d.claimId, d.entity, lost);
+        if (d.standIn && env_.nativeLost) env_.nativeLost(d.entity, a.part);   // the gore fallback hides it instead
         // Without its Delayed the fighter would keep "Dismemberment In Process" for good.
         if (Live(a.willie)) SetBool(a.willie.obj, kInProcess, false);
         return;

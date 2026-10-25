@@ -1,26 +1,24 @@
 #include "ui/chat.h"
-#include "util/hsm_names.h"
+#include "ui/umg.h"
+#include "match/hsm_hud_style.h"
 #include "hsm_chat.h"
 #include "log.h"
 #include <windows.h>
-#include <cstring>
+#include <array>
 #include <deque>
 #include <utility>
-#include <vector>
 
 namespace hsm::ui {
 using namespace hsm::ue;
 namespace {
 
-struct Vec2 { double x = 0, y = 0; };
-struct Anchors { Vec2 min, max; };
-enum : uint8_t { kCollapsed = 1, kHitTestInvisible = 3 };
-
 constexpr ULONGLONG kScanEveryMs = 1000;
 constexpr uint32_t kRepeatDelayMs = 400, kRepeatEveryMs = 60;
 constexpr int kZOrder = 60;
+constexpr float kWidth = 620;                                  // the panel's width: longer lines wrap
+constexpr Rgba kInputBack{0.02f, 0.017f, 0.014f, 0.92f};
 
-struct Label { UObject* text = nullptr; std::string shown; bool visible = true; };
+struct LogRow { Box row; Text name, text; };
 
 // Widget state. Rebuilt when the UI_HUD instance goes away; chat data below survives that.
 struct Widgets {
@@ -28,82 +26,90 @@ struct Widgets {
     UObject* hud = nullptr; int32_t hudIndex = -1;
     ULONGLONG nextScan = 0;
     bool built = false;
-    Label log, input;
-    std::vector<uint8_t> font;
+    Kit kit;
+    Box column;
+    Fixed logBox; Panel logPanel; std::array<LogRow, kChatLogLines> rows;
+    Fixed inputBox; Text prompt, draft, hint;
+    Text idle;
 } w;
 
-struct Shown { std::string name, text; uint32_t atMs = 0; };
 struct Key { bool down = false; uint32_t heldSince = 0, lastRepeat = 0; };
 
 struct Data {
-    std::deque<Shown> lines;
+    std::deque<ChatEntry> lines;
     std::deque<std::string> outgoing;
-    bool typing = false;
-    std::string draft;
-    hsm::ChatRateLimiter limiter;
+    hsm::ChatSession session;
+    std::function<void(bool)> capture;
+    std::function<bool()> paused;
+    int openVk = VK_RETURN;
+    int swallowVk = 0;                      // the letter key that opened the chat, not typed until it is let go of
     Key keys[256];
+    bool hudShown = false; uint32_t hudAt = 0;   // the match HUD's last state, and when it came up (the idle hint)
+    uint32_t typingAt = 0;                  // the caret's phase: when the line opened or was last typed into
+    bool refused = false; uint32_t refusedAt = 0;   // the last Enter was refused by the rate limiter ("slow down")
 } d;
 
 uint32_t NowMs() { return uint32_t(GetTickCount64()); }   // wrap-safe for elapsed-time math
 
-UObject* Tree(UObject* o) { UObject** t = Field<UObject*>(o, "WidgetTree"); return t ? *t : nullptr; }
-
-void SetLabel(Label& l, const std::string& s) {
-    if (!l.text || s == l.shown) return;
-    l.shown = s;
-    FText t = MakeText(s);
-    Call(l.text, "SetText").set("InText", t).invoke();
-}
-
-void ShowLabel(Label& l, bool on) {
-    if (!l.text || on == l.visible) return;
-    l.visible = on;
-    Call(l.text, "SetVisibility").set<uint8_t>("InVisibility", on ? kHitTestInvisible : kCollapsed).invoke();
-}
-
-UObject* MakeLabel(UObject* tree, UObject* canvas, Anchors a, Vec2 align, int justify) {
-    UObject* t = SpawnObject(FindClass("TextBlock"), tree);
-    if (!t) return nullptr;
-    if (!w.font.empty()) {
-        Call c(t, "SetFont");
-        if (FProperty* p = c.function() ? FindProperty(c.function(), "InFontInfo") : nullptr; p && size_t(PropertySize(p)) == w.font.size()) {
-            std::memcpy(c.paramPtr("InFontInfo"), w.font.data(), w.font.size());
-            c.invoke();
-        }
-    }
-    Call(t, "SetJustification").set<uint8_t>("InJustification", uint8_t(justify)).invoke();
-    Call add(canvas, "AddChildToCanvas"); add.set<UObject*>("Content", t).invoke();
-    if (UObject* slot = add.get<UObject*>("ReturnValue")) {
-        Call(slot, "SetAnchors").set("InAnchors", a).invoke();
-        Call(slot, "SetAlignment").set("InAlignment", align).invoke();
-        Call(slot, "SetAutoSize").set<bool>("InbAutoSize", true).invoke();
-        Call(slot, "SetZOrder").set<int32_t>("InZOrder", kZOrder).invoke();
-    }
-    Call(t, "SetVisibility").set<uint8_t>("InVisibility", kHitTestInvisible).invoke();
+// Chat text: the game's font, a dark outline, never taking clicks.
+Text MakeText(float size, Rgba color) {
+    Text t = w.kit.MakeText();
+    if (!t) return t;
+    t.Font(size, 1, {0, 0, 0, 0.9f});
+    t.Color(color);
+    t.Align(Justify::Left);
     return t;
+}
+
+// A box of the chat's width holding a padded panel.
+Panel MakeBand(Fixed& box, Rgba color, Margin padding) {
+    box = w.kit.MakeFixed();
+    box.Width(kWidth);
+    w.column.Add(box).Align(HAlign::Left, VAlign::Bottom).Padding({0, 0, 0, 4});
+    Panel p = w.kit.MakePanel();
+    p.Color(color);
+    p.Padding(padding);
+    box.Content(p).Align(HAlign::Fill, VAlign::Fill);
+    return p;
 }
 
 bool Build() {
     w.built = true;
-    UObject* tree = Tree(w.hud);
-    UObject** rootPtr = tree ? Field<UObject*>(tree, "RootWidget") : nullptr;
-    UObject* root = rootPtr ? *rootPtr : nullptr;
-    if (!root || !SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(root))), "CanvasPanel")) { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
-    if (UObject** src = Field<UObject*>(w.hud, "TextHurt"); src && *src)
-        if (void* font = FieldPtr(*src, "Font")) {
-            FProperty* p = FindProperty(ClassOf(*src), "Font");
-            w.font.assign(static_cast<uint8_t*>(font), static_cast<uint8_t*>(font) + PropertySize(p));
-        }
-    // Bottom-left: the input line sits at the bottom, recent lines stack above it.
-    w.log.text = MakeLabel(tree, root, {{0.0, 0.93}, {0.0, 0.93}}, {0, 1}, 0);
-    w.input.text = MakeLabel(tree, root, {{0.0, 0.97}, {0.0, 0.97}}, {0, 1}, 0);
+    w.kit = Kit(w.hud, Vis::HitTestInvisible);
+    Canvas root = w.kit.Root();
+    if (!root) { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
+    if (UObject** src = Field<UObject*>(w.hud, "TextHurt"); src && *src) w.kit.FontFrom(*src, "UI_HUD.TextHurt");
+    // Bottom-left, growing upwards: the log panel, the input row under it, the idle hint at the bottom.
+    w.column = w.kit.MakeColumn();
+    root.Add(w.column).Anchor({{0.012, 0.965}, {0.012, 0.965}}, {0, 1}).AutoSize().Z(kZOrder);
+    w.logPanel = MakeBand(w.logBox, style::kSmoke, {12, 6, 12, 6});
+    Box lines = w.kit.MakeColumn();
+    w.logPanel.Content(lines).Align(HAlign::Fill, VAlign::Bottom);
+    for (LogRow& r : w.rows) {
+        r.row = w.kit.MakeRow();
+        lines.Add(r.row).Align(HAlign::Fill, VAlign::Top).Padding({0, 1, 0, 1});
+        r.name = MakeText(20, style::kIron);
+        r.row.Add(r.name).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
+        r.text = MakeText(20, style::kBone);
+        r.text.Wrap(true);
+        r.row.Add(r.text).Fill().Align(HAlign::Fill, VAlign::Top);
+    }
+    Panel input = MakeBand(w.inputBox, kInputBack, {12, 4, 12, 4});
+    Box row = w.kit.MakeRow();
+    input.Content(row).Align(HAlign::Fill, VAlign::Center);
+    w.prompt = MakeText(20, style::kBloodInk);
+    w.prompt.Set(">");
+    row.Add(w.prompt).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
+    w.draft = MakeText(20, style::kBone);
+    w.draft.Wrap(true);
+    row.Add(w.draft).Fill().Align(HAlign::Fill, VAlign::Top);
+    w.hint = MakeText(14, style::kIron);
+    row.Add(w.hint).Align(HAlign::Right, VAlign::Center).Padding({12, 0, 0, 0});
+    w.idle = MakeText(16, style::kIron);
+    w.column.Add(w.idle).Align(HAlign::Left, VAlign::Bottom).Padding({2, 0, 0, 0});
+    if (!w.draft || !w.idle) { HSM_LOG("chat: could not make the chat widgets"); return false; }
     HSM_LOG("chat: overlay added to UI_HUD");
-    return w.input.text != nullptr;
-}
-
-// Pruning: drop lines past their display window (wrap-safe age).
-void Prune(uint32_t now) {
-    while (!d.lines.empty() && uint32_t(now - d.lines.front().atMs) >= hsm::kChatExpireMs) d.lines.pop_front();
+    return true;
 }
 
 bool Foreground() {
@@ -123,35 +129,29 @@ bool Fires(int vk, uint32_t now, bool allowRepeat) {
     return true;
 }
 
-void StartTyping() { d.typing = true; d.draft.clear(); }
-void CancelTyping() { d.typing = false; d.draft.clear(); }
-
-void SendTyping(uint32_t now) {
-    std::string text = hsm::SanitizeChat(d.draft);
-    if (text.empty()) { CancelTyping(); return; }
-    if (!d.limiter.Allow(now)) return;     // too fast: keep the draft so the player can resend
-    d.outgoing.push_back(text);
-    CancelTyping();
+// One event into the session; the keyboard follows what it reports, and every take and give-back is logged (with why,
+// when the event stands for something else: a level change is a hidden HUD).
+void Feed(hsm::ChatEvent e, uint32_t now, const std::string& text = std::string(), const char* why = nullptr) {
+    const hsm::ChatStep st = d.session.On(e, now, text);
+    if (d.session.typing() && (st.captureChanged || e == hsm::ChatEvent::Char || e == hsm::ChatEvent::Backspace)) {
+        d.typingAt = now;                   // the caret shows solid while keys go in, and blinks once they stop
+    }
+    if (st.captureChanged) d.refused = false;
+    if (st.refused) { d.refused = true; d.refusedAt = now; }
+    if (st.captureChanged) {
+        if (d.capture) d.capture(st.capture);
+        HSM_LOG("chat: capture %s (%s%s%s)", st.capture ? "on" : "off", hsm::ChatEventName(e), why ? ": " : "", why ? why : "");
+    }
+    if (st.send) d.outgoing.push_back(*st.send);
 }
 
-void Backspace() {
-    if (d.draft.empty()) return;
-    size_t i = d.draft.size() - 1;
-    while (i > 0 && (uint8_t(d.draft[i]) & 0xC0) == 0x80) --i;   // step back to the lead byte
-    d.draft.resize(i);
-}
-
-// Appends typed text, dropping control characters and anything past the wire limit.
-void AppendDraft(const wchar_t* in, int n) {
-    std::wstring keep;
-    for (int i = 0; i < n; ++i) if (in[i] >= 0x20 && in[i] != 0x7F) keep.push_back(in[i]);
-    if (keep.empty()) return;
-    int bytes = WideCharToMultiByte(CP_UTF8, 0, keep.data(), int(keep.size()), nullptr, 0, nullptr, nullptr);
-    if (bytes <= 0) return;
+// Typed text as UTF-8 (the session refuses control characters and anything past the wire limit).
+std::string Utf8(const wchar_t* in, int n) {
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, in, n, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return std::string();
     std::string u(size_t(bytes), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, keep.data(), int(keep.size()), u.data(), bytes, nullptr, nullptr);
-    if (d.draft.size() + u.size() > hsm::kMaxChatBytes) return;
-    d.draft += u;
+    WideCharToMultiByte(CP_UTF8, 0, in, n, u.data(), bytes, nullptr, nullptr);
+    return u;
 }
 
 // Keyboard state for ToUnicode, read from the live async state (the thread message queue may not be pumped).
@@ -161,67 +161,106 @@ void BuildKeyState(BYTE (&ks)[256]) {
 }
 
 void Poll(uint32_t now) {
-    if (!d.typing) {
-        if (Fires('T', now, false)) StartTyping();   // the T that opened typing is not typed
+    if (!d.session.typing()) {
+        if (!Fires(d.openVk, now, false)) return;
+        if (d.paused && d.paused()) return;   // no chat over the pause menu
+        if (d.openVk != VK_RETURN) d.swallowVk = d.openVk;
+        Feed(d.openVk == VK_RETURN ? hsm::ChatEvent::Enter : hsm::ChatEvent::OpenKey, now);
         return;
     }
-    if (Fires(VK_ESCAPE, now, false)) { CancelTyping(); return; }
-    if (Fires(VK_RETURN, now, false)) { SendTyping(now); return; }
+    if (d.paused && d.paused()) { Feed(hsm::ChatEvent::Paused, now); return; }
+    if (Fires(VK_ESCAPE, now, false)) { Feed(hsm::ChatEvent::Escape, now); return; }
+    if (Fires(VK_RETURN, now, false)) { Feed(hsm::ChatEvent::Enter, now); return; }
     BYTE ks[256] = {};
     bool ksReady = false;
     for (int vk = 0x08; vk <= 0xFE; ++vk) {
         if (vk == VK_RETURN || vk == VK_ESCAPE) continue;
+        if (vk == d.swallowVk) {   // held since it opened the chat: typed only once pressed again
+            if (!(GetAsyncKeyState(vk) & 0x8000)) { d.swallowVk = 0; d.keys[vk].down = false; }
+            continue;
+        }
         if (!Fires(vk, now, true)) continue;
-        if (vk == VK_BACK) { Backspace(); continue; }
+        if (vk == VK_BACK) { Feed(hsm::ChatEvent::Backspace, now); continue; }
         if (!ksReady) { BuildKeyState(ks); ksReady = true; }
         WCHAR buf[8] = {};
         int n = ToUnicode(UINT(vk), MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC), ks, buf, 8, 0x4);   // 0x4: keep dead-key state
-        if (n > 0) AppendDraft(buf, n);
+        if (n > 0) Feed(hsm::ChatEvent::Char, now, Utf8(buf, n));
     }
 }
 
-std::string JoinLines() {
-    std::string out;
-    for (const Shown& s : d.lines) {
-        if (!out.empty()) out += '\n';
-        out += s.name + ": " + s.text;
-    }
-    return out;
-}
-
-void Draw(const HudModel& m) {
+void Draw(const ChatScene& s) {
     if (!w.hudClass) w.hudClass = FindClass("UI_HUD_C");
     if (!w.hudClass) return;
     if (!w.hud || ObjectAt(w.hudIndex) != w.hud || ClassOf(w.hud) != w.hudClass) {
         if (w.hud) { UClass* cls = w.hudClass; ULONGLONG next = w.nextScan; w = Widgets{}; w.hudClass = cls; w.nextScan = next; }
         ULONGLONG now = GetTickCount64();
-        if (!m.visible || now < w.nextScan) return;
+        if (!s.visible || now < w.nextScan) return;
         w.nextScan = now + kScanEveryMs;
-        for (UObject* o : FindInstances("UI_HUD_C")) {
-            Call v(o, "IsInViewport"); v.invoke();
-            if (v.get<bool>("ReturnValue")) { w.hud = o; w.hudIndex = ObjectIndex(o); break; }
-        }
+        w.hud = OnScreen(FindInstances("UI_HUD_C"));
         if (!w.hud) return;
+        w.hudIndex = ObjectIndex(w.hud);
     }
     if (!w.built && !Build()) return;
-    std::string log = JoinLines();
-    SetLabel(w.log, log); ShowLabel(w.log, m.visible && !log.empty());
-    SetLabel(w.input, "> " + d.draft + "_"); ShowLabel(w.input, m.visible && d.typing);
+    w.column.Show(s.visible);
+    if (!s.visible) return;
+    w.logBox.Show(s.panel > 0);
+    w.logPanel.Color({style::kSmoke.r, style::kSmoke.g, style::kSmoke.b, style::kSmoke.a * s.panel});
+    for (size_t i = 0; i < w.rows.size(); ++i) {
+        LogRow& r = w.rows[i];
+        r.row.Show(i < s.lines.size());
+        if (i >= s.lines.size()) continue;
+        const ChatLineView& l = s.lines[i];
+        r.name.Set(l.name.text); r.name.Color(l.name.color);
+        r.text.Set(l.text.text); r.text.Color(l.text.color);
+        r.row.Opacity(l.opacity);
+    }
+    w.inputBox.Show(s.input);
+    if (s.input) {
+        w.draft.Set(s.draft + (s.caret ? "_" : " "));
+        w.hint.Set(s.hint.text); w.hint.Color(s.hint.color);
+    }
+    w.idle.Show(s.idle.visible);
+    if (s.idle.visible) { w.idle.Set(s.idle.text); w.idle.Color(s.idle.color); w.idle.Opacity(s.idle.opacity); }
+}
+
+int VkOf(ChatKey k) {
+    switch (k) {
+        case ChatKey::T: return 'T';
+        case ChatKey::Y: return 'Y';
+        case ChatKey::U: return 'U';
+        case ChatKey::Enter: break;
+    }
+    return VK_RETURN;
 }
 
 }  // namespace
 
-void ChatTick(const HudModel& m) {
+void ChatSetup(ChatKey key, std::function<void(bool on)> capture, std::function<bool()> paused) {
+    d.session = hsm::ChatSession(key);
+    d.openVk = VkOf(key);
+    d.capture = std::move(capture);
+    d.paused = std::move(paused);
+}
+
+void ChatTick(const HudScene& m) {
     uint32_t now = NowMs();
-    Prune(now);
+    if (m.visible && !d.hudShown) d.hudAt = now;
+    d.hudShown = m.visible;
     if (!Foreground() || !m.visible) {
-        // Keys are read only while the game window is foreground and the overlay is active.
+        // Keys are read only while the game window is foreground and the overlay is active; a line being typed is dropped
+        // and the keyboard given back.
         for (Key& k : d.keys) k.down = false;
-        if (d.typing) CancelTyping();
+        d.swallowVk = 0;
+        if (d.session.typing()) Feed(!Foreground() ? hsm::ChatEvent::FocusLost : hsm::ChatEvent::HudHidden, now);
     } else {
         Poll(now);
     }
-    Draw(m);
+    ChatLocal c;
+    c.hud = m.visible; c.hudAtMs = d.hudAt; c.key = d.session.key();
+    c.lines.assign(d.lines.begin(), d.lines.end());
+    c.typing = d.session.typing(); c.typingAtMs = d.typingAt; c.draft = d.session.draft();
+    c.refused = d.refused; c.refusedAtMs = d.refusedAt;
+    Draw(BuildChatScene(c, now));
 }
 
 std::optional<std::string> TakeOutgoing() {
@@ -231,13 +270,19 @@ std::optional<std::string> TakeOutgoing() {
     return s;
 }
 
-void ShowLine(const std::string& name, const std::string& text) {
+void ShowLine(const std::string& name, Rgba ink, const std::string& text) {
     std::string clean = hsm::SanitizeChat(text);
     if (clean.empty()) return;
-    d.lines.push_back(Shown{hsm::SanitizeChat(name), clean, NowMs()});
+    d.lines.push_back(ChatEntry{hsm::SanitizeChat(name), ink, clean, NowMs()});
     while (d.lines.size() > hsm::kChatLogLines) d.lines.pop_front();
 }
 
-bool Typing() { return d.typing; }
+bool Typing() { return d.session.typing(); }
+
+void ChatDrop(const char* why) {
+    if (!d.session.typing()) return;
+    d.swallowVk = 0;
+    Feed(hsm::ChatEvent::HudHidden, NowMs(), std::string(), why);
+}
 
 }  // namespace hsm::ui

@@ -52,7 +52,7 @@ public:
         // weapon a sheathe (EquipSync::MayBeSheathe), and the pose bones a stand-in has lost (StandInGore::DeadBones).
         // Without all four no stand-in hand is matched.
         std::function<bool(uint8_t entity, int hand, uint8_t& token)> equipToken;
-        std::function<bool(uint8_t entity, int hand, uint32_t classHash)> mayBeDraw;
+        std::function<bool(uint8_t entity, uint32_t classHash)> mayBeDraw;
         std::function<bool(uint8_t entity, int hand)> mayBeSheathe;
         std::function<uint32_t(uint8_t entity)> deadBones;
         // This code changed an entity's stand-in's hands (a drop let go of, a pickup, a leftover let go of, a weapon that
@@ -88,6 +88,17 @@ public:
     std::vector<std::vector<uint8_t>> CensusForJoiner() const;
     bool OnPropCensus(const uint8_t* d, size_t n);
 
+    // A prop's contact with a fighter (game::Claims; combat::DecidePropContact decides it): what struck, as seen here.
+    struct Touch {
+        uint64_t id = 0;
+        bool streamedHere = false;         // this machine streams it now (its lessee, or the host while it is FREE)
+        uint8_t toucher = 0;               // the fighter simulated here that held or touched it last, 0 if none
+        sync::V3 velocity;                 // cm/s, read here when streamed here (zero otherwise or when unread)
+    };
+    // False for an actor that is no prop here, and for a prop a hand holds (a blow with it is its holder's).
+    bool PropOf(ue::UObject* actor, Touch& out);
+    ue::UObject* ActorOf(uint64_t propId) const;                     // a prop's live actor here, nullptr if none
+
     std::string HealthLine();                                        // since the previous call
 
 private:
@@ -107,6 +118,7 @@ private:
         bool denied = false;               // held here while another machine holds it
         bool level = false;                // a level prop (MakeLevelPropId), not a dropped weapon
         bool moving = false;               // its last read was not at rest (level props: streamed before those at rest)
+        uint8_t toucher = 0;               // the fighter simulated here that held or touched it last (Touch)
         uint64_t readTick = 0;             // the tick `read` was taken in
         bool readOk = false;
         PropStateMsg read;
@@ -124,11 +136,19 @@ private:
         double episodeMs = -1;             // the pose's since-time this hand's attach retries belong to
         double retryMs = 0, backoffMs = 0;
         double reattachMs = -1e18;         // the last time a weapon that left by itself was taken back
+        bool selfDropLogged = false;       // its first loss since the stand-in was bound (left by itself, or gone) is logged
     };
     struct StandInHands {
         ue::UObject* willie = nullptr;
         int32_t index = -1;
+        double boundMs = 0;                // when this stand-in was bound (a respawn binds a new one)
         std::array<StandInHand, 2> hand{};
+    };
+    struct PendingDrop {                   // a drop heard of (its Touch Grant), not resolved yet
+        double heardMs = 0;
+        double deadlineMs = 0;
+        ue::UObject* witness = nullptr;    // the weapon that hand of the stand-in held when it was heard (sync::DropFacts)
+        int32_t witnessIndex = -1;
     };
     struct Loose {                         // a weapon a stand-in let go of here that is not a prop (yet)
         ue::UObject* actor = nullptr;
@@ -165,7 +185,9 @@ private:
     uint8_t MySlot() const { return env_.mySlot ? env_.mySlot() : kHostSlot; }
     void DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned);
     void ResolvePending(double nowMs);
-    void DeadlineRelease(uint64_t id, uint8_t owner, int hand);
+    void DeadlineRelease(uint64_t id, uint8_t owner, int hand, ue::UObject* standIn, ue::UObject* copy);
+    void GiveUp(uint64_t id, uint8_t owner, int hand, const PendingDrop& d, ue::UObject* copy, double nowMs);
+    ue::UObject* UntrackedInHand(ue::UObject* standIn, int hand);   // a real weapon in that hand that no prop names
     bool ReleaseFromStandIn(uint64_t propId, ue::UObject* standIn, int hand, ue::UObject* copy);
     DropResult DropFromHands(ue::UObject* standIn, int hand, ue::UObject* copy, const std::string& what);
     void MatchStandIns(double nowMs);
@@ -175,7 +197,7 @@ private:
     bool TakeIntoHand(ue::UObject* standIn, int hand, ue::UObject* weapon);
     void LetLoose(uint8_t entity, int hand, ue::UObject* weapon, double nowMs);   // falls here: a prop again, or loose_
     void TickLoose(double nowMs);
-    bool Adopt(uint64_t propId, uint8_t owner, int hand, double nowMs);
+    bool Adopt(uint64_t propId, uint8_t owner, int hand, const PendingDrop& d, double nowMs);
     void SetHeld(StandInHand& sh, ue::UObject* weapon);
     void ForgetHeld(uint8_t entity, ue::UObject* standIn);           // this code changed its hands: start from what they hold
     std::array<ue::UObject*, 2> HandsOf(ue::UObject* standIn);   // real weapons only, the right's not again on the left
@@ -210,7 +232,10 @@ private:
     PropStateView view_;
     std::map<uint64_t, Prop> props_;                                 // every prop with an actor here
     std::unordered_map<const ue::UObject*, uint64_t> byActor_;
-    std::map<uint64_t, double> pending_;                             // drops heard of, not found yet -> give up at
+    std::map<uint64_t, PendingDrop> pending_;                        // drops heard of, not found yet
+    // Drops given up as unresolved -> when: a later Grant of the id does not open another window (test 5: one came back
+    // with every Grant and fired its deadline 18 s after the drop); forgotten after kLooseKeepMs.
+    std::unordered_map<uint64_t, double> givenUp_;
     std::unordered_map<uint64_t, double> heardMs_;                   // last PropState heard per id (minting skips live ids)
     std::array<Hands, kMaxWillies + 1> hands_{};
     std::array<uint8_t, kMaxWillies + 1> dropSeq_{};

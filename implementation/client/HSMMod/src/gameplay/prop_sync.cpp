@@ -35,7 +35,6 @@ constexpr double kHeardLiveMs = 3000.0;       // an id heard this recently is li
 constexpr int kRestoreTicks = 3;              // the rig's full neutralise may re-apply its body policy once before it lets go
 constexpr double kRetryMs = 250.0;            // a stand-in hand's attach or release waits this long before it is tried again,
 constexpr double kRetryMaxMs = 4000.0;        // doubling up to this, until the owner's pose for that hand changes
-constexpr double kReattachMinMs = 2000.0;     // a weapon that left a stand-in's hand by itself is taken back at most this often
 constexpr double kLooseKeepMs = 10000.0;      // a weapon a stand-in let go of here waits this long for its drop to be heard of
 constexpr double kWeaponsRefreshMs = 10000.0; // the attach's list of weapon actors (WeaponActors walks every object) is read
                                               // again at most this often; props and loose_ are always looked at
@@ -84,6 +83,7 @@ void PropSync::Clear() {
     props_.clear();
     byActor_.clear();
     pending_.clear();
+    givenUp_.clear();
     heardMs_.clear();
     hands_ = {};
     standInHands_ = {};
@@ -147,7 +147,9 @@ void PropSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>
             continue;
         }
         UObject* parent = ObjectField(p.actor, 0);
-        const bool holding = parent && env_.ownedEntity && env_.ownedEntity(parent) != 0;
+        const uint8_t holder = parent && env_.ownedEntity ? env_.ownedEntity(parent) : 0;
+        const bool holding = holder != 0;
+        if (holding) p.toucher = holder;
         if (p.restoreTicks > 0) { --p.restoreTicks; if (!parent) RestorePhysics(p.root, p.rootIndex); }
 
         bool moving = false;   // only read when it decides anything: a let-go claim of mine waiting for rest
@@ -259,52 +261,80 @@ void PropSync::DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, UO
         if (!seen[e] && hands_[e].willie) hands_[e] = Hands{};
 }
 
-// Drops heard of (a Touch Grant on an id this machine does not know, from the machine that owns the id's fighter):
-// the weapon is still in the hand of the stand-in here, until the owner's pose shows that hand empty. At the deadline the
-// id still names the hand: an unknown weapon in that hand of the stand-in is the drop's, whatever the pose shows (no
-// pose, or one that never caught up), and is let go of (DeadlineRelease).
+// Drops heard of (a Touch Grant on an id this machine does not know, from the machine that owns the id's fighter). The
+// weapon in that hand of the stand-in when the drop was heard is its witness (OnGrant): the drop's copy, let go of once
+// the owner's pose shows that hand empty or another class, or at the deadline whatever the pose shows (no pose, or one
+// that never caught up; DeadlineRelease). A witness the stand-in let go of already (it left by itself, or the hand
+// matching was quicker) is adopted from loose_; with no witness (the hand was empty when the drop was heard) only a
+// weapon let go of from that hand before can be the drop's (sync::AdoptCandidate). Anything else in that hand is never
+// the drop's (test 5: a drop heard while the hand was empty forced out the secondary drawn 4 s later): at the deadline
+// the drop is given up (GiveUp).
 void PropSync::ResolvePending(double nowMs) {
     for (auto it = pending_.begin(); it != pending_.end();) {
         const uint64_t id = it->first;
+        const PendingDrop& d = it->second;
         bool done = props_.count(id) != 0;
         const uint8_t owner = PropOwnerEntity(id);
         const int hand = PropHand(id);
-        if (UObject* standIn = done ? nullptr : standIns_->ActorOf(owner)) {
-            UObject* copy = ObjectField(standIn, hand == 0 ? 1 : 2);
-            if (copy && !byActor_.count(copy) && adapter_->IsWeapon(copy) && !adapter_->IsBodyWeapon(copy) &&
-                ObjectField(copy, 0) == standIn) {
+        if (!done) {
+            UObject* standIn = standIns_->ActorOf(owner);
+            UObject* copy = UntrackedInHand(standIn, hand);
+            sync::DropFacts f;
+            f.witnessed = d.witness != nullptr;
+            f.holdsWitness = f.witnessed && copy == d.witness && adapter_->StillValid(copy, d.witnessIndex);
+            f.deadline = nowMs >= d.deadlineMs;
+            if (f.holdsWitness) {
                 uint32_t poseClass = 0;
                 const bool havePose = standIns_->PoseHand(owner, hand, poseClass);
-                if (ResolveDropNow(havePose, poseClass, ClassHashOf(copy))) {
-                    done = true;
-                    if (ReleaseFromStandIn(id, standIn, hand, copy)) ++n_.resolved;
-                }
-            } else if (!HandsOf(standIn)[size_t(hand)]) {
-                // Nothing in that hand could be the copy: the stand-in let go of it already (it left by itself, or the
-                // hand matching let it go first). The weapon it let go of from that hand most recently is the drop's.
-                done = Adopt(id, owner, hand, nowMs);
+                f.poseShowsLetGo = ResolveDropNow(havePose, poseClass, ClassHashOf(copy));
             }
-        }
-        if (!done && nowMs >= it->second) {
-            done = true;
-            DeadlineRelease(id, owner, hand);
+            if (!f.holdsWitness && Adopt(id, owner, hand, d, nowMs)) {
+                done = true;
+            } else {
+                switch (sync::StepDrop(f)) {
+                case sync::DropAct::Wait: break;
+                case sync::DropAct::Release:
+                    done = true;
+                    if (!f.poseShowsLetGo) DeadlineRelease(id, owner, hand, standIn, copy);
+                    else if (ReleaseFromStandIn(id, standIn, hand, copy)) ++n_.resolved;
+                    break;
+                case sync::DropAct::GiveUp:
+                    done = true;
+                    GiveUp(id, owner, hand, d, copy, nowMs);
+                    break;
+                }
+            }
         }
         it = done ? pending_.erase(it) : std::next(it);
     }
 }
 
-// A drop whose deadline passed. An unknown weapon still in that hand of the owner's stand-in is the drop's: let go of
-// (forced), unless the owner holds that prop again (a Hold Grant to the owner's slot), when the copy in hand is that
-// weapon, held, and becomes the prop where it is (kept). Only with no such weapon in that hand is the drop unresolved.
-void PropSync::DeadlineRelease(uint64_t id, uint8_t owner, int hand) {
-    UObject* standIn = standIns_->ActorOf(owner);
-    UObject* copy = standIn ? ObjectField(standIn, hand == 0 ? 1 : 2) : nullptr;
-    if (!copy || byActor_.count(copy) || !adapter_->IsWeapon(copy) || adapter_->IsBodyWeapon(copy) || ObjectField(copy, 0) != standIn) {
-        ++n_.unresolved;
-        HSM_LOG("props: drop %016llx (entity %u, hand %d) not found on its stand-in; that weapon stays local here",
-                static_cast<unsigned long long>(id), owner, hand);
-        return;
-    }
+// A real weapon in that hand of the stand-in (its "Parent Actor" the stand-in) that no prop names; nullptr if none.
+UObject* PropSync::UntrackedInHand(UObject* standIn, int hand) {
+    UObject* w = standIn ? ObjectField(standIn, hand == 0 ? 1 : 2) : nullptr;
+    if (!w || byActor_.count(w) || !adapter_->IsWeapon(w) || adapter_->IsBodyWeapon(w) || ObjectField(w, 0) != standIn) return nullptr;
+    return w;
+}
+
+// A drop with no copy here: its witness is gone, or there was none and nothing that hand let go of before is the drop's.
+// The weapon stays wherever it is here, and a later Grant of the id opens no other window (givenUp_).
+void PropSync::GiveUp(uint64_t id, uint8_t owner, int hand, const PendingDrop& d, UObject* copy, double nowMs) {
+    ++n_.unresolved;
+    for (auto g = givenUp_.begin(); g != givenUp_.end();) g = nowMs - g->second >= kLooseKeepMs ? givenUp_.erase(g) : std::next(g);
+    givenUp_[id] = nowMs;
+    std::string heard = "that hand empty";
+    if (d.witness)
+        heard = adapter_->StillValid(d.witness, d.witnessIndex) ? ObjectName(d.witness) + " in it, not in that hand since"
+                                                                 : std::string("a weapon in it, destroyed since");
+    const std::string holds = copy ? ObjectName(copy) : std::string("nothing untracked");
+    HSM_LOG("props: drop %016llx (entity %u, hand %d) not found on its stand-in (heard with %s; that hand holds %s now); that "
+            "weapon stays local here", static_cast<unsigned long long>(id), owner, hand, heard.c_str(), holds.c_str());
+}
+
+// A drop whose deadline passed while the stand-in still holds its witness. Let go of (forced), unless the owner holds
+// that prop again (a Hold Grant to the owner's slot), when the copy in hand is that weapon, held, and becomes the prop
+// where it is (kept).
+void PropSync::DeadlineRelease(uint64_t id, uint8_t owner, int hand, UObject* standIn, UObject* copy) {
     if (view_.Level(id) == LeaseLevel::Hold && view_.Streamer(id) == OwnerSlotOf(owner)) {
         Prop* p = Track(id, copy);
         if (!p) return;
@@ -446,7 +476,11 @@ void PropSync::MatchStandIns(double nowMs) {
             s = StandInHands{};
             s.willie = standIn;
             s.index = index;
+            s.boundMs = nowMs;
             for (int h = 0; h < 2; ++h) SetHeld(s.hand[size_t(h)], cur[size_t(h)]);
+            // Test 5: a respawned stand-in's hand went empty 330 ms after its weapon was given, with nothing logged.
+            HSM_LOG("props: stand-in of e%u is %s; hand 0 holds %s, hand 1 %s", e, ObjectName(standIn).c_str(),
+                    cur[0] ? ObjectName(cur[0]).c_str() : "nothing", cur[1] ? ObjectName(cur[1]).c_str() : "nothing");
         }
         for (int h = 0; h < 2; ++h) MatchHand(e, standIn, h, cur, nowMs);
     }
@@ -457,9 +491,16 @@ void PropSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObject*
     UObject* prev = sh.held;
     // Left both hands with nothing here letting it go (this code and Equip update or keep what they change; a sheathed
     // weapon keeps its "Parent Actor"): the stand-in dropped it by itself.
-    if (prev && prev != cur[0] && prev != cur[1] && adapter_->StillValid(prev, sh.heldIndex) && !ObjectField(prev, 0)) {
-        SelfDropped(e, standIn, h, sh, cur, nowMs);
-        if (env_.handsChanged) env_.handsChanged(e);
+    if (prev && prev != cur[0] && prev != cur[1]) {
+        if (!adapter_->StillValid(prev, sh.heldIndex)) {
+            if (!sh.selfDropLogged)
+                HSM_LOG("props: stand-in of e%u: the weapon in hand %d is gone, %.0f ms after the stand-in was bound", e, h,
+                        nowMs - standInHands_[e].boundMs);
+            sh.selfDropLogged = true;
+        } else if (!ObjectField(prev, 0)) {
+            SelfDropped(e, standIn, h, sh, cur, nowMs);
+            if (env_.handsChanged) env_.handsChanged(e);
+        }
     }
     SetHeld(sh, cur[size_t(h)]);
 
@@ -479,7 +520,7 @@ void PropSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObject*
         if (PropOwnerEntity(kv.first) == e && PropHand(kv.first) == h) { f.dropPending = true; break; }
     if (!f.holding && f.havePose && f.poseClass != sync::kHandEmpty && f.poseClass != sync::kHandUnknown) {
         const double age = nowMs - pose.sinceMs;   // only between the two graces does the answer change anything
-        if (age >= sync::kAttachGraceMs && age < sync::kDrawGraceMs) f.mayBeDraw = env_.mayBeDraw(e, h, f.poseClass);
+        if (age >= sync::kAttachGraceMs && age < sync::kDrawGraceMs) f.mayBeDraw = env_.mayBeDraw(e, f.poseClass);
     }
     const sync::HandAct act = sh.match.Step(f, nowMs);
     if (act == sync::HandAct::None) return;
@@ -508,14 +549,20 @@ void PropSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObject*
 }
 
 // A weapon left the stand-in's hand by itself. While the owner's pose still shows its class in that hand, the hand takes
-// it back (at most every kReattachMinMs, never a cut-off hand); otherwise it falls like a dropped weapon.
+// it back (at most every sync::kReattachMinMs, never a cut-off hand); otherwise it falls like a dropped weapon.
 void PropSync::SelfDropped(uint8_t e, UObject* standIn, int h, StandInHand& sh, std::array<UObject*, 2>& cur, double nowMs) {
     UObject* w = sh.held;
-    const bool first = ++n_.selfDrops <= kLogFirst;
+    // The first of every stand-in hand is logged, with how long after its binding (test 5: the respawn's empty hand).
+    const bool firstOfHand = !sh.selfDropLogged;
+    sh.selfDropLogged = true;
+    const bool first = ++n_.selfDrops <= kLogFirst || firstOfHand;
+    if (firstOfHand)
+        HSM_LOG("props: stand-in of e%u: first weapon to leave hand %d by itself, %.0f ms after the stand-in was bound", e, h,
+                nowMs - standInHands_[e].boundMs);
     StandIns::PoseHandView pose;
     const bool shown = sh.heldClass != 0 && standIns_->PoseHandInfo(e, h, pose) && pose.classHash == sh.heldClass;
     const bool handDead = env_.deadBones(e) & (1u << (h == 0 ? sync::kBoneHandR : sync::kBoneHandL));
-    if (shown && !cur[size_t(h)] && !handDead && nowMs - sh.reattachMs >= kReattachMinMs) {
+    if (shown && !cur[size_t(h)] && !handDead && nowMs - sh.reattachMs >= sync::kReattachMinMs) {
         sh.reattachMs = nowMs;
         if (TakeIntoHand(standIn, h, w)) {
             ++n_.reattached;
@@ -627,19 +674,24 @@ void PropSync::TickLoose(double nowMs) {
     }
 }
 
-// A drop heard of after the stand-in here let go of that weapon: the one it let go of from that hand most recently (and
-// still loose) becomes the drop's prop, if it is of the class the owner's pose showed in that hand before it changed (a
-// weapon this stand-in let go of earlier is not some other weapon the owner dropped since).
-bool PropSync::Adopt(uint64_t propId, uint8_t owner, int hand, double nowMs) {
+// A drop whose copy the stand-in here let go of already. With a witness, that weapon if it is loose; without, the one
+// let go of from that hand most recently before the drop was heard (and still loose), if it is of the class the
+// owner's pose showed in that hand before it changed (a weapon this stand-in let go of earlier is not some other weapon
+// the owner dropped since).
+bool PropSync::Adopt(uint64_t propId, uint8_t owner, int hand, const PendingDrop& d, double nowMs) {
+    const bool witnessed = d.witness != nullptr;
     StandIns::PoseHandView pose;
-    if (!standIns_->PoseHandInfo(owner, hand, pose)) return false;
+    if (!witnessed && !standIns_->PoseHandInfo(owner, hand, pose)) return false;
     auto best = loose_.end();
     for (auto it = loose_.begin(); it != loose_.end(); ++it)
-        if (it->entity == owner && it->hand == hand && nowMs - it->atMs < kLooseKeepMs && (best == loose_.end() || it->atMs > best->atMs))
+        if (it->entity == owner && (witnessed || it->hand == hand) && nowMs - it->atMs < kLooseKeepMs &&
+            sync::AdoptCandidate(witnessed, it->actor == d.witness && it->index == d.witnessIndex, it->atMs, d.heardMs) &&
+            (best == loose_.end() || it->atMs > best->atMs))
             best = it;
-    if (best != loose_.end() && (best->classHash == 0 || best->classHash != pose.prevClassHash || best->classHash == pose.classHash))
+    if (best == loose_.end()) return false;
+    if (!witnessed && (best->classHash == 0 || best->classHash != pose.prevClassHash || best->classHash == pose.classHash))
         return false;
-    if (best == loose_.end() || !adapter_->StillValid(best->actor, best->index) || ObjectField(best->actor, 0)) return false;
+    if (!adapter_->StillValid(best->actor, best->index) || ObjectField(best->actor, 0)) return false;
     UObject* w = best->actor;
     const int restoreTicks = best->restoreTicks;
     Prop* p = Track(propId, w);
@@ -702,10 +754,20 @@ void PropSync::Grant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     OnGrant(propId, g.slot, level);
 }
 
+// A drop heard of opens its one resolve window, with what that hand of the stand-in holds now as its witness.
 void PropSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     view_.OnGrant(propId, slot, level);
-    if (slot != MySlot() && !props_.count(propId) && !pending_.count(propId) && DropSignature(propId, level, slot))
-        pending_[propId] = SteadyNowMs() + kResolveWindowMs;
+    if (slot == MySlot() || props_.count(propId) || pending_.count(propId) || !DropSignature(propId, level, slot)) return;
+    const double now = SteadyNowMs();
+    if (auto g = givenUp_.find(propId); g != givenUp_.end()) {
+        if (now - g->second < kLooseKeepMs) return;   // given up already: that drop had its window
+        givenUp_.erase(g);
+    }
+    PendingDrop& d = pending_[propId];
+    d.heardMs = now;
+    d.deadlineMs = now + kResolveWindowMs;
+    d.witness = UntrackedInHand(standIns_->ActorOf(PropOwnerEntity(propId)), PropHand(propId));
+    d.witnessIndex = d.witness ? ObjectIndex(d.witness) : -1;
 }
 
 bool PropSync::OnPropState(const uint8_t* d, size_t n, uint8_t fromSlot) {
@@ -952,6 +1014,10 @@ void PropSync::ForgetEntity(uint8_t entity) {
         if (l.entity == entity) l.entity = 0;   // still falls; no drop of that fighter's can be heard of any more
     for (auto it = pending_.begin(); it != pending_.end();)
         it = PropOwnerEntity(it->first) == entity ? pending_.erase(it) : std::next(it);
+    for (auto it = givenUp_.begin(); it != givenUp_.end();)
+        it = PropOwnerEntity(it->first) == entity ? givenUp_.erase(it) : std::next(it);
+    for (auto& [id, p] : props_)
+        if (p.toucher == entity) p.toucher = 0;
 }
 
 // ---------------------------------------------------------------- contacts
@@ -964,12 +1030,35 @@ void PropSync::NoteContact(UObject* a, UObject* b) {
         UObject* other = side == 0 ? b : a;
         // A fighter simulated here, or a weapon in its hand ("Parent Actor" only: a thrown weapon's "Last Parent" is not a touch).
         UObject* fighter = adapter_->IsWillie(other) ? other : adapter_->IsWeapon(other) ? ObjectField(other, 0) : nullptr;
-        if (!fighter || !env_.ownedEntity(fighter)) continue;
+        const uint8_t entity = fighter ? env_.ownedEntity(fighter) : 0;
+        if (!entity) continue;
         auto p = props_.find(it->second);
         if (p == props_.end()) continue;
         p->second.lastContactMs = SteadyNowMs();
+        p->second.toucher = entity;
         ++n_.contacts;
     }
+}
+
+// A prop's contact with a fighter: the hook of "Deal Complex Damage" asks what struck (game::Claims).
+bool PropSync::PropOf(UObject* actor, Touch& out) {
+    if (!active_ || !actor) return false;
+    auto it = byActor_.find(actor);
+    if (it == byActor_.end()) return false;
+    auto p = props_.find(it->second);
+    if (p == props_.end() || !adapter_->StillValid(p->second.actor, p->second.index) || ObjectField(actor, 0)) return false;
+    out = Touch{};
+    out.id = p->first;
+    out.streamedHere = view_.Streamer(p->first) == MySlot();
+    out.toucher = p->second.toucher;
+    PropStateMsg s;
+    if (out.streamedHere && Read(p->second, s)) out.velocity = sync::V3{s.vx, s.vy, s.vz};
+    return true;
+}
+
+UObject* PropSync::ActorOf(uint64_t propId) const {
+    auto it = props_.find(propId);
+    return it != props_.end() && adapter_->StillValid(it->second.actor, it->second.index) ? it->second.actor : nullptr;
 }
 
 // ---------------------------------------------------------------- engine access

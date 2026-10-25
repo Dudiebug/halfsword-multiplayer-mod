@@ -6,6 +6,7 @@
 #include "hsm_protocol.h"
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,23 @@ inline bool ChatUtf8Next(const std::string& s, size_t i, size_t& len, uint32_t& 
         return true;
     }
     return false;
+}
+
+// UTF-8 as the engine takes text (an FString is UTF-16): code points above U+FFFF become a surrogate pair, and
+// every byte that does not start a valid sequence becomes one U+FFFD.
+inline std::u16string Utf16FromUtf8(const std::string& s) {
+    std::u16string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        size_t len = 0; uint32_t cp = 0;
+        if (!ChatUtf8Next(s, i, len, cp)) { out.push_back(char16_t(0xFFFD)); ++i; continue; }
+        i += len;
+        if (cp < 0x10000) { out.push_back(char16_t(cp)); continue; }
+        cp -= 0x10000;
+        out.push_back(char16_t(0xD800 + (cp >> 10)));
+        out.push_back(char16_t(0xDC00 + (cp & 0x3FF)));
+    }
+    return out;
 }
 
 // Strips control characters (C0, DEL, C1) and invalid UTF-8, trims ASCII spaces, truncates to kMaxChatBytes on a
@@ -136,6 +154,140 @@ public:
     void Clear() { entries_.clear(); }
 private:
     std::vector<Entry> entries_;
+};
+
+// ---------------------------------------------------------------- typing: the keyboard is the chat's
+// docs/MATCH_ROUNDS_UI_CHAT_PLAN.md section 2. The overlay polls the OS key state, but the game's own input kept firing
+// while the player typed: G opened the inventory, R slowed time, Esc paused. While a line is being typed the client
+// takes the keyboard from the game (UI-only input mode, as the game's own menus do) and gives it back on every way out.
+// ChatSession decides when; the client only polls keys into events and applies the capture it reports.
+
+// The key that opens the chat (HSMMod.ini [net] chat_key, -hsmchatkey=): Enter by default, as no fight action is bound to
+// it; T is very likely the game's Talk.
+enum class ChatKey : uint8_t { Enter, T, Y, U };
+
+inline const char* ChatKeyName(ChatKey k) {
+    switch (k) {
+        case ChatKey::Enter: return "enter";
+        case ChatKey::T: return "t";
+        case ChatKey::Y: return "y";
+        case ChatKey::U: return "u";
+    }
+    return "enter";
+}
+
+// "enter", "t", "y" or "u", any case. Anything else is refused and out is left as it was.
+inline bool ParseChatKey(const std::string& s, ChatKey& out) {
+    std::string low;
+    for (char c : s) low += (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+    for (ChatKey k : {ChatKey::Enter, ChatKey::T, ChatKey::Y, ChatKey::U})
+        if (low == ChatKeyName(k)) { out = k; return true; }
+    return false;
+}
+
+// OpenKey: the configured letter key (its text along); Char: any other key's text. FocusLost, HudHidden and Paused may
+// be sent every frame they hold.
+enum class ChatEvent : uint8_t { OpenKey, Enter, Escape, FocusLost, HudHidden, Paused, Char, Backspace };
+
+inline const char* ChatEventName(ChatEvent e) {
+    switch (e) {
+        case ChatEvent::OpenKey: return "open key";
+        case ChatEvent::Enter: return "enter";
+        case ChatEvent::Escape: return "escape";
+        case ChatEvent::FocusLost: return "focus lost";
+        case ChatEvent::HudHidden: return "hud hidden";
+        case ChatEvent::Paused: return "paused";
+        case ChatEvent::Char: return "char";
+        case ChatEvent::Backspace: return "backspace";
+    }
+    return "?";
+}
+
+struct ChatStep {
+    bool captureChanged = false;            // this event took the keyboard or gave it back
+    bool capture = false;                   // the keyboard is the chat's after it (exactly while typing)
+    bool refused = false;                   // the rate limiter refused the line: the draft and the keyboard stay
+    std::optional<std::string> send;        // a line to send: sanitized, non-empty
+};
+
+// Not typing: Enter (when it is the key) or OpenKey starts a line and takes the keyboard; the key that opened it is not
+// typed; everything else is the game's. Typing: OpenKey and Char type their text (whole, or not at all when it holds a
+// control character, invalid UTF-8 or would pass kMaxChatBytes), Backspace takes the last code point, Enter sends the
+// sanitized draft (an empty or blank one only closes and costs no token), and Escape, FocusLost, HudHidden and Paused
+// drop the draft. Every close gives the keyboard back, once.
+class ChatSession {
+public:
+    explicit ChatSession(ChatKey key = ChatKey::Enter) : key_(key) {}
+
+    ChatStep On(ChatEvent e, uint32_t nowMs, const std::string& text = std::string()) {
+        ChatStep st;
+        if (!typing_) {
+            if (e == ChatEvent::OpenKey || (e == ChatEvent::Enter && key_ == ChatKey::Enter)) {
+                typing_ = true;
+                draft_.clear();
+                st.captureChanged = true;
+            }
+            st.capture = typing_;
+            return st;
+        }
+        switch (e) {
+            case ChatEvent::OpenKey:
+            case ChatEvent::Char:
+                if (Typable(text) && draft_.size() + text.size() <= kMaxChatBytes) draft_ += text;
+                break;
+            case ChatEvent::Backspace:
+                if (!draft_.empty()) {
+                    size_t i = draft_.size() - 1;
+                    while (i > 0 && (static_cast<uint8_t>(draft_[i]) & 0xC0) == 0x80) --i;   // back to the lead byte
+                    draft_.resize(i);
+                }
+                break;
+            case ChatEvent::Enter: {
+                std::string line = SanitizeChat(draft_);
+                if (!line.empty()) {
+                    if (!limiter_.Allow(nowMs)) { st.refused = true; break; }
+                    st.send = std::move(line);
+                }
+                Close(st);
+                break;
+            }
+            case ChatEvent::Escape:
+            case ChatEvent::FocusLost:
+            case ChatEvent::HudHidden:
+            case ChatEvent::Paused:
+                Close(st);
+                break;
+        }
+        st.capture = typing_;
+        return st;
+    }
+
+    bool typing() const { return typing_; }
+    const std::string& draft() const { return draft_; }
+    ChatKey key() const { return key_; }
+
+private:
+    // Non-empty valid UTF-8 without a control character (C0, DEL, C1).
+    static bool Typable(const std::string& s) {
+        if (s.empty()) return false;
+        for (size_t i = 0; i < s.size();) {
+            size_t len = 0;
+            uint32_t cp = 0;
+            if (!ChatUtf8Next(s, i, len, cp) || cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)) return false;
+            i += len;
+        }
+        return true;
+    }
+    void Close(ChatStep& st) {
+        typing_ = false;
+        draft_.clear();
+        st.captureChanged = true;
+    }
+
+    ChatKey key_;
+    bool typing_ = false;
+    std::string draft_;
+    ChatRateLimiter limiter_;
 };
 
 }  // namespace hsm

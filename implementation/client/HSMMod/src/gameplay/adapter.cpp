@@ -84,6 +84,14 @@ UObject* Adapter::PlayerWillie(int localIndex) {
     return willieClass_ && IsA(ch, willieClass_) ? ch : nullptr;
 }
 
+namespace {
+UObject* WidgetLibrary() {
+    static UObject* wbl = nullptr;
+    if (!wbl) if (UObject* cls = FindObject("WidgetBlueprintLibrary", "Class")) wbl = DefaultObject(reinterpret_cast<UClass*>(cls));
+    return wbl;
+}
+}  // namespace
+
 // Same calls the game makes when a menu closes (decomp UI/UI_DeathDoor.cpp:118-119): our session travel skips the
 // stock menu flow that would otherwise leave the menu's UI input mode and cursor behind.
 void Adapter::RestoreGameInput() {
@@ -91,19 +99,33 @@ void Adapter::RestoreGameInput() {
     pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
-    static UObject* wbl = nullptr;
-    if (!wbl) if (UObject* cls = FindObject("WidgetBlueprintLibrary", "Class")) wbl = DefaultObject(reinterpret_cast<UClass*>(cls));
-    Call mode(wbl, "SetInputMode_GameOnly");
+    Call mode(WidgetLibrary(), "SetInputMode_GameOnly");
     mode.set<UObject*>("PlayerController", ctrl).set<bool>("bFlushInput", false).invoke();
     SetBool(ctrl, "bShowMouseCursor", false);
 }
 
-bool Adapter::FloorZ(const FVector& at, UObject* ignore, double& z) {
+// The call the game makes when its death screen opens (decomp UI/UI_DeathDoor.cpp:226): UI-only, no widget focused, the
+// mouse not locked (EMouseLockMode::DoNotLock), the keys held now flushed (a running fighter stops). The viewport then
+// ignores keys, so G (inventory), R (slow motion) and Esc (pause) reach neither the fighter nor the pause menu; the
+// chat reads the OS key state and is unaffected.
+void Adapter::CaptureInput(bool on) {
+    inputCaptured_ = on;
+    if (!on) { RestoreGameInput(); return; }
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!ctrl) return;
+    Call mode(WidgetLibrary(), "SetInputMode_UIOnlyEx");
+    mode.set<UObject*>("PlayerController", ctrl).set<UObject*>("InWidgetToFocus", nullptr).set<uint8_t>("InMouseLockMode", 0)
+        .set<bool>("bFlushInput", true).invoke();
+}
+
+bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, double& z, std::string* hitName) {
     static UObject* ksl = nullptr;
     if (!ksl) if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
-    struct ActorArray { UObject** data; int32_t num, max; };   // TArray<AActor*> view over a local; the engine only reads it
-    UObject* ignored[1] = {ignore};
-    ActorArray skip{ignored, ignore ? 1 : 0, 1};
+    struct ActorArray { UObject** data; int32_t num, max; };   // TArray<AActor*> view over our vector; the engine only reads it
+    std::vector<UObject*> ignored = ignore;
+    ActorArray skip{ignored.data(), int32_t(ignored.size()), int32_t(ignored.size())};
     Call t(ksl, "LineTraceSingle");
     t.set<UObject*>("WorldContextObject", world_).set("Start", FVector{at.x, at.y, at.z + 150}).set("End", FVector{at.x, at.y, at.z - 600})
      .set<uint8_t>("TraceChannel", 0).set<bool>("bTraceComplex", false).set("ActorsToIgnore", skip).set<uint8_t>("DrawDebugType", 0)
@@ -114,7 +136,43 @@ bool Adapter::FloorZ(const FVector& at, UObject* ignore, double& z) {
     FVector ip; std::memcpy(&ip, hit + 40, sizeof ip);   // FHitResult::ImpactPoint
     if (!std::isfinite(ip.z)) return false;
     z = ip.z;
+    if (hitName) {
+        Call b(statics_, "BreakHitResult");
+        b.setFrom("Hit", hit);
+        UObject* actor = b.invoke() ? b.get<UObject*>("HitActor") : nullptr;
+        *hitName = actor ? ObjectName(actor) : std::string("nothing");
+    }
     return true;
+}
+
+// The Abyss' level script places each enemy this way before Spawn_NPC (decomp Maps/Abyss_Map_Open_EA.cpp:997, radius 500).
+bool Adapter::NavigablePoint(const FVector& origin, double radius, FVector& out) {
+    static UObject* nav = nullptr;
+    if (!nav) if (UObject* cls = FindObject("NavigationSystemV1", "Class")) nav = DefaultObject(reinterpret_cast<UClass*>(cls));
+    if (!nav || !world_) return false;
+    Call c(nav, "K2_GetRandomLocationInNavigableRadius");
+    c.set<UObject*>("WorldContextObject", world_).set("Origin", origin).setReal("Radius", radius)
+     .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
+    if (!c.invoke() || !c.get<bool>("ReturnValue")) return false;
+    out = c.get<FVector>("RandomLocation");
+    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+}
+
+// What a floor trace for a spawn must look through (test 5: it hit the fighter already standing at the spot): every
+// fighter with its attached actors (armor pieces, held and sheathed weapons) and every weapon lying around.
+std::vector<UObject*> Adapter::BodiesAndGear() {
+    std::vector<UObject*> out = WeaponActors();
+    for (UObject* w : AllWillies()) {
+        out.push_back(w);
+        Call att(w, "GetAttachedActors");
+        att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
+        FObjArray* arr = att.invoke() ? static_cast<FObjArray*>(att.paramPtr("OutActors")) : nullptr;
+        if (arr && arr->num > 0 && arr->num <= 256)
+            for (int32_t i = 0; i < arr->num; ++i) if (arr->data[i]) out.push_back(arr->data[i]);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
 bool Adapter::ControlRotation(int localIndex, float& yaw, float& pitch) {
@@ -336,17 +394,27 @@ void Adapter::DestroyActor(UObject* actor) {
     if (!reported) { reported = true; HSM_LOG("adapter: a destroyed actor is %smarked as garbage", IsGarbage(actor) ? "" : "NOT "); }
 }
 
-bool Adapter::BeingDestroyed(UObject* actor) {
-    static UFunction* fn = nullptr;
-    if (!fn) if (UClass* actorClass = FindClass("Actor")) fn = FindFunction(actorClass, "IsActorBeingDestroyed");
-    if (!actor || !fn) return false;
-    Call c(actor, fn);
+// Each object is asked its own class's question: AActor::IsActorBeingDestroyed for an actor, UActorComponent::IsBeingDestroyed
+// for a component, nothing for anything else. Neither thunk checks its class (shipping ProcessEvent does not either): the
+// actor's reads byte 0x5D, which on a component is bit 40 of its ComponentTags array pointer, so a tagged mesh read as
+// "being destroyed" on one machine and not on the other (docs/TWO_PLAYER_TEST_5.md section 1).
+bool Adapter::BeingDestroyed(UObject* o) {
+    static UClass* actorClass = nullptr;
+    static UClass* componentClass = nullptr;
+    static UFunction* actorFn = nullptr;
+    static UFunction* componentFn = nullptr;
+    if (!actorFn && (actorClass = FindClass("Actor"))) actorFn = FindFunction(actorClass, "IsActorBeingDestroyed");
+    if (!componentFn && (componentClass = FindClass("ActorComponent"))) componentFn = FindFunction(componentClass, "IsBeingDestroyed");
+    if (!o) return false;
+    UFunction* fn = actorFn && IsA(o, actorClass) ? actorFn : componentFn && IsA(o, componentClass) ? componentFn : nullptr;
+    if (!fn) return false;
+    Call c(o, fn);
     return c.invoke() && c.get<bool>("ReturnValue");
 }
 
 bool Adapter::StillValid(UObject* o, int32_t index) const {
     if (!o || index < 0 || ObjectAt(index) != o) return false;
-    return !destroyAware_ || !BeingDestroyed(o);
+    return !destroyAware_ || (!IsGarbage(o) && !BeingDestroyed(o));
 }
 
 void Adapter::DestroyFighter(UObject* willie, int32_t index) {
@@ -762,7 +830,8 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
         else DestroyActor(old);
     }
     Call(ctrl, "ResetIgnoreInputFlags").invoke();   // the new body must take input whatever the death left behind
-    RestoreGameInput();
+    if (inputCaptured_) CaptureInput(true);         // a line being typed keeps the keyboard (the new controller's too)
+    else RestoreGameInput();
     HSM_LOG("adapter: local player respawned");
     return w;
 }

@@ -15,6 +15,13 @@ inline MatchConfig Sanitize(MatchConfig c) {
     return c;
 }
 
+inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
+    if (IsBotFormat(c.format)) return Regear::None;                     // gear is a PvP option
+    if (c.gear == Gear::RandomTier) return Regear::Each;
+    if (c.gear == Gear::Mirror && (cause == RespawnCause::RoundReset || cause == RespawnCause::Rematch)) return Regear::Shared;
+    return Regear::None;
+}
+
 inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f) {
     std::map<uint8_t, int8_t> out;
     int teams = TeamCount(f);
@@ -105,10 +112,11 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
         int alive = 0; uint8_t last = 0;
         for (const auto& [e, f] : fighters_) if (f.alive) { ++alive; last = e; }
         if (alive > 1) return;
-        roundOver_ = true; roundEnd_ = nowMs;
+        roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = last;                 // 0: nobody standing, a drawn round
         if (alive == 1) {
             AddPoints(ScoreKeyOf(last), 1);
             if (Score(ScoreKeyOf(last)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(last), nowMs);
+            else if (phase_ == MatchPhase::SuddenDeath) { int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
         }
         return;
     }
@@ -132,6 +140,16 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
 }
 
 inline Match::Events Match::Tick(uint32_t nowMs) {
+    Events ev = Advance(nowMs);
+    if (!ev.respawn.empty() || ev.rematch) {
+        RespawnCause cause = ev.rematch ? RespawnCause::Rematch : ev.roundReset ? RespawnCause::RoundReset
+                           : ev.waveCleared ? RespawnCause::WaveCleared : RespawnCause::Individual;
+        ev.regear = RegearFor(cfg_, cause);
+    }
+    return ev;
+}
+
+inline Match::Events Match::Advance(uint32_t nowMs) {
     Events ev;
     uint32_t elapsed = nowMs - phaseStart_;
     if (endedPending_) { ev.ended = true; endedPending_ = false; }    // before the rematch branch can return
@@ -152,8 +170,8 @@ inline Match::Events Match::Tick(uint32_t nowMs) {
     if (endedPending_) { ev.ended = true; endedPending_ = false; }    // ended during this Tick (time limit)
     if (phase_ == MatchPhase::Idle || phase_ == MatchPhase::Results) return ev;
     if (cfg_.format == Format::Duel) {
-        if (roundOver_ && nowMs - roundEnd_ >= kRoundGapMs) {
-            roundOver_ = false; ev.roundReset = true;
+        if (roundOver_ && nowMs - roundEnd_ >= uint32_t(cfg_.respawnDelayS) * 1000u) {
+            roundOver_ = false; roundWinner_ = 0; ++round_; ev.roundReset = true;
             for (auto& [e, f] : fighters_) { f.alive = true; ev.respawn.push_back(e); }
         }
         return ev;
@@ -167,12 +185,17 @@ inline Match::Events Match::Tick(uint32_t nowMs) {
         }
         int alive = AliveBots();
         if (remaining_ == 0 && spawnOwed_ == 0 && alive == 0) {          // wave cleared: downed players return
-            AddPoints(kHumanTeam, 1); ++wave_; inBreak_ = true; breakStart_ = nowMs; ev.waveCleared = true;
+            AddPoints(kHumanTeam, 1); ++wave_; ev.waveCleared = true;
+            if (phase_ == MatchPhase::SuddenDeath) {                      // past the time limit the wave wins the match
+                End(kHumanTeam, nowMs); endedPending_ = false; ev.ended = true;
+                return ev;
+            }
+            inBreak_ = true; breakStart_ = nowMs;
             for (const auto& [e, f] : fighters_) if (f.human && !f.alive) ev.respawn.push_back(e);
             return ev;
         }
         int room = kMaxBotsAlive - alive - spawnOwed_;
-        int n = std::min(remaining_, std::max(room, 0));
+        int n = std::min({remaining_, std::max(room, 0), kBotsPerTick});
         if (n > 0) { remaining_ -= n; spawnOwed_ += n; ev.spawnBots = n; ev.botRank = waveRank_; }
         return ev;
     }
@@ -185,6 +208,12 @@ inline void Match::MarkRespawned(uint8_t entity) { auto it = fighters_.find(enti
 
 inline void Match::Finish(int winnerKey, uint32_t nowMs) {
     if (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath || phase_ == MatchPhase::Countdown) End(winnerKey, nowMs);
+}
+
+inline uint32_t Match::RoundGapLeftMs(uint32_t nowMs) const {
+    if (!roundOver_ || (phase_ != MatchPhase::Live && phase_ != MatchPhase::SuddenDeath)) return 0;   // the last round has no gap
+    uint32_t gap = uint32_t(cfg_.respawnDelayS) * 1000u, elapsed = nowMs - roundEnd_;
+    return gap > elapsed ? gap - elapsed : 0;
 }
 
 inline uint32_t Match::TimeLeftMs(uint32_t nowMs) const {
@@ -228,7 +257,7 @@ inline void Match::StartWave(uint32_t nowMs, Events& ev) {
 }
 inline void Match::ResetModeState() {
     wave_ = 0; remaining_ = 0; waveRank_ = 0; spawnOwed_ = 0; inBreak_ = false; clearedPending_ = false; breakStart_ = 0;
-    revive_.clear(); roundOver_ = false; roundEnd_ = 0;
+    revive_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = cfg_.format == Format::Duel ? 1 : 0;
 }
 
 inline std::vector<int8_t> PartitionSides(const std::vector<Point3>& points, int teams) {

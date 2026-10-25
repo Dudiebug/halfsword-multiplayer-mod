@@ -244,6 +244,28 @@ void TestReach() {
     CHECK(!HandReachesSlot(2, 2) && !HandReachesSlot(-1, 2));
 }
 
+// The owner's pose shows a class in an empty hand of the stand-in, token other: a draw still on its way when a slot the
+// owner shows sheathed holds a weapon of that class on the stand-in -- any slot, whichever hand: a hand draws from every
+// slot (PlanEquip's Draw has no reach). Test 5: the right hand drew from L 1 ("drew into hand R slot 3"); the reach
+// rule took that for a pickup and the hand went for the nearest loose weapon of the class.
+void TestMayBeDraw() {
+    constexpr uint32_t kSword = 0x5304D001u, kAxe = 0x41E0A11Eu;
+    for (int k = 0; k < kEquipSlots; ++k) {
+        std::array<uint32_t, kEquipSlots> slots{};
+        slots[size_t(k)] = kSword;
+        CHECK(MayBeDrawFrom(uint8_t(1u << k), slots, kSword));       // every slot, R 1 to L 2
+        CHECK(!MayBeDrawFrom(uint8_t(1u << k), slots, kAxe));        // another class
+        CHECK(!MayBeDrawFrom(uint8_t(0x1F & ~(1u << k)), slots, kSword));   // the owner shows that slot drawn
+        CHECK(!MayBeDrawFrom(uint8_t(1u << k), {}, kSword));         // the stand-in's slot is empty
+    }
+    std::array<uint32_t, kEquipSlots> mixed{kAxe, 0, kAxe, kSword, 0};
+    CHECK(MayBeDrawFrom(0x08, mixed, kSword));                       // test 5: L 1
+    CHECK(!MayBeDrawFrom(0x05, mixed, kSword));
+    CHECK(MayBeDrawFrom(0x05, mixed, kAxe));
+    CHECK(!MayBeDrawFrom(0x1F, mixed, 0));                           // no class: never (an empty slot is 0 too)
+    CHECK(!MayBeDrawFrom(0x00, mixed, kSword));
+}
+
 EquipHints Stale(bool r, bool l) { EquipHints h; h.staleHeld = {r, l}; return h; }
 
 void TestPlanStale() {
@@ -331,6 +353,7 @@ int main() {
     TestTracker();
     TestPlan();
     TestReach();
+    TestMayBeDraw();
     TestPlanStale();
     TestSender();
     if (g_fail) { std::printf("test_hsm_equip: %d failure(s)\n", g_fail); return 1; }

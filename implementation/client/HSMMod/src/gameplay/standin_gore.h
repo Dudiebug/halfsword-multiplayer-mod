@@ -73,6 +73,8 @@ public:
     void OnVitals(uint8_t entity, uint32_t severed, uint32_t dislocated, double nowMs);
     // The game's own cut was replayed on this entity's stand-in for `part`: no fallback for it, and its bones are gone.
     void NoteNativeSever(uint8_t entity, uint8_t part);
+    // ... but its Delayed half (limb spawn, bone hide) never ran: the part is owed to the fallback again.
+    void NoteNativeLost(uint8_t entity, uint8_t part);
     void Tick(double nowMs);                                    // once per frame, after the stand-ins' Tick
     // Pose bones (bit per sync::kPoseBones index) the entity's current stand-in has lost; 0 when it is whole or has no actor.
     uint32_t DeadBones(uint8_t entity) const;
@@ -95,7 +97,7 @@ private:
         sync::GoreOwed owed;                                    // fallbacks due and joints dislocated, until the tracker resets
         Record rec;
     };
-    struct Counters { uint64_t vitals = 0, resets = 0, fallbacks = 0, nothing = 0, failed = 0, reasserted = 0, native = 0,
+    struct Counters { uint64_t vitals = 0, resets = 0, fallbacks = 0, nothing = 0, failed = 0, reasserted = 0, native = 0, nativeLost = 0,
                       dislocated = 0, relocated = 0, swaps = 0, actors = 0; };
     // The entity's live stand-in, with its record made current; a new actor drops what was owed and waits for a whole sample.
     ue::UObject* Bind(uint8_t entity, Entry& e);

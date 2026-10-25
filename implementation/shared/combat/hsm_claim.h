@@ -8,6 +8,7 @@
 // contributors, MIT (see THIRD_PARTY_NOTICES.md).
 #pragma once
 #include "hsm_protocol.h"
+#include "session/hsm_lease.h"
 #include "sync/hsm_pose.h"
 #include "util/hsm_names.h"
 #include <bitset>
@@ -90,6 +91,9 @@ struct Xform {
 
 // What struck: HSMP flag bit 7 (BF.WEAPON) plus the hand that owns the history/replay component.
 enum class StrikeSource : uint8_t { Body = 0, WeaponRight = 1, WeaponLeft = 2 };
+// Whose: the attacker fighter's weapon or body, or a prop (a rock, a thrown weapon, debris) streamed by the claiming
+// machine, whose contact it decided for the attacker (DecidePropContact).
+enum class StrikerKind : uint8_t { Fighter = 0, Prop = 1 };
 
 // A captured "Deal Complex Damage" call, in the hit bone's local frame (see Xform above).
 struct HitClaim {
@@ -107,6 +111,9 @@ struct HitClaim {
     bool hasHitBox = false;
     Xform hitBoxLocal;                  // Hit Box's world transform, expressed in the hit bone frame
     V3 hitBoxExtent;                    // Hit Box half-extents; only meaningful when hasHitBox
+    StrikerKind striker = StrikerKind::Fighter;
+    uint64_t propId = 0;                // Prop: the prop (session/hsm_lease.h ids); 0 for a fighter
+    V3 propVelocity;                    // Prop: its velocity at the contact, in the hit bone's frame; zero for a fighter
 };
 
 // The world-space "Deal Complex Damage" call inputs, same fields as the decompiled signature
@@ -195,6 +202,30 @@ inline DcdInputs ReplayInputs(const HitClaim& c, const Xform& victimBoneWorld) {
     }
     return out;
 }
+
+// ---------------------------------------------------------------- props (test 5: rocks did no damage)
+// A contact between a fighter and a prop is decided on the one machine that streams the prop (its lessee, or the host
+// while it is FREE): there the prop is simulated and the contact carries a real impulse; everywhere else the prop is a
+// copy teleported to that stream, whose contact does not. A stand-in struck by a prop streamed here becomes a claim; a
+// stand-in struck by a copy driven from elsewhere is that streamer's to claim; my fighter struck by a prop streamed
+// here takes it natively, and struck by a driven copy not at all (the streamer's claim against its stand-in of my
+// fighter brings the blow).
+enum class PropContact : uint8_t { Native, Claim, Block };
+inline PropContact DecidePropContact(bool victimOwnedHere, bool propStreamedHere) {
+    if (victimOwnedHere) return propStreamedHere ? PropContact::Native : PropContact::Block;
+    return propStreamedHere ? PropContact::Claim : PropContact::Block;
+}
+
+// Marks a claim (MakeClaim's) as struck by a prop: its id and its world velocity at the contact, taken into the hit
+// bone's frame like every other direction (rotation only). A body blow: no hand holds it and no clash parries it.
+inline void StruckByProp(HitClaim& c, uint64_t propId, const V3& velocityWorld, const Xform& hitBoneWorld) {
+    c.striker = StrikerKind::Prop;
+    c.propId = propId;
+    c.propVelocity = hitBoneWorld.ToLocalDir(velocityWorld);
+    c.source = StrikeSource::Body;
+}
+// The prop's velocity at the contact against victimBoneWorld (the victim's own bone), as ReplayInputs turns the rest.
+inline V3 PropVelocityWorld(const HitClaim& c, const Xform& victimBoneWorld) { return victimBoneWorld.FromLocalDir(c.propVelocity); }
 
 // ---------------------------------------------------------------- the DCD contact gate
 // Willie_BP.cpp:2994 (decompiled):
@@ -540,6 +571,9 @@ inline void PutClaim(hsm::Writer& w, const HitClaim& m) {
     w.u8(m.hasHitBox ? 1 : 0);
     PutXform(w, m.hitBoxLocal);
     PutV3(w, m.hitBoxExtent);
+    w.u8(uint8_t(m.striker));
+    w.u64(m.propId);
+    PutV3(w, m.propVelocity);
 }
 
 inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
@@ -568,16 +602,26 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
     uint8_t hasBox = r.u8();
     numOk &= GetXform(r, m.hitBoxLocal);
     numOk &= GetV3(r, m.hitBoxExtent);
+    const uint8_t strikerRaw = r.u8();
+    m.propId = r.u64();
+    numOk &= GetV3(r, m.propVelocity);
 
     if (!r.done() || !numOk) return false;
     if (lt > 1 || dpb > 1 || ehv > 1 || hasBox > 1) return false;
     if (srcRaw > uint8_t(StrikeSource::WeaponLeft)) return false;
+    if (strikerRaw > uint8_t(StrikerKind::Prop)) return false;
+    if (strikerRaw == uint8_t(StrikerKind::Prop)) {
+        if (!ValidPropId(m.propId) || srcRaw != uint8_t(StrikeSource::Body)) return false;   // a prop, never from a hand
+    } else if (m.propId != 0 || m.propVelocity.x != 0 || m.propVelocity.y != 0 || m.propVelocity.z != 0) {
+        return false;                                                                        // a fighter's names no prop
+    }
 
     m.lowerThreshold = lt == 1;
     m.damageParentBone = dpb == 1;
     m.extraHighVelocity = ehv == 1;
     m.source = StrikeSource(srcRaw);
     m.hasHitBox = hasBox == 1;
+    m.striker = StrikerKind(strikerRaw);
     return true;
 }
 

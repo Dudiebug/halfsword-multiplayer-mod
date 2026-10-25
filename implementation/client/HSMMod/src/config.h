@@ -1,5 +1,6 @@
 // HSMMod.ini next to the game exe. Missing file or role=off keeps the game fully vanilla.
 #pragma once
+#include "hsm_chat.h"
 #include <cstdint>
 #include <string>
 
@@ -17,6 +18,7 @@ struct Config {
     // Host only (clients take the host's choice from Welcome). true: every machine simulates its own fighter and the
     // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
     bool ownerSync = true;
+    ChatKey chatKey = ChatKey::Enter;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

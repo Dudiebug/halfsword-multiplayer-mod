@@ -1,5 +1,6 @@
 #include "gameplay/gear.h"
 #include "log.h"
+#include "match/hsm_match.h"
 #include "util/hsm_names.h"
 #include <algorithm>
 
@@ -11,9 +12,8 @@ constexpr const char* kGeneratorClass = "BP_Generator_Characters_Random_C";
 constexpr const char* kWillieClass = "Willie_BP_C";
 constexpr const char* kSaveGameClass = "SG_GameProgress_C";
 constexpr const char* kSavePassport = "Free Mode Player Character 1";   // SG_GameProgress_C field carrying the blob
-// Per-tier Equipment Budget from BP_GameManager.Generate_Random_Characters. Outside Free Mode the generator picks
-// weapons within this budget, so a zero budget (as SpawnBot uses) would starve the loadout.
-constexpr double kTierBudget[8] = { 0, 15, 50, 100, 250, 444, 666, 888 };
+// Outside Free Mode the generator picks weapons within the tier's Equipment Budget (hsm::kTierBudget, shared with the
+// lobby page's hint), so a zero budget (as SpawnBot uses) would starve the loadout.
 
 UObject* GameplayStatics() {
     UObject* cls = FindObject("GameplayStatics", "Class");

@@ -2,7 +2,8 @@
 //   ResolveTeams  - lobby picks + host overrides + auto-balance -> team per roster slot
 //   TeamColor     - tabard tint per team
 //   KillLog       - last hostile contact per victim (kill attribution window)
-//   Match         - phases, score limit, time limit + sudden death, players-vs-bots loss, respawn schedule
+//   Match         - phases, score limit, time limit + sudden death, players-vs-bots loss, respawn schedule, Duel rounds
+//   RegearFor     - which respawns bring a new generated loadout
 //   PartitionSides / PickRespawn - team spawn sides and respawn points
 #pragma once
 #include "session/hsm_spawn.h"
@@ -30,11 +31,20 @@ struct MatchConfig {
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
 };
+// Equipment Budget per tier, from BP_GameManager.Generate_Random_Characters: random gear is rolled within it.
+inline constexpr int kTierBudget[8] = {0, 15, 50, 100, 250, 444, 666, 888};
 
 inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Format::Zombies; }
 inline int TeamCount(Format f) { return f == Format::TwoTeams ? 2 : f == Format::ThreeTeams ? 3 : IsBotFormat(f) ? 2 : 0; }
 inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5 : f == Format::Duel ? 3 : 10; }
 MatchConfig Sanitize(MatchConfig c);
+
+// Generated gear at a respawn: None keeps the slot's loadout, Each gives every respawning fighter a fresh one, Shared
+// gives them all one fresh loadout. Own gear and the bot formats never regear; Mirror rolls only when everybody is reset
+// together, so in free-for-all and teams the shared loadout lasts until the rematch.
+enum class Regear : uint8_t { None = 0, Each = 1, Shared = 2 };
+enum class RespawnCause : uint8_t { Individual = 0, RoundReset = 1, WaveCleared = 2, Rematch = 3 };
+Regear RegearFor(const MatchConfig& c, RespawnCause cause);
 
 // Owner authority: a machine processes a hit only on a body it owns, and between teammates only with friendly fire.
 inline bool HitAllowed(bool victimOwnedHere, int8_t attackerTeam, int8_t victimTeam, bool friendlyFire) {
@@ -65,13 +75,15 @@ struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = tru
 class Match {
 public:
     static constexpr uint32_t kCountdownMs = 5000, kResultsMs = 10000;
-    static constexpr uint32_t kWaveBreakMs = 20000, kZombieBreakMs = 10000, kRoundGapMs = 4000, kCorpseMs = 45000;
+    static constexpr uint32_t kWaveBreakMs = 20000, kZombieBreakMs = 10000, kCorpseMs = 45000;   // Duel's gap: respawnDelayS
     static constexpr int kMaxBotsAlive = 10;
+    static constexpr int kBotsPerTick = 1;   // the host ticks once a frame; a whole horde in one frame took seconds (test 5)
     struct Events {
         bool live = false, ended = false, rematch = false;
         bool waveStarted = false, waveCleared = false, roundReset = false;
-        int spawnBots = 0, botRank = 0;  // bot formats: how many bots to spawn now, and their Enum_Ranks tier
+        int spawnBots = 0, botRank = 0;  // bot formats: how many bots to spawn now (at most kBotsPerTick), and their Enum_Ranks tier
         std::vector<uint8_t> respawn;   // entities to respawn now
+        Regear regear = Regear::None;   // with respawn or rematch: the gear they come back with (RegearFor)
     };
 
     void Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs);
@@ -83,6 +95,9 @@ public:
     void Finish(int winnerKey, uint32_t nowMs);          // ends a running match now (no effect once over)
     bool Has(uint8_t e) const { return fighters_.count(e) != 0; }
     int wave() const { return wave_; }
+    int round() const { return round_; }                // Duel: 1 at the start and the rematch, +1 per reset; else 0
+    uint8_t roundWinner() const { return roundWinner_; }   // Duel's gap: who took the round, 0 = drawn / not in the gap
+    uint32_t RoundGapLeftMs(uint32_t nowMs) const;      // Duel: time left before the next round, 0 outside the gap
     int botsLeft() const;
     void SpawnFailed(int n);                            // requested bots that could not be spawned go back to the wave                               // not yet spawned + alive, in the current wave
     std::vector<uint8_t> StaleBotCorpses(uint32_t nowMs, uint32_t ageMs) const;
@@ -105,6 +120,7 @@ private:
     struct F { int8_t team = kNoTeam; bool human = true, alive = true; uint32_t diedAt = 0; int kills = 0, deaths = 0; };
     void AddPoints(int key, int points);
     void End(int winnerKey, uint32_t nowMs);
+    Events Advance(uint32_t nowMs);                     // Tick without the regear decision
     int UniqueLeader() const;                           // kNoWinner when tied or empty
     MatchConfig cfg_;
     MatchPhase phase_ = MatchPhase::Idle;
@@ -124,6 +140,8 @@ private:
     // duel
     bool roundOver_ = false;
     uint32_t roundEnd_ = 0;
+    int round_ = 0;
+    uint8_t roundWinner_ = 0;
 };
 
 // Wave sizes. Survival: one bot per player plus one per wave (max 30), tier + wave/2.

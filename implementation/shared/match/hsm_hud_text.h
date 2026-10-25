@@ -39,8 +39,27 @@ inline std::string TeamScores(const MatchInfo& m) {
     return s;
 }
 
+// MatchInfo `m` as of `nowMs`, when it arrived at `receivedAtMs` (tick counts, wrap-safe): its clocks run down by
+// the time since, stopping at 0. A receive time ahead of now (a clock that stepped back) counts as no time.
+inline MatchInfo Extrapolate(const MatchInfo& m, uint32_t receivedAtMs, uint32_t nowMs) {
+    uint32_t elapsed = nowMs - receivedAtMs;
+    if (elapsed > 0x80000000u) elapsed = 0;
+    MatchInfo e = m;
+    e.timeLeftMs = m.timeLeftMs > elapsed ? m.timeLeftMs - elapsed : 0;
+    e.roundGapLeftMs = m.roundGapLeftMs > elapsed ? m.roundGapLeftMs - elapsed : 0;
+    return e;
+}
+
+inline bool InRoundGap(const MatchInfo& m) {
+    return Format(m.format) == Format::Duel && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
+}
+
 inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
     Format f = Format(m.format);
+    if (InRoundGap(m)) {                                   // "Round 2 to Ann   next round in 3"
+        std::string who = !m.roundWinner ? " drawn" : m.roundWinner == myEntity ? " to you" : " to " + NameOf(m, m.roundWinner);
+        return "Round " + std::to_string(m.round) + who + "   next round in " + Seconds(m.roundGapLeftMs);
+    }
     std::string limit = "(first to " + std::to_string(m.scoreLimit) + ")";
     switch (MatchPhase(m.phase)) {
         case MatchPhase::Idle: return {};
@@ -71,6 +90,17 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
     } else s = TeamScores(m) + "   " + limit;
     if (m.timeLeftMs) s += "   " + Clock(m.timeLeftMs);
     return s;
+}
+
+// The line under a dead player. Duel: the round is over and everybody returns together after the gap; the bot
+// formats: the downed return when the wave is cleared; otherwise the respawn delay counts down.
+inline std::string RespawnLine(const MatchInfo& m, uint32_t sinceDeathMs) {
+    if (m.phase == uint8_t(MatchPhase::Idle) || m.phase == uint8_t(MatchPhase::Results)) return {};
+    Format f = Format(m.format);
+    if (f == Format::Duel) return m.roundGapLeftMs ? "Round over   next round in " + Seconds(m.roundGapLeftMs) : "Round over";
+    if (IsBotFormat(f)) return "Down   back next wave";
+    uint32_t delay = uint32_t(m.respawnDelayS) * 1000u;
+    return sinceDeathMs < delay ? "Respawning in " + Seconds(delay - sinceDeathMs) : "Respawning...";
 }
 
 inline std::string KillLine(const MatchInfo& m, const Kill& k) {
@@ -115,6 +145,13 @@ inline int8_t NextTeamPick(int8_t cur, int teams) { return cur + 1 >= 0 && cur +
 inline std::string TeamLabel(int team) {
     static const char* kNames[] = {"Red", "Blue", "Green", "Gold"};
     return team >= 0 && team < 4 ? kNames[team] : "Auto";
+}
+// The lobby's gear setting, with when it changes (RegearFor). The bot formats have no gear option: own loadouts.
+inline std::string GearLabel(Gear g, Format f) {
+    if (IsBotFormat(f)) return "Own loadouts";
+    if (g == Gear::RandomTier) return f == Format::Duel ? "Random by tier, new each round" : "Random by tier, new each life";
+    if (g == Gear::Mirror) return f == Format::Duel ? "Everyone identical, new each round" : "Everyone identical";
+    return "Own loadouts";
 }
 inline std::string TimeLabel(uint16_t seconds) { return seconds ? std::to_string(seconds / 60) + " min" : "off"; }
 

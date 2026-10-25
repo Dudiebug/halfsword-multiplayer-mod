@@ -107,8 +107,21 @@ static void TestMatchInfoAndKill() {
     m.phase = 2; m.timeLeftMs = 123456; m.winner = -1000;
     m.scores = {{0, 3}, {1, -2}, {2, 7}};
     m.fighters = {{1, 0, 3, 1, "host"}, {2, 1, 0, 2, "ann"}, {9, 2, 7, 0, "Bot"}};
+    CHECK(m.gear == 0 && m.tier == 2 && m.round == 0 && m.roundGapLeftMs == 0 && m.roundWinner == 0);
+    CHECK(m.fighters[0].pingMs == 0 && m.fighters[0].alive);                   // defaults: no ping known, alive
+    m.gear = 2; m.tier = 5; m.round = 3; m.roundGapLeftMs = 4200; m.roundWinner = 9;   // rev 13: the rounds plan's fields
+    m.fighters[0].pingMs = 87; m.fighters[1].alive = false; m.fighters[2].pingMs = 65535;
     auto b = Encode(m); MatchInfo o;
     CHECK(Decode(b.data(), b.size(), o));
+    CHECK(o.gear == 2 && o.tier == 5 && o.round == 3 && o.roundGapLeftMs == 4200 && o.roundWinner == 9);
+    CHECK(o.fighters[0].pingMs == 87 && o.fighters[0].alive && !o.fighters[1].alive && o.fighters[1].pingMs == 0);
+    CHECK(o.fighters[2].alive && o.fighters[2].pingMs == 65535);
+    for (uint8_t g = 0; g < kGearCount; ++g)
+        for (uint8_t tier = 0; tier <= 7; ++tier) {
+            MatchInfo x = m; x.gear = g; x.tier = tier; x.round = uint16_t(1000 + tier); x.roundGapLeftMs = 0xFFFFFFFFu;
+            auto e = Encode(x); MatchInfo y;
+            CHECK(Decode(e.data(), e.size(), y) && y.gear == g && y.tier == tier && y.round == 1000 + tier && y.roundGapLeftMs == 0xFFFFFFFFu);
+        }
     CHECK(o.format == 2 && o.scoreLimit == 12 && o.timeLimitS == 300 && o.respawnDelayS == 4 && o.friendlyFire && o.phase == 2);
     CHECK(o.timeLeftMs == 123456 && o.winner == -1000 && o.scores.size() == 3 && o.scores[1].score == -2 && o.scores[2].key == 2);
     CHECK(o.fighters.size() == 3 && o.fighters[2].entity == 9 && o.fighters[2].team == 2 && o.fighters[2].kills == 7 && o.fighters[1].deaths == 2 && o.fighters[1].name == "ann");
@@ -129,12 +142,16 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.fighters[0].team = 8; }));
     CHECK(bad([](MatchInfo& x) { x.fighters.resize(kMaxWillies + 1, {1, 0, 0, 0, ""}); }));
     CHECK(bad([](MatchInfo& x) { x.scores.resize(kMaxWillies + 1); }));
+    CHECK(bad([](MatchInfo& x) { x.gear = kGearCount; }));
+    CHECK(bad([](MatchInfo& x) { x.tier = 8; }));
+    { auto e = Encode(m); CHECK(e.back() == 1); e.back() = 2; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive is 0 or 1
+    { auto e = Encode(m); e.pop_back(); MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }                        // truncated
     b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));                  // trailing byte
     Kill k; k.killer = 3; k.victim = 4; k.flags = 1;
     auto kb = Encode(k); Kill ko; CHECK(Decode(kb.data(), kb.size(), ko) && ko.killer == 3 && ko.victim == 4 && ko.flags == 1);
     k.victim = 0; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));   // victim required
     k.victim = 4; k.flags = 8; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 12);   // rev 12: SeverNotice, PropCensus; rev 11: MatchInfo takes every match format
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 13);   // rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so

@@ -55,6 +55,7 @@ public:
         std::function<void(const combat::StuckBladeMsg&)> sendStuck;     // a blade of ours stuck in / freed from a stand-in
         std::function<bool(uint8_t attacker, uint8_t victim)> allowed;   // the friendly-fire rule
         std::function<void(uint8_t entity, uint8_t part)> nativeShown;   // a stand-in lost that part natively (gore)
+        std::function<void(uint8_t entity, uint8_t part)> nativeLost;    // ... but the cut's Delayed half never ran there
     };
     using Owned = std::vector<std::pair<uint8_t, ue::UObject*>>;
 
@@ -88,6 +89,7 @@ private:
         Rebuilt args;
         uint8_t entity = 0;
         bool standIn = false;   // dismemberment was allowed for this call: forbid it again afterwards
+        uint32_t claimId = 0;
     };
     struct Retry {              // refused while another sever on that fighter was in process: tried once more after it
         combat::SeverClaim claim;

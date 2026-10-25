@@ -155,8 +155,11 @@ static void TestSurvivalWaves() {
     Wave w0 = WaveFor(Format::PlayersVsBots, 0, 2, 2);
     CHECK(m.botsLeft() == w0.count);
     auto ev = m.Tick(t + 1);
-    CHECK(ev.spawnBots == std::min(w0.count, Match::kMaxBotsAlive) && ev.botRank == w0.rank);
-    for (int i = 0; i < w0.count; ++i) m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+    CHECK(ev.spawnBots == 1 && ev.botRank == w0.rank);                          // one bot per tick (TestWavePacing)
+    for (int i = 0; i < w0.count; ++i) {
+        if (i) CHECK(m.Tick(t + 1).spawnBots == 1);
+        m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+    }
     CHECK(m.Tick(t + 2).spawnBots == 0 && m.botsLeft() == w0.count);              // all spawned, all alive
     m.OnDeath(1, 7, t + 3);                                                     // a player goes down: stays down
     CHECK(m.Tick(t + 3 + 60000).respawn.empty());
@@ -181,14 +184,47 @@ static void TestSurvivalAliveCap() {
     Match m = LiveSurvival(Format::Zombies, t);
     Wave w = WaveFor(Format::Zombies, 0, 2, 2);
     CHECK(w.count > Match::kMaxBotsAlive);                                      // hordes exceed the alive cap
-    auto ev = m.Tick(t + 1); CHECK(ev.spawnBots == Match::kMaxBotsAlive);
-    for (int i = 0; i < Match::kMaxBotsAlive; ++i) m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+    for (int i = 0; i < Match::kMaxBotsAlive; ++i) {
+        CHECK(m.Tick(t + 1).spawnBots == 1);                                    // one bot per tick (TestWavePacing)
+        m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+    }
     CHECK(m.Tick(t + 2).spawnBots == 0);
     m.OnDeath(7, 1, t + 3); m.RemoveFighter(7);                                 // one dies and is cleaned up
     CHECK(m.Tick(t + 4).spawnBots == 1);                                        // refill from the wave's remainder
     CHECK(m.Score(kHumanTeam) == 0 && m.botsLeft() == w.count - 1);
     m.OnDeath(1, 8, t + 5);
     CHECK(m.Tick(t + 6).respawn.empty());                                       // no timed respawns
+}
+
+// A wave spawns one bot per Tick (the host ticks once a frame): test 5 spawned a whole Abyss horde in one frame and the
+// frame took seconds. The alive cap and the wave count still hold; a bot that died makes room for the next one.
+static void TestWavePacing() {
+    uint32_t t = 0;
+    Match m = LiveSurvival(Format::Zombies, t);
+    Wave w = WaveFor(Format::Zombies, 0, 2, 2);
+    CHECK(w.count >= Match::kMaxBotsAlive + 2);
+    for (int i = 0; i < Match::kMaxBotsAlive; ++i) {
+        auto ev = m.Tick(t + 1 + uint32_t(i));
+        CHECK(ev.spawnBots == 1 && ev.botRank == w.rank);
+        if (i < Match::kMaxBotsAlive - 1) m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+    }
+    CHECK(m.Tick(t + 19).spawnBots == 0);                                       // a requested bot not added yet counts
+    m.AddFighter({uint8_t(7 + Match::kMaxBotsAlive - 1), kBotTeam, false});     // against the alive cap
+    CHECK(m.Tick(t + 20).spawnBots == 0 && m.botsLeft() == w.count);            // at the alive cap
+    m.OnDeath(7, 1, t + 21); m.OnDeath(8, 1, t + 21);                           // two die at once: refilled one at a time
+    CHECK(m.Tick(t + 22).spawnBots == 1);
+    m.AddFighter({17, kBotTeam, false});
+    CHECK(m.Tick(t + 23).spawnBots == 1);
+    m.AddFighter({18, kBotTeam, false});
+    CHECK(m.Tick(t + 24).spawnBots == 0 && m.botsLeft() == w.count - 2);
+    Match f = LiveSurvival(Format::PlayersVsBots, t);
+    Wave w0 = WaveFor(Format::PlayersVsBots, 0, 2, 2);
+    CHECK(w0.count == 2);
+    CHECK(f.Tick(t + 1).spawnBots == 1);                                        // not yet added: the next tick asks for
+    CHECK(f.Tick(t + 2).spawnBots == 1);                                        // the next bot of the wave
+    CHECK(f.Tick(t + 3).spawnBots == 0 && f.botsLeft() == w0.count);            // the wave is all requested
+    f.SpawnFailed(1);                                                           // one could not be spawned: back to the wave
+    CHECK(f.Tick(t + 4).spawnBots == 1);
 }
 
 static void TestWaves() {
@@ -200,27 +236,193 @@ static void TestWaves() {
     CHECK(WaveFor(Format::Zombies, 100, 6, 0).count == 60 && WaveFor(Format::PlayersVsBots, 0, 0, 0).count == 1);
 }
 
+// Spec revision (rounds plan 1.1): the gap between Duel rounds is the lobby's respawn delay (default 5 s), not a fixed
+// 4 s, so the host controls it and the HUD counts it down (RoundGapLeftMs). round() numbers the rounds.
 static void TestDuelRounds() {
-    MatchConfig c = Cfg(Format::Duel, 2);
+    MatchConfig c = Cfg(Format::Duel, 2);                                       // respawn delay 5 s: the gap
     Match m; m.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    CHECK(m.round() == 1 && m.RoundGapLeftMs(0) == 0 && m.roundWinner() == 0);
     m.Tick(Match::kCountdownMs);
     uint32_t t = Match::kCountdownMs;
+    CHECK(m.round() == 1 && m.RoundGapLeftMs(t + 1) == 0);                      // no gap while the round is fought
     m.OnDeath(2, 0, t + 1);                                                     // fell off / bled out: round still goes to 1
-    CHECK(m.Score(1) == 1 && m.phase() == MatchPhase::Live);
+    CHECK(m.Score(1) == 1 && m.phase() == MatchPhase::Live && m.roundWinner() == 1);
+    CHECK(m.RoundGapLeftMs(t + 1) == 5000 && m.RoundGapLeftMs(t + 2001) == 3000 && m.RoundGapLeftMs(t + 5000) == 1);
+    CHECK(m.RoundGapLeftMs(t + 5001) == 0);
     m.OnDeath(1, 0, t + 2);                                                     // round already decided: no point
-    CHECK(m.Score(2) == 0);
-    CHECK(m.Tick(t + 1 + Match::kRoundGapMs - 1).respawn.empty());
-    auto ev = m.Tick(t + 1 + Match::kRoundGapMs);
+    CHECK(m.Score(2) == 0 && m.roundWinner() == 1);                             // still player 1's round, though down
+    CHECK(m.Tick(t + 1 + 5000 - 1).respawn.empty() && m.round() == 1);
+    auto ev = m.Tick(t + 1 + 5000);
     CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2}) && m.Alive(1) && m.Alive(2));
+    CHECK(m.round() == 2 && m.RoundGapLeftMs(t + 5001) == 0 && m.roundWinner() == 0);
+    ev = m.Tick(t + 5002);
+    CHECK(!ev.roundReset && ev.respawn.empty() && m.round() == 2);              // one reset, one round
     m.OnDeath(1, 2, t + 10000);                                                 // second round to player 2
-    CHECK(m.Score(2) == 1 && m.Kills(2) == 1);
+    CHECK(m.Score(2) == 1 && m.Kills(2) == 1 && m.roundWinner() == 2 && m.round() == 2);
     CHECK(m.Tick(t + 10000 + 60000).respawn.empty() == false);                  // only the round reset revives
+    CHECK(m.round() == 3);
     m.OnDeath(2, 1, t + 80000);
     CHECK(m.phase() == MatchPhase::Results && m.winner() == 1);
+    CHECK(m.RoundGapLeftMs(t + 80000) == 0 && m.round() == 3);                  // the deciding round has no gap
+    CHECK(!m.Tick(t + 80000 + 5000).roundReset && m.round() == 3);
+    ev = m.Tick(t + 80000 + Match::kResultsMs);
+    CHECK(ev.rematch && m.round() == 1 && m.roundWinner() == 0);                // the rematch starts at round 1
+    Match slow; slow.Start(Cfg(Format::Duel, 3, 0, 7), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    slow.Tick(Match::kCountdownMs);
+    slow.OnDeath(2, 1, t + 100);
+    CHECK(slow.RoundGapLeftMs(t + 100) == 7000);                                // a 7 s respawn delay is a 7 s gap
+    CHECK(slow.Tick(t + 100 + 6999).respawn.empty() && slow.Tick(t + 100 + 7000).roundReset);
     Match three; three.Start(Cfg(Format::Duel, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
     three.Tick(Match::kCountdownMs);
     three.OnDeath(1, 2, t + 1); CHECK(three.Score(2) == 0 && three.Score(3) == 0);  // two still standing
-    three.OnDeath(3, 2, t + 2); CHECK(three.Score(2) == 1);                     // last one standing
+    CHECK(three.RoundGapLeftMs(t + 1) == 0 && three.roundWinner() == 0);
+    three.OnDeath(3, 2, t + 2); CHECK(three.Score(2) == 1 && three.roundWinner() == 2);   // last one standing
+    Match solo; solo.Start(Cfg(Format::Duel, 3), {{1, kNoTeam, true}}, 0);
+    solo.Tick(Match::kCountdownMs);
+    solo.OnDeath(1, 0, t + 1);                                                  // nobody standing: a drawn round
+    CHECK(solo.roundWinner() == 0 && solo.RoundGapLeftMs(t + 1) == 5000 && solo.Score(1) == 0);
+    Match ffa; ffa.Start(Cfg(Format::FreeForAll, 5), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    CHECK(ffa.round() == 0);                                                    // rounds are Duel's
+    ffa.Tick(Match::kCountdownMs); ffa.OnDeath(2, 1, t + 1);
+    CHECK(ffa.round() == 0 && ffa.RoundGapLeftMs(t + 2) == 0 && ffa.roundWinner() == 0);
+}
+
+// Sudden death ends on the next deciding event, as the HUD says (NEXT ROUND WINS, NEXT POINT WINS): in Duel the next
+// round that leaves one leader, in the bot formats the next wave cleared. Neither waits for the score limit.
+static void TestSuddenDeathEnds() {
+    Match d; d.Start(Cfg(Format::Duel, 5, 60), {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+    d.Tick(Match::kCountdownMs);
+    uint32_t t = Match::kCountdownMs;
+    d.OnDeath(2, 1, t + 100); d.OnDeath(3, 1, t + 200);                     // round 1 to fighter 1
+    CHECK(d.Tick(t + 200 + 5000).roundReset);
+    d.OnDeath(1, 2, t + 6000); d.OnDeath(3, 2, t + 6100);                   // round 2 to fighter 2: 1 : 1 : 0
+    CHECK(d.Tick(t + 6100 + 5000).roundReset && d.round() == 3);
+    auto ev = d.Tick(t + 60000);
+    CHECK(d.phase() == MatchPhase::SuddenDeath && !ev.ended);                 // tied at the time limit
+    d.OnDeath(1, 3, t + 61000); d.OnDeath(2, 3, t + 61100);                 // round 3 to fighter 3: 1 : 1 : 1, still tied
+    CHECK(d.phase() == MatchPhase::SuddenDeath && d.Score(3) == 1 && d.RoundGapLeftMs(t + 61100) == 5000);
+    CHECK(d.Tick(t + 61100 + 5000).roundReset && d.round() == 4);
+    d.OnDeath(2, 1, t + 70000);
+    CHECK(d.phase() == MatchPhase::SuddenDeath);                              // two still standing: no round yet
+    d.OnDeath(3, 1, t + 70100);                                              // round 4 to fighter 1: 2 : 1 : 1
+    CHECK(d.phase() == MatchPhase::Results && d.winner() == 1 && d.Score(1) == 2);   // far from the limit of 5
+    CHECK(d.RoundGapLeftMs(t + 70100) == 0 && !d.Tick(t + 70100 + 5000).roundReset);
+    Match two; two.Start(Cfg(Format::Duel, 5, 30), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    two.Tick(t);
+    two.OnDeath(2, 1, t + 100);
+    CHECK(two.phase() == MatchPhase::Live && two.Score(1) == 1);             // before the limit a round is just a round
+    CHECK(two.Tick(t + 100 + 5000).roundReset);
+    two.OnDeath(1, 2, t + 6000); two.Tick(t + 6000 + 5000);
+    two.Tick(t + 30000);
+    CHECK(two.phase() == MatchPhase::SuddenDeath);
+    two.OnDeath(1, 2, t + 31000);
+    CHECK(two.phase() == MatchPhase::Results && two.winner() == 2 && two.Score(2) == 2);
+
+    MatchConfig c = Cfg(Format::PlayersVsBots, 10, 60); c.tier = 2;
+    Match b; b.Start(c, Two(), 0);
+    b.Tick(t);
+    Wave w0 = WaveFor(Format::PlayersVsBots, 0, 2, 2);
+    for (int i = 0; i < w0.count; ++i) { b.Tick(t + 1); b.AddFighter({uint8_t(7 + i), kBotTeam, false}); }
+    ev = b.Tick(t + 60000);
+    CHECK(b.phase() == MatchPhase::SuddenDeath && !ev.ended);                 // no wave cleared by the time limit
+    b.OnDeath(1, 7, t + 60001);
+    CHECK(b.phase() == MatchPhase::SuddenDeath);                              // one player down, one still up
+    for (int i = 0; i < w0.count - 1; ++i) b.OnDeath(uint8_t(7 + i), 2, t + 60010);
+    CHECK(!b.Tick(t + 60011).ended && b.phase() == MatchPhase::SuddenDeath);  // a bot still up
+    b.OnDeath(uint8_t(7 + w0.count - 1), 2, t + 60020);
+    ev = b.Tick(t + 60021);
+    CHECK(ev.waveCleared && ev.ended && b.phase() == MatchPhase::Results && b.winner() == kHumanTeam);
+    CHECK(ev.respawn.empty() && ev.regear == Regear::None && b.Score(kHumanTeam) == 1);   // over: nobody returns
+    CHECK(!b.Tick(t + 60022).ended);                                          // reported once
+    Match held; held.Start(c, Two(), 0);
+    held.Tick(t);
+    for (int i = 0; i < w0.count; ++i) { held.Tick(t + 1); held.AddFighter({uint8_t(7 + i), kBotTeam, false}); }
+    for (int i = 0; i < w0.count; ++i) held.OnDeath(uint8_t(7 + i), 1, t + 10);
+    ev = held.Tick(t + 11);
+    CHECK(ev.waveCleared && !ev.ended && held.phase() == MatchPhase::Live);   // before the limit a wave is just a wave
+    held.Tick(t + 60000);
+    CHECK(held.phase() == MatchPhase::Results && held.winner() == kHumanTeam); // a wave cleared by the limit: players win
+    Match lost; lost.Start(c, Two(), 0);
+    lost.Tick(t); lost.Tick(t + 60000);
+    CHECK(lost.phase() == MatchPhase::SuddenDeath);
+    lost.OnDeath(1, 0, t + 60100); lost.OnDeath(2, 0, t + 60200);             // everyone down in sudden death: bots win
+    CHECK(lost.phase() == MatchPhase::Results && lost.winner() == kBotTeam);
+}
+
+// Rounds plan 1.1: which respawns bring a new loadout. Own gear and the bot formats never do.
+static void TestRegear() {
+    using C = RespawnCause;
+    auto R = [](Format f, Gear g, C cause) { MatchConfig c = Cfg(f, 5); c.gear = g; return RegearFor(c, cause); };
+    int cells = 0;
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::Duel, Format::PlayersVsBots, Format::Zombies})
+        for (C cause : {C::Individual, C::RoundReset, C::WaveCleared, C::Rematch}) {
+            ++cells;
+            CHECK(R(f, Gear::Own, cause) == Regear::None);
+            if (IsBotFormat(f)) { CHECK(R(f, Gear::RandomTier, cause) == Regear::None && R(f, Gear::Mirror, cause) == Regear::None); continue; }
+            CHECK(R(f, Gear::RandomTier, cause) == Regear::Each);                // every respawning fighter, every time
+            bool together = cause == C::RoundReset || cause == C::Rematch;      // everybody reset at once
+            CHECK(R(f, Gear::Mirror, cause) == (together ? Regear::Shared : Regear::None));
+        }
+    CHECK(cells == 24);
+    CHECK(R(Format::Duel, Gear::Mirror, C::RoundReset) == Regear::Shared && R(Format::Duel, Gear::RandomTier, C::RoundReset) == Regear::Each);
+    CHECK(R(Format::FreeForAll, Gear::RandomTier, C::Individual) == Regear::Each && R(Format::FreeForAll, Gear::Mirror, C::Individual) == Regear::None);
+    CHECK(R(Format::TwoTeams, Gear::Mirror, C::Rematch) == Regear::Shared);
+    CHECK(R(Format::Duel, Gear(7), C::RoundReset) == Regear::None);             // an unknown gear setting is Own
+}
+
+// Tick says when the respawns it orders bring a new loadout: once per reset or death, never for Own or bot formats.
+static void TestRegearEvents() {
+    std::vector<FighterInfo> two = {{1, kNoTeam, true}, {2, kNoTeam, true}};
+    uint32_t t = Match::kCountdownMs;
+    for (Gear g : {Gear::Own, Gear::RandomTier, Gear::Mirror}) {
+        MatchConfig c = Cfg(Format::Duel, 5); c.gear = g;
+        Match m; m.Start(c, two, 0);
+        auto ev = m.Tick(t);
+        CHECK(ev.live && ev.regear == Regear::None);                            // the match start gears everyone itself
+        m.OnDeath(2, 1, t + 100);
+        CHECK(m.Tick(t + 200).regear == Regear::None);
+        ev = m.Tick(t + 100 + 5000);
+        Regear want = g == Gear::Own ? Regear::None : g == Gear::Mirror ? Regear::Shared : Regear::Each;
+        CHECK(ev.roundReset && ev.respawn.size() == 2 && ev.regear == want);
+        ev = m.Tick(t + 100 + 5001);
+        CHECK(ev.respawn.empty() && ev.regear == Regear::None);                 // exactly once per reset
+    }
+    MatchConfig f = Cfg(Format::FreeForAll, 2, 0, 5); f.gear = Gear::RandomTier;
+    Match a; a.Start(f, two, 0); a.Tick(t);
+    a.OnDeath(2, 1, t + 10);
+    CHECK(a.Tick(t + 10 + 4999).regear == Regear::None);
+    auto ev = a.Tick(t + 10 + 5000);
+    CHECK(ev.respawn == std::vector<uint8_t>({2}) && ev.regear == Regear::Each);   // the victim alone, with new gear
+    a.MarkRespawned(2);
+    ev = a.Tick(t + 10 + 5001);
+    CHECK(ev.respawn.empty() && ev.regear == Regear::None);
+    f.gear = Gear::Mirror;
+    Match b; b.Start(f, two, 0); b.Tick(t);
+    b.OnDeath(2, 1, t + 10);
+    ev = b.Tick(t + 10 + 5000);
+    CHECK(ev.respawn.size() == 1 && ev.regear == Regear::None);                // keeps the shared loadout
+    b.MarkRespawned(2);
+    b.OnDeath(2, 1, t + 6000);
+    CHECK(b.phase() == MatchPhase::Results);
+    ev = b.Tick(t + 6001);
+    CHECK(ev.ended && ev.regear == Regear::None);
+    ev = b.Tick(t + 6000 + Match::kResultsMs);
+    CHECK(ev.rematch && ev.respawn.empty() && ev.regear == Regear::Shared);     // a new shared loadout at the rematch
+    CHECK(b.Tick(t + 6001 + Match::kResultsMs).regear == Regear::None);
+    f.gear = Gear::Own;
+    Match o; o.Start(f, two, 0); o.Tick(t);
+    o.OnDeath(2, 1, t + 10); o.OnDeath(2, 1, t + 11);
+    CHECK(o.Tick(t + 10 + 5000).regear == Regear::None);
+    // Survival with a gear setting left over from a PvP lobby: the downed come back at wave clear in their own gear.
+    MatchConfig s = Cfg(Format::PlayersVsBots, 10); s.gear = Gear::RandomTier;
+    Match v; v.Start(s, {{1, kHumanTeam, true}, {2, kHumanTeam, true}}, 0);
+    CHECK(v.Tick(t).waveStarted);
+    CHECK(v.Tick(t + 1).spawnBots == 1); v.AddFighter({7, kBotTeam, false});
+    CHECK(v.Tick(t + 2).spawnBots == 1); v.AddFighter({8, kBotTeam, false});
+    v.OnDeath(1, 7, t + 3);
+    v.OnDeath(7, 2, t + 4); v.OnDeath(8, 2, t + 5);
+    ev = v.Tick(t + 6);
+    CHECK(ev.waveCleared && ev.respawn == std::vector<uint8_t>({1}) && ev.regear == Regear::None);
 }
 
 static void TestHasAndFinish() {
@@ -291,7 +493,8 @@ int main() {
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
-    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWaves(); TestSides();
+    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -47,10 +47,22 @@ std::vector<UObject*> FindInstances(const char* className);                     
 UObject* DefaultObject(const UClass* c);
 
 // Reflection -----------------------------------------------------------------
-UFunction* FindFunction(const UClass* c, const std::string& name);              // walks super classes
+UFunction* FindFunction(const UClass* c, const std::string& name);              // walks super classes (cached)
 std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& prefix);
-FProperty* FindProperty(const void* ustruct, const std::string& name);         // walks super structs
+FProperty* FindProperty(const void* ustruct, const std::string& name);         // walks super structs (cached)
+// FindFunction and FindProperty remember every (struct, name) answer, a miss included: test 5's hit hook spent 0.146 ms
+// per contact walking class chains and making a string of every member name. A struct's answers are dropped when the
+// object array no longer holds that struct at its slot under its name, and all of them by FlushReflectionCache (a level
+// change: the old level's classes are gone).
+void FlushReflectionCache();
+struct ReflectionCacheStats { uint64_t hits = 0, misses = 0, dropped = 0; size_t structs = 0; };
+ReflectionCacheStats GetReflectionCacheStats();
 FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix); // user-defined struct members carry _N_GUID suffixes
+// Native script structs (USTRUCTs such as SlateFontInfo) by name, and their members (super structs' included), so a
+// struct's layout is read from the running build rather than hard-coded. tools/check_reflection.py checks every
+// struct and member name the mod passes to them.
+UObject* FindStruct(const std::string& name);                                     // the UScriptStruct, or nullptr
+FProperty* StructMember(const UObject* scriptStruct, const std::string& member);  // nullptr when either is missing
 int32_t PropertyOffset(const FProperty* p);
 int32_t PropertySize(const FProperty* p);           // ElementSize
 int32_t PropertyArrayDim(const FProperty* p);
@@ -140,7 +152,7 @@ FName MakeName(const std::string& s);   // via KismetStringLibrary.Conv_StringTo
 // FString/FText as they appear in parameter buffers. FStringArg points at caller-owned storage the engine only reads.
 struct FStringArg { const wchar_t* data = nullptr; int32_t num = 0, max = 0; };
 struct FStringArgHolder {
-    explicit FStringArgHolder(const std::string& s) : w(s.begin(), s.end()) { arg = { w.c_str(), int32_t(w.size() + 1), int32_t(w.size() + 1) }; }
+    explicit FStringArgHolder(const std::string& s);   // UTF-8 in, UTF-16 for the engine
     std::wstring w; FStringArg arg;
 };
 // TArray<uint8> header as it appears in parameter buffers. Engine-filled arrays are copied out and left to the engine

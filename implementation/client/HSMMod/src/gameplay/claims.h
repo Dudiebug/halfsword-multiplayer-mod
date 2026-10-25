@@ -13,10 +13,16 @@
 // "Last Damage Taken"/"Last Damaged Bone" are left to the victim's own 0.2 s "Reset Last Damage Taken", as in a solo
 // fight. Ours as well: one blow's contacts coalesce into one claim on the attacker (combat::BlowCoalescer), and the
 // victim replays arriving claims from a per-victim queue, at most kReplaysPerTick per victim per frame.
+// Props (test 5: rocks did no damage): a prop's contact with a fighter is decided where the prop is streamed
+// (combat::DecidePropContact). A stand-in struck by a prop streamed here is a claim struck by that prop (its attacker
+// the fighter simulated here that held or touched it last, else this machine's player), replayed with the victim's own
+// copy of the prop as the striker; my fighter struck by a copy driven from elsewhere is blocked, the streamer's claim
+// brings that blow.
 #pragma once
 #include "combat/hsm_claim.h"
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
+#include "gameplay/prop_sync.h"
 #include "session/hsm_authority.h"
 #include "ue/engine.h"
 #include <array>
@@ -36,6 +42,12 @@ public:
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
         std::function<void(const combat::HitClaim&)> send;          // a claim made here (the session routes it)
         std::function<bool(uint8_t attacker, uint8_t victim)> allowed;   // the friendly-fire rule
+        // Props: what a prop actor is here (PropSync::PropOf), a prop's actor here (PropSync::ActorOf), and this machine's
+        // player entity (a prop claim's attacker when no fighter simulated here touched the prop). Without the first two
+        // a prop's contact with a stand-in is blocked and one with my fighter runs natively, as before rev 13.
+        std::function<bool(ue::UObject* actor, PropSync::Touch& out)> prop;
+        std::function<ue::UObject*(uint64_t propId)> propActor;
+        std::function<uint8_t()> myEntity;
     };
     // Installs the hooks (owner "claims"; they resolve on every level load). False when the script VM hook is
     // unavailable: nothing is guarded then (the host does not offer owner sync without it).
@@ -64,14 +76,16 @@ private:
         uint64_t sent = 0, gated = 0, limited = 0, friendly = 0, coalesced = 0, zeroImpulse = 0, capped = 0, replayed = 0,
                  queued = 0, dropped = 0, dupes = 0, stale = 0, ageUnknown = 0, parried = 0, noVictim = 0, noBone = 0,
                  noStriker = 0, failed = 0, blockedStandIn = 0, blockedOnMine = 0, getDamageBlocked = 0, effects = 0,
-                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0;
+                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0;
     };
     bool OnDealComplexDamage(ue::ScriptCall& c);
     bool OnGetDamage(ue::ScriptCall& c);
     void AfterDealComplexDamage(ue::ScriptCall& c);
-    void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp);
+    void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
+                   const PropSync::Touch* prop);
     void ReplayNow(const combat::HitClaim& c, double nowMs);         // a queued claim, through my fighter's own DCD
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;
+    ue::UObject* Striker(const combat::HitClaim& c) const;                          // the claim's striking component here
     ue::UObject* StrikerOn(ue::UObject* fighter, const combat::HitClaim& c) const;   // the claim's striking component on fighter
     ue::UObject* ComponentNamed(ue::UObject* actor, const std::string& name) const;  // a primitive component of actor by name
     ue::UObject* HitBox(ue::UObject* victim, const combat::HitClaim& c, const combat::DcdInputs& in);

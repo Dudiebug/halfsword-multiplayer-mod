@@ -46,9 +46,9 @@ public:
 
     // The owner's token for one hand of its fighter (0 other, k + 1 drawn from slot k); false before its first state.
     bool OwnerToken(uint8_t entity, int hand, uint8_t& token) const;
-    // The entity's stand-in has a weapon of this class sheathed in a slot this hand reaches that the owner's state shows
-    // sheathed too: the owner's pose showing that class in the hand may be a draw whose state is still on its way.
-    bool MayBeDraw(uint8_t entity, int hand, uint32_t classHash) const;
+    // The entity's stand-in has a weapon of this class sheathed in a slot the owner's state shows sheathed too (any slot:
+    // combat::MayBeDrawFrom): the owner's pose showing that class in an empty hand may be a draw still on its way.
+    bool MayBeDraw(uint8_t entity, uint32_t classHash) const;
     // The owner's state shows a slot this hand reaches holding a weapon where the entity's stand-in has none: the pose no
     // longer showing the stand-in's held weapon may be a sheathe this class will mirror (the stale-sheathe re-plan).
     bool MayBeSheathe(uint8_t entity, int hand) const;

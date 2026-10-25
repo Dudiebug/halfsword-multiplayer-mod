@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 12;         // 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 13;         // 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
@@ -170,7 +170,11 @@ struct BlobChunk {
 
 // Match (rev 5). Field ranges mirror hsm::Sanitize in match/hsm_match.h.
 struct ScoreEntry { int16_t key = 0; int16_t score = 0; };          // key: team, or entity in free-for-all
-struct FighterEntry { uint8_t entity = 0; int8_t team = -1; int16_t kills = 0, deaths = 0; std::string name; };
+struct FighterEntry {
+    uint8_t entity = 0; int8_t team = -1; int16_t kills = 0, deaths = 0; std::string name;
+    uint16_t pingMs = 0;                // round trip to the host, 0 = unknown (the host itself, bots)
+    bool alive = true;
+};
 struct MatchInfo {
     uint8_t format = 0;                 // hsm::Format
     uint16_t scoreLimit = 5, timeLimitS = 0, respawnDelayS = 5;
@@ -178,6 +182,10 @@ struct MatchInfo {
     uint8_t phase = 0;                  // hsm::MatchPhase
     uint32_t timeLeftMs = 0;
     int16_t winner = -1000;             // score key, -1000 = undecided
+    uint8_t gear = 0, tier = 2;         // hsm::Gear, Enum_Ranks tier
+    uint16_t round = 0;                 // Duel: the round being fought, or just won in the gap; 0 in other formats
+    uint32_t roundGapLeftMs = 0;        // Duel: time before the next round, 0 outside the gap
+    uint8_t roundWinner = 0;            // Duel's gap: the entity that took the round, 0 = drawn
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
 };
@@ -388,17 +396,23 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     Writer w; w.header(MsgType::MatchInfo);
     w.u8(m.format); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
     w.u8(m.phase); w.u32(m.timeLeftMs); w.i16(m.winner);
+    w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner);
     size_t ns = m.scores.size() < 255 ? m.scores.size() : 255; w.u8(uint8_t(ns));
     for (size_t i = 0; i < ns; ++i) { w.i16(m.scores[i].key); w.i16(m.scores[i].score); }
     size_t nf = m.fighters.size() < 255 ? m.fighters.size() : 255; w.u8(uint8_t(nf));
-    for (size_t i = 0; i < nf; ++i) { const FighterEntry& f = m.fighters[i]; w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); }
+    for (size_t i = 0; i < nf; ++i) {
+        const FighterEntry& f = m.fighters[i];
+        w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); w.u16(f.pingMs); w.u8(f.alive ? 1 : 0);
+    }
     return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
     m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
+    m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8();
     if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.gear >= kGearCount || m.tier > 7) return false;
     m.friendlyFire = ff == 1;
     size_t ns = r.u8(); if (ns > kMaxWillies) return false;
     m.scores.resize(ns); for (ScoreEntry& e : m.scores) { e.key = r.i16(); e.score = r.i16(); }
@@ -406,7 +420,9 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     m.fighters.resize(nf);
     for (FighterEntry& f : m.fighters) {
         f.entity = r.u8(); f.team = int8_t(r.u8()); f.kills = r.i16(); f.deaths = r.i16(); f.name = r.str(kMaxPlayerName);
+        f.pingMs = r.u16(); uint8_t alive = r.u8(); f.alive = alive == 1;
         if (f.entity == 0 || f.team < -1 || f.team > 7) return false;
+        if (alive > 1) return false;
     }
     return r.done();
 }

@@ -1,6 +1,7 @@
 #include "ue/engine.h"
 #include "log.h"
 #include "util/hsm_names.h"
+#include "hsm_chat.h"
 #include <windows.h>
 #include <cstring>
 #include <mutex>
@@ -54,6 +55,16 @@ uint64_t g_key = 0;
 
 std::mutex g_nameMu;
 std::unordered_map<uint64_t, std::string> g_nameCache;
+
+// FindFunction / FindProperty answers per struct (engine.h). The slot and name tell a reused address apart.
+struct LookupBucket {
+    int32_t index = -1;
+    FName name{};
+    std::unordered_map<std::string, void*> answers;   // nullptr: looked up, not there
+};
+std::mutex g_lookupMu;
+std::unordered_map<const void*, LookupBucket> g_functionCache, g_propertyCache;
+uint64_t g_lookupHits = 0, g_lookupMisses = 0, g_lookupDropped = 0;
 
 template <class T> T Read(const void* base, size_t off) { T v; std::memcpy(&v, static_cast<const uint8_t*>(base) + off, sizeof(T)); return v; }
 
@@ -166,11 +177,63 @@ std::vector<UObject*> FindInstances(const char* className) {
 UObject* DefaultObject(const UClass* c) { return c ? Read<UObject*>(c, kClassCDO) : nullptr; }
 
 // ---------------------------------------------------------------- reflection
+namespace {
+bool SameFName(FName a, FName b) { return a.index == b.index && a.number == b.number; }
+
+// The struct is still the one the bucket was filled for: same slot, same name, and the object array holds it there.
+bool BucketCurrent(LookupBucket& b, const UObject* s, int32_t index, FName name) {
+    if (b.index == index && SameFName(b.name, name) && ObjectAt(index) == s) return true;
+    if (!b.answers.empty()) ++g_lookupDropped;
+    b.answers.clear(); b.index = index; b.name = name;
+    return false;
+}
+
+template <class Walk>
+void* CachedLookup(std::unordered_map<const void*, LookupBucket>& cache, const void* ustruct, const std::string& name, Walk walk) {
+    if (!ustruct) return nullptr;
+    const UObject* s = static_cast<const UObject*>(ustruct);
+    const int32_t index = ObjectIndex(s);
+    const FName sname = ObjectFName(s);
+    {
+        std::lock_guard<std::mutex> lock(g_lookupMu);
+        auto b = cache.find(ustruct);
+        if (b != cache.end() && BucketCurrent(b->second, s, index, sname)) {
+            auto a = b->second.answers.find(name);
+            if (a != b->second.answers.end()) { ++g_lookupHits; return a->second; }
+        }
+    }
+    void* found = walk();                                // unlocked: the walk reads names (their own lock)
+    std::lock_guard<std::mutex> lock(g_lookupMu);
+    ++g_lookupMisses;
+    if (ObjectAt(index) != s) return found;              // not in the object array: answered, not remembered
+    LookupBucket& b = cache[ustruct];
+    BucketCurrent(b, s, index, sname);
+    b.answers.emplace(name, found);
+    return found;
+}
+}  // namespace
+
+void FlushReflectionCache() {
+    std::lock_guard<std::mutex> lock(g_lookupMu);
+    g_lookupDropped += g_functionCache.size() + g_propertyCache.size();
+    g_functionCache.clear(); g_propertyCache.clear();
+}
+
+ReflectionCacheStats GetReflectionCacheStats() {
+    std::lock_guard<std::mutex> lock(g_lookupMu);
+    ReflectionCacheStats st;
+    st.hits = g_lookupHits; st.misses = g_lookupMisses; st.dropped = g_lookupDropped;
+    st.structs = g_functionCache.size() + g_propertyCache.size();
+    return st;
+}
+
 UFunction* FindFunction(const UClass* c, const std::string& name) {
-    for (const void* s = c; s; s = Read<void*>(s, kStructSuper))
-        for (UObject* f = Read<UObject*>(s, kStructChildren); f; f = Read<UObject*>(f, kFieldNext))
-            if (SameNameAscii(ObjectName(f), name)) return reinterpret_cast<UFunction*>(f);
-    return nullptr;
+    return static_cast<UFunction*>(CachedLookup(g_functionCache, c, name, [&]() -> void* {
+        for (const void* s = c; s; s = Read<void*>(s, kStructSuper))
+            for (UObject* f = Read<UObject*>(s, kStructChildren); f; f = Read<UObject*>(f, kFieldNext))
+                if (SameNameAscii(ObjectName(f), name)) return f;
+        return nullptr;
+    }));
 }
 
 std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& prefix) {
@@ -181,10 +244,12 @@ std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& 
 }
 
 FProperty* FindProperty(const void* ustruct, const std::string& name) {
-    for (const void* s = ustruct; s; s = Read<void*>(s, kStructSuper))
-        for (const void* p = Read<void*>(s, kStructChildProps); p; p = Read<void*>(p, kFFieldNext))
-            if (SameNameAscii(NameToString(Read<FName>(p, kFFieldName)), name)) return static_cast<FProperty*>(const_cast<void*>(p));
-    return nullptr;
+    return static_cast<FProperty*>(CachedLookup(g_propertyCache, ustruct, name, [&]() -> void* {
+        for (const void* s = ustruct; s; s = Read<void*>(s, kStructSuper))
+            for (const void* p = Read<void*>(s, kStructChildProps); p; p = Read<void*>(p, kFFieldNext))
+                if (SameNameAscii(NameToString(Read<FName>(p, kFFieldName)), name)) return const_cast<void*>(p);
+        return nullptr;
+    }));
 }
 
 FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix) {
@@ -193,6 +258,9 @@ FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix) {
             if (StartsWithNameAscii(NameToString(Read<FName>(p, kFFieldName)), prefix)) return static_cast<FProperty*>(const_cast<void*>(p));
     return nullptr;
 }
+
+UObject* FindStruct(const std::string& name) { return FindObject(name, "ScriptStruct"); }
+FProperty* StructMember(const UObject* scriptStruct, const std::string& member) { return scriptStruct ? FindProperty(scriptStruct, member) : nullptr; }
 
 int32_t PropertyOffset(const FProperty* p) { return Read<int32_t>(p, kPropOffset); }
 int32_t PropertySize(const FProperty* p) { return Read<int32_t>(p, kPropElementSize); }
@@ -408,6 +476,13 @@ FText MakeText(const std::string& s) {
     c.set("InString", str.arg);
     c.invoke();
     return c.get<FText>("ReturnValue");
+}
+
+FStringArgHolder::FStringArgHolder(const std::string& s) {
+    static_assert(sizeof(wchar_t) == sizeof(char16_t), "FString is UTF-16");
+    std::u16string u = Utf16FromUtf8(s);
+    w.assign(u.begin(), u.end());
+    arg = { w.c_str(), int32_t(w.size() + 1), int32_t(w.size() + 1) };
 }
 
 std::string ReadFString(const void* fstring) {

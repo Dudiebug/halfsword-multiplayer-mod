@@ -73,8 +73,81 @@ static void TestLobbyText() {
     CHECK(TimeLabel(0) == "off" && TimeLabel(600) == "10 min");
 }
 
+// Rounds plan 1.2 / 3.2: Duel's gap names who took the round and counts the next one in; the dead line never says
+// "Respawning" in Duel; the gear label says when the gear changes.
+static void TestRoundsText() {
+    MatchInfo d; d.format = uint8_t(Format::Duel); d.scoreLimit = 3; d.phase = uint8_t(MatchPhase::Live);
+    d.fighters = {{1, -1, 0, 0, "Bob"}, {2, -1, 1, 0, "Ann"}}; d.scores = {{1, 0}, {2, 1}};
+    d.round = 2; d.roundWinner = 2; d.roundGapLeftMs = 2100;
+    CHECK(StatusLine(d, 1) == "Round 2 to Ann   next round in 3");
+    CHECK(StatusLine(d, 2) == "Round 2 to you   next round in 3");
+    d.roundWinner = 0; CHECK(StatusLine(d, 1) == "Round 2 drawn   next round in 3");
+    d.roundWinner = 2; d.round = 4; d.roundGapLeftMs = 1;
+    CHECK(StatusLine(d, 1) == "Round 4 to Ann   next round in 1");
+    d.phase = uint8_t(MatchPhase::SuddenDeath); CHECK(StatusLine(d, 1) == "Round 4 to Ann   next round in 1");
+    d.phase = uint8_t(MatchPhase::Live); d.roundGapLeftMs = 0;                  // the round is being fought: the score line
+    CHECK(Has(StatusLine(d, 1), "Rounds") && Has(StatusLine(d, 1), "You 0") && Has(StatusLine(d, 1), "Ann 1") && !Has(StatusLine(d, 1), "next round"));
+    d.roundGapLeftMs = 4000; d.phase = uint8_t(MatchPhase::Results); d.winner = 2; d.timeLeftMs = 9000;
+    CHECK(Has(StatusLine(d, 1), "ANN WINS") && !Has(StatusLine(d, 1), "next round"));   // results, not a gap
+    MatchInfo f; f.format = uint8_t(Format::FreeForAll); f.scoreLimit = 5; f.phase = uint8_t(MatchPhase::Live);
+    f.scores = {{1, 2}, {2, 4}}; f.fighters = {{1, -1, 2, 0, "Host"}, {2, -1, 4, 1, "Ann"}}; f.roundGapLeftMs = 3000; f.round = 2;
+    CHECK(!Has(StatusLine(f, 1), "next round") && Has(StatusLine(f, 1), "You 2"));   // rounds are Duel's
+
+    MatchInfo r = d; r.phase = uint8_t(MatchPhase::Live); r.roundGapLeftMs = 2100;
+    CHECK(RespawnLine(r, 0) == "Round over   next round in 3");
+    r.roundGapLeftMs = 0; CHECK(RespawnLine(r, 0) == "Round over");
+    for (uint32_t since : {0u, 1000u, 4999u, 5000u, 60000u}) {
+        r.roundGapLeftMs = since; CHECK(!Has(RespawnLine(r, since), "Respawning") && Has(RespawnLine(r, since), "Round over"));
+    }
+    r.phase = uint8_t(MatchPhase::Results); CHECK(RespawnLine(r, 0).empty());
+    f.respawnDelayS = 5;
+    CHECK(RespawnLine(f, 0) == "Respawning in 5" && RespawnLine(f, 2100) == "Respawning in 3" && RespawnLine(f, 4999) == "Respawning in 1");
+    CHECK(RespawnLine(f, 5000) == "Respawning..." && RespawnLine(f, 90000) == "Respawning...");
+    f.respawnDelayS = 0; CHECK(RespawnLine(f, 0) == "Respawning...");
+    f.respawnDelayS = 5; f.format = uint8_t(Format::TwoTeams); CHECK(RespawnLine(f, 1000) == "Respawning in 4");
+    f.phase = uint8_t(MatchPhase::Countdown); CHECK(RespawnLine(f, 1000) == "Respawning in 4");
+    f.phase = uint8_t(MatchPhase::Results); CHECK(RespawnLine(f, 1000).empty());
+    f.phase = uint8_t(MatchPhase::Idle); CHECK(RespawnLine(f, 1000).empty());
+    MatchInfo z; z.format = uint8_t(Format::Zombies); z.phase = uint8_t(MatchPhase::Live); z.respawnDelayS = 5;
+    CHECK(RespawnLine(z, 1000) == "Down   back next wave");                     // back when the wave is cleared
+    z.format = uint8_t(Format::PlayersVsBots); CHECK(RespawnLine(z, 99000) == "Down   back next wave");
+
+    CHECK(GearLabel(Gear::Own, Format::Duel) == "Own loadouts" && GearLabel(Gear::Own, Format::FreeForAll) == "Own loadouts");
+    CHECK(GearLabel(Gear::Mirror, Format::Duel) == "Everyone identical, new each round");
+    CHECK(GearLabel(Gear::Mirror, Format::FreeForAll) == "Everyone identical" && GearLabel(Gear::Mirror, Format::TwoTeams) == "Everyone identical");
+    CHECK(GearLabel(Gear::RandomTier, Format::Duel) == "Random by tier, new each round");
+    CHECK(GearLabel(Gear::RandomTier, Format::FreeForAll) == "Random by tier, new each life");
+    CHECK(GearLabel(Gear::RandomTier, Format::ThreeTeams) == "Random by tier, new each life");
+    CHECK(GearLabel(Gear::Mirror, Format::Zombies) == "Own loadouts" && GearLabel(Gear::RandomTier, Format::PlayersVsBots) == "Own loadouts");
+    CHECK(GearLabel(Gear(9), Format::Duel) == "Own loadouts");                  // an unknown setting is Own
+}
+
+// MatchInfo comes once a second (and at every change); the clocks run on in between so countdowns move every frame.
+static void TestExtrapolate() {
+    MatchInfo m; m.format = uint8_t(Format::Duel); m.phase = uint8_t(MatchPhase::Live); m.timeLeftMs = 10000; m.roundGapLeftMs = 3000;
+    m.round = 2; m.roundWinner = 1; m.fighters = {{1, -1, 0, 0, "Bob"}, {2, -1, 1, 0, "Ann"}};
+    MatchInfo e = Extrapolate(m, 1000, 3500);
+    CHECK(e.timeLeftMs == 7500 && e.roundGapLeftMs == 500);
+    CHECK(e.round == 2 && e.roundWinner == 1 && e.phase == m.phase && e.fighters.size() == 2 && e.fighters[1].name == "Ann");
+    e = Extrapolate(m, 1000, 5000); CHECK(e.timeLeftMs == 6000 && e.roundGapLeftMs == 0);      // runs out, never wraps
+    e = Extrapolate(m, 1000, 1000); CHECK(e.timeLeftMs == 10000 && e.roundGapLeftMs == 3000);
+    e = Extrapolate(m, 1000, 999); CHECK(e.timeLeftMs == 10000 && e.roundGapLeftMs == 3000);   // a clock behind: no time
+    e = Extrapolate(m, 0xFFFFFF00u, 0x100u); CHECK(e.timeLeftMs == 9488 && e.roundGapLeftMs == 2488);   // tick count wrap
+    e = Extrapolate(m, 0, 40000); CHECK(e.timeLeftMs == 0 && e.roundGapLeftMs == 0);
+    m.timeLeftMs = 0; m.roundGapLeftMs = 0;
+    e = Extrapolate(m, 0, 500); CHECK(e.timeLeftMs == 0 && e.roundGapLeftMs == 0);            // no clock stays no clock
+    MatchInfo r; r.format = uint8_t(Format::FreeForAll); r.phase = uint8_t(MatchPhase::Results); r.winner = 2; r.timeLeftMs = 9100;
+    r.fighters = {{1, -1, 2, 0, "Host"}, {2, -1, 4, 1, "Ann"}};
+    CHECK(Has(StatusLine(Extrapolate(r, 0, 0), 1), "rematch in 10"));
+    CHECK(Has(StatusLine(Extrapolate(r, 0, 700), 1), "rematch in 9"));
+    CHECK(Has(StatusLine(Extrapolate(r, 0, 8200), 1), "rematch in 1"));
+    MatchInfo d = m; d.roundGapLeftMs = 2100; d.fighters = {{1, -1, 0, 0, "Bob"}, {2, -1, 1, 0, "Ann"}};
+    CHECK(StatusLine(Extrapolate(d, 50, 1150), 1) == "Round 2 to you   next round in 1");
+    CHECK(!Has(StatusLine(Extrapolate(d, 50, 2150), 1), "next round"));                     // the gap is over
+}
+
 int main() {
-    TestLobbyText();
+    TestLobbyText(); TestRoundsText(); TestExtrapolate();
     TestStatus(); TestKillLine(); TestScoreboard();
     std::printf(g_fail ? "%d FAILED\n" : "all hud text tests passed\n", g_fail);
     return g_fail ? 1 : 0;

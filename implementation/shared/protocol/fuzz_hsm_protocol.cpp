@@ -65,6 +65,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
     MatchInfo mi; mi.format = 1; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
+    MatchInfo md; md.format = 4; md.scoreLimit = 3; md.phase = 2; md.gear = 2; md.tier = 4; md.round = 2; md.roundGapLeftMs = 3000; md.roundWinner = 1;
+    md.scores = {{1, 1}}; md.fighters = {{1, -1, 1, 0, "a", 40, true}, {2, -1, 0, 1, "bb", 120, false}}; s.push_back(Encode(md));
     Kill kl; kl.killer = 1; kl.victim = 2; s.push_back(Encode(kl));
     sync::PoseFrame pf; pf.tsMs = 5000; pf.stepUs = 16667;
     for (int b = 0; b < sync::kPoseBones; ++b) { pf.bones[size_t(b)].pos = sync::V3{ 10.0 * b, 5, 90 }; pf.bones[size_t(b)].rot = sync::Q4{ 0, 0, 0, 1 }; }
@@ -74,6 +76,9 @@ std::vector<std::vector<uint8_t>> Seeds() {
     combat::HitClaim hc; hc.claimId = 3; hc.attacker = 1; hc.victim = 2; hc.hitBone = "head"; hc.strikeComponent = "Blade";
     hc.source = combat::StrikeSource::WeaponRight; hc.hasHitBox = true; hc.hitBoxExtent = sync::V3{ 5, 5, 5 };
     s.push_back(Encode(HitClaimMsg{ hc })); s.push_back(Encode(HitFxMsg{ hc }));
+    combat::HitClaim rock = hc;
+    combat::StruckByProp(rock, MakeLevelPropId(14), sync::V3{ 300, 0, -50 }, combat::Xform{ {}, sync::Q4{ 0, 0, 0, 1 }, { 1, 1, 1 } });
+    s.push_back(Encode(HitClaimMsg{ rock })); s.push_back(Encode(HitFxMsg{ rock }));
     combat::SeverClaim sc; sc.claimId = 4; sc.attacker = 1; sc.victim = 2; sc.part = 9; sc.masterMesh = "CharacterMesh0";
     sc.attachMarker = "DM Sphere Thigh_R 2"; sc.markers = {"DM Sphere Thigh_R 2", "DM Sphere Thigh_R 3"}; sc.frameBone = "thigh_r";
     sc.box1.local.rot = sync::Q4{ 0, 0, 0, 1 }; sc.box1.extent = sync::V3{ 100, 500, 100 }; sc.box1.local.pos = sync::V3{ 0, 500, 0 };

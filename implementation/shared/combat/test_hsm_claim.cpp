@@ -1,6 +1,7 @@
 // Unit tests for hsm_claim.h. Run via implementation/shared/run_tests.sh test_hsm_claim.
 #include "combat/hsm_claim.h"
 #include "hsm_protocol.h"
+#include "session/hsm_lease.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -458,6 +459,12 @@ static HitClaim RandClaim(std::mt19937& rng) {
     c.hasHitBox = (rng() % 2) == 0;
     c.hitBoxLocal.pos = RandV3(rng); c.hitBoxLocal.rot = RandQ4(rng); c.hitBoxLocal.scale = RandV3(rng);
     c.hitBoxExtent = RandV3(rng);
+    if (rng() % 2) {   // struck by a prop: a level prop or a dropped weapon, never from a hand
+        c.striker = StrikerKind::Prop;
+        c.propId = rng() % 2 ? hsm::MakeLevelPropId(uint16_t(rng())) : hsm::MakeDropPropId(uint8_t(1 + rng() % 16), uint8_t(rng() % 2), uint8_t(rng()), uint32_t(rng()));
+        c.propVelocity = RandV3(rng);
+        c.source = StrikeSource::Body;
+    }
     return c;
 }
 static bool ClaimEq(const HitClaim& a, const HitClaim& b) {
@@ -472,11 +479,13 @@ static bool ClaimEq(const HitClaim& a, const HitClaim& b) {
            a.extraHighVelocity == b.extraHighVelocity && a.source == b.source &&
            a.strikeComponent == b.strikeComponent && a.strikeBone == b.strikeBone &&
            a.hasHitBox == b.hasHitBox && EqXform(a.hitBoxLocal, b.hitBoxLocal) &&
-           EqV3(a.hitBoxExtent, b.hitBoxExtent);
+           EqV3(a.hitBoxExtent, b.hitBoxExtent) && a.striker == b.striker && a.propId == b.propId &&
+           EqV3(a.propVelocity, b.propVelocity);
 }
 
 static void TestSerializationRoundTrip() {
     std::mt19937 rng(12345);
+    int props = 0;
     for (int i = 0; i < 1000; ++i) {
         HitClaim c = RandClaim(rng);
         hsm::Writer w;
@@ -486,7 +495,9 @@ static void TestSerializationRoundTrip() {
         CHECK(GetClaim(r, back));
         CHECK(r.done());
         CHECK(ClaimEq(c, back));
+        props += c.striker == StrikerKind::Prop;
     }
+    CHECK(props > 300 && props < 700);   // both kinds were round-tripped
 }
 
 // ---------------------------------------------------------------- hostile decode
@@ -508,8 +519,8 @@ static void TestHostileDecode() {
     PutClaim(w0, ref);
     // Fixed wire layout for these string lengths: 10 (header) + 2 (hitBone) + 4*24 (vectors) +
     // 5*8 (doubles) + 4 (bluntDestruction) + 4 (bools+source) + 2 (strikeComponent) + 1 (strikeBone)
-    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) = 264.
-    CHECK(w0.buf.size() == 264);
+    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) + 1 (striker) + 8 (propId) + 24 (propVelocity) = 297.
+    CHECK(w0.buf.size() == 297);
 
     {
         HitClaim back;
@@ -599,6 +610,27 @@ static void TestHostileDecode() {
         HitClaim tmp;
         CHECK(!GetClaim(r, tmp));
     }
+    // Bad enum: striker byte (offset 264) set to an undefined StrikerKind value.
+    {
+        std::vector<uint8_t> buf = w0.buf;
+        buf[264] = 2;
+        hsm::Reader r(buf.data(), buf.size());
+        HitClaim tmp;
+        CHECK(!GetClaim(r, tmp));
+    }
+    // A fighter's claim names no prop: a prop id (offset 265) or a prop velocity (offset 273) on one is garbage.
+    {
+        std::vector<uint8_t> buf = w0.buf;
+        buf[265] = 1;
+        hsm::Reader r(buf.data(), buf.size());
+        HitClaim tmp;
+        CHECK(!GetClaim(r, tmp));
+        buf = w0.buf;
+        const double one = 1.0;
+        std::memcpy(buf.data() + 273 + 16, &one, 8);   // propVelocity.z
+        hsm::Reader r2(buf.data(), buf.size());
+        CHECK(!GetClaim(r2, tmp));
+    }
 
     // Purely random bytes, random lengths: must never crash (ASan/UBSan aborts the test on a real
     // bug). The result is otherwise unconstrained -- a random buffer could coincidentally decode.
@@ -612,6 +644,92 @@ static void TestHostileDecode() {
         HitClaim tmp;
         (void)GetClaim(r, tmp);
     }
+}
+
+// ---------------------------------------------------------------- props (test 5: rocks did no damage)
+static HitClaim PropRef() {
+    HitClaim c;
+    c.claimId = 9; c.attacker = 1; c.victim = 2; c.attackerTsMs = 500;
+    c.hitBone = "head"; c.hitImpulse = {0, 0, 900}; c.strikeComponent = "StaticMeshComponent0";
+    Xform bone;
+    bone.pos = {100, 0, 160};
+    bone.rot = AxisAngleDeg(0, 0, 1, 90.0);
+    StruckByProp(c, hsm::MakeLevelPropId(14), {300, 0, -50}, bone);
+    return c;
+}
+
+// The prop's velocity at the contact travels in the hit bone's frame like every other direction (rotation only), and
+// the claim is a body blow: no hand holds a thrown rock, and no clash parries it.
+static void TestPropStriker() {
+    Xform bone;
+    bone.pos = {100, 0, 160};
+    bone.rot = AxisAngleDeg(0, 0, 1, 90.0);   // +90 deg about Z: (1,0,0) -> (0,1,0)
+    bone.scale = {0.9, 0.9, 0.9};
+    HitClaim c;
+    c.source = StrikeSource::WeaponRight;
+    c.propVelocity = {7, 7, 7};
+    StruckByProp(c, hsm::MakeLevelPropId(14), {300, 0, -50}, bone);
+    CHECK(c.striker == StrikerKind::Prop);
+    CHECK(c.propId == hsm::MakeLevelPropId(14));
+    CHECK(c.source == StrikeSource::Body);
+    CHECK(NearV3(c.propVelocity, {0, -300, -50}));                    // unrotated by -90 deg about Z, scale ignored
+    CHECK(NearV3(PropVelocityWorld(c, bone), {300, 0, -50}));
+    Xform victim = bone;
+    victim.rot = AxisAngleDeg(0, 0, 1, 180.0);                          // the victim's bone faces the other way
+    CHECK(NearV3(PropVelocityWorld(c, victim), {0, 300, -50}));
+    CHECK(Near(Len(PropVelocityWorld(c, victim)), Len(V3{300, 0, -50})));
+    HitClaim fighter;
+    CHECK(fighter.striker == StrikerKind::Fighter && fighter.propId == 0);   // a claim is a fighter's unless said
+    ParryWindow pw;
+    pw.NoteClash(1, StrikeSource::WeaponRight, 500);
+    pw.NoteClash(1, StrikeSource::WeaponLeft, 500);
+    HitClaim p = PropRef();
+    CHECK(!pw.Cancels(p));
+}
+
+static void TestPropClaimDecode() {
+    const HitClaim ref = PropRef();
+    auto roundTrips = [](const HitClaim& c, HitClaim& back) {
+        hsm::Writer w;
+        PutClaim(w, c);
+        hsm::Reader r(w.buf.data(), w.buf.size());
+        return GetClaim(r, back);
+    };
+    HitClaim back;
+    CHECK(roundTrips(ref, back) && ClaimEq(ref, back));
+    HitClaim m = ref;
+    m.propId = hsm::MakeDropPropId(3, 1, 5, 77);   // a thrown weapon
+    CHECK(roundTrips(m, back) && back.propId == m.propId);
+    m = ref; m.propId = 0;                          CHECK(!roundTrips(m, back));   // a prop claim names its prop
+    m = ref; m.propId = 0x0005;                     CHECK(!roundTrips(m, back));   // a weapon id with no owner entity
+    m = ref; m.propId = uint64_t(1) << 50 | 0x0105; CHECK(!roundTrips(m, back));   // bits above a weapon id
+    m = ref; m.source = StrikeSource::WeaponRight;  CHECK(!roundTrips(m, back));   // no hand holds a thrown prop
+    m = ref; m.source = StrikeSource::WeaponLeft;   CHECK(!roundTrips(m, back));
+    m = ref; m.propVelocity = {0, 0, 0};            CHECK(roundTrips(m, back));    // a prop at rest still strikes
+    m = ref; m.striker = StrikerKind::Fighter;      CHECK(!roundTrips(m, back));   // a fighter's claim names no prop
+    m.propId = 0;                                   CHECK(!roundTrips(m, back));   // ... nor a prop velocity
+    m.propVelocity = {0, 0, 0};                     CHECK(roundTrips(m, back));
+    hsm::Writer w;
+    PutClaim(w, ref);
+    for (size_t n = 0; n < w.buf.size(); ++n) {   // every truncation fails
+        hsm::Reader r(w.buf.data(), n);
+        CHECK(!GetClaim(r, back));
+    }
+    std::vector<uint8_t> buf = w.buf;
+    const uint64_t nanBits = 0x7FF8000000000000ull;
+    std::memcpy(buf.data() + buf.size() - 24, &nanBits, 8);   // propVelocity.x
+    hsm::Reader r(buf.data(), buf.size());
+    CHECK(!GetClaim(r, back));
+}
+
+// Who decides a contact between a fighter and a prop: the one machine that streams the prop. A stand-in struck by a
+// prop streamed here is a claim; one struck by a copy streamed elsewhere is that streamer's to claim. My fighter struck
+// by a prop streamed here takes it natively; by a copy driven from elsewhere, not (the streamer's claim brings it).
+static void TestDecidePropContact() {
+    CHECK(DecidePropContact(false, true) == PropContact::Claim);
+    CHECK(DecidePropContact(false, false) == PropContact::Block);
+    CHECK(DecidePropContact(true, true) == PropContact::Native);
+    CHECK(DecidePropContact(true, false) == PropContact::Block);
 }
 
 int main() {
@@ -635,6 +753,9 @@ int main() {
     TestReplayQueue();
     TestSerializationRoundTrip();
     TestHostileDecode();
+    TestPropStriker();
+    TestPropClaimDecode();
+    TestDecidePropContact();
     if (g_fail) { std::printf("test_hsm_claim: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_claim: all passed\n");
     return 0;

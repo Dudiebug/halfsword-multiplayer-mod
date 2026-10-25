@@ -2,6 +2,7 @@
 #include "ue/hook.h"
 #include "log.h"
 #include <MinHook.h>
+#include <memory>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -14,17 +15,28 @@ void* g_target = nullptr;
 
 struct NameRule { std::function<bool(const std::string&)> match; PreHook hook; };
 
+// A function's hooks are an immutable list, replaced (never edited) when a rule is added: a hooked call takes a reference
+// instead of copying the list (test 5: the hit hook alone ran 8970 times in one frame).
+using HookList = std::shared_ptr<const std::vector<PreHook>>;
 std::shared_mutex g_mu;
-std::unordered_map<UFunction*, std::vector<PreHook>> g_exact;      // includes resolved name rules
+std::unordered_map<UFunction*, HookList> g_exact;                  // includes resolved name rules
 std::unordered_map<UFunction*, bool> g_classified;                 // function already checked against name rules
 std::vector<NameRule> g_nameRules;
+
+// Adds a hook to a function's list. Requires the unique lock.
+void AddHook(UFunction* fn, PreHook hook) {
+    HookList& list = g_exact[fn];
+    auto next = std::make_shared<std::vector<PreHook>>(list ? *list : std::vector<PreHook>{});
+    next->push_back(std::move(hook));
+    list = std::move(next);
+}
 
 // Resolve name rules for a function seen for the first time. Requires the unique lock.
 void Classify(UFunction* fn) {
     g_classified[fn] = true;
     if (g_nameRules.empty()) return;
     std::string name = ObjectName(reinterpret_cast<UObject*>(fn));
-    for (const NameRule& r : g_nameRules) if (r.match(name)) g_exact[fn].push_back(r.hook);
+    for (const NameRule& r : g_nameRules) if (r.match(name)) AddHook(fn, r.hook);
 }
 
 std::atomic<unsigned long> g_gameThreadId{0};
@@ -54,7 +66,7 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
     }
     bool block = false;
     if (obj && fn) {
-        std::vector<PreHook> hooks;
+        HookList hooks;
         {
             std::shared_lock<std::shared_mutex> lock(g_mu);
             bool known = g_classified.count(fn) != 0;
@@ -66,13 +78,14 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
                 auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second;
             }
         }
-        // Hooks run without the lock so they may call ProcessEvent (re-entering this detour).
-        if (!hooks.empty()) {
+        // Hooks run without the lock so they may call ProcessEvent (re-entering this detour); the list they run
+        // stays alive (and unchanged) even if a rule is added meanwhile.
+        if (hooks && !hooks->empty()) {
             const bool timed = t_inHooks == 0 && GetCurrentThreadId() == g_gameThreadId.load(std::memory_order_relaxed);
             const int64_t t0 = timed ? Qpc() : 0;
             {
                 InHooks in;
-                for (const PreHook& h : hooks) if (h(obj, fn, params)) block = true;
+                for (const PreHook& h : *hooks) if (h(obj, fn, params)) block = true;
             }
             if (timed) { ++g_hookCalls; g_hookNs += uint64_t(QpcNs(Qpc() - t0)); }
         }
@@ -114,7 +127,7 @@ void RemoveProcessEventHook() {
 void HookFunction(UFunction* fn, PreHook hook) {
     if (!fn) return;
     std::unique_lock<std::shared_mutex> lock(g_mu);
-    g_exact[fn].push_back(std::move(hook));
+    AddHook(fn, std::move(hook));
 }
 
 void HookFunctionsMatching(std::function<bool(const std::string&)> match, PreHook hook) {
@@ -122,7 +135,7 @@ void HookFunctionsMatching(std::function<bool(const std::string&)> match, PreHoo
     g_nameRules.push_back({match, hook});
     // Re-check functions already classified so the rule also applies to them.
     for (auto& [fn, _] : g_classified)
-        if (match(ObjectName(reinterpret_cast<UObject*>(fn)))) g_exact[fn].push_back(hook);
+        if (match(ObjectName(reinterpret_cast<UObject*>(fn)))) AddHook(fn, hook);
 }
 
 void ClearHooks() {

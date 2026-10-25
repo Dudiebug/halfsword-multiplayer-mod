@@ -289,7 +289,7 @@ static void TestSeverNoticeMake() {
 }
 
 static void TestSeverNoticeWire() {
-    CHECK(kProtocolRevision == 12);                           // a rev-11 peer would drop a SeverNotice without a word
+    CHECK(kProtocolRevision >= 12);                           // a rev-11 peer would drop a SeverNotice without a word
     SeverClaim n;
     CHECK(MakeSeverNotice(OwnCapture(), n));
     std::vector<uint8_t> b = Encode(SeverNoticeMsg{n});

@@ -2,6 +2,7 @@
 #include "hsm_chat.h"
 #include <cstdio>
 #include <limits>
+#include <random>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
@@ -171,7 +172,224 @@ static void TestChatLog() {
     c.Clear(); CHECK(c.size() == 0);
 }
 
+// ---------------------------------------------------------------- ChatSession: the keyboard is the chat's while typing
+// docs/MATCH_ROUNDS_UI_CHAT_PLAN.md section 2: G and R opened the inventory and slow motion while the player typed.
+
+static void TestChatKey() {
+    ChatKey k = ChatKey::U;
+    CHECK(ParseChatKey("enter", k) && k == ChatKey::Enter);
+    CHECK(ParseChatKey("T", k) && k == ChatKey::T);
+    CHECK(ParseChatKey("y", k) && k == ChatKey::Y);
+    CHECK(ParseChatKey("u", k) && k == ChatKey::U);
+    CHECK(ParseChatKey("ENTER", k) && k == ChatKey::Enter);
+    CHECK(ParseChatKey("Enter", k) && k == ChatKey::Enter);
+    for (const char* bad : {"", "x", "g", "r", "tt", "enter ", " t", "return", "esc"}) {
+        k = ChatKey::Y;
+        CHECK(!ParseChatKey(bad, k) && k == ChatKey::Y);   // refused, left as it was
+    }
+    for (ChatKey key : {ChatKey::Enter, ChatKey::T, ChatKey::Y, ChatKey::U}) {
+        ChatKey back = key == ChatKey::Enter ? ChatKey::T : ChatKey::Enter;
+        CHECK(ParseChatKey(ChatKeyName(key), back) && back == key);
+    }
+    CHECK(ChatSession().key() == ChatKey::Enter);   // the default: Enter is no fight action in the game's list
+}
+
+static void TestSessionEnter() {
+    ChatSession s;
+    CHECK(!s.typing() && s.draft().empty());
+    // Not typing: letters, Backspace and the exits are the game's.
+    for (ChatEvent e : {ChatEvent::Char, ChatEvent::Backspace, ChatEvent::Escape, ChatEvent::FocusLost, ChatEvent::HudHidden,
+                        ChatEvent::Paused}) {
+        ChatStep st = s.On(e, 0, "g");
+        CHECK(!st.captureChanged && !st.capture && !st.send && !st.refused && !s.typing());
+    }
+    // Enter opens: the keyboard is taken, and the Enter is not typed.
+    ChatStep st = s.On(ChatEvent::Enter, 0);
+    CHECK(st.captureChanged && st.capture && !st.send && s.typing() && s.draft().empty());
+    // G and R are letters of the line now.
+    st = s.On(ChatEvent::Char, 10, "g");
+    CHECK(!st.captureChanged && st.capture && !st.send && s.draft() == "g");
+    s.On(ChatEvent::Char, 20, "r");
+    s.On(ChatEvent::Char, 30, "!");
+    CHECK(s.draft() == "gr!");
+    // Enter sends and gives the keyboard back.
+    st = s.On(ChatEvent::Enter, 40);
+    CHECK(st.captureChanged && !st.capture && st.send && *st.send == "gr!" && !s.typing() && s.draft().empty());
+    // With Enter as the key, a letter key is never the open key: OpenKey still opens (the caller sends it only for the
+    // configured key), and while typing it is a letter.
+    ChatSession o;
+    st = o.On(ChatEvent::OpenKey, 0, "t");
+    CHECK(st.captureChanged && st.capture && o.draft().empty());
+}
+
+static void TestSessionLetterKey() {
+    ChatSession s(ChatKey::T);
+    // Enter is no open key now.
+    ChatStep st = s.On(ChatEvent::Enter, 0);
+    CHECK(!st.captureChanged && !st.capture && !s.typing());
+    // T opens and is not typed; the T pressed while typing is an ordinary letter.
+    st = s.On(ChatEvent::OpenKey, 0, "t");
+    CHECK(st.captureChanged && st.capture && s.typing() && s.draft().empty());
+    st = s.On(ChatEvent::OpenKey, 10, "t");
+    CHECK(!st.captureChanged && st.capture && s.draft() == "t");
+    s.On(ChatEvent::Char, 20, "o");
+    s.On(ChatEvent::OpenKey, 30, "T");
+    CHECK(s.draft() == "toT");
+    st = s.On(ChatEvent::Enter, 40);
+    CHECK(st.captureChanged && !st.capture && st.send && *st.send == "toT");
+}
+
+static void TestSessionEmptyAndRate() {
+    // Enter on an empty or blank draft only closes.
+    ChatSession s;
+    s.On(ChatEvent::Enter, 0);
+    ChatStep st = s.On(ChatEvent::Enter, 10);
+    CHECK(st.captureChanged && !st.capture && !st.send && !st.refused && !s.typing());
+    s.On(ChatEvent::Enter, 20);
+    s.On(ChatEvent::Char, 30, " ");
+    s.On(ChatEvent::Char, 40, " ");
+    st = s.On(ChatEvent::Enter, 50);
+    CHECK(st.captureChanged && !st.capture && !st.send && !s.typing());
+    // The line sent is sanitized (trimmed).
+    s.On(ChatEvent::Enter, 60);
+    for (const char* c : {" ", "h", "i", " "}) s.On(ChatEvent::Char, 70, c);
+    st = s.On(ChatEvent::Enter, 80);
+    CHECK(st.send && *st.send == "hi");
+    // Three lines back to back, the fourth refused: the draft and the keyboard stay the chat's.
+    ChatSession r;
+    for (int i = 0; i < 3; ++i) {
+        r.On(ChatEvent::Enter, 1000);
+        r.On(ChatEvent::Char, 1000, "x");
+        st = r.On(ChatEvent::Enter, 1000);
+        CHECK(st.send && *st.send == "x" && !st.refused);
+    }
+    r.On(ChatEvent::Enter, 1000);
+    r.On(ChatEvent::Char, 1000, "y");
+    st = r.On(ChatEvent::Enter, 1500);
+    CHECK(!st.send && st.refused && !st.captureChanged && st.capture && r.typing() && r.draft() == "y");
+    // A second after the burst the kept draft goes.
+    st = r.On(ChatEvent::Enter, 2000);
+    CHECK(st.send && *st.send == "y" && !st.refused && st.captureChanged && !st.capture);
+    // A blank Enter is no send and costs no token.
+    ChatSession b;
+    for (int i = 0; i < 5; ++i) { b.On(ChatEvent::Enter, 0); b.On(ChatEvent::Char, 0, " "); b.On(ChatEvent::Enter, 0); }
+    for (int i = 0; i < 3; ++i) {
+        b.On(ChatEvent::Enter, 0);
+        b.On(ChatEvent::Char, 0, "z");
+        CHECK(b.On(ChatEvent::Enter, 0).send.has_value());
+    }
+}
+
+// Every way out of typing gives the keyboard back exactly once, and all but Enter drop the draft.
+static void TestSessionExits() {
+    const ChatEvent exits[] = {ChatEvent::Escape, ChatEvent::FocusLost, ChatEvent::HudHidden, ChatEvent::Paused,
+                               ChatEvent::Enter};
+    for (ChatEvent e : exits) {
+        ChatSession s;
+        CHECK(s.On(ChatEvent::Enter, 0).captureChanged);
+        s.On(ChatEvent::Char, 10, "a");
+        s.On(ChatEvent::Char, 20, "b");
+        ChatStep st = s.On(e, 30);
+        CHECK(st.captureChanged && !st.capture && !s.typing() && s.draft().empty() && !st.refused);
+        CHECK(e == ChatEvent::Enter ? (st.send && *st.send == "ab") : !st.send);
+        // Released once: the same exit again, or any other, changes nothing (an Enter would open again).
+        for (ChatEvent again : exits) {
+            if (again == ChatEvent::Enter) continue;
+            st = s.On(again, 40);
+            CHECK(!st.captureChanged && !st.capture && !s.typing());
+        }
+        // Opened again: the dropped draft is gone.
+        s.On(ChatEvent::Enter, 50);
+        CHECK(s.typing() && s.draft().empty());
+    }
+    for (ChatEvent e : exits) CHECK(std::string(ChatEventName(e)).size() > 0);
+    CHECK(std::string(ChatEventName(ChatEvent::FocusLost)) == "focus lost");
+}
+
+static void TestSessionDraft() {
+    ChatSession s;
+    s.On(ChatEvent::Enter, 0);
+    // Backspace takes one code point, never half of one; on an empty draft it does nothing (and closes nothing).
+    s.On(ChatEvent::Char, 0, "a");
+    s.On(ChatEvent::Char, 0, "\xC3\xA9");          // é
+    s.On(ChatEvent::Char, 0, "\xE2\x82\xAC");      // €
+    CHECK(s.draft() == "a\xC3\xA9\xE2\x82\xAC");
+    s.On(ChatEvent::Backspace, 0);
+    CHECK(s.draft() == "a\xC3\xA9");
+    s.On(ChatEvent::Backspace, 0);
+    CHECK(s.draft() == "a");
+    s.On(ChatEvent::Backspace, 0);
+    ChatStep st = s.On(ChatEvent::Backspace, 0);
+    CHECK(s.draft().empty() && s.typing() && st.capture && !st.captureChanged);
+    // Control characters, invalid UTF-8 and empty text are not typed; several code points at once are.
+    for (const char* bad : {"", "\x01", "\x7F", "\n", "\xFF", "\xC3", "a\x01", "\xC2\x85"}) s.On(ChatEvent::Char, 0, bad);
+    CHECK(s.draft().empty());
+    s.On(ChatEvent::Char, 0, "ab");
+    CHECK(s.draft() == "ab");
+    // Nothing past the wire limit: a character that would not fit is dropped whole.
+    ChatSession f;
+    f.On(ChatEvent::Enter, 0);
+    for (size_t i = 0; i + 1 < kMaxChatBytes; ++i) f.On(ChatEvent::Char, 0, "x");
+    CHECK(f.draft().size() == kMaxChatBytes - 1);
+    f.On(ChatEvent::Char, 0, "\xC3\xA9");
+    CHECK(f.draft().size() == kMaxChatBytes - 1);
+    f.On(ChatEvent::Char, 0, "y");
+    CHECK(f.draft().size() == kMaxChatBytes && f.draft().back() == 'y');
+    f.On(ChatEvent::Char, 0, "z");
+    CHECK(f.draft().size() == kMaxChatBytes);
+    st = f.On(ChatEvent::Enter, 0);
+    CHECK(st.send && st.send->size() == kMaxChatBytes);
+}
+
+// Random event streams: the capture is on exactly while typing, every change is reported once, and what goes out is a
+// sanitized, non-empty line within the wire limit.
+static void TestSessionRandom() {
+    std::mt19937 rng(1234);
+    const char* texts[] = {"a", "g", "r", " ", "\xC3\xA9", "\x01", "\xFF", "t", "xyz"};
+    for (int run = 0; run < 200; ++run) {
+        ChatSession s(run % 2 ? ChatKey::T : ChatKey::Enter);
+        bool capture = false;
+        int ons = 0, offs = 0;
+        uint32_t now = 0;
+        for (int i = 0; i < 400; ++i) {
+            now += rng() % 700;
+            const ChatEvent e = ChatEvent(rng() % 8);
+            const bool wasTyping = s.typing();
+            const ChatStep st = s.On(e, now, texts[rng() % 9]);
+            CHECK(st.capture == s.typing());
+            CHECK(st.captureChanged == (wasTyping != s.typing()));
+            if (st.captureChanged) { capture = st.capture; (capture ? ons : offs)++; }
+            CHECK(capture == s.typing());
+            if (st.send) CHECK(!st.send->empty() && *st.send == SanitizeChat(*st.send) && st.send->size() <= kMaxChatBytes);
+            CHECK(!(st.send && st.refused));
+            CHECK(s.draft().size() <= kMaxChatBytes && ValidUtf8(s.draft()));
+            if (!s.typing()) CHECK(s.draft().empty());
+        }
+        CHECK(ons == offs + (s.typing() ? 1 : 0));
+    }
+}
+
+// Text as the engine takes it (an FString is UTF-16): BMP code points as one unit, the rest as a surrogate pair,
+// every byte that does not start a valid sequence as one U+FFFD.
+static void TestUtf16() {
+    CHECK(Utf16FromUtf8("").empty());
+    CHECK(Utf16FromUtf8("Ann 3") == u"Ann 3");
+    CHECK(Utf16FromUtf8("WAVE 4 \xC2\xB7 2") == u"WAVE 4 \u00B7 2");
+    CHECK(Utf16FromUtf8("Gr\xC3\xBC\xC3\x9F" "e") == u"Gr\u00FC\u00DF" "e");
+    CHECK(Utf16FromUtf8("\xE2\x82\xAC") == u"\u20AC");
+    CHECK(Utf16FromUtf8("\xEF\xBF\xBF") == std::u16string(1, char16_t(0xFFFF)));
+    CHECK(Utf16FromUtf8("\xF0\x9F\x98\x80!") == (std::u16string{char16_t(0xD83D), char16_t(0xDE00), u'!'}));
+    CHECK(Utf16FromUtf8("\xF0\x90\x80\x80") == (std::u16string{char16_t(0xD800), char16_t(0xDC00)}));   // U+10000
+    CHECK(Utf16FromUtf8("\xF4\x8F\xBF\xBF") == (std::u16string{char16_t(0xDBFF), char16_t(0xDFFF)}));   // U+10FFFF
+    CHECK(Utf16FromUtf8("a\xFF" "b") == u"a\uFFFD" "b");
+    CHECK(Utf16FromUtf8("\xE2\x82") == u"\uFFFD\uFFFD");             // truncated: each stray byte
+    CHECK(Utf16FromUtf8("\xC0\xAF") == u"\uFFFD\uFFFD");             // overlong
+    CHECK(Utf16FromUtf8("\xED\xA0\x80") == u"\uFFFD\uFFFD\uFFFD");   // an encoded surrogate
+    CHECK(Utf16FromUtf8(std::string("a\0b", 3)) == std::u16string(u"a\0b", 3));   // NUL is kept; callers terminate
+}
+
 int main() {
+    TestUtf16();
     TestRoundTrip();
     TestTruncationLoop();
     TestUtf8CutEdges();
@@ -181,6 +399,13 @@ int main() {
     TestFromSlotPreserved();
     TestRateLimiter();
     TestChatLog();
+    TestChatKey();
+    TestSessionEnter();
+    TestSessionLetterKey();
+    TestSessionEmptyAndRate();
+    TestSessionExits();
+    TestSessionDraft();
+    TestSessionRandom();
     if (g_fail) { std::printf("test_hsm_chat: %d failures\n", g_fail); return 1; }
     std::printf("test_hsm_chat: all passed\n");
     return 0;

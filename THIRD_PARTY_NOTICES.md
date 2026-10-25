@@ -58,4 +58,4 @@ Built into `dwmapi.dll`; each keeps its license file in its directory.
 ## Not used
 
 Half Sword Enhancer's license forbids redistributing any part of it. No code or structure from it is in this
-repository; field offsets observed in its dump are used only as facts.
+repository; field offsets observed in its dump are listed as facts in `docs/REVERSE_ENGINEERING.md` §5.

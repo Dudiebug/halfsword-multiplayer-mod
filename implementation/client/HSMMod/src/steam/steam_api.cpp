@@ -71,6 +71,9 @@ struct Api {
     FLAT(bool, SetRichPresence, void*, const char*, const char*)
     FLAT(const char*, GetFriendPersonaName, void*, uint64_t)
     FLAT(const char*, GetPersonaName, void*)
+    FLAT(int, GetMediumFriendAvatar, void*, uint64_t)
+    FLAT(bool, GetImageSize, void*, int, uint32_t*, uint32_t*)
+    FLAT(bool, GetImageRGBA, void*, int, uint8_t*, int)
     FLAT(uint64_t, GetSteamID, void*)
     FLAT(bool, IsAPICallCompleted, void*, uint64_t, bool*)
     FLAT(bool, GetAPICallResult, void*, uint64_t, void*, int, int, bool*)
@@ -221,6 +224,11 @@ bool Init() {
     // session stamps arrivals when it polls them.
     g.GetLocalTimestamp = Fn<Api::GetLocalTimestamp_t>("SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp");
     if (!g.GetLocalTimestamp) HSM_LOG("steam: no SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp; arrival times are the poll time");
+    // Optional: avatars on the multiplayer page; without them the rows keep an empty space.
+    g.GetMediumFriendAvatar = Fn<Api::GetMediumFriendAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
+    g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
+    g.GetImageRGBA = Fn<Api::GetImageRGBA_t>("SteamAPI_ISteamUtils_GetImageRGBA");
+    if (!g.GetMediumFriendAvatar || !g.GetImageSize || !g.GetImageRGBA) HSM_LOG("steam: no avatar exports; the page shows no avatars");
     if (!g_mm || !g_friends || !g_user || !g_utils || !g_msgs || !g_netUtils) { HSM_LOG("steam: interface accessor returned null"); return false; }
     for (CallbackObj& cb : g_callbacks) g.RegisterCallback(&cb, cb.id);
     ue::HookNative(reinterpret_cast<void*>(g.RunCallbacks), reinterpret_cast<void*>(&RunCallbacksDetour), reinterpret_cast<void**>(&g_runOriginal), "SteamAPI_RunCallbacks");
@@ -276,6 +284,19 @@ std::string PersonaName(SteamId user) {
     return n ? n : "";
 }
 uint32_t AppId() { return g_ready ? g.GetAppID(g_utils) : 0; }
+
+int MediumAvatar(SteamId user) { return g_ready && g.GetMediumFriendAvatar && user ? g.GetMediumFriendAvatar(g_friends, user) : 0; }
+
+bool AvatarRGBA(int image, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba) {
+    width = height = 0;
+    rgba.clear();
+    if (!g_ready || !g.GetImageSize || !g.GetImageRGBA || image <= 0) return false;
+    if (!g.GetImageSize(g_utils, image, &width, &height) || !width || !height || width > 1024 || height > 1024) return false;
+    rgba.resize(size_t(width) * height * 4);
+    if (g.GetImageRGBA(g_utils, image, rgba.data(), int(rgba.size()))) return true;
+    rgba.clear();
+    return false;
+}
 
 std::string LaunchConnectLobby() {
     std::wstring cmd = GetCommandLineW();

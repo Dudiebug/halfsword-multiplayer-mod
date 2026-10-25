@@ -132,7 +132,9 @@ public:
         }
         for (uint32_t part = 0; part < kGoreSeveredBits; ++part) {
             const uint32_t bit = 1u << part;
-            if ((severed & bit) && !(severedSeen_ & bit) && !(nativeApplied_ & bit)) { pendingSinceMs_[part] = nowMs; pending_ |= bit; }
+            if (!(severed & bit) || (severedSeen_ & bit)) continue;
+            pendingSinceMs_[part] = nowMs;                      // the first report, kept for NoteNativeLost
+            if (!(nativeApplied_ & bit)) pending_ |= bit;
         }
         severedSeen_ |= severed;
         out.dislocate = dislocated & ~dislocatedSeen_;
@@ -151,6 +153,17 @@ public:
         if (part >= kGoreSeveredBits) return;
         nativeApplied_ |= 1u << part;
         pending_ &= ~(1u << part);
+    }
+
+    // The game's own cut began on this stand-in for `part` (NoteNativeSever) but its Delayed half, which spawns the limb
+    // and hides the bone, never ran (test 5: lost on every stand-in cut). The part is owed to the fallback again: at the
+    // grace deadline counted from its first report, at once when that has passed; when no report came yet, the report
+    // starts the grace timer as for a part no cut covered.
+    void NoteNativeLost(uint8_t part) {
+        if (part >= kGoreSeveredBits) return;
+        const uint32_t bit = 1u << part;
+        nativeApplied_ &= ~bit;
+        if (severedSeen_ & bit) pending_ |= bit;
     }
 
     // Call once per frame (independent of Vitals' 15 Hz) so a pending grace period fires on time instead of
@@ -179,7 +192,7 @@ private:
     uint32_t dislocatedSeen_ = 0;   // the dislocated mask as of the last OnVitals (for edge-triggering dislocate/relocate)
     uint32_t nativeApplied_ = 0;    // parts NoteNativeSever has fired for: never start (or restart) a grace timer
     uint32_t pending_ = 0;          // parts whose grace timer is running; a mask, not a time sentinel, so any clock origin works
-    double pendingSinceMs_[kGoreSeveredBits] = {};   // when each pending part was first reported (valid only while its pending_ bit is set)
+    double pendingSinceMs_[kGoreSeveredBits] = {};   // when each part was first reported (valid while its severedSeen_ bit is set)
     bool awaiting_ = false;         // AwaitWhole: ignoring samples with gore until a whole one or the deadline
     bool awaitStarted_ = false;     // the first ignored sample has set awaitSinceMs_ (a flag, so any clock origin works)
     double awaitSinceMs_ = 0;
@@ -210,6 +223,7 @@ struct GoreRecord {
     uint32_t PartsToShow(uint32_t due) const { return due & kGoreSeveredMask & ~(hidden | native | gaveUp); }
     uint32_t JointsToFree(uint32_t dislocated) const { return dislocated & kGoreJointMask & ~(freed | jointsGaveUp); }
     uint32_t DeadBones() const { return GoreDeadBones(hidden, native); }
+    void NativeLost(uint8_t part) { if (part < kGoreSeveredBits) native &= ~(1u << part); }   // its Delayed half never ran
 };
 
 }  // namespace hsm::sync

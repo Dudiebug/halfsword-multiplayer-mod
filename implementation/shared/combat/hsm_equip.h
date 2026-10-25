@@ -144,6 +144,18 @@ constexpr bool HandReachesSlot(int hand, int slot) {
     return false;
 }
 
+// The owner's pose shows a weapon of class cls in an empty hand of the stand-in while its Equip token for that hand is
+// other: it may be a draw whose state is still on its way (mid-draw the owner's hand and slot hold the same actor) when a
+// slot the owner shows sheathed holds a weapon of that class on the stand-in (slotClass[k], 0 for an empty slot). Any
+// slot, whichever hand: a hand draws from every slot (PlanEquip's Draw has no reach; HandReachesSlot is for sheathing).
+// Test 5: the right hand drew from L 1, a reach rule took that for a pickup, and the hand went for a loose weapon.
+inline bool MayBeDrawFrom(uint8_t ownerSheathed, const std::array<uint32_t, kEquipSlots>& slotClass, uint32_t cls) {
+    if (cls == 0) return false;
+    for (int k = 0; k < kEquipSlots; ++k)
+        if ((ownerSheathed & (1u << k)) && slotClass[size_t(k)] == cls) return true;
+    return false;
+}
+
 struct EquipStep {
     enum class Kind : uint8_t { Sheathe, Draw };
     Kind kind = Kind::Draw;
