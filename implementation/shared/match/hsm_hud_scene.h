@@ -175,7 +175,7 @@ struct LocalHud {
     bool oneFight = false;           // a Progression fight (Free Mode off): the host plays it as one fight, no waves
     BannerShot banner;               // BannerTracker::shot()
     std::vector<FeedItem> feed;      // oldest first
-    float giveUp = 0;                // Duel: how far the give-up key hold is (GiveUpHold::progress), 0 = not held
+    float giveUp = 0;                // Duel / wave break: how far the G hold is (GiveUpHold::progress), 0 = not held
 };
 
 struct SceneText { bool visible = false; std::string text; Rgba color = style::kBone; float opacity = 1, scale = 1; };
@@ -234,6 +234,7 @@ inline SceneText Pill(const MatchInfo& m, uint8_t me, bool oneFight) {
         default: break;
     }
     if (InRoundGap(m)) { p.text = "NEXT ROUND IN " + Seconds(m.roundGapLeftMs); return p; }
+    if (InWaveBreak(m)) { p.text = "NEXT WAVE IN " + Seconds(m.roundGapLeftMs); return p; }
     if (m.phase == uint8_t(MatchPhase::SuddenDeath)) { p.text = "SUDDEN DEATH"; p.color = style::kBloodInk; return p; }
     if (f == Format::Duel) { p.text = RoundName(m); if (FinalRound(m)) p.color = style::kWarn; return p; }
     if (IsBotFormat(f)) {
@@ -347,6 +348,8 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     if (l.giveUp > 0 && Format(m.format) == Format::Duel && fought && !InRoundGap(m))
         s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
+    if (l.giveUp > 0 && InWaveBreak(m))          // the same G hold votes to skip the loot break
+        s.pill = {true, "SKIPPING THE BREAK " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kOk, 1, 1};
     if (m.phase == uint8_t(MatchPhase::Countdown)) {
         if (m.timeLeftMs) {                      // the digits, each popping as it appears
             Look look = BannerLook((1000 - m.timeLeftMs % 1000) % 1000);

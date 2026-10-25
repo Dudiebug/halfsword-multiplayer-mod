@@ -697,6 +697,42 @@ static void TestPropStreamDue() {
     CHECK(PropStreamDue(LeaseLevel::Touch, -1.0e9, true, 0.0));           // never sent
 }
 
+
+// A dropped weapon lying FREE for kIdleDespawnMs goes on every machine (the lag of a pile of them).
+// Spec revision (user, 2026-10-25): a fighter standing near no longer holds the minute back (fighters stand by the loot
+// all wave long); the minute runs only in the bot formats (DropClearFor), counted from when the weapon went FREE.
+static void TestIdleDespawn() {
+    const uint64_t drop = MakeDropPropId(2, 0, 1);
+    CHECK(kIdleDespawnMs == 60000.0);
+    CHECK(!IdleDespawnDue(drop, 0.0, 59999.999));                        // not yet
+    CHECK(IdleDespawnDue(drop, 0.0, 60000.0));                           // exactly a minute FREE: due
+    CHECK(!IdleDespawnDue(drop, 30000.0, 89999.999));                    // counted from when it went FREE
+    CHECK(IdleDespawnDue(drop, 30000.0, 90000.0));
+    CHECK(!IdleDespawnDue(drop, -1.0, 1e9));                             // not FREE (held, touched, or no Grant yet)
+    CHECK(!IdleDespawnDue(MakeLevelPropId(7), 0.0, 1e9));                // a level prop stays
+}
+
+// Loose armour pieces (dropped loot, stripped pieces) are no props: each machine times its own copies. A piece goes a
+// minute after it was first seen loose; one picked up (worn or carried: not in the loose list) starts over when it lies
+// loose again. The first sweep after Reset (a new match) only records what already lay loose: the level's own pieces
+// stay, unless one of them is picked up and dropped again.
+static void TestLooseTimer() {
+    LooseTimer t;
+    CHECK(t.Sweep({1, 2}, 0.0).empty());                                 // baseline: the level's pieces
+    CHECK(t.Sweep({1, 2, 3}, 1000.0).empty());                           // 3 is new loot
+    CHECK(t.Sweep({1, 2, 3}, 60999.999).empty());
+    CHECK(t.Sweep({1, 2, 3}, 61000.0) == std::vector<uint64_t>({3}));    // a minute loose: due, then forgotten
+    CHECK(t.Sweep({1, 2, 3}, 70000.0).empty());                          // reported once (destroyed by the caller)
+    CHECK(t.Sweep({1, 2}, 1e9).empty());                                 // the level's pieces stay for good
+    CHECK(t.Sweep({2, 4}, 2e9).empty());                                 // 1 picked up; 4 is new
+    CHECK(t.Sweep({2}, 2e9 + 1000.0).empty());                           // 4 picked up within the minute...
+    CHECK(t.Sweep({1, 4}, 2e9 + 2000.0).empty());                        // ...and dropped again: starts over, as does 1
+    CHECK(t.Sweep({1, 4}, 2e9 + 61999.999).empty());
+    CHECK(t.Sweep({1, 2, 4}, 2e9 + 62000.0) == std::vector<uint64_t>({1, 4}));   // 2 came back from the baseline: new
+    CHECK(t.Sweep({2}, 2e9 + 122000.0) == std::vector<uint64_t>({2}));
+    t.Reset();
+    CHECK(t.Sweep({5, 6}, 3e9).empty() && t.Sweep({5, 6}, 4e9).empty()); // a new baseline
+}
 int main() {
     TestDropIdentity(); TestMintDropPropId(); TestDropEpoch(); TestDropSignature(); TestResolveDropNow(); TestPropStreamDue();
     TestDropNoticed(); TestDropNoticedFollowsTheTable(); TestContactClaimant(); TestIslandSource();
@@ -708,7 +744,7 @@ int main() {
     TestPropStateViewStaleAndDuplicateRejected(); TestPropStateViewWrapAround(); TestPropStateViewFollowsGrants();
     TestLeaseStreamerAndAccepts(); TestGrantsForLateJoiner(); TestLeaseFromPeer();
     TestClaimTouchLifecycle(); TestClaimHoldThrowSettle(); TestClaimContactWindowAndRestReset(); TestPropAtRestAndFreeSchedule();
-    TestIdentityScheme();
+    TestIdentityScheme(); TestIdleDespawn(); TestLooseTimer();
     std::printf(g_fail ? "%d FAILED\n" : "all lease tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

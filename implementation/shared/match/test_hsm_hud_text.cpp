@@ -147,8 +147,25 @@ static void TestExtrapolate() {
     CHECK(!Has(StatusLine(Extrapolate(d, 50, 2150), 1), "next round"));                     // the gap is over
 }
 
+// Survival's loot break between waves. The bot formats carry its time left in roundGapLeftMs and how many players voted
+// to skip it in roundWinner (Duel-only fields until now: an older client still decodes the message and ignores them).
+static void TestWaveBreakText() {
+    MatchInfo s; s.format = uint8_t(Format::PlayersVsBots); s.phase = uint8_t(MatchPhase::Live); s.scores = {{kHumanTeam, 2}};
+    s.fighters = {{1, kHumanTeam, 0, 0, "Bob"}, {2, kHumanTeam, 0, 0, "Ann"}, {10, kBotTeam, 0, 0, "Bot"}};
+    CHECK(!InWaveBreak(s) && Has(StatusLine(s, 1), "Wave 3"));                  // fighting
+    s.roundGapLeftMs = 44100; s.roundWinner = 1;
+    CHECK(InWaveBreak(s) && !InRoundGap(s));
+    CHECK(StatusLine(s, 1) == "Wave 2 cleared   next wave in 45   hold G to skip (1/2 ready)");   // bots do not vote
+    s.roundWinner = 0; CHECK(StatusLine(s, 2) == "Wave 2 cleared   next wave in 45   hold G to skip (0/2 ready)");
+    s.format = uint8_t(Format::Zombies); s.roundGapLeftMs = 9000;
+    CHECK(InWaveBreak(s) && Has(StatusLine(s, 1), "next wave in 9"));
+    s.phase = uint8_t(MatchPhase::Results); CHECK(!InWaveBreak(s));
+    MatchInfo d; d.format = uint8_t(Format::Duel); d.phase = uint8_t(MatchPhase::Live); d.roundGapLeftMs = 2000;
+    CHECK(!InWaveBreak(d) && InRoundGap(d));                                    // Duel's gap is no wave break
+}
+
 int main() {
-    TestLobbyText(); TestRoundsText(); TestExtrapolate();
+    TestLobbyText(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
     TestStatus(); TestKillLine(); TestScoreboard();
     std::printf(g_fail ? "%d FAILED\n" : "all hud text tests passed\n", g_fail);
     return g_fail ? 1 : 0;

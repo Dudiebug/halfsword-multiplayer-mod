@@ -93,6 +93,13 @@ public:
     // Destroys every weapon lying loose that a fighter once held: no "Parent Actor" (a drop clears it, Willie_BP.cpp:5987,
     // 6299) but a "Last Parent" (set by every grab, :6073, 6394). Level weapons nobody picked up stay. Returns how many.
     int DestroyDroppedWeapons();
+    // Armour pieces lying loose (no attach parent): what a strip, a pick-up swap or a fallen bot's loot left. Worn and
+    // carried pieces are attached. One pass over the object array.
+    std::vector<ue::UObject*> LooseArmor();
+    // Survival loot: a fallen fighter lets go of what its hands hold and sheds the worn pieces LootPicks(seed) picks
+    // through its own Remove Armor (a loose piece each, reported to the other machines like a strip). Returns how many
+    // pieces it shed; weapons: how many hands let go.
+    int DropLoot(ue::UObject* willie, uint32_t seed, int& weapons);
     std::vector<ue::UObject*> BodiesAndGear();             // every Willie, what is attached to it (armor, weapons) and every weapon
     // Re-tints the fabric of every armor piece attached to the Willie; returns how many pieces changed.
     int TintArmor(ue::UObject* willie, float r, float g, float b);

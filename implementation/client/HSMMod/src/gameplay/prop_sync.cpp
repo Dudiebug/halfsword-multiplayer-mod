@@ -48,6 +48,7 @@ constexpr double kCensusFirstMs = 3000.0;     // a fight level's first census wa
 constexpr double kCensusRefreshMs = 5000.0;   // the host walks again this often; a client retries its misses this often
 constexpr size_t kLevelReadsPerTick = 16;     // level props read (and so streamed) per tick at most, the moving ones first
 constexpr uint8_t kMovable = 2;               // EComponentMobility::Movable: only a movable root can simulate
+constexpr double kIdleCheckMs = 1000.0;       // DespawnIdle: how often the FREE weapons are checked
 
 // Where this process starts every entity's drop epoch: the wall clock, so a machine that reconnects (Stop zeroes the
 // sequences) does not mint the ids its previous session gave weapons that may still lie in the level elsewhere.
@@ -88,6 +89,8 @@ void PropSync::Clear() {
     pending_.clear();
     givenUp_.clear();
     heardMs_.clear();
+    freeSince_.clear();
+    idleCheckMs_ = 0;
     hands_ = {};
     standInHands_ = {};
     loose_.clear();
@@ -143,6 +146,7 @@ void PropSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>
         if (!adapter_->StillValid(p.actor, p.index)) {   // destroyed here (a respawn takes what its fighter held)
             ++n_.lost;
             if (p.claim.sent != LeaseLevel::Free) Claim(id, ClaimSend::Release, LeaseLevel::Free, nowMs);
+            freeSince_.erase(id);
             // A level prop: the host walks again at once (its census drops it); a client binds that index again when it can.
             if (p.level) { if (env_.host) censusMs_ = nowMs; else bound_.erase(LevelPropIndex(id)); }
             byActor_.erase(p.actor);
@@ -190,6 +194,7 @@ void PropSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>
     size_t budget = kLevelReadsPerTick;
     StreamLevel(dueMoving, movingCursor_, budget, true, me, nowMs);
     StreamLevel(dueIdle, idleCursor_, budget, false, me, nowMs);
+    if (idleDespawn_ && nowMs >= idleCheckMs_) { idleCheckMs_ = nowMs + kIdleCheckMs; DespawnIdle(nowMs); }
 }
 
 // Read a prop I stream, and send its state when it is due by that read (at rest: the slow schedule).
@@ -859,6 +864,8 @@ void PropSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     const LeaseLevel prevLevel = view_.Level(propId);
     const uint8_t prevSlot = view_.Streamer(propId);
     view_.OnGrant(propId, slot, level);
+    if (level != LeaseLevel::Free) freeSince_.erase(propId);
+    else if (!IsLevelProp(propId)) freeSince_.emplace(propId, SteadyNowMs());   // the first FREE Grant starts the minute
     NoticeDrop(propId, prevLevel, prevSlot, level, level == LeaseLevel::Free ? kHostSlot : slot);
     if (slot == MySlot() || props_.count(propId) || pending_.count(propId) || !DropSignature(propId, level, slot)) return;
     const double now = SteadyNowMs();
@@ -1264,6 +1271,38 @@ UObject* PropSync::ObjectField(UObject* o, int which) {
     return off >= 0 ? *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(o) + off) : nullptr;
 }
 
+// Every machine decides by itself (IdleDespawnDue): the FREE Grant came to all of them at once. Only in the bot formats
+// (SetIdleDespawn); Duel, free-for-all and teams clear them all at a new round or rematch (session ClearDroppedWeapons).
+void PropSync::SetIdleDespawn(bool on) {
+    if (on && !idleDespawn_) {                       // the minute starts now for what already lay FREE
+        const double now = SteadyNowMs();
+        for (auto& kv : freeSince_) kv.second = now;
+    }
+    idleDespawn_ = on;
+}
+
+void PropSync::DespawnIdle(double nowMs) {
+    if (freeSince_.empty()) return;
+    for (auto it = props_.begin(); it != props_.end();) {
+        Prop& p = it->second;
+        const auto f = freeSince_.find(it->first);
+        // Not FREE here, or a claim of mine on its way (my fighter touched it): not idle.
+        if (p.level || f == freeSince_.end() || p.claim.sent != LeaseLevel::Free || !adapter_->StillValid(p.actor, p.index) ||
+            ObjectField(p.actor, 0)) {
+            ++it;
+            continue;
+        }
+        if (!IdleDespawnDue(it->first, f->second, nowMs)) { ++it; continue; }
+        if (++n_.despawned <= kLogFirst)
+            HSM_LOG("props: %s (#%llx) despawned: FREE for %.0f s", ObjectName(p.actor).c_str(),
+                    static_cast<unsigned long long>(it->first), (nowMs - f->second) / 1000.0);
+        adapter_->DestroyActor(p.actor);
+        freeSince_.erase(f);
+        byActor_.erase(p.actor);
+        it = props_.erase(it);
+    }
+}
+
 // ---------------------------------------------------------------- health
 
 std::string PropSync::HealthLine() {
@@ -1279,7 +1318,7 @@ std::string PropSync::HealthLine() {
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
                   "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu spawned %llu (failed %llu) "
                   "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
-                  "leftOut %zu purged %llu censuses %llu censusRejected %llu",
+                  "leftOut %zu purged %llu censuses %llu censusRejected %llu | despawned %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
                   d(a.resolved, b.resolved), d(a.forced, b.forced), d(a.kept, b.kept), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
                   d(a.releaseFailed, b.releaseFailed), d(a.requests, b.requests), d(a.releases, b.releases),
@@ -1290,7 +1329,7 @@ std::string PropSync::HealthLine() {
                   d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased), level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
-                  d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected));
+                  d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected), d(a.despawned, b.despawned));
     reported_ = n_;
     return line;
 }

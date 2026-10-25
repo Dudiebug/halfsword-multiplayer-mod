@@ -393,18 +393,98 @@ static void TestGearPool() {
     CHECK(p.size() == 1 && p.Take(7) == std::vector<uint8_t>({7}));
 }
 
-static void TestDuelRoundWatch() {
-    DuelRoundWatch w;
-    CHECK(!w.Observe(Format::Duel, 1));                                         // the first round seen: nothing before it
-    CHECK(!w.Observe(Format::Duel, 1));
-    CHECK(w.Observe(Format::Duel, 2) && !w.Observe(Format::Duel, 2));          // once per new round
-    CHECK(w.Observe(Format::Duel, 3));
-    CHECK(w.Observe(Format::Duel, 1));                                          // the rematch
-    CHECK(!w.Observe(Format::FreeForAll, 0) && !w.Observe(Format::FreeForAll, 2));   // Duel only
-    CHECK(!w.Observe(Format::Duel, 2));                                         // another format forgot the round
-    CHECK(!w.Observe(Format::Duel, 0) && !w.Observe(Format::Duel, 3));          // so does round 0 (no match)
-    CHECK(w.Observe(Format::Duel, 4));
-    CHECK(!w.Observe(Format::TwoTeams, 5));                               // another format never fires
+// Spec revision (user, 2026-10-25): what clears the dropped weapons and loose armour differs per format. Duel: each new
+// round (as before). Free-for-all and teams: each rematch. The bot formats, fought in waves with loot from the fallen
+// bots: a minute after each piece was dropped (session/hsm_lease.h IdleDespawnDue, LooseTimer).
+static void TestDropClearFor() {
+    CHECK(DropClearFor(Format::Duel) == DropClear::EachRound);
+    CHECK(DropClearFor(Format::FreeForAll) == DropClear::EachMatch);
+    CHECK(DropClearFor(Format::TwoTeams) == DropClear::EachMatch && DropClearFor(Format::ThreeTeams) == DropClear::EachMatch);
+    CHECK(DropClearFor(Format::PlayersVsBots) == DropClear::AfterIdle && DropClearFor(Format::Zombies) == DropClear::AfterIdle);
+}
+
+// The moment each machine clears: Duel's round moving on from one already seen (the next round, or the rematch's round
+// 1); free-for-all and teams' rematch (the results giving way to the next countdown). Never in the bot formats. Another
+// format or round 0 forgets what was seen.
+static void TestDropClearWatch() {
+    const uint8_t live = uint8_t(MatchPhase::Live), results = uint8_t(MatchPhase::Results), countdown = uint8_t(MatchPhase::Countdown);
+    DropClearWatch w;
+    CHECK(!w.Observe(Format::Duel, live, 1));                                   // the first round seen: nothing before it
+    CHECK(!w.Observe(Format::Duel, live, 1));
+    CHECK(w.Observe(Format::Duel, live, 2) && !w.Observe(Format::Duel, live, 2));   // once per new round
+    CHECK(w.Observe(Format::Duel, live, 3));
+    CHECK(w.Observe(Format::Duel, countdown, 1));                               // the rematch
+    CHECK(!w.Observe(Format::FreeForAll, live, 0) && !w.Observe(Format::FreeForAll, live, 2));
+    CHECK(!w.Observe(Format::Duel, live, 2));                                   // another format forgot the round
+    CHECK(!w.Observe(Format::Duel, live, 0) && !w.Observe(Format::Duel, live, 3));   // so does round 0 (no match)
+    CHECK(w.Observe(Format::Duel, live, 4));
+    DropClearWatch f;
+    CHECK(!f.Observe(Format::FreeForAll, countdown, 0) && !f.Observe(Format::FreeForAll, live, 0));   // the first match
+    CHECK(!f.Observe(Format::FreeForAll, results, 0) && !f.Observe(Format::FreeForAll, results, 0));
+    CHECK(f.Observe(Format::FreeForAll, countdown, 0));                         // the rematch: once
+    CHECK(!f.Observe(Format::FreeForAll, countdown, 0) && !f.Observe(Format::FreeForAll, live, 0));
+    CHECK(!f.Observe(Format::FreeForAll, results, 0) && f.Observe(Format::FreeForAll, live, 0));   // a rematch seen late
+    CHECK(!f.Observe(Format::TwoTeams, live, 0) && !f.Observe(Format::TwoTeams, countdown, 0));     // a new format: first seen
+    CHECK(!f.Observe(Format::TwoTeams, results, 0) && !f.Observe(Format::ThreeTeams, countdown, 0));   // and again
+    CHECK(!f.Observe(Format::ThreeTeams, results, 0) && f.Observe(Format::ThreeTeams, countdown, 0));
+    DropClearWatch b;
+    for (Format g : {Format::PlayersVsBots, Format::Zombies}) {
+        CHECK(!b.Observe(g, live, 0) && !b.Observe(g, results, 0) && !b.Observe(g, countdown, 0) && !b.Observe(g, live, 0));
+    }
+}
+
+// The bot formats' break between waves. Survival's is a minute of looting the fallen bots (Zombies keep 10 s). Every
+// player may vote to skip it (held G); when all of them have, the next wave starts on the next Tick.
+static void TestWaveBreakSkip() {
+    CHECK(Match::kWaveBreakMs == 60000 && Match::kZombieBreakMs == 10000);
+    uint32_t t = 0;
+    Match m = LiveSurvival(Format::PlayersVsBots, t);
+    const int n = m.botsLeft();
+    CHECK(m.SkipVotesNeeded() == 2 && m.SkipVotes() == 0 && m.BreakLeftMs(t) == 0);
+    CHECK(!m.VoteSkip(1, t));                                                  // not in a break: no vote
+    for (int i = 0; i < n; ++i) { m.Tick(t + 1); m.AddFighter({uint8_t(7 + i), kBotTeam, false}); }
+    for (int i = 0; i < n; ++i) m.OnDeath(uint8_t(7 + i), 1, t + 10);
+    CHECK(m.Tick(t + 11).waveCleared && m.BreakLeftMs(t + 11) == Match::kWaveBreakMs);
+    CHECK(m.BreakLeftMs(t + 11 + 15000) == Match::kWaveBreakMs - 15000);
+    CHECK(m.VoteSkip(1, t + 12) && m.SkipVotes() == 1);
+    CHECK(!m.VoteSkip(1, t + 13) && m.SkipVotes() == 1);                         // once per player
+    CHECK(!m.VoteSkip(7, t + 13) && !m.VoteSkip(99, t + 13));                    // bots and strangers do not vote
+    CHECK(!m.Tick(t + 14).waveStarted);                                          // one of two: the break goes on
+    CHECK(m.VoteSkip(2, t + 15) && m.SkipVotes() == 2);
+    auto ev = m.Tick(t + 16);
+    CHECK(ev.waveStarted && m.SkipVotes() == 0 && m.BreakLeftMs(t + 16) == 0);  // everyone: the next wave now
+    CHECK(!m.VoteSkip(1, t + 17));                                              // fighting again
+    // A player who left does not hold the break up.
+    for (int i = 0; i < m.botsLeft(); ++i) { m.Tick(t + 20); m.AddFighter({uint8_t(30 + i), kBotTeam, false}); }
+    for (int i = 0; i < 30; ++i) if (m.Has(uint8_t(30 + i))) m.OnDeath(uint8_t(30 + i), 2, t + 30);
+    CHECK(m.Tick(t + 31).waveCleared);
+    CHECK(m.VoteSkip(1, t + 32) && !m.Tick(t + 33).waveStarted);
+    m.RemoveFighter(2);
+    CHECK(m.SkipVotesNeeded() == 1 && m.Tick(t + 34).waveStarted);
+    // Zombies' short break; no votes outside the bot formats.
+    uint32_t z = 0;
+    Match zm = LiveSurvival(Format::Zombies, z);
+    CHECK(zm.BreakLeftMs(z) == 0);
+    Match d; d.Start(Cfg(Format::Duel, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0); d.Tick(Match::kCountdownMs);
+    CHECK(!d.VoteSkip(1, Match::kCountdownMs + 1) && d.BreakLeftMs(Match::kCountdownMs + 1) == 0);
+    Match f; f.Start(Cfg(Format::FreeForAll, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0); f.Tick(Match::kCountdownMs);
+    CHECK(!f.VoteSkip(1, Match::kCountdownMs + 1));
+}
+
+// A fallen Survival bot sheds a couple of armour pieces (LootPicks: which of its worn pieces), besides its weapons.
+static void TestLootPicks() {
+    CHECK(kLootArmorPieces == 2 && Match::kLootDelayMs == 2000);
+    CHECK(LootPicks(0, 2, 5).empty());
+    CHECK(LootPicks(1, 2, 5) == std::vector<size_t>({0}));
+    for (uint32_t seed = 0; seed < 64; ++seed) {
+        std::vector<size_t> p = LootPicks(7, 2, seed);
+        CHECK(p.size() == 2 && p[0] < 7 && p[1] < 7 && p[0] != p[1]);
+        CHECK(LootPicks(7, 2, seed) == p);                                      // the same seed, the same picks
+    }
+    std::set<size_t> firsts;
+    for (uint32_t seed = 0; seed < 64; ++seed) firsts.insert(LootPicks(7, 2, seed)[0]);
+    CHECK(firsts.size() >= 5);                                                  // not always the same piece
+    CHECK(LootPicks(3, 5, 1).size() == 3);
 }
 
 // Sudden death ends on the next deciding event, as the HUD says (NEXT ROUND WINS, NEXT POINT WINS): in Duel the next
@@ -614,7 +694,7 @@ int main() {
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDuelRoundWatch(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

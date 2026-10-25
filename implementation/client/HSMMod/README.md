@@ -102,6 +102,13 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **Pause menu**: in an owner-sync match (the default), Esc still opens the game's pause menu and it works, but the
   fight does not pause. A paused game stopped your fighter on every other screen, and a host's pause sent the clients
   back to the main menu after 7 s.
+- **Dropped weapons and armour are cleared** in an owner-sync match, so a long fight does not pile them up: in Duel at
+  each new round, in Free-for-all and teams at each rematch, and in Survival and Zombies a minute after each piece was
+  dropped (standing next to it does not keep it). Level props (barrels, stools) and armour the level already had stay.
+- **Survival loot**: about 2 s after a bot falls it lets go of its weapons and sheds two of its armour pieces for the
+  players to pick up; its body goes 45 s later with what it still wore. The break between waves is a minute of
+  looting; hold **G** to vote to skip it, and the next wave starts once every player has voted. Zombies keep their
+  stock disintegration and a 10 s break.
 - **HUD** inside the game's own `UI_HUD`: score line and clock, respawn countdown, kill feed, and a scoreboard while
   Tab is held.
 

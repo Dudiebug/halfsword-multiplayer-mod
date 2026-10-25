@@ -54,8 +54,20 @@ inline bool InRoundGap(const MatchInfo& m) {
     return Format(m.format) == Format::Duel && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
 }
 
+// The bot formats' break between waves: MatchInfo carries its time left in roundGapLeftMs and the players' votes to
+// skip it in roundWinner (Duel-only fields before: older clients ignore them outside Duel).
+inline bool InWaveBreak(const MatchInfo& m) {
+    return IsBotFormat(Format(m.format)) && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
+}
+
 inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
     Format f = Format(m.format);
+    if (InWaveBreak(m)) {                                  // "Wave 2 cleared   next wave in 45   hold G to skip (1/2 ready)"
+        int players = 0;
+        for (const FighterEntry& e : m.fighters) players += e.team == kHumanTeam;
+        return "Wave " + std::to_string(ScoreOf(m, kHumanTeam)) + " cleared   next wave in " + Seconds(m.roundGapLeftMs) +
+               "   hold G to skip (" + std::to_string(m.roundWinner) + "/" + std::to_string(players) + " ready)";
+    }
     if (InRoundGap(m)) {                                   // "Round 2 to Ann   next round in 3"
         std::string who = !m.roundWinner ? " drawn" : m.roundWinner == myEntity ? " to you" : " to " + NameOf(m, m.roundWinner);
         return "Round " + std::to_string(m.round) + who + "   next round in " + Seconds(m.roundGapLeftMs);

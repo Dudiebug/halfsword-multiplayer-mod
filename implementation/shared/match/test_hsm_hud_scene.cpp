@@ -198,6 +198,17 @@ static void TestCountdownDigits() {
     s = BuildHudScene(m, Me(), kAt + 5000); CHECK(!s.banner.visible);  // run out before Live arrives: no "0"
 }
 
+// Survival's loot break: the pill counts down to the next wave; held G fills the player's vote to skip it.
+static void TestWaveBreakPill() {
+    MatchInfo m = Survival(); m.roundGapLeftMs = 44100; m.roundWinner = 1;
+    CHECK(BuildHudScene(m, Me(), kAt).pill.text == "NEXT WAVE IN 45");
+    LocalHud l = Me(); l.giveUp = 0.5f;
+    HudScene s = BuildHudScene(m, l, kAt);
+    CHECK(s.pill.visible && s.pill.text == "SKIPPING THE BREAK 50%" && Same(s.pill.color, kOk));
+    m.roundGapLeftMs = 0;                                                        // fighting: G does nothing here
+    CHECK(BuildHudScene(m, l, kAt).pill.text == BuildHudScene(m, Me(), kAt).pill.text);
+}
+
 // Hold G to give up: while held in a fought Duel round the pill says so, with how far the hold is.
 static void TestGiveUpPill() {
     LocalHud l = Me(); l.giveUp = 0.5f;
@@ -544,7 +555,7 @@ int main() {
     TestOneFight();
     TestCountdownDigits();
     TestBannerFromShot();
-    TestGiveUpPill();
+    TestGiveUpPill(); TestWaveBreakPill();
     TestDuelCountdownHint();
     TestBannerTracker();
     TestDeadPanel();

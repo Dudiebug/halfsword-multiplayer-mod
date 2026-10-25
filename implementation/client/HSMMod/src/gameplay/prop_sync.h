@@ -65,6 +65,7 @@ public:
     };
     void Start(Adapter& adapter, StandIns& standIns, Env env);
     void Stop();                                                     // everything, the drop sequences too
+    void SetIdleDespawn(bool on);                                    // dropped weapons go after a minute FREE (bot formats)
     void Clear();                                                    // a level change: every actor is gone
     bool Active() const { return active_; }
 
@@ -185,7 +186,8 @@ private:
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
                  attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
                  spawned = 0, spawnFailed = 0,
-                 censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0;
+                 censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0,
+                 despawned = 0;
     };
 
     uint8_t MySlot() const { return env_.mySlot ? env_.mySlot() : kHostSlot; }
@@ -232,6 +234,8 @@ private:
     RootCalls* CallsFor(ue::UObject* root);
     ue::UObject* ObjectField(ue::UObject* o, int which);             // 0 "Parent Actor", 1 "Weapon R", 2 "Weapon L"
     bool InUse(uint64_t propId, double nowMs) const;
+    // A dropped weapon FREE for a minute goes (session/hsm_lease.h IdleDespawnDue); every kIdleCheckMs, while SetIdleDespawn.
+    void DespawnIdle(double nowMs);
 
     bool active_ = false;
     Adapter* adapter_ = nullptr;
@@ -247,6 +251,9 @@ private:
     // with every Grant and fired its deadline 18 s after the drop); forgotten after kLooseKeepMs.
     std::unordered_map<uint64_t, double> givenUp_;
     std::unordered_map<uint64_t, double> heardMs_;                   // last PropState heard per id (minting skips live ids)
+    std::unordered_map<uint64_t, double> freeSince_;                 // when each lease went FREE here (its first FREE Grant)
+    double idleCheckMs_ = 0;                                         // DespawnIdle: the next check
+    bool idleDespawn_ = false;                                       // the bot formats (match/hsm_match.h DropClearFor)
     std::array<Hands, kMaxWillies + 1> hands_{};
     std::array<uint8_t, kMaxWillies + 1> dropSeq_{};
     std::array<uint32_t, kMaxWillies + 1> dropEpoch_{};                // seeded per process at Start (MakeDropPropId)

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace hsm {
@@ -75,7 +76,8 @@ struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = tru
 class Match {
 public:
     static constexpr uint32_t kCountdownMs = 5000, kResultsMs = 10000;
-    static constexpr uint32_t kWaveBreakMs = 20000, kZombieBreakMs = 10000, kCorpseMs = 45000;   // Duel's gap: respawnDelayS
+    static constexpr uint32_t kWaveBreakMs = 60000, kZombieBreakMs = 10000, kCorpseMs = 45000;   // Duel's gap: respawnDelayS
+    static constexpr uint32_t kLootDelayMs = 2000;   // Survival: a fallen bot sheds its loot this long after it fell
     static constexpr int kMaxBotsAlive = 10;
     static constexpr int kBotsPerTick = 1;   // the host ticks once a frame; a whole horde in one frame took seconds (test 5)
     struct Events {
@@ -104,6 +106,13 @@ public:
     size_t LoadoutsAhead() const;
     uint8_t roundWinner() const { return roundWinner_; }   // Duel's gap: who took the round, 0 = drawn / not in the gap
     uint32_t RoundGapLeftMs(uint32_t nowMs) const;      // Duel: time left before the next round, 0 outside the gap
+    // Bot formats' break between waves: time left (0 outside a break), and the players' votes to skip it (held G). Once
+    // every player in the match voted, the next Tick starts the wave. VoteSkip: false, and no effect, outside a break,
+    // for a bot or a stranger, or a second time.
+    uint32_t BreakLeftMs(uint32_t nowMs) const;
+    bool VoteSkip(uint8_t entity, uint32_t nowMs);
+    size_t SkipVotes() const { return skipVotes_.size(); }
+    size_t SkipVotesNeeded() const;
     int botsLeft() const;
     void SpawnFailed(int n);                            // requested bots that could not be spawned go back to the wave                               // not yet spawned + alive, in the current wave
     std::vector<uint8_t> StaleBotCorpses(uint32_t nowMs, uint32_t ageMs) const;
@@ -141,6 +150,8 @@ private:
     int wave_ = 0, remaining_ = 0, waveRank_ = 0, spawnOwed_ = 0;   // owed: requested, not yet added
     bool inBreak_ = false, clearedPending_ = false;
     uint32_t breakStart_ = 0;
+    std::set<uint8_t> skipVotes_;
+    uint32_t BreakMs() const { return cfg_.format == Format::Zombies ? kZombieBreakMs : kWaveBreakMs; }
     std::vector<uint8_t> revive_;
     void ResetModeState();
     // duel
@@ -180,14 +191,29 @@ private:
     std::vector<std::vector<uint8_t>> blobs_;
 };
 
-// Duel: true once each time the round number moves on from one already seen (the next round, or the rematch's round 1):
-// the moment each machine clears the weapons dropped in the rounds before. Another format or round 0 forgets the round.
-class DuelRoundWatch {
+// What clears the dropped weapons and loose armour: Duel each new round, free-for-all and teams each rematch, the bot
+// formats (fought over the fallen bots' loot) a minute after each piece was dropped (session/hsm_lease.h).
+enum class DropClear : uint8_t { EachRound = 0, EachMatch = 1, AfterIdle = 2 };
+inline DropClear DropClearFor(Format f) {
+    return f == Format::Duel ? DropClear::EachRound : IsBotFormat(f) ? DropClear::AfterIdle : DropClear::EachMatch;
+}
+// True once at the moment each machine clears (from the MatchInfo it sees): Duel's round moving on from one already seen
+// (the next round, or the rematch's round 1); free-for-all and teams' results giving way to the rematch. Never in the
+// bot formats. Another format, or Duel's round 0 (no match), forgets what was seen.
+class DropClearWatch {
 public:
-    bool Observe(Format f, uint16_t round);
+    bool Observe(Format f, uint8_t phase, uint16_t round);
 private:
+    bool any_ = false;
+    Format format_ = Format::FreeForAll;
+    uint8_t phase_ = 0;
     uint16_t seen_ = 0;
 };
+
+// Survival loot: which of a fallen bot's `pieces` worn armour pieces it sheds, at most `max` distinct indices, picked
+// by `seed` (the same seed, the same picks).
+constexpr size_t kLootArmorPieces = 2;
+std::vector<size_t> LootPicks(size_t pieces, size_t max, uint32_t seed);
 
 // Wave sizes. Survival: one bot per player plus one per wave (max 30), tier + wave/2.
 // Zombies: six per player plus four per wave (max 60), tier + wave/3. Ranks cap at 7.

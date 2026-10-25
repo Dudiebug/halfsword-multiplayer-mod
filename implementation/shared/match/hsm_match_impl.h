@@ -71,7 +71,7 @@ inline void Match::AddFighter(const FighterInfo& f) {
     F x; x.team = f.team; x.human = f.human; fighters_[f.entity] = x;
     if (!f.human && spawnOwed_ > 0) --spawnOwed_;
 }
-inline void Match::RemoveFighter(uint8_t entity) { fighters_.erase(entity); }
+inline void Match::RemoveFighter(uint8_t entity) { fighters_.erase(entity); skipVotes_.erase(entity); }
 
 inline int Match::ScoreKeyOf(uint8_t entity) const { return cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel ? int(entity) : int(TeamOf(entity)); }
 
@@ -194,11 +194,37 @@ inline std::vector<uint8_t> GearPool::Take(uint8_t tier) {
     return b;
 }
 
-inline bool DuelRoundWatch::Observe(Format f, uint16_t round) {
-    if (f != Format::Duel || round == 0) { seen_ = 0; return false; }
-    bool moved = seen_ != 0 && round != seen_;
-    seen_ = round;
-    return moved;
+inline bool DropClearWatch::Observe(Format f, uint8_t phase, uint16_t round) {
+    const bool same = any_ && f == format_;
+    const uint8_t was = phase_;
+    any_ = true; format_ = f; phase_ = phase;
+    if (!same) seen_ = 0;
+    switch (DropClearFor(f)) {
+    case DropClear::EachRound: {
+        if (round == 0) { seen_ = 0; return false; }
+        bool moved = seen_ != 0 && round != seen_;
+        seen_ = round;
+        return moved;
+    }
+    case DropClear::EachMatch:
+        return same && was == uint8_t(MatchPhase::Results) &&
+               (phase == uint8_t(MatchPhase::Countdown) || phase == uint8_t(MatchPhase::Live));
+    case DropClear::AfterIdle: break;
+    }
+    return false;
+}
+
+inline std::vector<size_t> LootPicks(size_t pieces, size_t max, uint32_t seed) {
+    std::vector<size_t> idx(pieces);
+    for (size_t i = 0; i < pieces; ++i) idx[i] = i;
+    const size_t n = std::min(pieces, max);
+    uint32_t x = seed * 0x9E3779B9u + 0x7F4A7C15u;
+    for (size_t i = 0; i < n; ++i) {
+        x ^= x >> 16; x *= 0x85EBCA6Bu; x ^= x >> 13; x *= 0xC2B2AE35u; x ^= x >> 16;   // murmur3 finaliser
+        std::swap(idx[i], idx[i + x % (pieces - i)]);
+    }
+    idx.resize(n);
+    return idx;
 }
 
 inline Match::Events Match::Tick(uint32_t nowMs) {
@@ -241,8 +267,8 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
     if (IsBotFormat(cfg_.format)) {
         if (phase_ == MatchPhase::Countdown || ev.waveStarted) return ev;   // spawning starts on the next tick
         if (inBreak_) {
-            uint32_t pause = cfg_.format == Format::Zombies ? kZombieBreakMs : kWaveBreakMs;
-            if (nowMs - breakStart_ >= pause) StartWave(nowMs, ev);
+            const size_t needed = SkipVotesNeeded();
+            if (nowMs - breakStart_ >= BreakMs() || (needed > 0 && skipVotes_.size() >= needed)) StartWave(nowMs, ev);
             return ev;
         }
         int alive = AliveBots();
@@ -276,6 +302,22 @@ inline uint32_t Match::RoundGapLeftMs(uint32_t nowMs) const {
     if (!roundOver_ || (phase_ != MatchPhase::Live && phase_ != MatchPhase::SuddenDeath)) return 0;   // the last round has no gap
     uint32_t gap = uint32_t(cfg_.respawnDelayS) * 1000u, elapsed = nowMs - roundEnd_;
     return gap > elapsed ? gap - elapsed : 0;
+}
+
+inline uint32_t Match::BreakLeftMs(uint32_t nowMs) const {
+    if (!IsBotFormat(cfg_.format) || !inBreak_ || (phase_ != MatchPhase::Live && phase_ != MatchPhase::SuddenDeath)) return 0;
+    uint32_t elapsed = nowMs - breakStart_;
+    return BreakMs() > elapsed ? BreakMs() - elapsed : 0;
+}
+inline size_t Match::SkipVotesNeeded() const {
+    size_t n = 0;
+    for (const auto& [e, f] : fighters_) n += f.human;
+    return n;
+}
+inline bool Match::VoteSkip(uint8_t entity, uint32_t nowMs) {
+    auto it = fighters_.find(entity);
+    if (BreakLeftMs(nowMs) == 0 || it == fighters_.end() || !it->second.human) return false;
+    return skipVotes_.insert(entity).second;
 }
 
 inline uint32_t Match::TimeLeftMs(uint32_t nowMs) const {
@@ -316,9 +358,10 @@ inline void Match::StartWave(uint32_t nowMs, Events& ev) {
     for (const auto& [e, f] : fighters_) humans += f.human;
     Wave w = WaveFor(cfg_.format, wave_, humans, cfg_.tier);
     remaining_ = w.count; waveRank_ = w.rank; spawnOwed_ = 0; inBreak_ = false; breakStart_ = nowMs; ev.waveStarted = true;
+    skipVotes_.clear();
 }
 inline void Match::ResetModeState() {
-    wave_ = 0; remaining_ = 0; waveRank_ = 0; spawnOwed_ = 0; inBreak_ = false; clearedPending_ = false; breakStart_ = 0;
+    wave_ = 0; remaining_ = 0; waveRank_ = 0; spawnOwed_ = 0; inBreak_ = false; clearedPending_ = false; breakStart_ = 0; skipVotes_.clear();
     revive_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = cfg_.format == Format::Duel ? 1 : 0;
 }
 

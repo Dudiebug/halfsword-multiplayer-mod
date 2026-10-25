@@ -28,6 +28,7 @@
 #pragma once
 #include "hsm_protocol.h"
 #include "session/hsm_authority.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -466,5 +467,43 @@ inline uint8_t ContactClaimant(uint8_t myEntity, OtherKind kind, bool otherStrea
     }
     return 0;
 }
+
+// Dropped weapons pile up over a long fight (each one is physics and contacts). In the bot formats (match/hsm_match.h
+// DropClearFor) one that has been FREE for a minute goes, on every machine by itself: the FREE Grant reaches all of them
+// at once, so no message is needed. Level props stay. freeSinceMs: when its lease went FREE here (< 0: not FREE).
+constexpr double kIdleDespawnMs = 60000.0;
+inline bool IdleDespawnDue(uint64_t propId, double freeSinceMs, double nowMs) {
+    return !IsLevelProp(propId) && freeSinceMs >= 0 && nowMs - freeSinceMs >= kIdleDespawnMs;
+}
+
+// Loose armour pieces are no props: each machine times its own copies by an id of its own. Sweep gets the pieces lying
+// loose now and returns the ones loose for kIdleDespawnMs since first seen (ascending, each reported once). A piece not
+// in a sweep (worn, carried, gone) is forgotten, and starts over when it lies loose again. The first sweep after
+// construction or Reset is the baseline: the pieces the level already had stay, until one is picked up.
+class LooseTimer {
+public:
+    std::vector<uint64_t> Sweep(const std::vector<uint64_t>& looseNow, double nowMs) {
+        std::vector<uint64_t> due;
+        std::map<uint64_t, double> seen;
+        std::map<uint64_t, bool> baseline;
+        for (uint64_t id : looseNow) {
+            if (!based_ || baseline_.count(id)) { baseline[id] = true; continue; }
+            auto it = since_.find(id);
+            double since = it == since_.end() ? nowMs : it->second;
+            if (nowMs - since >= kIdleDespawnMs) due.push_back(id);
+            else seen[id] = since;
+        }
+        based_ = true;
+        since_ = std::move(seen); baseline_ = std::move(baseline);
+        std::sort(due.begin(), due.end());
+        due.erase(std::unique(due.begin(), due.end()), due.end());
+        return due;
+    }
+    void Reset() { based_ = false; since_.clear(); baseline_.clear(); }
+private:
+    bool based_ = false;
+    std::map<uint64_t, double> since_;
+    std::map<uint64_t, bool> baseline_;
+};
 
 }  // namespace hsm

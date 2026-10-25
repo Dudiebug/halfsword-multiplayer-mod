@@ -3,8 +3,10 @@
 #include "gameplay/combat_sync.h"
 #include "hsm_owner.h"
 #include "log.h"
+#include "match/hsm_match.h"
 #include "sync/hsm_gore.h"
 #include "ue/hook.h"
+#include "ue/script_hook.h"
 #include "util/hsm_names.h"
 #include <algorithm>
 #include <chrono>
@@ -798,6 +800,66 @@ int Adapter::DestroyDroppedWeapons() {
         ++destroyed;
     }
     return destroyed;
+}
+
+namespace {
+// An armour piece's class: BP_Armor_Master_C and its children carry both.
+bool ArmorClass(UClass* cls) { return FindProperty(cls, "Armor Passport") && FindProperty(cls, "Armor Slot"); }
+}
+
+std::vector<UObject*> Adapter::LooseArmor() {
+    std::vector<UObject*> out;
+    std::unordered_map<UClass*, bool> armorClass;
+    UClass* master = FindClass(kArmorClass);   // a class test by the chain: no property lookups by name over ~80k objects
+    if (!master) return out;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o) || IsGarbage(o)) continue;
+        auto it = armorClass.find(ClassOf(o));
+        if (it == armorClass.end()) it = armorClass.emplace(ClassOf(o), IsA(o, master) && ArmorClass(ClassOf(o))).first;
+        if (!it->second || (destroyAware_ && BeingDestroyed(o))) continue;
+        Call parent(o, "GetAttachParentActor");
+        if (parent.invoke() && !parent.get<UObject*>("ReturnValue")) out.push_back(o);
+    }
+    return out;
+}
+
+int Adapter::DropLoot(UObject* willie, uint32_t seed, int& weapons) {
+    weapons = 0;
+    if (!willie) return 0;
+    for (int h = 0; h < 2; ++h) {   // the hand weapon drop the prop sync uses (a grip type of 0 would destroy the weapon)
+        UObject** held = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
+        uint8_t* grip = Field<uint8_t>(willie, h == 0 ? "R_GripType_Current" : "L_GripType_Current");
+        if (!held || !*held || IsBodyWeapon(*held) || !grip || *grip == 0) continue;
+        Call c(willie, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
+        c.set<bool>(h == 0 ? "Dropped With no Damage" : "Dropped with No Damage", true);
+        if (c.invoke()) ++weapons;
+    }
+    Call att(willie, "GetAttachedActors");
+    att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", false);
+    FObjArray* arr = att.invoke() ? static_cast<FObjArray*>(att.paramPtr("OutActors")) : nullptr;
+    if (!arr || arr->num <= 0 || arr->num > 256) return 0;
+    std::vector<UObject*> worn;
+    for (int32_t i = 0; i < arr->num; ++i) {
+        UObject* a = arr->data[i];
+        if (!a || !ArmorClass(ClassOf(a)) || !Field<uint8_t>(a, "Armor Slot")) continue;
+        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(a))).find("Panties") != std::string::npos) continue;   // never shed
+        worn.push_back(a);
+    }
+    std::sort(worn.begin(), worn.end());
+    UObject* mesh = MeshOf(willie);
+    int shed = 0;
+    for (size_t k : LootPicks(worn.size(), kLootArmorPieces, seed)) {
+        UObject* piece = worn[k];
+        Call t(piece, "GetTransform");
+        if (!t.invoke()) continue;
+        Call remove(willie, "Remove Armor");
+        remove.set<FTransform>("SpawnTransform", t.get<FTransform>("ReturnValue")).set<uint8_t>("Slot", *Field<uint8_t>(piece, "Armor Slot"))
+            .set<UObject*>("Disable Collision With", mesh);
+        ScriptHookBypass bypass;   // our own call (the Remove Armor observer still reports it)
+        if (remove.valid() && remove.invoke()) ++shed;
+    }
+    return shed;
 }
 
 int Adapter::TintArmor(UObject* willie, float r, float g, float b) {

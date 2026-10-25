@@ -386,6 +386,7 @@ public:
             chatPhase_ = info_.phase;
         }
         GiveUpTick();
+        DropsTick();
         HudScene hud = BuildHud();
         ui::HudTick(hud);
         ui::ChatTick(hud);
@@ -1778,7 +1779,7 @@ private:
         std::vector<FighterInfo> list;
         for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true});
         match_.Start(cfg, list, NowMs());
-        kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression;
+        kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression; looted_.clear();
         respawnQueue_.clear();
         Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own and bot formats
         bool gearApplied = startGear != Regear::None;
@@ -1811,7 +1812,7 @@ private:
         if (ev.waveStarted) HSM_LOG("host: wave %d starts (%d bots)", match_.wave() + 1, match_.botsLeft());
         if (ev.waveCleared) HSM_LOG("host: wave cleared");
         if (ev.roundReset) HSM_LOG("host: duel round reset");
-        if (roundWatch_.Observe(match_.config().format, uint16_t(match_.round()))) ClearDroppedWeapons();
+        if (dropWatch_.Observe(match_.config().format, uint8_t(match_.phase()), uint16_t(match_.round()))) ClearDroppedWeapons();
         if (ev.ended) HSM_LOG("host: match over, winner key %d", match_.winner());
         MakeGearAhead(now);
         if (ev.rematch && progression_) {                // Progression fights end back in the Tavern, like the stock game
@@ -1841,6 +1842,14 @@ private:
             nextCorpseSweep_ = now + kScanIntervalMs;
             for (uint8_t e : match_.StaleBotCorpses(now, Match::kCorpseMs)) RemoveBot(e);
         }
+        if (wavesEnabled_ && match_.config().format == Format::PlayersVsBots)   // zombies disintegrate (the stock death)
+            for (uint8_t e : match_.StaleBotCorpses(now, Match::kLootDelayMs)) {
+                auto it = bots_.find(e);
+                if (it == bots_.end() || !looted_.insert(e).second || !adapter_.StillValid(it->second.obj, it->second.index)) continue;
+                int weapons = 0;
+                const int pieces = adapter_.DropLoot(it->second.obj, uint32_t(e) * 2654435761u ^ now, weapons);
+                HSM_LOG("host: bot %u dropped its loot: %d weapon(s), %d armour piece(s)", e, weapons, pieces);
+            }
         if (infoDirty_ || now >= nextInfo_) BroadcastInfo(now);
     }
 
@@ -1878,8 +1887,15 @@ private:
         }
     }
 
-    // Held G: the fighter concedes the Duel round being fought (Match::Forfeit); the feed says they gave up.
+    // Held G: the fighter concedes the Duel round being fought (Match::Forfeit); the feed says they gave up. In the bot
+    // formats' break between waves it is the player's vote to skip the break (Match::VoteSkip).
     void HandleGiveUp(uint8_t e, uint32_t now) {
+        if (IsBotFormat(match_.config().format)) {
+            if (!match_.VoteSkip(e, now)) { HSM_LOG("match: #%u held G, but there is no break to skip (or it already voted)", e); return; }
+            HSM_LOG("match: #%u votes to skip the break (%zu/%zu)", e, match_.SkipVotes(), match_.SkipVotesNeeded());
+            infoDirty_ = true;
+            return;
+        }
         if (RespawnQueued(e)) return;                     // the new round has not reached its fighter yet
         if (!match_.Forfeit(e, now)) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
         HSM_LOG("match: #%u gave up the round", e);
@@ -1889,21 +1905,63 @@ private:
         infoDirty_ = true;
     }
 
-    // Duel: each new round starts without the weapons dropped in the rounds before (they piled up 5 -> 36 in test 13).
-    // Both machines clear their own copies; the prop sync lets go of the ones it was moving.
+    // Duel's new round, and free-for-all and teams' rematch, start without the weapons and armour pieces dropped before
+    // (weapons piled up 5 -> 36 in test 13). Every machine clears its own copies; the prop sync lets go of the ones it
+    // was moving. Armour the level had at the match start stays (LooseTimer's baseline).
     void ClearDroppedWeapons() {
         if (!OwnerMode() || !MatchLevel()) return;
-        HSM_LOG("duel: new round, %d dropped weapon(s) cleared", adapter_.DestroyDroppedWeapons());
+        const int weapons = adapter_.DestroyDroppedWeapons();
+        int armor = 0;
+        if (looseOn_) {
+            std::unordered_map<uint64_t, UObject*> byId;
+            const std::vector<uint64_t> ids = LooseIds(byId);
+            const double now = double(NowMs());
+            looseTimer_.Sweep(ids, now);                                   // a piece dropped since the last sweep is timed too
+            for (uint64_t id : looseTimer_.Sweep(ids, now + kIdleDespawnMs)) { adapter_.DestroyActor(byId[id]); ++armor; }   // all but the baseline
+        }
+        HSM_LOG("drops: %s, %d dropped weapon(s) and %d armour piece(s) cleared",
+                Format(info_.format) == Format::Duel ? "new round" : "rematch", weapons, armor);
     }
 
-    // Hold G in a fought Duel round to give it up (GiveUpHold): the host's own fighter here, a client's by asking the host.
+    // The loose armour pieces here, keyed by object (LooseTimer ids).
+    std::vector<uint64_t> LooseIds(std::unordered_map<uint64_t, UObject*>& byId) {
+        std::vector<uint64_t> ids;
+        for (UObject* a : adapter_.LooseArmor()) { const uint64_t id = uint64_t(reinterpret_cast<uintptr_t>(a)); ids.push_back(id); byId[id] = a; }
+        return ids;
+    }
+
+    // Every machine, every frame: what clears the drops in this format (DropClearFor). The bot formats: weapons a
+    // minute after they went FREE (the prop sync), loose armour a minute after it was first seen loose here. The timer's
+    // baseline is taken when a match starts in this level, so armour the level had stays.
+    void DropsTick() {
+        const bool running = OwnerMode() && MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle);
+        const bool idle = running && DropClearFor(Format(info_.format)) == DropClear::AfterIdle;
+        props_.SetIdleDespawn(idle);
+        if (!running) { if (looseOn_) { looseTimer_.Reset(); looseOn_ = false; } return; }
+        const uint32_t now = NowMs();
+        if (looseOn_ && now < nextLooseSweep_) return;
+        looseOn_ = true; nextLooseSweep_ = now + kLooseSweepMs;
+        std::unordered_map<uint64_t, UObject*> byId;
+        const std::vector<uint64_t> due = looseTimer_.Sweep(LooseIds(byId), double(now));
+        if (!idle) return;                                                 // timed only, for the next clear
+        for (uint64_t id : due) {
+            if (++loosePurged_ <= 20)
+                HSM_LOG("drops: loose armour %s despawned: a minute loose", ObjectName(byId[id]).c_str());
+            adapter_.DestroyActor(byId[id]);
+        }
+    }
+
+    // Hold G in a fought Duel round to give it up (GiveUpHold), or in a bot format's break to vote to skip it: the host's
+    // own here, a client's by asking the host.
     void GiveUpTick() {
         const uint32_t now = NowMs();
         bool down = false;
         const bool fought = info_.phase == uint8_t(MatchPhase::Live) || info_.phase == uint8_t(MatchPhase::SuddenDeath);
         UObject* own = adapter_.PlayerWillie(0);
-        if (MatchLevel() && info_.format == uint8_t(Format::Duel) && fought && !InRoundGap(info_) && !ui::Typing()
-            && own && !adapter_.IsDead(own) && EntityAlive(MyEntity())) {
+        const bool duel = info_.format == uint8_t(Format::Duel) && fought && !InRoundGap(info_) && own && !adapter_.IsDead(own) &&
+                          EntityAlive(MyEntity());
+        const bool skip = InWaveBreak(info_);
+        if (MatchLevel() && (duel || skip) && !ui::Typing()) {
             if (GetAsyncKeyState('G') & 0x8000) {   // the key first: asking whose window is in front is the dearer call
                 DWORD pid = 0;
                 if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
@@ -1912,7 +1970,7 @@ private:
         }
         if (!giveUp_.Update(down, now)) return;
         const uint8_t me = MyEntity();
-        HSM_LOG("match: G held %u ms: giving up the round (#%u)", unsigned(GiveUpHold::kHoldMs), me);
+        HSM_LOG("match: G held %u ms: %s (#%u)", unsigned(GiveUpHold::kHoldMs), skip ? "voting to skip the break" : "giving up the round", me);
         if (IsHost()) HandleGiveUp(me, now);
         else if (hostPeer_) { GiveUpMsg g; g.entity = me; net_->Send(hostPeer_, kChanReliable, Encode(g), true); }
     }
@@ -2060,7 +2118,8 @@ private:
     void RemoveBot(uint8_t e) {
         auto it = bots_.find(e);
         if (it == bots_.end()) return;
-        if (adapter_.StillValid(it->second.obj, it->second.index)) adapter_.DestroyActor(it->second.obj);
+        adapter_.DestroyFighter(it->second.obj, it->second.index);   // its armour and weapons too (DestroyActor left them)
+        looted_.erase(e);
         Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true);
         director_.Forget(e); match_.RemoveFighter(e); kills_.Forget(e); severedSent_.erase(e); severs_.Forget(e); gore_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e);
         bots_.erase(it);
@@ -2159,6 +2218,10 @@ private:
         m.winner = int16_t(match_.winner());
         m.gear = uint8_t(IsBotFormat(c.format) ? Gear::Own : c.gear); m.tier = c.tier;   // the gear in effect
         m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
+        if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
+            m.roundGapLeftMs = match_.BreakLeftMs(now);
+            m.roundWinner = uint8_t(std::min<size_t>(match_.SkipVotes(), 255));
+        }
         for (const auto& [key, score] : match_.scores()) if (m.scores.size() < kMaxWillies) m.scores.push_back({int16_t(key), int16_t(score)});
         for (const RosterMember& r : roster_.members())
             m.fighters.push_back({r.entity, match_.TeamOf(r.entity), int16_t(match_.Kills(r.entity)), int16_t(match_.Deaths(r.entity)), r.name,
@@ -2608,7 +2671,7 @@ private:
             case MsgType::MatchInfo: {
                 MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
-                if (roundWatch_.Observe(Format(info_.format), info_.round)) ClearDroppedWeapons();
+                if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) ClearDroppedWeapons();
                 break;
             }
             case MsgType::Kill: { Kill k; Decode(d, n, k); PushFeed(k); break; }
@@ -2770,7 +2833,13 @@ private:
     std::deque<uint8_t> respawnQueue_;   // host, owner sync: entities whose respawn waits for its tick (RespawnQueued)
     uint32_t ownDiedAt_ = 0;
     GiveUpHold giveUp_;
-    DuelRoundWatch roundWatch_;
+    DropClearWatch dropWatch_;                       // Duel round / rematch: the drops are cleared (DropClearFor)
+    LooseTimer looseTimer_;                          // loose armour pieces here (DropsTick)
+    bool looseOn_ = false;                           // the timer has its baseline for this match
+    uint32_t nextLooseSweep_ = 0;
+    uint64_t loosePurged_ = 0;
+    std::set<uint8_t> looted_;                       // Survival bots that dropped their loot
+    static constexpr uint32_t kLooseSweepMs = 5000;
     GearPool gearPool_;
     uint32_t nextGearAhead_ = 0;
     uint32_t ownBlob_ = 0;    // the loadout blob of this machine's last own Spawn (client): a change is new gear
