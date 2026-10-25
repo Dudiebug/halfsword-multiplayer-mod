@@ -655,7 +655,7 @@ static void TestDropNoticedFollowsTheTable() {
 
 // Contact islands (two-player test 6, section 2): a prop pushed by a prop this machine streams is claimed TOUCH too, so
 // one machine simulates the whole pile it disturbed instead of the host and the toucher each simulating a part.
-// "Streamed here" is view_.Streamer(prop) == my slot: my TOUCH / HOLD lease, or FREE while I am the host.
+// "Streamed here" is IslandSource: my TOUCH / HOLD lease only (a FREE prop the host streams by default is no push).
 static void TestContactClaimant() {
     const uint8_t me = 3;
     CHECK(ContactClaimant(me, OtherKind::OwnedFighter, false) == me);     // a fighter simulated here: today's behaviour
@@ -668,6 +668,18 @@ static void TestContactClaimant() {
     // No fighter of mine to credit: no claim, whatever touched it.
     CHECK(ContactClaimant(0, OtherKind::OwnedFighter, false) == 0);
     CHECK(ContactClaimant(0, OtherKind::Prop, true) == 0);
+}
+
+// Two-player test 10: the host claimed every FREE prop another FREE prop bumped (a stand-in knocking its copies about),
+// first, so the client that pushed them lost the tie and its pushes never reached the host.
+static void TestIslandSource() {
+    const uint8_t me = 2, other = 1;
+    CHECK(IslandSource(me, LeaseLevel::Touch, me));                       // my touch lease spreads to what it pushes
+    CHECK(IslandSource(me, LeaseLevel::Hold, me));                        // so does what I hold
+    CHECK(!IslandSource(kHostSlot, LeaseLevel::Free, kHostSlot));         // FREE, though the host streams it: nobody's push
+    CHECK(!IslandSource(other, LeaseLevel::Touch, me));                   // another machine's lease: its island
+    // NEGATIVE CONTROL: the host's own touch lease still spreads, as in test 6.
+    CHECK(IslandSource(kHostSlot, LeaseLevel::Touch, kHostSlot));
 }
 
 static void TestPropStreamDue() {
@@ -687,7 +699,7 @@ static void TestPropStreamDue() {
 
 int main() {
     TestDropIdentity(); TestMintDropPropId(); TestDropEpoch(); TestDropSignature(); TestResolveDropNow(); TestPropStreamDue();
-    TestDropNoticed(); TestDropNoticedFollowsTheTable(); TestContactClaimant();
+    TestDropNoticed(); TestDropNoticedFollowsTheTable(); TestContactClaimant(); TestIslandSource();
     TestPropStateRoundTrip(); TestPropStateRejects();
     TestPropLeaseRoundTrip(); TestPropLeaseRejects(); TestPropIdBoundsOnDecode(); TestRequestFreeIsNoOp();
     TestGrantWhenFree(); TestTouchVsTouchFirstWins(); TestHoldBeatsTouch(); TestHoldVsHoldFirstWins();

@@ -447,8 +447,15 @@ inline ClaimSend StepClaim(LeaseClaim& c, bool holding, double lastContactMs, bo
 // simulates is simulated here too and the pile one hit disturbed has one simulator (two-player test 6: the barrel the
 // touched stick held up stayed the host's, and the two copies moved differently). A prop streamed elsewhere is that
 // streamer's island; a stand-in, and the weapon in its hand, is another machine's fighter and claims nothing.
+// "A prop this machine streams" is a lease it holds (IslandSource), not a FREE prop the host streams by default: a FREE
+// prop is no fighter's push, and the host claimed every FREE prop one bumped into (a stand-in knocking the host's copies
+// together, a pile settling) before the client that pushed them could ask, so the client lost every tie and its pushes
+// never showed on the host (two-player test 10).
 // myEntity: the fighter of this machine the contact is credited to (for a fighter or its weapon its own, for a prop the one
 // that touched that prop last, else this machine's), 0 when there is none. Returns the entity to claim for, 0 for none.
+inline bool IslandSource(uint8_t streamer, LeaseLevel level, uint8_t me) {
+    return streamer == me && level != LeaseLevel::Free;
+}
 enum class OtherKind : uint8_t { OwnedFighter = 0, OwnedWeapon = 1, StandIn = 2, Prop = 3 };
 inline uint8_t ContactClaimant(uint8_t myEntity, OtherKind kind, bool otherStreamedHere) {
     switch (kind) {

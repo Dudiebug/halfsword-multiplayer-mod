@@ -13,7 +13,7 @@ constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12;   // six fig
 constexpr Rgba kOutline{0, 0, 0, 0.9f}, kClear{0, 0, 0, 0};
 constexpr Rgba kFeedMine{0.22f, 0.025f, 0.02f, 0.80f}, kFeedOther{0.02f, 0.017f, 0.014f, 0.55f};
 
-struct Block { Box column; Panel panel; Text label, score; Icon underline; };
+struct Block { Box column; Panel panel; Text label, score; };
 struct FeedLine { Panel panel; std::array<Text, kFeedSpans> spans; };
 struct BoardLine { Panel frame, panel; Icon swatch; Text name, badge, kills, deaths, score, ping, status; };
 
@@ -103,10 +103,6 @@ void BuildTop(Canvas& root) {
         row.Add(b.label).Align(HAlign::Left, VAlign::Center).Padding({0, 0, 12, 0});
         b.score = MakeText(32, 2);
         row.Add(b.score).Align(HAlign::Left, VAlign::Center);
-        b.underline = g.kit.MakeIcon();                         // marks your own block; clear on the others
-        b.underline.Size({4, 3});
-        b.underline.Color(kClear);
-        b.column.Add(b.underline).Align(HAlign::Fill, VAlign::Top);
     }
     g.bar = MakeBar(g.barBox, g.top, 320, 5, {0, 6, 0, 0});
     g.pill = MakePanel(style::kSmoke, {14, 2, 14, 2});
@@ -208,7 +204,6 @@ void ApplyTop(const HudScene& s) {
         const ScoreBlock& sb = s.strip[i];
         b.label.Set(sb.label); b.label.Color(sb.color);
         b.score.Set(std::to_string(sb.score)); b.score.Color(sb.color);
-        b.underline.Color(sb.mine ? style::kBlood : kClear);
     }
     g.barBox.Show(s.timeBar);
     if (s.timeBar) g.bar.Percent(s.timeFrac);

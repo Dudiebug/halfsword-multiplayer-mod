@@ -402,6 +402,61 @@ void TestSlotAnchor() {
     CHECK(SlotAnchorPlan(filled, {}, others) == nothing);
 }
 
+// SlotPlacePlan: the sheath slots whose weapon waits for its constraint, kept at its socket meanwhile.
+void TestSlotPlace() {
+    int w[kEquipSlots], extra, other;
+    const std::array<const void*, kEquipSlots> filled = {&w[0], &w[1], &w[2], &w[3], &w[4]};
+    const std::array<bool, kEquipSlots> dead{};
+    const std::array<bool, kEquipSlots> live = {true, true, true, true, true};
+    const std::array<const void*, 2> bare = {nullptr, nullptr};
+    const std::array<const void*, 2> others = {&extra, &other};
+    const std::array<bool, kEquipSlots> nothing{};
+
+    // every slot filled and no constraint made yet: all five are placed, whatever the hands hold elsewhere
+    for (const auto& hands : {bare, others}) {
+        const std::array<bool, kEquipSlots> p = SlotPlacePlan(filled, dead, hands);
+        for (int k = 0; k < kEquipSlots; ++k) CHECK(p[size_t(k)]);
+    }
+    // NEGATIVE CONTROL: a live constraint holds the weapon already; that slot is not placed, the others are
+    for (int k = 0; k < kEquipSlots; ++k) {
+        std::array<bool, kEquipSlots> l = dead;
+        l[size_t(k)] = true;
+        const std::array<bool, kEquipSlots> p = SlotPlacePlan(filled, l, others);
+        for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+    }
+    CHECK(SlotPlacePlan(filled, live, bare) == nothing);
+    // an empty slot is never placed, empty hands or full
+    for (const auto& hands : {bare, others})
+        for (int k = 0; k < kEquipSlots; ++k) {
+            std::array<const void*, kEquipSlots> s = filled;
+            s[size_t(k)] = nullptr;
+            const std::array<bool, kEquipSlots> p = SlotPlacePlan(s, dead, hands);
+            for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+        }
+    CHECK(SlotPlacePlan({}, dead, bare) == nothing);
+    // a weapon in a hand (a draw grabs it while the slot still names it) is never placed, whichever hand
+    for (int k = 0; k < kEquipSlots; ++k)
+        for (int hand = 0; hand < 2; ++hand) {
+            std::array<const void*, 2> held = {&extra, &other};
+            held[size_t(hand)] = &w[k];
+            const std::array<bool, kEquipSlots> p = SlotPlacePlan(filled, dead, held);
+            for (int j = 0; j < kEquipSlots; ++j) CHECK(p[size_t(j)] == (j != k));
+        }
+    // one weapon named by two slots is placed at the first only (it cannot sit at two sockets)
+    std::array<const void*, kEquipSlots> twice = filled;
+    twice[3] = &w[1];
+    const std::array<bool, kEquipSlots> pt = SlotPlacePlan(twice, dead, bare);
+    CHECK(pt[0] && pt[1] && pt[2] && !pt[3] && pt[4]);
+    twice[4] = &w[0];
+    const std::array<bool, kEquipSlots> pt2 = SlotPlacePlan(twice, dead, bare);
+    CHECK(pt2[0] && pt2[1] && pt2[2] && !pt2[3] && !pt2[4]);
+    // ... and a later slot's live constraint does not stop the first from being placed
+    std::array<bool, kEquipSlots> laterLive = dead;
+    laterLive[3] = true;
+    const std::array<bool, kEquipSlots> pt3 = SlotPlacePlan(twice, laterLive, bare);
+    CHECK(pt3[1] && !pt3[3]);
+}
+
 }  // namespace
 
 int main() {
@@ -415,6 +470,7 @@ int main() {
     TestPlanStale();
     TestSender();
     TestSlotAnchor();
+    TestSlotPlace();
     if (g_fail) { std::printf("test_hsm_equip: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_equip: ok\n");
     return 0;

@@ -1131,8 +1131,9 @@ void PropSync::NoteContact(UObject* a, UObject* b) {
         if (it == byActor_.end()) continue;
         UObject* other = side == 0 ? b : a;
         // What touched it (ContactClaimant): a fighter simulated here, or a weapon in its hand ("Parent Actor" only: a thrown
-        // weapon's "Last Parent" is not a touch); a stand-in or its weapon claims nothing; and a prop this machine streams
-        // claims what it pushes, credited to whoever touched that prop last -- the pile one hit disturbed has one simulator.
+        // weapon's "Last Parent" is not a touch); a stand-in or its weapon claims nothing; and a prop this machine leases
+        // (IslandSource: not a FREE one the host streams) claims what it pushes, credited to whoever touched that prop
+        // last -- the pile one hit disturbed has one simulator.
         UObject* fighter = adapter_->IsWillie(other) ? other : adapter_->IsWeapon(other) ? ObjectField(other, 0) : nullptr;
         OtherKind kind = OtherKind::StandIn;
         uint8_t entity = 0;
@@ -1142,7 +1143,7 @@ void PropSync::NoteContact(UObject* a, UObject* b) {
             if (entity) kind = adapter_->IsWillie(other) ? OtherKind::OwnedFighter : OtherKind::OwnedWeapon;
         } else if (auto pusher = byActor_.find(other); pusher != byActor_.end()) {
             kind = OtherKind::Prop;
-            streamedHere = view_.Streamer(pusher->second) == MySlot();
+            streamedHere = IslandSource(view_.Streamer(pusher->second), view_.Level(pusher->second), MySlot());
             if (auto q = props_.find(pusher->second); q != props_.end()) entity = q->second.toucher;
             if (!entity) entity = uint8_t(MySlot() + 1);   // this machine's fighter: the roster slot's entity
         }

@@ -65,6 +65,7 @@ public:
     // grip types go through sync::GripToApply: a hand that holds a weapon here never gets 0, which would destroy the
     // weapon. Call every frame after Neutralise and Drive. Logs one line per change.
     void ApplyGrip(const sync::GripState& g);
+    void ApplySwitch(bool on, ue::UObject* weaponR);   // the polearm hand switch's joint positions
 
 private:
     sync::GripState ReadGrip() const;             // the bound Willie's own grip variables (the owner's side)
@@ -125,6 +126,8 @@ private:
     bool gripStateKnown_ = false;
     ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)
+    ue::UObject* switchJoint_ = nullptr;                     // the right hand joint ApplySwitch last set
+    bool switchOn_ = false;                                  // ... and whether it set it switched
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons

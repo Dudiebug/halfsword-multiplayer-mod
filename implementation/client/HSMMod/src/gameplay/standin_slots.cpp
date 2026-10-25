@@ -21,7 +21,7 @@ constexpr const char* kSlotLabel[kEquipSlots] = {"R1", "R2", "Back", "L1", "L2"}
 constexpr int kBackSlot = 2;                             // its constraint already holds the Mesh
 constexpr double kLostAfterMs = 1000.0;                  // a slot weapon's constraint is made a moment after it is spawned
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel (standin_rig.cpp)
-constexpr uint8_t kIgnore = 0;                           // ECollisionResponse::ECR_Ignore
+constexpr uint8_t kIgnore = 0, kBlock = 2;               // ECollisionResponse::ECR_Ignore, ECR_Block
 constexpr size_t kMemory = 64;                           // constraints / weapons remembered
 constexpr double kSnapBackCm = 15.0;                     // a waist weapon farther than this from its socket is put back first
 constexpr uint8_t kWorldSpace = 0;                       // ERelativeTransformSpace::RTS_World
@@ -112,6 +112,7 @@ struct Slot {
     bool own = false;          // the weapon's "Parent Actor" is this stand-in
     bool held = false;         // in a hand (a draw grabs it while the slot variable still holds it)
     bool anchor = false;       // combat::SlotAnchorPlan, an own weapon with a BaseMesh
+    bool place = false;        // combat::SlotPlacePlan (waiting for its constraint), an own weapon with a BaseMesh
 };
 
 std::array<Slot, kEquipSlots> ReadSlots(UObject* willie) {
@@ -128,6 +129,7 @@ std::array<Slot, kEquipSlots> ReadSlots(UObject* willie) {
     }
     const std::array<const void*, 2> hands = {ObjField(willie, "Weapon R"), ObjField(willie, "Weapon L")};
     const std::array<bool, kEquipSlots> plan = combat::SlotAnchorPlan(actors, live, hands);
+    const std::array<bool, kEquipSlots> placePlan = combat::SlotPlacePlan(actors, live, hands);
     for (int k = 0; k < kEquipSlots; ++k) {
         Slot& s = out[size_t(k)];
         if (!s.weapon) continue;
@@ -135,6 +137,7 @@ std::array<Slot, kEquipSlots> ReadSlots(UObject* willie) {
         s.own = ObjField(s.weapon, "Parent Actor") == willie;
         s.held = s.weapon == hands[0] || s.weapon == hands[1];
         s.anchor = plan[size_t(k)] && s.own && s.body;
+        s.place = placePlan[size_t(k)] && s.own && s.body;
     }
     return out;
 }
@@ -156,6 +159,14 @@ void SetBodyPolicy(UObject* body) {
     Call(body, "SetEnableGravity").set<bool>("bGravityEnabled", false).invoke();
     Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", kIgnore).invoke();
     Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldDynamic).set<uint8_t>("NewResponse", kIgnore).invoke();
+}
+
+// A sheathed weapon is a physics object hanging from its sheath joint, as on the owner's machine: gravity on and the world
+// blocking it again (the held-weapon policy above, left over from a hand, made it float stiffly at the hip).
+void SetSheathPolicy(UObject* body) {
+    Call(body, "SetEnableGravity").set<bool>("bGravityEnabled", true).invoke();
+    Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", kBlock).invoke();
+    Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldDynamic).set<uint8_t>("NewResponse", kBlock).invoke();
 }
 
 // A teleporting move of a component by d, then at rest (standin_rig.cpp MoveBy / HoldStill).
@@ -233,14 +244,14 @@ void StandInSlots::Shift(UObject* willie, const sync::V3& d) {
 }
 
 void StandInSlots::Anchor(UObject* willie, bool logLost) {
-    static Seen retargeted, lost, snapped;   // game thread only
+    static Seen retargeted, lost, snapped, placed;   // game thread only
     UObject* mesh = willie ? ObjField(willie, "Mesh") : nullptr;
     if (!mesh) return;
     const std::array<Slot, kEquipSlots> slots = ReadSlots(willie);
     for (int k = 0; k < kEquipSlots; ++k) {
         const Slot& s = slots[size_t(k)];
         if (s.anchor) {
-            SetBodyPolicy(s.body);
+            SetSheathPolicy(s.body);
             // The waist slots hold BoneCore, whose collision the rig switches off; the pelvis body is the one it drives.
             if (k != kBackSlot && !Remembered(retargeted, s.constraint)) {
                 // The new constraint keeps the weapon where it is: one that fell while BoneCore had no collision (the game
@@ -255,6 +266,21 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
                 c.set<UObject*>("Component1", s.body).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh)
                     .setName("BoneName2", MakeName("pelvis"));
                 if (c.invoke()) Remember(retargeted, s.constraint);
+            }
+        } else if (s.place) {
+            // Spawned away from the stand-in (about 6 m) and constrained a moment later: kept at its socket meanwhile, so
+            // it never shows where it was spawned (the sheath flicker).
+            SetBodyPolicy(s.body);
+            const char* socket = SocketOf(s.weapon, k);
+            const double away = SocketDistance(mesh, s.body, socket);
+            if (away > kSnapBackCm && SnapToSocket(mesh, s.body, socket) && !Remembered(placed, s.weapon)) {
+                Remember(placed, s.weapon);
+                HSM_LOG("rig: %s slot %s kept at its socket until its constraint is made (was %.0fcm away)",
+                        ObjectName(willie).c_str(), kSlotLabel[k], away);
+            }
+            if (logLost && !Remembered(lost, s.weapon)) {   // still none: the game never made it (or it broke)
+                Remember(lost, s.weapon);
+                HSM_LOG("rig: %s slot %s lost its sheath constraint", ObjectName(willie).c_str(), kSlotLabel[k]);
             }
         } else if (logLost && s.weapon && s.own && !s.held && !s.live && !Remembered(lost, s.weapon)) {
             Remember(lost, s.weapon);

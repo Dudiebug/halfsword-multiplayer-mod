@@ -222,6 +222,23 @@ inline std::array<bool, kEquipSlots> SlotAnchorPlan(const std::array<const void*
     return out;
 }
 
+// The sheath slots whose weapon waits for its constraint (the game makes it a moment after spawning the weapon): filled,
+// the constraint not live, the weapon in no hand, and the first slot naming that weapon. The client keeps such a weapon
+// at its socket until the constraint is made, so it never shows where it was spawned.
+inline std::array<bool, kEquipSlots> SlotPlacePlan(const std::array<const void*, kEquipSlots>& slotActors,
+                                                   const std::array<bool, kEquipSlots>& constraintLive,
+                                                   const std::array<const void*, 2>& heldActors) {
+    std::array<bool, kEquipSlots> out{};
+    for (int k = 0; k < kEquipSlots; ++k) {
+        const void* a = slotActors[size_t(k)];
+        if (!a || constraintLive[size_t(k)] || a == heldActors[0] || a == heldActors[1]) continue;
+        bool first = true;
+        for (int j = 0; j < k; ++j) first = first && slotActors[size_t(j)] != a;
+        out[size_t(k)] = first;
+    }
+    return out;
+}
+
 // Sender side, per fighter: a state is due when it is the first, differs from the last one sent, or the last one is
 // kEquipResendMs old.
 class EquipSender {

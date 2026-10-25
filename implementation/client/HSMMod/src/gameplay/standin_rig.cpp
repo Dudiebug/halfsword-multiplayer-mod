@@ -568,6 +568,7 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
         HSM_LOG("rig: %s: off hand released", ObjectName(willie_).c_str());
     }
     if (gripFlag_[0]) SetBoolValue(gripFlag_[0], base + PropertyOffset(gripFlag_[0]), offJoint_ != nullptr);
+    ApplySwitch(g.switched2H, weaponR);
     applied.offhand = offJoint_ != nullptr;
     const sync::GripState& l = gripStateLogged_;
     if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
@@ -578,6 +579,36 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     HSM_LOG("rig: %s grips R %u L %u%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(applied.gripR), unsigned(applied.gripL),
             applied.offhand ? " offhand" : "", applied.altGrip ? " alt" : "", applied.mordhau ? " mordhau" : "",
             applied.switched2H ? " switched" : "", applied.reverseR ? " reverse" : "");
+}
+
+// The polearm hand switch (X: Willie_BP Polearm Hands Switch, :16393) slides the hands along the shaft by moving the grip
+// joints' reference positions; writing "2H Switched Hands (Temp)" alone (pre10) moved the animation only, the hands kept
+// their places. The rig moves them as the game does whenever the owner's flag differs from what this right-hand joint was
+// set to (a new joint starts unswitched, as after the game's own grab).
+void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
+    UObject* const r = FieldAt(gripOffset_[0]);
+    if (r != switchJoint_) { switchJoint_ = r; switchOn_ = false; }
+    if (!r || !weaponR || on == switchOn_) return;
+    switchOn_ = on;
+    UObject* const grip = ObjField(weaponR, "Grip");
+    UObject* const offPos = ObjField(weaponR, "Grip L Hand Off Hand");
+    UObject* const defPos = ObjField(weaponR, "Grip R Hand Default Pos");
+    const FVector* const g = grip ? Field<FVector>(grip, "RelativeLocation") : nullptr;
+    const FVector* const o = offPos ? Field<FVector>(offPos, "RelativeLocation") : nullptr;
+    const FVector* const d = defPos ? Field<FVector>(defPos, "RelativeLocation") : nullptr;
+    if (!g || !o || !d) {
+        HSM_LOG("rig: %s: hand switch FAILED (no grip positions on %s)", ObjectName(willie_).c_str(), ObjectName(weaponR).c_str());
+        return;
+    }
+    const double k = ObjField(grip, "StaticMesh") ? -5.0 : 1.0;   // the game's own factors
+    const FVector refR = on ? FVector{o->x + d->x * k, o->y + d->y * k, o->z + d->z * k}
+                            : FVector{g->x + d->x, g->y + d->y, g->z + d->z};
+    Call(r, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", refR).invoke();
+    const bool off = offJoint_ && FieldAt(gripOffset_[1]) == offJoint_;
+    if (off)
+        Call(offJoint_, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", on ? FVector{} : *o).invoke();
+    HSM_LOG("rig: %s: hands %s along the shaft%s", ObjectName(willie_).c_str(), on ? "switched" : "switched back",
+            off ? "" : " (right hand only)");
 }
 
 void FighterRig::SetBodyPolicy(UObject* body) {
