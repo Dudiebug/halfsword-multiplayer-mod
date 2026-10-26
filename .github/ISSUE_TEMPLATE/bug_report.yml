@@ -1,0 +1,74 @@
+name: Bug report
+description: Something broke, crashed or desynced
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! The log files are the most useful part of a report, so please attach them.
+        They are next to the DLL in `<Half Sword>/HalfswordUE5/Binaries/Win64/`:
+        `HSMMod.log` (this session) and `HSMMod.prev.log` (the session before).
+        Logs from **every** player in the match help a lot.
+  - type: input
+    id: mod-version
+    attributes:
+      label: Mod version
+      description: Shown on the lobby badge, or the release you downloaded.
+      placeholder: "0.6.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux (Proton)
+        - Steam Deck
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Were you the host or a client?
+      options:
+        - Host
+        - Client
+        - Solo / not in a lobby
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: players
+    attributes:
+      label: Number of players in the match
+      placeholder: "2"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What were you doing right before it happened? Does it happen every time?
+      placeholder: |
+        1. Host a lobby, friend joins
+        2. Start a match
+        3. ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag and drop HSMMod.log and HSMMod.prev.log here (from every player if you can).
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, videos, changed HSMMod.ini settings, other mods installed.
