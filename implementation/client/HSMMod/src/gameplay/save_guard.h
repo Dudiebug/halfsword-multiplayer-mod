@@ -31,6 +31,7 @@ private:
 
     session::SaveGuardPolicy policy_;
     bool hooked_ = false, leftChecked_ = false, hookFailLogged_ = false;
+    bool matchLevel_ = false;             // this tick's matchLevel (the fight-only blocks)
     std::wstring backup_;                 // this session's backup file (empty: none made)
     std::vector<Setting> settings_;       // the game instance's settings before the session
     unsigned blocked_ = 0;                // calls blocked this session

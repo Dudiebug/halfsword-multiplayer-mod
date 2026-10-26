@@ -55,6 +55,7 @@ void GrabSync::Clear() {
     for (Grabber& g : grabbers_) { g.sender.Reset(); g.willie = nullptr; g.live = false; }   // seq keeps counting
     marks_.clear();
     lastGrab_ = {};
+    heldBones_ = {};
 }
 
 void GrabSync::Forget(uint8_t entity) {
@@ -76,6 +77,7 @@ void GrabSync::Tick(double nowMs, float dt, const std::vector<std::pair<uint8_t,
     if (!active_) return;
     // Grabber side: what each fighter simulated here holds. A replaced or vanished fighter lets go first.
     std::array<UObject*, kMaxWillies + 1> mine{};
+    heldBones_ = {};
     for (const auto& [e, w] : owned) {
         if (e == 0 || e > kMaxWillies || !w) continue;
         mine[e] = w;
@@ -95,12 +97,16 @@ void GrabSync::Tick(double nowMs, float dt, const std::vector<std::pair<uint8_t,
     std::array<bool, kMaxWillies + 1> held{};
     const auto isMine = [&](uint8_t e) { return e != 0 && e <= kMaxWillies && mine[e] != nullptr; };
     const auto dead = [this](uint8_t e) { return env_.dead && env_.dead(e); };
+    std::array<int8_t, kMaxWillies + 1> down{};   // -1 unknown yet this tick, read once per held fighter
+    down.fill(-1);
     for (const sync::GrabPull& p : inbox_.Pulls(nowMs, isMine, dead)) {
-        if (!Pull(p, mine[p.target], nowMs, dt)) continue;
+        if (down[p.target] < 0) down[p.target] = DownHere(p.target, mine[p.target]) ? 1 : 0;
+        if (!Pull(p, mine[p.target], down[p.target] == 1, nowMs, dt)) continue;
         const bool fresh = lastGrab_[p.grabber][p.hand] != p.grabId;
         lastGrab_[p.grabber][p.hand] = p.grabId;
         if (fresh && n_.grabs < kLogFirst)
-            HSM_LOG("grabs: e%u held by e%u (hand %s, bone %s, grab %u)", p.target, p.grabber, kHandTag[p.hand], p.bone.c_str(), p.grabId);
+            HSM_LOG("grabs: e%u held by e%u (hand %s, bone %s, grab %u%s)", p.target, p.grabber, kHandTag[p.hand], p.bone.c_str(), p.grabId,
+                    down[p.target] == 1 ? ", a down body: carried" : "");
         SetMark(p.target, mine[p.target], env_.standInActor ? env_.standInActor(p.grabber) : nullptr, fresh);
         held[p.target] = true;
     }
@@ -150,6 +156,7 @@ std::array<GrabHand, kGrabHands> GrabSync::ReadHands(UObject* willie) {
         out[i].target = target;
         out[i].bone = name;
         out[i].grip = ToXform(b).ToLocal(ToV(hand.translation));   // the sender clamps it to kGripMaxUu
+        heldBones_[target] |= sync::YieldBones(sync::PoseBoneIndex(name), env_.down && env_.down(target));
     }
     return out;
 }
@@ -158,7 +165,14 @@ std::array<GrabHand, kGrabHands> GrabSync::ReadHands(UObject* willie) {
 
 // One step of one hold: the grip on my bone toward the grabber's stand-in hand (both read, the stand-in untouched),
 // a velocity change added to that body. False when nothing could be read, or the hold just broke free.
-bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, double nowMs, float dt) {
+bool GrabSync::DownHere(uint8_t entity, UObject* me) {
+    VitalsMsg v;
+    return me && adapter_->ReadVitals(me, entity, v) && ((v.flags & 7u) != 0 || v.health <= 0.f);
+}
+
+// A down body (dead, fallen, knocked out) is carried: the stiffer DownPullParams, part of the pull on its pelvis and
+// chest as well, and it breaks free only on a glitch (kGrabDownBreakUu/Ms).
+bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowMs, float dt) {
     UObject* mesh = me ? adapter_->Mesh(me) : nullptr;
     if (!mesh || !Ready(mesh)) return false;
     UObject* standIn = env_.standInActor ? env_.standInActor(p.grabber) : nullptr;
@@ -172,18 +186,28 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, double nowMs, float dt
         return false;
     }
     if (!BoneWorld(handMesh, hands_[p.hand], a)) { ++n_.noAnchor; return false; }
-    const V3 grip = ToXform(b).FromLocal(p.grip), hand = ToV(a.translation);
+    const V3 grip = ToXform(b).FromLocal(p.grip);
     velAt_.put(0, ToF(grip)).put(1, bone);
     vel_.put(0, hands_[p.hand]);
     if (!velAt_.invoke(mesh) || !vel_.invoke(handMesh)) { ++n_.noAnchor; return false; }
+    const V3 handVel = ToV(vel_.take<FVector>(1));
+    const V3 hand = sync::GrabAnchor(ToV(a.translation), handVel);
     const double dist = Dist(grip, hand);
-    if (inbox_.NoteDistance(p, dist, nowMs)) {
+    if (down ? inbox_.NoteDistance(p, dist, nowMs, sync::kGrabDownBreakUu, sync::kGrabDownBreakMs) : inbox_.NoteDistance(p, dist, nowMs)) {
         if (++n_.broke <= kLogFirst) HSM_LOG("grabs: e%u broke free of e%u's hand %s (%.0f cm)", p.target, p.grabber, kHandTag[p.hand], dist);
         return false;
     }
-    const V3 dv = sync::GrabPullDv(grip, ToV(velAt_.take<FVector>(2)), hand, ToV(vel_.take<FVector>(1)), dt);
+    const V3 dv = sync::GrabPullDv(grip, ToV(velAt_.take<FVector>(2)), hand, handVel, dt, down ? sync::DownPullParams() : sync::GrabPullParams{});
     addVel_.put(0, ToF(dv)).put(1, true).put(2, bone);   // bAddToCurrent: the change, on that body only
     if (addVel_.invoke(mesh)) ++n_.pulls;
+    if (down) {
+        const V3 share{dv.x * sync::kGrabDownSpread, dv.y * sync::kGrabDownSpread, dv.z * sync::kGrabDownSpread};
+        for (const char* torso : {"pelvis", "spine_03"}) {
+            if (p.bone == torso) continue;
+            addVel_.put(0, ToF(share)).put(1, true).put(2, NameOf(torso));
+            addVel_.invoke(mesh);
+        }
+    }
     return true;
 }
 

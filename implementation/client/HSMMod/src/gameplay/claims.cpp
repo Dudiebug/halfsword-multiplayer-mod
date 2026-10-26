@@ -17,7 +17,7 @@ namespace {
 
 constexpr const char* kHookOwner = "claims";
 constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker weapon
-constexpr double kRecentAttackerMs = 10000;   // a death this long after the last replayed blow has no killer
+constexpr double kRecentAttackerMs = 60000;   // a death this long after the last replayed blow has no killer (KillLog::kWindowMs)
 constexpr uint64_t kLogFirst = 20;            // the first claims and replays are logged in full (test evidence)
 
 struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };

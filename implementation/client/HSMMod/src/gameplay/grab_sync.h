@@ -29,6 +29,7 @@ public:
         std::function<uint8_t(const ue::UObject*)> standInEntity;          // the entity a stand-in Willie shows, 0 if none
         std::function<ue::UObject*(uint8_t)> standInActor;                 // an entity's stand-in, nullptr if none
         std::function<bool(uint8_t)> dead;                                  // a remote entity's latest vitals say dead
+        std::function<bool(uint8_t)> down;                                  // ... say dead, fallen, knocked out or 0 health
         std::function<void(const std::vector<uint8_t>&, bool reliable)> send;   // a GrabState made here (the session routes it)
     };
     void Start(Adapter& adapter, Env env);
@@ -40,6 +41,8 @@ public:
     void Forget(uint8_t entity);                                            // the entity left or respawned: holds by it, and on it, end
     void Clear();                                                           // level change: actors are gone, nothing touched
     std::string HealthLine();                                               // since the previous call
+    // The pose bones of an entity's stand-in my fighters hold natively (sync::YieldBones): left to the hold, not servoed.
+    uint32_t HeldBones(uint8_t entity) const { return entity <= kMaxWillies ? heldBones_[entity] : 0u; }
 
 private:
     struct Grabber { ue::UObject* willie = nullptr; bool live = false; sync::GrabSender sender; };
@@ -48,7 +51,8 @@ private:
                       noAnchor = 0, noBone = 0; };
     void SendFor(uint8_t entity, const std::array<GrabHand, kGrabHands>& reads, double nowMs);
     std::array<GrabHand, kGrabHands> ReadHands(ue::UObject* willie);
-    bool Pull(const sync::GrabPull& p, ue::UObject* me, double nowMs, float dt);   // true while the hold pulls
+    bool Pull(const sync::GrabPull& p, ue::UObject* me, bool down, double nowMs, float dt);   // true while the hold pulls
+    bool DownHere(uint8_t entity, ue::UObject* me);                         // my fighter is dead, fallen, knocked out or at 0 health
     void SetMark(uint8_t entity, ue::UObject* willie, ue::UObject* by, bool newGrab);
     void Unmark(uint8_t entity);
     bool Ready(ue::UObject* mesh);                                          // the per-frame calls, resolved on first use
@@ -66,6 +70,7 @@ private:
     sync::GrabInbox inbox_;
     std::array<std::array<uint32_t, kGrabHands>, kMaxWillies + 1> lastGrab_{};   // per remote grabber and hand: last grab pulled
     std::map<uint8_t, Mark> marks_;
+    std::array<uint32_t, kMaxWillies + 1> heldBones_{};
     Counters n_, reported_;
 };
 

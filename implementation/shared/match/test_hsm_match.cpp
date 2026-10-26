@@ -65,6 +65,13 @@ static void TestKillLog() {
     k.OnHit(5, 5, 100); CHECK(k.KillerOf(5, 200) == 0);                // self contact ignored
     k.OnHit(6, 0, 100); CHECK(k.KillerOf(6, 200) == 0);
     k.Forget(2); CHECK(k.KillerOf(2, 2500) == 0);
+    k.OnHit(7, 3, 1000); CHECK(k.KillerOf(7, 1000 + 45000) == 3);
+    for (int t = 0; t < 7; ++t) CHECK(MuscleForTier(t) < MuscleForTier(t + 1));   // more muscle every rank up
+    CHECK(MuscleForTier(-3) == MuscleForTier(0) && MuscleForTier(12) == MuscleForTier(7) && MuscleForTier(7) == 1.0);
+    CHECK(MuscleForTier(0) > 0.0 && MuscleFor(0.1, 0) == MuscleForTier(0));
+    CHECK(MuscleFor(0.95, 2) == 0.95 && MuscleFor(0.3, 7) == 1.0);                // never lowers a heavier build    // a bleed-out 45 s after the blow is still a kill
+    CHECK(!CombatPhase(MatchPhase::Idle) && !CombatPhase(MatchPhase::Countdown) && !CombatPhase(MatchPhase::Results));
+    CHECK(CombatPhase(MatchPhase::Live) && CombatPhase(MatchPhase::SuddenDeath));
 }
 
 static std::vector<FighterInfo> Teams2() { return {{1, 0, true}, {2, 1, true}, {3, 0, true}, {4, 1, true}}; }
@@ -435,6 +442,23 @@ static void TestDropClearWatch() {
 
 // The bot formats' break between waves. Survival's is a minute of looting the fallen bots (Zombies keep 10 s). Every
 // player may vote to skip it (held G); when all of them have, the next wave starts on the next Tick.
+// Progression co-op, test 2026-10-25: both players lay downed but alive with the stock give-up screen suppressed, so
+// the fight could never end. Holding G gives the fight up; when every human has, the bots win.
+static void TestGiveUpFight() {
+    uint32_t t = 0;
+    Match m = LiveSurvival(Format::PlayersVsBots, t);
+    m.AddFighter({7, kBotTeam, false});
+    CHECK(!m.GiveUpFight(7, t + 1) && m.Alive(7));                              // a bot cannot
+    CHECK(!m.GiveUpFight(9, t + 1));                                            // not in the match
+    CHECK(m.GiveUpFight(1, t + 1) && !m.Alive(1) && m.phase() == MatchPhase::Live);
+    CHECK(!m.GiveUpFight(1, t + 2));                                            // already down
+    CHECK(m.GiveUpFight(2, t + 3) && m.phase() == MatchPhase::Results && m.winner() == kBotTeam);
+    CHECK(!m.GiveUpFight(2, t + 4));                                            // results: nothing to give up
+    Match duel; duel.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    duel.Tick(Match::kCountdownMs);
+    CHECK(!duel.GiveUpFight(1, Match::kCountdownMs + 1) && duel.Alive(1));      // PvP: Forfeit's rules instead
+}
+
 static void TestWaveBreakSkip() {
     CHECK(Match::kWaveBreakMs == 60000 && Match::kZombieBreakMs == 10000);
     uint32_t t = 0;
@@ -715,7 +739,7 @@ int main() {
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
+    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

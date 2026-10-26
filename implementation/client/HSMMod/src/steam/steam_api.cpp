@@ -1,4 +1,5 @@
 #include "steam/steam_api.h"
+#include "steam/hsm_steam_abi.h"
 #include "log.h"
 #include "ue/hook.h"
 #include <windows.h>
@@ -13,33 +14,13 @@
 namespace hsm::steam {
 namespace {
 
-// ---------------------------------------------------------------- Steamworks 1.57 layouts (Windows, pack 8)
-#pragma pack(push, 8)
-struct NetIdentity { int32_t type; int32_t size; union { uint64_t steamId; char raw[128]; }; };
-static_assert(sizeof(NetIdentity) == 136, "SteamNetworkingIdentity");
+using namespace abi;   // Steamworks 1.57 layouts (steam/hsm_steam_abi.h)
 constexpr int32_t kIdentitySteamId = 16;
-
-struct NetMessage {
-    void* data; int32_t size; uint32_t conn; NetIdentity peer; int64_t connUserData; int64_t usecReceived;
-    int64_t messageNumber; void* freeData; void* release; int32_t channel; int32_t flags; int64_t userData; uint16_t lane; uint16_t pad;
-};
-static_assert(offsetof(NetMessage, peer) == 16 && offsetof(NetMessage, usecReceived) == 160 && offsetof(NetMessage, channel) == 192,
-              "SteamNetworkingMessage_t");
-
-struct LobbyCreated { int32_t result; uint64_t lobby; };                                   // 513 (call result)
-struct LobbyMatchList { uint32_t count; };                                                // 510 (call result)
-struct LobbyEnter { uint64_t lobby; uint32_t permissions; bool locked; uint32_t response; };  // 504
-struct LobbyDataUpdate { uint64_t lobby; uint64_t member; uint8_t success; };             // 505
-struct LobbyChatUpdate { uint64_t lobby; uint64_t changed; uint64_t changer; uint32_t state; };  // 506
-struct LobbyChatMsg { uint64_t lobby; uint64_t user; uint8_t type; uint32_t chatId; };    // 507
-struct GameLobbyJoinRequested { uint64_t lobby; uint64_t friendId; };                    // 333
-struct SessionRequest { NetIdentity remote; };                                            // 1251
-static_assert(sizeof(LobbyCreated) == 16 && sizeof(LobbyEnter) == 24 && sizeof(LobbyChatUpdate) == 32 && sizeof(LobbyChatMsg) == 24, "callback layouts");
-#pragma pack(pop)
 
 constexpr int kCbLobbyEnter = 504, kCbLobbyData = 505, kCbLobbyChatUpdate = 506, kCbLobbyChatMsg = 507;
 constexpr int kCbLobbyMatchList = 510, kCbLobbyCreated = 513, kCbJoinRequested = 333, kCbRichJoin = 337;
 constexpr int kCbSessionRequest = 1251, kCbSessionFailed = 1252;
+constexpr int kCbRelayStatus = 1281, kCbServerConnectFailure = 102, kCbServersDisconnected = 103;
 
 // ---------------------------------------------------------------- flat API
 HMODULE g_dll = nullptr;
@@ -82,7 +63,7 @@ struct Api {
     FLAT(int, ReceiveMessagesOnChannel, void*, int, NetMessage**, int)
     FLAT(bool, AcceptSessionWithUser, void*, const NetIdentity*)
     FLAT(bool, CloseSessionWithUser, void*, const NetIdentity*)
-    FLAT(int, GetSessionConnectionInfo, void*, const NetIdentity*, void*, void*)
+    FLAT(int, GetSessionConnectionInfo, void*, const NetIdentity*, NetConnectionInfo*, NetStatus*)
     FLAT(void, InitRelayNetworkAccess, void*)
     FLAT(int64_t, GetLocalTimestamp, void*)
     FLAT(void, ReleaseMessage, void*)
@@ -114,7 +95,21 @@ void __cdecl OnCallback(CallbackObj* self, void* p) {
             break;
         }
         case kCbSessionRequest: { auto* c = static_cast<SessionRequest*>(p); e.kind = Event::SessionRequest; e.user = c->remote.steamId; break; }
-        case kCbSessionFailed: { e.kind = Event::SessionFailed; std::memcpy(&e.user, static_cast<uint8_t*>(p) + 8, 8); break; }   // m_info.m_identityRemote.steamID
+        case kCbSessionFailed: {
+            const NetConnectionInfo& c = static_cast<SessionFailed*>(p)->info;
+            e.kind = Event::SessionFailed; e.ok = false;
+            if (c.remote.type == kIdentitySteamId) e.user = c.remote.steamId;
+            e.a = uint32_t(c.endReason); e.text.assign(c.endDebug, strnlen(c.endDebug, sizeof c.endDebug));
+            break;
+        }
+        // Diagnostics only (from CSLewin's PR #1): why a relay or the Steam servers went away.
+        case kCbRelayStatus: {
+            const RelayStatus& c = *static_cast<RelayStatus*>(p);
+            HSM_LOG("steam: relay status avail=%d config=%d anyRelay=%d measuring=%d %.256s", c.available, c.networkConfig, c.anyRelay, c.measuring, c.debug);
+            return;
+        }
+        case kCbServersDisconnected: HSM_LOG("steam: disconnected from the Steam servers (result %d)", static_cast<ServersDisconnected*>(p)->result); return;
+        case kCbServerConnectFailure: HSM_LOG("steam: could not reach the Steam servers (result %d)", static_cast<ServerConnectFailure*>(p)->result); return;
         default: return;
     }
     Push(std::move(e));
@@ -124,18 +119,23 @@ void* g_vtable[3] = { reinterpret_cast<void*>(&OnCallback), reinterpret_cast<voi
 CallbackObj g_callbacks[] = {
     {g_vtable, 0, kCbLobbyEnter, int32_t(sizeof(LobbyEnter))}, {g_vtable, 0, kCbLobbyData, int32_t(sizeof(LobbyDataUpdate))},
     {g_vtable, 0, kCbLobbyChatUpdate, int32_t(sizeof(LobbyChatUpdate))}, {g_vtable, 0, kCbLobbyChatMsg, int32_t(sizeof(LobbyChatMsg))},
-    {g_vtable, 0, kCbJoinRequested, int32_t(sizeof(GameLobbyJoinRequested))}, {g_vtable, 0, kCbRichJoin, 8 + 256},
-    {g_vtable, 0, kCbSessionRequest, int32_t(sizeof(SessionRequest))}, {g_vtable, 0, kCbSessionFailed, 1024},
+    {g_vtable, 0, kCbJoinRequested, int32_t(sizeof(GameLobbyJoinRequested))}, {g_vtable, 0, kCbRichJoin, int32_t(sizeof(RichJoinRequested))},
+    // SessionFailed was registered at 1024 bytes; it must be its real size, 696 (CSLewin's PR #1).
+    {g_vtable, 0, kCbSessionRequest, int32_t(sizeof(SessionRequest))}, {g_vtable, 0, kCbSessionFailed, int32_t(sizeof(SessionFailed))},
+    {g_vtable, 0, kCbRelayStatus, int32_t(sizeof(RelayStatus))}, {g_vtable, 0, kCbServersDisconnected, int32_t(sizeof(ServersDisconnected))},
+    {g_vtable, 0, kCbServerConnectFailure, int32_t(sizeof(ServerConnectFailure))},
 };
 
 // ---------------------------------------------------------------- callback pumping
 // The engine pumps SteamAPI_RunCallbacks only when OnlineSubsystemSteam is active. We hook the export to see
-// whether anyone calls it; if nobody does shortly after init, we pump it ourselves from the game thread.
+// whether anyone calls it; while nobody has for 2 s we pump it ourselves from the game thread, also when the hook
+// could not be installed (then we call the export directly). From CSLewin's PR #1: the old check pumped only if the
+// game had never pumped, so a game pump that stopped later left callbacks unpumped.
 using RunCallbacksFn = void (*)();
 RunCallbacksFn g_runOriginal = nullptr;
-std::atomic<uint64_t> g_externalPumps{0};
+std::atomic<uint64_t> g_lastExternalPump{0};
 thread_local bool t_selfPump = false;
-void RunCallbacksDetour() { if (!t_selfPump) ++g_externalPumps; g_runOriginal(); }
+void RunCallbacksDetour() { if (!t_selfPump) g_lastExternalPump = GetTickCount64(); g_runOriginal(); }
 bool g_selfPump = false;
 ULONGLONG g_readyAt = 0;
 
@@ -231,7 +231,9 @@ bool Init() {
     if (!g.GetMediumFriendAvatar || !g.GetImageSize || !g.GetImageRGBA) HSM_LOG("steam: no avatar exports; the page shows no avatars");
     if (!g_mm || !g_friends || !g_user || !g_utils || !g_msgs || !g_netUtils) { HSM_LOG("steam: interface accessor returned null"); return false; }
     for (CallbackObj& cb : g_callbacks) g.RegisterCallback(&cb, cb.id);
-    ue::HookNative(reinterpret_cast<void*>(g.RunCallbacks), reinterpret_cast<void*>(&RunCallbacksDetour), reinterpret_cast<void**>(&g_runOriginal), "SteamAPI_RunCallbacks");
+    const bool hooked = ue::HookNative(reinterpret_cast<void*>(g.RunCallbacks), reinterpret_cast<void*>(&RunCallbacksDetour),
+                                       reinterpret_cast<void**>(&g_runOriginal), "SteamAPI_RunCallbacks");
+    if (!hooked) HSM_LOG("steam: could not hook SteamAPI_RunCallbacks; the mod pumps it directly");
     g_readyAt = GetTickCount64();
     g_ready = true;
     HSM_LOG("steam: ready (app %u, user %llu, %s)", AppId(), (unsigned long long)MySteamId(), PersonaName(MySteamId()).c_str());
@@ -240,11 +242,13 @@ bool Init() {
 
 void Tick() {
     if (!g_ready) return;
-    if (!g_selfPump && g_externalPumps.load() == 0 && GetTickCount64() - g_readyAt > 2000) {
-        g_selfPump = true;
-        HSM_LOG("steam: nobody pumps SteamAPI_RunCallbacks; pumping from the game thread");
+    const uint64_t external = g_lastExternalPump.load();
+    const bool selfPump = GetTickCount64() - (external ? external : g_readyAt) > 2000;
+    if (selfPump != g_selfPump) {
+        g_selfPump = selfPump;
+        HSM_LOG("steam: SteamAPI_RunCallbacks pumped by %s", selfPump ? "the mod (nobody else pumps it)" : "the game");
     }
-    if (g_selfPump && g_runOriginal) { t_selfPump = true; g_runOriginal(); t_selfPump = false; }
+    if (g_selfPump) { t_selfPump = true; (g_runOriginal ? g_runOriginal : g.RunCallbacks)(); t_selfPump = false; }
     for (size_t i = 0; i < g_pending.size();) {
         PendingCall pc = g_pending[i];
         bool failed = false;
@@ -315,8 +319,21 @@ std::string LaunchConnectLobby() {
     return id;
 }
 
-void CreateLobby(LobbyType type, int maxMembers) { if (g_ready) g_pending.push_back({g.CreateLobby(g_mm, int(type), maxMembers), kCbLobbyCreated, Event::LobbyCreated}); }
-void JoinLobby(SteamId lobby) { if (g_ready) g.JoinLobby(g_mm, lobby); }   // result arrives as LobbyEnter callback
+// A zero call handle means Steam refused the call at once; it never completes, so it fails here (CSLewin's PR #1)
+// instead of leaving the lobby state waiting forever.
+void CreateLobby(LobbyType type, int maxMembers) {
+    if (!g_ready) return;
+    const ApiCall call = g.CreateLobby(g_mm, int(type), maxMembers);
+    if (call) { g_pending.push_back({call, kCbLobbyCreated, Event::LobbyCreated}); return; }
+    HSM_LOG("steam: CreateLobby returned no call handle");
+    Event e{}; e.kind = Event::LobbyCreated; e.ok = false; Push(std::move(e));
+}
+void JoinLobby(SteamId lobby) {   // the result arrives as a LobbyEnter callback
+    if (!g_ready) return;
+    if (g.JoinLobby(g_mm, lobby)) return;
+    HSM_LOG("steam: JoinLobby %llu returned no call handle", (unsigned long long)lobby);
+    Event e{}; e.kind = Event::LobbyEntered; e.lobby = lobby; e.ok = false; Push(std::move(e));
+}
 void LeaveLobby(SteamId lobby) { if (g_ready && lobby) g.LeaveLobby(g_mm, lobby); }
 bool SetLobbyType(SteamId lobby, LobbyType type) { return g_ready && g.SetLobbyType(g_mm, lobby, int(type)); }
 bool SetLobbyJoinable(SteamId lobby, bool joinable) { return g_ready && g.SetLobbyJoinable(g_mm, lobby, joinable); }
@@ -335,7 +352,10 @@ bool SendLobbyChat(SteamId lobby, const std::string& t) { return g_ready && g.Se
 void RequestLobbyList(const std::string& key, const std::string& value) {
     if (!g_ready) return;
     if (!key.empty()) g.AddRequestLobbyListStringFilter(g_mm, key.c_str(), value.c_str(), 0 /* equal */);
-    g_pending.push_back({g.RequestLobbyList(g_mm), kCbLobbyMatchList, Event::LobbyList});
+    const ApiCall call = g.RequestLobbyList(g_mm);
+    if (call) { g_pending.push_back({call, kCbLobbyMatchList, Event::LobbyList}); return; }
+    HSM_LOG("steam: RequestLobbyList returned no call handle");
+    Event e{}; e.kind = Event::LobbyList; e.ok = false; Push(std::move(e));
 }
 void InviteOverlay(SteamId lobby) { if (g_ready) g.ActivateGameOverlayInviteDialog(g_friends, lobby); }
 void SetRichPresence(const std::string& k, const std::string& v) { if (g_ready) g.SetRichPresence(g_friends, k.c_str(), v.c_str()); }
@@ -368,10 +388,9 @@ void CloseSession(SteamId user) { if (g_ready) { NetIdentity id = Identity(user)
 int PingMs(SteamId user) {
     if (!g_ready) return -1;
     NetIdentity id = Identity(user);
-    alignas(8) uint8_t info[2048] = {}, status[512] = {};
-    g.GetSessionConnectionInfo(g_msgs, &id, info, status);
-    int32_t ping; std::memcpy(&ping, status + 4, 4);   // SteamNetConnectionRealTimeStatus_t::m_nPing
-    return ping;
+    NetStatus status{};
+    // Only a connected session (k_ESteamNetworkingConnectionState_Connected) has a ping; any other state reads zeros.
+    return g.GetSessionConnectionInfo(g_msgs, &id, nullptr, &status) == 3 ? status.ping : -1;
 }
 
 }  // namespace hsm::steam

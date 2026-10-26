@@ -62,6 +62,20 @@ inline BodyTarget AimBody(const BodyTarget& tg, const V3& acc, double hS) {
 inline BodyTarget TargetOf(const BoneSample& b) { return BodyTarget{ b.pos, b.rot, b.vel, b.angVelDeg }; }
 inline BodyTarget TargetOf(const WeaponSample& w) { return BodyTarget{ w.pos, w.rot, w.vel, w.angVelDeg }; }
 
+// The owner's flail head carried onto this stand-in's weapon: where it hangs off the owner's handle, put on the stand-in's
+// handle (velocities kept as feed-forward). The head swings on the stand-in's own chain, so aiming it at the owner's world
+// spot pulled it against the chain whenever the two handles were apart.
+inline BoneSample HeadOnStandIn(const WeaponSample& owner, const BodyNow& mine) {
+    const Q4 inv = QuatConj(QuatNormalize(owner.rot));
+    const V3 local = QuatRotateVec(inv, Vec3Sub(owner.head.pos, owner.pos));
+    const Q4 localRot = QuatMul(inv, QuatNormalize(owner.head.rot));
+    const Q4 m = QuatNormalize(mine.rot);
+    BoneSample h = owner.head;
+    h.pos = Vec3Add(mine.pos, QuatRotateVec(m, local));
+    h.rot = QuatNormalize(QuatMul(m, localRot));
+    return h;
+}
+
 // Per-stand-in acceleration estimate from consecutive sampled targets (slots: 23 bones, then 2 weapons).
 class AimBuilder {
 public:
@@ -157,7 +171,7 @@ inline FighterCommand ServoFighter(const FighterNow& now, const PoseFrame& targe
         // The flail head of a commanded weapon, when the target has one and the stand-in's chain simulates. No
         // acceleration estimate: the head swings on a chain, and its own velocity already leads the swing.
         if (!target.weapons[w].hasHead || !now.headValid[w]) continue;
-        const BodyTarget h = AimOrHold(TargetOf(target.weapons[w].head), V3{}, dtS, frozen);
+        const BodyTarget h = AimOrHold(TargetOf(HeadOnStandIn(target.weapons[w], now.weapons[w])), V3{}, dtS, frozen);
         out.heads[w] = ClampToOwnerSpeed(ServoBody(now.heads[w], h, dtS, p.gain * kHeadGainShare, p.capLinUu * kHeadCapShare, p.capAngDeg * kHeadCapShare),
                                          now.heads[w], h);
         out.headDrive[w] = true;

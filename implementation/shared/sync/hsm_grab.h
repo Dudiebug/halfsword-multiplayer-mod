@@ -108,6 +108,10 @@ constexpr double kGrabLeaseMs = 1500.0;    // nothing newer heard for this long:
 constexpr double kGripMaxUu = 55.0;        // the sender clamps the grip to this, inside kMaxGripUu (grip_max)
 constexpr double kGrabBreakUu = 130.0;     // the grip farther than this from the hand ... (grab_break)
 constexpr double kGrabBreakMs = 400.0;     // ... for this long: broke free until a new grab (grab_break_ms)
+// A body that cannot struggle (dead, fallen, knocked out) breaks free only on a glitch: farther and longer than that.
+constexpr double kGrabDownBreakUu = 250.0, kGrabDownBreakMs = 1000.0;
+// The grabber's stand-in shows its hand a playout delay late; the pull aims this far ahead along the hand's velocity.
+constexpr double kGrabAnchorLeadS = 0.08, kGrabAnchorLeadCapUu = 40.0;
 
 // The same holds (the same grabs of the same bones); grips and seq may differ.
 inline bool SameHolds(const GrabStateMsg& a, const GrabStateMsg& b) {
@@ -194,15 +198,16 @@ public:
         }
         return out;
     }
-    // This tick's grip-to-hand distance of a pulled hold; true once it broke free (it stays broken for that grab).
-    bool NoteDistance(const GrabPull& p, double distUu, double nowMs) {
+    // This tick's grip-to-hand distance of a pulled hold; true once it broke free (it stays broken for that grab): farther
+    // than breakUu for breakMs (kGrabDownBreakUu/Ms for a body that cannot struggle).
+    bool NoteDistance(const GrabPull& p, double distUu, double nowMs, double breakUu = kGrabBreakUu, double breakMs = kGrabBreakMs) {
         if (p.grabber == 0 || p.grabber > kMaxWillies || p.hand >= kGrabHands) return false;
         Break& b = slots_[p.grabber - 1].brk[p.hand];
         if (b.grabId != p.grabId) b = Break{ p.grabId };
         if (b.broken) return true;
-        if (distUu > kGrabBreakUu) {
+        if (distUu > breakUu) {
             if (!b.far) { b.far = true; b.farSinceMs = nowMs; }
-            b.broken = nowMs - b.farSinceMs >= kGrabBreakMs;
+            b.broken = nowMs - b.farSinceMs >= breakMs;
         } else {
             b.far = false;
         }
@@ -249,6 +254,43 @@ struct GrabPullParams {
     double maxDvUu = 800.0;      // cm/s per step at most (HSMP apply_max_dv): a glitch never launches a body
     double minDtS = 0.004, maxDtS = 0.080;   // the stand-in servo's frame-time clamp
 };
+
+// A held body that cannot struggle (dead, fallen, knocked out): carried the way the game carries a held NPC, not
+// dragged on a soft spring (test 2026-10-25: grabbing another player's body "worked" but did not feel like the game's).
+// Three times as stiff, twice the lead, still overdamped (zeta = 200 / (2 sqrt 4500) ~ 1.5), and the same per-step cap
+// raised so a body keeps up with a walking grabber.
+inline GrabPullParams DownPullParams() {
+    GrabPullParams p;
+    p.stiffness = 4500.0; p.damping = 200.0; p.leadUu = 80.0; p.maxDvUu = 1500.0;
+    return p;
+}
+// Share of a down body's pull also given to its pelvis and chest, so the whole body comes along, not just the held limb.
+constexpr double kGrabDownSpread = 0.5;
+
+// Where the pull aims: the grabber's stand-in hand, advanced along its velocity by leadS (at most capUu), since the
+// stand-in shows the grabber a playout delay late. Non-finite velocity: the hand itself.
+inline V3 GrabAnchor(const V3& hand, const V3& handVel, double leadS = kGrabAnchorLeadS, double capUu = kGrabAnchorLeadCapUu) {
+    using namespace grabdetail;
+    if (!Finite(hand) || !Finite(handVel) || !std::isfinite(leadS)) return hand;
+    return Add(hand, ClampLen(Scale(handVel, std::max(leadS, 0.0)), capUu));
+}
+
+// The pose bone index of a held bone name, or -1.
+inline int PoseBoneIndex(const std::string& name) {
+    for (int i = 0; i < kPoseBones; ++i) if (name == kPoseBoneNames[i]) return i;
+    return -1;
+}
+// The pose bones (bit per index) the held fighter's stand-in leaves to the grabber's native hold on the grabber's screen,
+// so the servo and the grab constraint do not pull the bone two ways: the held bone and its parent, or, for a body that
+// cannot struggle, the held limb up to the torso (the owner's own pull brings the rest after the hand). Never the whole
+// body: a stand-in's bodies have no gravity and ignore the floor, so an undriven torso would float.
+inline uint32_t YieldBones(int bone, bool down) {
+    if (bone < 0 || bone >= kPoseBones) return 0;
+    if (!down) return (1u << bone) | (1u << kPoseParent[size_t(bone)]);
+    uint32_t m = 0;
+    for (int b = bone; b != kBonePelvis && !(b >= 2 && b <= 5); b = kPoseParent[size_t(b)]) m |= 1u << b;   // up to pelvis / spine
+    return m ? m : (1u << bone);
+}
 
 // The velocity change for the held bone this step (SetPhysicsLinearVelocity, added): backward Euler of the handle's
 // spring-damper toward the grabber's hand, the hand advanced by its own velocity over the step and the damping

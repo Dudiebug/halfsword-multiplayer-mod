@@ -11,7 +11,7 @@
 namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.6.4";   // bump with every release tag
+constexpr const char* kModVersion = "0.6.5";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
@@ -71,7 +71,7 @@ private:
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
     State state_ = State::Offline;
-    steam::SteamId lobby_ = 0, owner_ = 0;
+    steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;   // joining_: the lobby Join asked for, until its enter
     steam::LobbyType type_ = steam::LobbyType::FriendsOnly;
     std::vector<LobbyMember> members_;
     std::vector<LobbyListing> listings_;

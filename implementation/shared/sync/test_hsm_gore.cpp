@@ -22,7 +22,7 @@ constexpr uint32_t kLegL = 1u << 12;
 constexpr uint32_t kJArmR = 1u << 0;
 constexpr uint32_t kJArmL = 1u << 1;
 constexpr uint32_t kJLegR = 1u << 2;
-constexpr uint32_t kJLegL = 1u << 3;
+[[maybe_unused]] constexpr uint32_t kJLegL = 1u << 3;   // the full joint set, for reference
 constexpr uint32_t kJNeck = 1u << 4;
 constexpr uint32_t kJSpine = 1u << 5;
 

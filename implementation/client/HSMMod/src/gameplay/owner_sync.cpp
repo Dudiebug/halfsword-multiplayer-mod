@@ -259,6 +259,29 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     if (!a.rig.StillValid()) { a.rig.Unbind(); return; }
     a.rig.Neutralise(nowMs);
     if (!s.feed) return;   // nothing streamed yet: the gravity-free bodies hold where they spawned
+    // The owner's death, shown on the stand-in. The game's lock-on and AI skip a DED fighter; without it a player cut in
+    // half stayed a live target on the other machine, and the lock-on kept aiming at where they had stood. The
+    // stand-in's own tick is blocked, so setting DED runs none of the game's Death logic.
+    if (s.feed->haveVitals) {
+        const VitalsMsg& v = s.feed->vitals;
+        const bool dead = (v.flags & 1u) != 0;
+        if (dead != a.deadShown && SetBool(a.willie, "DED", dead)) {
+            a.deadShown = dead;
+            if (double* hp = Field<double>(a.willie, "Health"); hp && dead) *hp = 0.0;
+            HSM_LOG("standins: entity %u's stand-in marked %s", entity, dead ? "dead" : "alive");
+        }
+        // Down, not dead yet (test 2026-10-25: cut in half, the owner lay fallen and knocked out at 0 health for 23 s
+        // before the game called it a death, and the other player's lock-on kept aiming at the standing spot its capsule
+        // was left at). The capsule follows the body, and the stand-in's health is the owner's 0, while down.
+        const bool down = dead || (v.flags & 6u) != 0 || v.health <= 0.f;
+        if (down != a.downShown) {
+            a.downShown = down;
+            HSM_LOG("standins: entity %u is %s (flags %u, health %.0f)", entity, down ? "down; the capsule follows the body" : "up again",
+                    unsigned(v.flags), double(v.health));
+        }
+        if (!dead && v.health <= 0.f)
+            if (double* hp = Field<double>(a.willie, "Health"); hp && *hp > 0.0) *hp = 0.0;
+    }
 
     sync::FighterNow now;
     if (!a.rig.Read(0, 0, nullptr, &now)) return;
@@ -270,12 +293,15 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
         for (const V3& p : avoid) snapBlocked = snapBlocked || Dist(a.lastTargetPelvis, p) < kSnapClearUu;
     sync::PoseFrame target;
     const sync::DriverStep st = a.driver.Step(s.feed->player, nowMs, now, dt, snapBlocked, target);
+    const uint32_t held = heldBones_ ? heldBones_(entity) : 0u;   // bones my fighter's grab holds: left to the grab
     if (st.have) {
         // The capsule goes where the owner's capsule was at the shown time, facing its way; first, since a teleporting
         // capsule may carry the Mesh, then Shift (HSMP main.lua:4773 drive_root, then :4791 snap_mesh).
         V3 root;
         double yaw = 0.0;
-        const bool haveRoot = s.feed->root.At(st.info.playTsMs, root, yaw);
+        // A dead owner's capsule stays where they stood (or fell from); the stand-in's goes with the body instead, so
+        // nothing that aims at the actor (lock-on, AI) aims at an empty spot.
+        const bool haveRoot = !a.deadShown && !a.downShown && s.feed->root.At(st.info.playTsMs, root, yaw);
         a.rig.PlaceCapsule(haveRoot ? root : target.bones[sync::kBonePelvis].pos, haveRoot ? &yaw : nullptr);
         a.lastTargetPelvis = target.bones[sync::kBonePelvis].pos;
         a.haveTarget = true;
@@ -283,7 +309,14 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
         a.haveShown = true;
     }
     if (st.place) a.rig.Shift(st.shift);
-    if (st.have && st.pelvisErrUu >= 0.0) a.rig.Drive(st.cmd);
+    if (st.have && st.pelvisErrUu >= 0.0) {
+        if (!held) a.rig.Drive(st.cmd);
+        else {
+            sync::FighterCommand cmd = st.cmd;
+            for (int i = 0; i < sync::kPoseBones; ++i) if ((held >> i) & 1u) cmd.drive[i] = false;
+            a.rig.Drive(cmd);
+        }
+    }
     if (st.have) a.rig.ApplyGrip(target.grip);   // after Neutralise and Drive: the owner's grips on this stand-in's hands
     if (st.have) a.rig.ApplyHeld(target, now, nowMs);   // and the owner's seat of the weapon in the right hand
     Record(s, st, now, target);

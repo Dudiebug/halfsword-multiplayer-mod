@@ -3,7 +3,7 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build (v0.4) passes every offline check (unit tests under ASan/UBSan
+> **Status: pre-release.** The current build (v0.6.5) passes every offline check (unit tests under ASan/UBSan
 > and protocol fuzzing) and is being play-tested in two-player matches; each pre-release fixes what the last test
 > found. Expect bugs.
 
@@ -17,7 +17,7 @@ No game files are changed; delete the DLL to go back to vanilla.
 - **Hits through the game's own damage code:** the attacker claims a hit; the victim's machine replays it on its own
   fighter, so armour, wounds, bleeding, knockouts and deaths work as in solo.
 - **Gore, grabs, dropped weapons and level props** are synced: severed limbs, stuck blades, dislocations, grabbing
-  another player, loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
+  and carrying another player (alive or down), loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
   props, which the host names for everyone.
 - Match modes, scores, chat and spectating.
 
@@ -58,6 +58,15 @@ HSMMod is released under the [MIT License](LICENSE). Share builds and modified v
 copyright and license notice.
 
 ## Credits
+
+### Contributors
+
+- [Dudiebug](https://github.com/Dudiebug): author and maintainer.
+- [CSLewin](https://github.com/CSLewin) (Craig Chouraki-Lewin): Steamworks 1.57 struct layouts, Steam
+  networking and lobby fixes, and no combat outside the live match phase
+  ([#1](https://github.com/Dudiebug/halfsword-multiplayer-mod/pull/1)).
+
+### Third-party code
 
 Parts of the sync design are ported from [Cyrex0/HalfSword-MP](https://github.com/Cyrex0/HalfSword-MP),
 Copyright (c) 2026 Cyrex0 and the HalfSword-MP contributors, MIT. MinHook and ENet are vendored under their own

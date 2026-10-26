@@ -1,5 +1,17 @@
 # Third-party notices
 
+## Contributions by CSLewin
+
+Parts of the Steam and match code come from CSLewin's pull request #1 to Dudiebug/halfsword-multiplayer-mod,
+contributed under this project's MIT license (see LICENSE). Thank you, CSLewin.
+
+| File in this repository | From the pull request |
+|---|---|
+| `implementation/shared/steam/hsm_steam_abi.h` | the Steamworks 1.57 Win64 struct layouts and their size checks |
+| `implementation/client/HSMMod/src/steam/steam_api.cpp` | SessionFailed registered at its real size and its end reason logged; the relay-status and Steam-server callbacks; the RunCallbacks pump that takes over whenever the game stops pumping; failed lobby calls (no call handle) reported at once; the typed connection status for the ping |
+| `implementation/client/HSMMod/src/gameplay/lobby.{h,cpp}` | ignoring a lobby enter that is not the lobby being joined; following a Steam join request from inside a lobby |
+| `implementation/shared/match/hsm_match.h` (`CombatPhase`), `implementation/client/HSMMod/src/gameplay/session.cpp` (`CombatEnabled`) | no blow between session fighters counts before the match is live or after it ended |
+
 ## HalfSword-MP (HSMP)
 
 Parts of the multiplayer sync code are ported from, or follow, HalfSword-MP (https://github.com/Cyrex0/HalfSword-MP),

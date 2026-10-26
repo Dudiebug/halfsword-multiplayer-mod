@@ -147,6 +147,14 @@ inline bool Match::Forfeit(uint8_t entity, uint32_t nowMs) {
     return true;
 }
 
+inline bool Match::GiveUpFight(uint8_t entity, uint32_t nowMs) {
+    if (!IsBotFormat(cfg_.format) || !CombatPhase(phase_)) return false;
+    auto it = fighters_.find(entity);
+    if (it == fighters_.end() || !it->second.human || !it->second.alive) return false;
+    OnDeath(entity, 0, nowMs);
+    return true;
+}
+
 inline bool Match::RoundInPlay() const {
     return cfg_.format == Format::Duel && !roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath);
 }

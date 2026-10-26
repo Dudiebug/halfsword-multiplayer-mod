@@ -352,8 +352,12 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
+    // A Progression co-op fight has no stock give-up screen in a session: G gives the fight up (Match::GiveUpFight).
+    const bool coop = l.oneFight && Format(m.format) == Format::PlayersVsBots && fought && !InWaveBreak(m);
     if (const FighterEntry* mine = FighterOf(m, l.me); mine && mine->alive && mine->down && fought && !InRoundGap(m) && !l.dead)
-        s.pill = {true, "DOWN - GET UP", style::kBloodInk, 1, 1};
+        s.pill = {true, coop ? "DOWN - GET UP OR HOLD G" : "DOWN - GET UP", style::kBloodInk, 1, 1};
+    if (l.giveUp > 0 && coop)
+        s.pill = {true, "GIVING UP THE FIGHT " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
     if (l.giveUp > 0 && Format(m.format) == Format::Duel && fought && !InRoundGap(m))
         s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
     if (l.giveUp > 0 && InWaveBreak(m))          // the same G hold votes to skip the loot break
@@ -363,6 +367,8 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
             Look look = BannerLook((1000 - m.timeLeftMs % 1000) % 1000);
             s.banner = {true, Seconds(m.timeLeftMs), style::kBone, look.opacity, look.scale};
             if (Format(m.format) == Format::Duel) s.bannerSub = {true, "HOLD G TO GIVE UP A ROUND", style::kIron, look.opacity, 1};
+            else if (l.oneFight && Format(m.format) == Format::PlayersVsBots)
+                s.bannerSub = {true, "HOLD G TO GIVE UP THE FIGHT", style::kIron, look.opacity, 1};
         }
     } else if (!l.banner.text.empty()) {
         uint32_t age = AgeMs(l.banner.atMs, nowMs);

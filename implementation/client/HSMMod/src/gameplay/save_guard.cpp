@@ -63,17 +63,21 @@ bool ProcessAlive(unsigned long pid) {
 
 void SaveGuard::Hook() {
     if (hooked_ || !ScriptHookActive()) return;
-    auto block = [this](const char* what) {
-        return [this, what](ScriptCall&) {
-            if (!policy_.Blocking()) return false;
+    // fightOnly: blocked in a session's fight levels only. In the Progression hub the game makes a new character
+    // (Reset Player Character) and dresses it (Override Player Character Equipment) for the next fight; blocking them
+    // there left the character screen stuck (test 2026-10-25). The in-memory character is the session's; the backup
+    // still goes back over GameProgress when the session is over, and Save Game stays blocked everywhere.
+    auto block = [this](const char* what, bool fightOnly = false) {
+        return [this, what, fightOnly](ScriptCall&) {
+            if (!policy_.Blocking() || (fightOnly && !matchLevel_)) return false;
             if (++blocked_ % 50 == 1) HSM_LOG("save: blocked the game's \"%s\" during a session (%u so far)", what, blocked_);
             return true;
         };
     };
     // Literal names, one call each: tools/check_reflection.py verifies HookScript names against the game.
     int n = HookScript(kHookOwner, "GI_Settings_C", "Save Game", block("Save Game"));
-    n += HookScript(kHookOwner, "GI_Settings_C", "Reset Player Character", block("Reset Player Character"));
-    n += HookScript(kHookOwner, "GI_Settings_C", "Override Player Character Equipment", block("Override Player Character Equipment"));
+    n += HookScript(kHookOwner, "GI_Settings_C", "Reset Player Character", block("Reset Player Character", true));
+    n += HookScript(kHookOwner, "GI_Settings_C", "Override Player Character Equipment", block("Override Player Character Equipment", true));
     n += HookScript(kHookOwner, "GI_Settings_C", "Delete Save", block("Delete Save"));
     // The game reloads the game instance from GameProgress on its level loads (it saved it just before, so the pair
     // kept the session's settings). With the save blocked, the load brought back the pre-session ones: test 2026-10-25,
@@ -88,6 +92,7 @@ void SaveGuard::Hook() {
 
 void SaveGuard::Tick(Adapter& adapter, bool joined, bool matchLevel) {
     if (!leftChecked_) RestoreLeft(adapter);
+    matchLevel_ = matchLevel;
     switch (policy_.Update(joined, matchLevel)) {
     case session::SaveAction::Backup: Backup(adapter); break;
     case session::SaveAction::Restore: Restore(adapter); break;

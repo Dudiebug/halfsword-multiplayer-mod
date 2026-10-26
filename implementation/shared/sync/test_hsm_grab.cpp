@@ -579,6 +579,66 @@ static void TestPullLaw() {
     CHECK(Len(Dv(V3{}, V3{}, V3{ 20, 0, 0 }, V3{}, nan)) == 0);
 }
 
+// Test 2026-10-25: a grabbed player's body followed on a soft spring and did not feel like the game's own carry. A body
+// that cannot struggle is pulled stiffer (still without overshoot) and breaks free only on a glitch; the pull aims ahead
+// of the grabber's late stand-in hand; the grabber's screen leaves the held limb to its native grab.
+static void TestDownCarry() {
+    using hsm::sync::DownPullParams;
+    const GrabPullParams soft, down = DownPullParams();
+    CHECK(down.stiffness == 3 * soft.stiffness && down.leadUu == 2 * soft.leadUu && down.maxDvUu > soft.maxDvUu);
+    CHECK(down.damping > 2 * std::sqrt(down.stiffness));                             // overdamped
+    const double dt = 1.0 / 60;
+    const V3 far{ 60, 0, 0 };
+    CHECK(GrabPullDv(V3{}, V3{}, far, V3{}, dt, down).x > GrabPullDv(V3{}, V3{}, far, V3{}, dt, soft).x);   // pulls harder
+    V3 x{ -200, 0, 0 }, v{};
+    bool overshot = false;
+    for (int i = 0; i < 240; ++i) {
+        const V3 dv = GrabPullDv(x, v, V3{}, V3{}, dt, down);
+        CHECK(Len(dv) <= down.maxDvUu + 1e-9);
+        v = V3{ v.x + dv.x, v.y + dv.y, v.z + dv.z };
+        x = V3{ x.x + v.x * dt, x.y + v.y * dt, x.z + v.z * dt };
+        overshot = overshot || x.x > 1e-9;
+    }
+    CHECK(!overshot && Len(x) < 0.5);
+
+    // Break-free: the soft hold breaks past 130 uu for 400 ms; a down body's only past 250 uu for 1 s.
+    const auto mine = [](uint8_t e) { return e == 5; };
+    const auto alive = [](uint8_t) { return false; };
+    GrabInbox in;
+    CHECK(in.Accept(SomeState(), 0));
+    const std::vector<GrabPull> ps = in.Pulls(0, mine, alive);
+    CHECK(ps.size() == 1);
+    if (ps.size() != 1) return;
+    using hsm::sync::kGrabDownBreakMs;
+    using hsm::sync::kGrabDownBreakUu;
+    CHECK(!in.NoteDistance(ps[0], 200, 0, kGrabDownBreakUu, kGrabDownBreakMs));
+    CHECK(!in.NoteDistance(ps[0], 200, 900, kGrabDownBreakUu, kGrabDownBreakMs));       // under 250: never far
+    CHECK(!in.NoteDistance(ps[0], 260, 1000, kGrabDownBreakUu, kGrabDownBreakMs));
+    CHECK(!in.NoteDistance(ps[0], 260, 1999, kGrabDownBreakUu, kGrabDownBreakMs));
+    CHECK(in.NoteDistance(ps[0], 260, 2000, kGrabDownBreakUu, kGrabDownBreakMs));
+
+    // The anchor: ahead along the hand's velocity by 80 ms, at most 40 uu; the hand itself on bad input.
+    using hsm::sync::GrabAnchor;
+    const V3 a = GrabAnchor(V3{ 10, 0, 0 }, V3{ 100, 0, 0 });
+    CHECK(Near(a.x, 18) && a.y == 0 && a.z == 0);
+    CHECK(Near(GrabAnchor(V3{}, V3{ 0, 5000, 0 }).y, 40));
+    CHECK(GrabAnchor(V3{ 1, 2, 3 }, V3{ std::numeric_limits<double>::quiet_NaN(), 0, 0 }).x == 1);
+
+    // The bones the grabber's screen leaves to its grab.
+    using hsm::sync::PoseBoneIndex;
+    using hsm::sync::YieldBones;
+    CHECK(PoseBoneIndex("hand_r") == sync::kBoneHandR && PoseBoneIndex("pelvis") == 0 && PoseBoneIndex("weapon") == -1);
+    CHECK(YieldBones(-1, true) == 0 && YieldBones(sync::kPoseBones, false) == 0);
+    CHECK(YieldBones(sync::kBoneHandR, false) == ((1u << 16) | (1u << 15)));          // hand and lower arm
+    CHECK(YieldBones(sync::kBoneHandR, true) == ((1u << 16) | (1u << 15) | (1u << 14) | (1u << 13)));   // the arm to the chest
+    CHECK(YieldBones(sync::kBoneFootL, true) == ((1u << 19) | (1u << 18) | (1u << 17)));   // the leg to the pelvis
+    CHECK(YieldBones(0, true) == 1u && YieldBones(3, true) == (1u << 3));               // a torso bone: only itself
+    for (int b = 0; b < sync::kPoseBones; ++b) {
+        CHECK((YieldBones(b, true) & (1u << b)) != 0);
+        CHECK(YieldBones(b, true) != (1u << sync::kPoseBones) - 1u);                    // never the whole (gravity-free) body
+    }
+}
+
 int main() {
     TestRoundTrip();
     TestRejects();
@@ -589,6 +649,7 @@ int main() {
     TestForgetRetiresHolds();
     TestDropTarget();
     TestPullLaw();
+    TestDownCarry();
     if (g_fail) { std::printf("test_hsm_grab: %d check(s) failed\n", g_fail); return 1; }
     std::printf("test_hsm_grab: all checks passed\n");
     return 0;

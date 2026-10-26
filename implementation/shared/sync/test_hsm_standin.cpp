@@ -261,6 +261,23 @@ static void TestOffsetPoseAndError() {
 // 9b. A flail head is servoed with its own, softer gain and caps, about its bone origin, without the acceleration
 // estimate, and only when its weapon is commanded, the target carries it and the stand-in's chain simulates.
 static BoneSample HeadSample() { return BoneSample{ V3{ 80, 0, 60 }, QAxis(V3{ 1, 0, 0 }, 0.4), V3{ 400, 0, -100 }, V3{ 0, 0, 200 } }; }
+static void TestHeadOnStandIn() {
+    WeaponSample w;
+    w.pos = V3{ 10, 0, 50 };
+    w.rot = QAxis(V3{ 0, 0, 1 }, 0.3);
+    w.head = HeadSample();
+    BodyNow same{ w.pos, w.rot, V3{} };
+    const BoneSample h0 = HeadOnStandIn(w, same);   // the same handle: the owner's head
+    CHECK(Near(h0.pos, w.head.pos, 1e-9) && QuatAngleDeg(h0.rot, w.head.rot) < 1e-6);
+    CHECK(Near(h0.vel, w.head.vel, 1e-12) && Near(h0.angVelDeg, w.head.angVelDeg, 1e-12));
+    BodyNow moved{ V3{ 110, -40, 50 }, QuatMul(QAxis(V3{ 0, 0, 1 }, 1.5707963267948966), w.rot), V3{} };   // moved and turned 90 deg
+    const BoneSample h1 = HeadOnStandIn(w, moved);
+    const V3 off = Vec3Sub(w.head.pos, w.pos);                   // (70, 0, 10) turned 90 deg about Z: (0, 70, 10)
+    CHECK(Near(h1.pos, V3{ 110 - off.y, -40 + off.x, 50 + off.z }, 1e-9));
+    CHECK(std::fabs(Vec3Dist(h1.pos, moved.pos) - Vec3Dist(w.head.pos, w.pos)) < 1e-9);   // still a chain length off the handle
+    CHECK(std::fabs(QuatAngleDeg(h1.rot, w.head.rot) - 90.0) < 1e-6);
+}
+
 static void TestServoFighterFlailHead() {
     PoseFrame a = MovingTarget(), b = MovingTarget();
     a.weapons[0].hasHead = b.weapons[0].hasHead = true;
@@ -281,7 +298,8 @@ static void TestServoFighterFlailHead() {
     const double dt = 1.0 / 60.0;
     const FighterCommand c = ServoFighter(now, b, ab, false, dt, p);
     CHECK(c.headDrive[0] && !c.headDrive[1]);
-    const BodyTarget aim = AimBody(TargetOf(HeadSample()), V3{}, dt);
+    const BodyTarget aim = AimBody(TargetOf(HeadOnStandIn(b.weapons[0], now.weapons[0])), V3{}, dt);
+    CHECK(!Near(aim.pos, HeadSample().pos, 1.0));   // the stand-in's handle is 20 uu off the owner's: so is the head's aim
     CHECK(SameCmd(c.heads[0], ServoBody(now.heads[0], aim, dt, 0.3 * kHeadGainShare, 900 * kHeadCapShare, 800 * kHeadCapShare)));
     CHECK(!SameCmd(c.heads[0], ServoBody(now.heads[0], aim, dt, 0.3, 900, 800)));   // softer than a body
     CHECK(kHeadGainShare > 0.0 && kHeadGainShare < 1.0 && kHeadCapShare > 0.0 && kHeadCapShare < 1.0);
@@ -302,8 +320,9 @@ static void TestServoFighterFlailHead() {
     PoseFrame noHead = b;
     noHead.weapons[0].hasHead = false;
     CHECK(!ServoFighter(now, noHead, ab, false, dt, p).headDrive[0]);
-    FighterNow on = now;   // frozen and on the held head: commanded to stay
-    on.heads[0] = BodyNow{ HeadSample().pos, HeadSample().rot, V3{} };
+    FighterNow on = now;   // frozen and on the held head (carried onto the stand-in's weapon): commanded to stay
+    const BoneSample onHead = HeadOnStandIn(b.weapons[0], on.weapons[0]);
+    on.heads[0] = BodyNow{ onHead.pos, onHead.rot, V3{} };
     const FighterCommand f = ServoFighter(on, b, ab, true, dt, p);
     CHECK(f.headDrive[0] && Near(f.heads[0].vel, V3{}, 1e-9) && Near(f.heads[0].angVelDeg, V3{}, 1e-9));
     // a placement and the mirror offset move the head with everything else
@@ -881,7 +900,9 @@ static void TestServoFighterOwnerSpeed() {
     tg.weapons[0].hasHead = true;
     tg.weapons[0].head = BoneSample{ V3{ 80, 0, 60 }, QAxis(V3{ 1, 0, 0 }, 0.4), V3{}, V3{} };
     FighterNow now = NowAtOffset(tg, V3{ 60, 0, 0 });
-    now.heads[0] = BodyNow{ V3{ 140, 0, 60 }, tg.weapons[0].head.rot, V3{} };
+    // The head's target rides on the stand-in's weapon (HeadOnStandIn: 60 uu over, at 140): left at the owner's spot, it
+    // is 60 uu off it.
+    now.heads[0] = BodyNow{ V3{ 80, 0, 60 }, tg.weapons[0].head.rot, V3{} };
     now.headValid[0] = true;
     AimBuilder ab;
     const EffectiveParams p{ 0.3, 0.5, 900, 900 };
@@ -905,6 +926,7 @@ int main() {
     TestServoFighterUsesAcc();
     TestServoFighterFrozen();
     TestOffsetPoseAndError();
+    TestHeadOnStandIn();
     TestServoFighterFlailHead();
     TestPosePipeIdeal();
     TestPipelineAcceptance();

@@ -30,6 +30,12 @@ constexpr const char* kStandInTrueBoolFields[] = {
 constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Bend Over Extreme"};
 
 constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried again this often, not every frame
+// The owner's offhand flag drops for a frame or two in fast swings: the off hand lets go only after it has been off this
+// long, and takes the shaft only after it has been on this long, so the joint does not flap at the stream's rate.
+constexpr double kOffhandAttachMs = 100.0, kOffhandReleaseMs = 250.0;
+// While both hands hold the shaft a re-seat of the right hand breaks the off hand's joint and swings a long weapon:
+// only a seat this far off is fixed then (one-handed: hsm_held.h's thresholds).
+constexpr double kHeldTwoHandDeg = 60.0, kHeldTwoHandUu = 30.0;
 constexpr const char* kWeaponFields[sync::kPoseWeapons] = {"Weapon R", "Weapon L"};   // slot = hand
 constexpr const char* kGripFields[2] = {"PhysicsConstraint R Hand", "PhysicsConstraint L Hand"};
 // The sheath slots (SheathSlots_Enum order, standin_slots.cpp SlotActor): a weapon the game puts in one is anchored on the
@@ -128,16 +134,32 @@ void CollisionOff(UObject* c) {
     Call(c, "SetCollisionEnabled").set<uint8_t>("NewType", kNoCollision).invoke();
 }
 
-// The weapon's flail chain: its SkeletalMeshComponent tagged "Flail", or nullptr.
+bool HasBone(UObject* mesh, const char* bone) {
+    Call index(mesh, "GetBoneIndex");
+    index.setName("BoneName", MakeName(bone));
+    return index.invoke() && index.get<int32_t>("ReturnValue") >= 0;
+}
+
+// The weapon's flail chain: its SkeletalMeshComponent tagged "Flail", else (test 2026-10-25: every flail on both
+// machines logged "flail no", the tag lookup found nothing) any of its SkeletalMeshComponents with a Joint1 bone, the
+// bone the game simulates the chain below. nullptr for every other weapon.
 UObject* FlailComponent(UObject* actor) {
     UClass* skel = FindClass("SkeletalMeshComponent");
     if (!skel) return nullptr;
     Call byTag(actor, "GetComponentsByTag");
     byTag.set<UClass*>("ComponentClass", skel).setName("Tag", MakeName(kFlailTag));
-    if (!byTag.invoke()) return nullptr;
-    const FObjArray* arr = static_cast<const FObjArray*>(byTag.paramPtr("ReturnValue"));
+    if (byTag.invoke()) {
+        const FObjArray* arr = static_cast<const FObjArray*>(byTag.paramPtr("ReturnValue"));
+        if (arr && arr->data && arr->num > 0 && arr->num <= 64 && arr->data[0]) return arr->data[0];
+    }
+    Call byClass(actor, "K2_GetComponentsByClass");
+    byClass.set<UClass*>("ComponentClass", skel);
+    if (!byClass.invoke()) return nullptr;
+    const FObjArray* arr = static_cast<const FObjArray*>(byClass.paramPtr("ReturnValue"));
     if (!arr || !arr->data || arr->num <= 0 || arr->num > 64) return nullptr;
-    return arr->data[0];
+    for (int32_t i = 0; i < arr->num; ++i)
+        if (UObject* c = arr->data[i]; c && HasBone(c, "Joint1")) return c;
+    return nullptr;
 }
 
 // A flail's chain simulates only below Joint1, and the game switches it on again after every BaseMesh.SetSimulatePhysics
@@ -281,6 +303,8 @@ void FighterRig::RefreshWeapon(int w) {
             wp.headSetAng.valid()) {
             wp.flail = flail;
             wp.flailIndex = ObjectIndex(flail);
+        } else {
+            HSM_LOG("rig: %s: flail chain %s found but its physics functions are missing", cls.c_str(), ObjectName(flail).c_str());
         }
     }
     HSM_LOG("rig: %s slot %d = %s (root %s, base %s, tip %s, flail %s)", ObjectName(willie_).c_str(), w, cls.c_str(),
@@ -585,8 +609,11 @@ void FighterRig::FreeGrip(int hand) {
 
 void FighterRig::Drive(const sync::FighterCommand& cmd) {
     if (!StillValid()) return;
+    // The off hand on the shaft rides with the weapon: servoing it as well pulls the shaft sideways against the joint,
+    // and a polearm's tip swings by the length between the hands.
+    const bool offOnShaft = offJoint_ && FieldAt(gripOffset_[1]) == offJoint_;
     for (int i = 0; i < sync::kPoseBones; ++i) {
-        if (!cmd.drive[i]) continue;
+        if (!cmd.drive[i] || (offOnShaft && i == sync::kBoneHandL)) continue;
         setLin_.put(0, ToF(cmd.bones[i].vel)).put(1, false).put(2, bones_[i]);
         setLin_.invoke(mesh_);
         setAng_.put(0, ToF(cmd.bones[i].angVelDeg)).put(1, false).put(2, bones_[i]);
@@ -734,8 +761,10 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
         offJoint_ = nullptr;
         offTryMs_ = -1e18;
     }
-    if (wantOff && (!offJoint_ || FieldAt(gripOffset_[1]) != offJoint_)) {
-        const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (wantOff != offWant_) { offWant_ = wantOff; offWantSinceMs_ = now; }
+    const bool steady = now - offWantSinceMs_ >= (wantOff ? kOffhandAttachMs : kOffhandReleaseMs);
+    if (wantOff && (!offJoint_ || FieldAt(gripOffset_[1]) != offJoint_) && (steady || offJoint_)) {
         if (now - offTryMs_ >= kOffhandRetryMs) {
             offTryMs_ = now;
             UObject* const before = FieldAt(gripOffset_[1]);
@@ -744,7 +773,7 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
             offJoint_ = after && after != before ? after : nullptr;
             HSM_LOG("rig: %s: off hand %s", ObjectName(willie_).c_str(), offJoint_ ? "attached to the shaft" : "attach FAILED");
         }
-    } else if (!wantOff && offJoint_) {
+    } else if (!wantOff && offJoint_ && (steady || !weaponR)) {
         Call br(willie_, "Break L Constraint");
         br.set<bool>("Slide", false);
         br.invoke();
@@ -772,7 +801,9 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
 void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
     UObject* const r = FieldAt(gripOffset_[0]);
     if (r != switchJoint_) { switchJoint_ = r; switchOn_ = false; }
-    if (!r || !weaponR || on == switchOn_) return;
+    // An off-hand joint made again while switched (a re-seat, a re-attach) starts at the unswitched spot: set it again.
+    const bool offRemade = on && switchOn_ && offJoint_ && offJoint_ != switchOffJoint_ && FieldAt(gripOffset_[1]) == offJoint_;
+    if (!r || !weaponR || (on == switchOn_ && !offRemade)) return;
     switchOn_ = on;
     UObject* const grip = ObjField(weaponR, "Grip");
     UObject* const offPos = ObjField(weaponR, "Grip L Hand Off Hand");
@@ -793,6 +824,7 @@ void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
         Call(offJoint_, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0).set("RefPosition", on ? FVector{} : *o).invoke();
         gripLocked_[1] = nullptr;   // HoldOffhand again: the switched hands lock the slide along the shaft
     }
+    switchOffJoint_ = off ? offJoint_ : nullptr;
     HSM_LOG("rig: %s: hands %s along the shaft%s", ObjectName(willie_).c_str(), on ? "switched" : "switched back",
             off ? "" : " (right hand only)");
 }
@@ -891,6 +923,10 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
     const sync::BodyNow& sh = now.bones[sync::kBoneHandR];
     const sync::HeldPose owner = sync::HeldIn(oh.pos, oh.rot, ow.pos, ow.rot);
     const sync::HeldPose mine = sync::HeldIn(sh.pos, sh.rot, now.weapons[0].pos, now.weapons[0].rot);
+    if (offJoint_ && sync::QuatAngleDeg(owner.rot, mine.rot) < kHeldTwoHandDeg && sync::Vec3Dist(owner.pos, mine.pos) < kHeldTwoHandUu) {
+        heldCheck_.Reset();
+        return;
+    }
     if (!heldCheck_.Update(nowMs, owner, mine)) return;
     FTransform keep;
     if (!WorldTransform(wp.root, keep)) return;

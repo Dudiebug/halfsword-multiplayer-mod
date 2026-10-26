@@ -376,7 +376,32 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
     if (UObject* st = FindObject(kPassportStruct, "UserDefinedStruct"))
         if (FProperty* h = FindPropertyPrefix(st, "Height_"); h && PropertySize(h) == sizeof(double)) std::memcpy(&height, from + PropertyOffset(h), sizeof height);
     if (!std::isfinite(height)) height = 0.5;
+    if (muscleTier_ >= 0) ApplyMuscle(willie, dst);
     return true;
+}
+
+// The rank's build on the spawned fighter's own copy of the passport (never the save or the generator's). Weight is
+// taken to run 0..1 like Height; any other value is left alone and logged, so a test log shows the real range.
+void Adapter::ApplyMuscle(UObject* willie, FProperty* passport) {
+    UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
+    FProperty* w = st ? FindPropertyPrefix(st, "Weight_") : nullptr;
+    if (!w || PropertySize(w) != sizeof(double)) {
+        static bool logged = false;
+        if (!logged) HSM_LOG("adapter: the passport has no double Weight; builds stay as they are");
+        logged = true;
+        return;
+    }
+    uint8_t* at = reinterpret_cast<uint8_t*>(willie) + PropertyOffset(passport) + PropertyOffset(w);
+    double own = 0;
+    std::memcpy(&own, at, sizeof own);
+    if (!std::isfinite(own) || own < 0.0 || own > 1.0) {
+        HSM_LOG("adapter: %s's passport Weight is %.3f, outside 0..1; build left as it is", ObjectName(willie).c_str(), own);
+        return;
+    }
+    const double want = MuscleFor(own, muscleTier_);
+    if (want == own) return;
+    std::memcpy(at, &want, sizeof want);
+    HSM_LOG("adapter: %s built for tier %d (Weight %.2f -> %.2f)", ObjectName(willie).c_str(), muscleTier_, own, want);
 }
 
 UObject* Adapter::SpawnFighter(const SpawnOptions& o) {

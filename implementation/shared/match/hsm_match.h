@@ -7,6 +7,7 @@
 //   PartitionSides / PickRespawn - team spawn sides and respawn points
 #pragma once
 #include "session/hsm_spawn.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -35,6 +36,11 @@ struct MatchConfig {
 // Equipment Budget per tier, from BP_GameManager.Generate_Random_Characters: random gear is rolled within it.
 inline constexpr int kTierBudget[8] = {0, 15, 50, 100, 250, 444, 666, 888};
 
+// A fighter's build (the passport's Weight, 0..1, like Height) by Enum_Ranks tier: the higher the rank fought at, the
+// more muscle. A fighter already built heavier keeps their own build: MuscleFor never lowers it.
+inline double MuscleForTier(int tier) { return 0.2 + 0.8 * double(std::clamp(tier, 0, 7)) / 7.0; }
+inline double MuscleFor(double own, int tier) { return std::max(own, MuscleForTier(tier)); }
+
 inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Format::Zombies; }
 inline int TeamCount(Format f) { return f == Format::TwoTeams ? 2 : f == Format::ThreeTeams ? 3 : IsBotFormat(f) ? 2 : 0; }
 inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5 : f == Format::Duel ? 3 : 10; }
@@ -60,7 +66,7 @@ Rgba TeamColor(int team);             // a == 0: no tint (free-for-all keeps pla
 
 class KillLog {
 public:
-    static constexpr uint32_t kWindowMs = 10000;
+    static constexpr uint32_t kWindowMs = 60000;   // a bleed-out often comes long after the last blow (CSLewin's PR #1: 10 s lost kills)
     void OnHit(uint8_t victim, uint8_t attacker, uint32_t nowMs);
     uint8_t KillerOf(uint8_t victim, uint32_t nowMs) const;   // 0 = nobody within the window
     void Forget(uint8_t entity);
@@ -70,6 +76,7 @@ private:
 };
 
 enum class MatchPhase : uint8_t { Idle = 0, Countdown = 1, Live = 2, SuddenDeath = 3, Results = 4 };
+inline bool CombatPhase(MatchPhase phase) { return phase == MatchPhase::Live || phase == MatchPhase::SuddenDeath; }   // blows count
 
 struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = true; };
 
@@ -95,6 +102,10 @@ public:
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
     // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
     bool Forfeit(uint8_t entity, uint32_t nowMs);
+    // Players vs bots (Progression co-op): a living human gives up the fight (held G), as if they had fallen. With every
+    // human down that way the bots win and the match ends. False, and no effect, in a PvP format, outside a fought phase,
+    // for a bot or for a fighter already dead.
+    bool GiveUpFight(uint8_t entity, uint32_t nowMs);
     // Duel: the round being fought is drawn (nobody can finish it, hsm_draw.h): over now with no point to anyone, and the
     // usual gap before every fighter respawns. False, and no effect, outside Duel or outside a fought round.
     bool Draw(uint32_t nowMs);

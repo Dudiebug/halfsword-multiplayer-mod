@@ -148,6 +148,9 @@ private:
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)
     ue::UObject* switchJoint_ = nullptr;                     // the right hand joint ApplySwitch last set
     bool switchOn_ = false;                                  // ... and whether it set it switched
+    ue::UObject* switchOffJoint_ = nullptr;                  // the off-hand joint ApplySwitch last moved
+    bool offWant_ = false;                                   // the owner's offhand grip as last seen ...
+    double offWantSinceMs_ = 0;                              // ... and since when (kOffhandAttachMs / kOffhandReleaseMs)
     ue::UObject* seatJoint_ = nullptr;                       // the right hand joint ApplySeat last seated
     uint8_t seatKey_ = 0;                                    // ... and the owner's toggles it was seated for (SeatKey)
     sync::HeldCheck heldCheck_;                              // ApplyHeld: the stand-in's seat against the owner's

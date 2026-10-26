@@ -593,6 +593,16 @@ private:
     bool InFightLevel() const { return !currentLevel_.empty() && !IsMenuLevel(currentLevel_); }
     // Matches run in fight levels, not in the Tavern hub where players walk around between fights.
     bool MatchLevel() const { return InFightLevel() && currentLevel_.find("Hub") == std::string::npos; }
+    // A level with fighters in it. Not the Progression hub: outside Free Mode the Tavern is the game's menu-like hub
+    // (character creation, the next fight's pick), with no pawn and a mouse cursor. Test 2026-10-25: the mod spawned a
+    // fighter there after 15 s, took the cursor away (game-only input) and set the travel's game mode back over the
+    // hub's own, so both players sat in the character screen unable to click while their spawned fighters died.
+    bool FighterLevel() const { return InFightLevel() && !progressionHub_; }
+    // On a match level no blow between session fighters counts before the match is live or after it ended (from
+    // CSLewin's PR #1): a fighter hit while the others were still loading or in the countdown died before it began.
+    bool CombatEnabled() const {
+        return !MatchLevel() || CombatPhase(IsHost() ? match_.phase() : MatchPhase(info_.phase));
+    }
     std::string MyName() const { return steamMode() ? steam::PersonaName(steam::MySteamId()) : cfg_.playerName; }
 
     // ------------------------------------------------------------------ agent bridge (sensors/actuators)
@@ -700,7 +710,7 @@ private:
     // An owner-sync client waits for its level gate instead (the gate's exit spawns the announced fighter) and is
     // only the short fallback after it (LocalFighterGrace).
     void EnsureLocalFighter() {
-        if (!(net_ || automated_) || !InFightLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
+        if (!(net_ || automated_) || !FighterLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
         double graceMs = 0;
         if (!LocalFighterGrace(net_ && !IsHost() && OwnerMode(), levelGate_.Open(), graceMs)) { noPawnSince_ = 0; return; }
         uint32_t now = NowMs();
@@ -852,6 +862,8 @@ private:
 
     void OnLevelLoaded() {
         currentLevel_ = ObjectName(OuterOf(OuterOf(lastGameMode_)));   // GameMode -> PersistentLevel -> World
+        progressionHub_ = InFightLevel() && currentLevel_.find("Hub") != std::string::npos && !adapter_.FreeModeActive();
+        if (progressionHub_) HSM_LOG("session: %s is the Progression hub; no fighters, the game keeps its own input", currentLevel_.c_str());
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
         ui::ChatDrop("level change");   // the new level's controller starts with the game's input
         agent::VmHookFlush();
@@ -861,22 +873,24 @@ private:
         haveSnapshot_ = false; snappedOwn_ = false; picksValid_ = false;
         held_.fill(Held{});                          // agent-held axes do not carry into the next level
         groundValid_ = false; foesStopped_ = false;
-        if (InFightLevel() && !fightSettings_.empty()) {   // a session fight: the mode its travel set, whatever the load did
+        if (FighterLevel() && !fightSettings_.empty()) {   // a session fight: the mode its travel set, whatever the load did
             const std::string changed = game::ChangedGameSettings(fightSettings_);
             if (!changed.empty())
                 HSM_LOG("session: the level load changed the fight's settings (%s); set back (%zu)", changed.c_str(),
                         game::ApplyGameSettings(fightSettings_));
         }
         oneFight_ = InFightLevel() && !adapter_.FreeModeActive();   // a client has the host's GI settings (Travel) by now
+        // Fighters are built for the lobby's tier (both sides read it from the Steam lobby); MatchInfo keeps it current.
+        adapter_.SetMuscleTier(steamMode() && lobby_.InLobby() && MatchLevel() ? int(lobby_.config().tier) : -1);
         if (!InFightLevel()) RestoreFoes();
-        inputFixAt_ = net_ && InFightLevel() ? NowMs() + 1500 : 0;
-        probeSince_ = InFightLevel() ? std::max(NowMs(), 1u) : 0;
+        inputFixAt_ = net_ && FighterLevel() ? NowMs() + 1500 : 0;
+        probeSince_ = FighterLevel() ? std::max(NowMs(), 1u) : 0;
         severedSent_.clear(); worldTracker_ = WorldTracker{}; worldView_ = WorldView{}; jitter_.clear(); placed_.clear();
         hitKind_.clear(); fighterOfFrame_.clear(); otherActorOffset_.clear();   // the old level's classes and functions are gone
         spawnIgnore_.clear();
         // Host side: every actor of the old level is gone.
         for (Fighter& f : fighters_) { f.actor.Clear(); f.input.ReleaseAll(); f.wasDead = false; }
-        director_.OnLevel(InFightLevel(), NowMs(), travelSeq_);
+        director_.OnLevel(FighterLevel(), NowMs(), travelSeq_);
         bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; feed_.clear(); banner_.Reset();
         tints_.clear();
         ownDeadPending_ = false; ownDiedAt_ = 0; mirrorBlob_.clear(); ownBlob_ = 0;
@@ -885,7 +899,7 @@ private:
         levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
         // Owner sync, client: the stock pawn the level gives player 0 is replaced by the dressed fighter the host
         // announces, once the level's own start-up cleanup is over (ClientGateOpen).
-        if (net_ && !IsHost() && OwnerMode() && InFightLevel()) ownDeadPending_ = true;
+        if (net_ && !IsHost() && OwnerMode() && FighterLevel()) ownDeadPending_ = true;
         // Owner sync: every stand-in died with the level (the feeds stay: their owners keep streaming).
         for (uint8_t e = 1; e <= kMaxWillies; ++e) { standIns_.Detach(e); severs_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); }
         gore_.Clear();
@@ -926,7 +940,8 @@ private:
             else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(HitClaimMsg{c}), true);
         };
         env.allowed = [this](uint8_t attacker, uint8_t victim) {
-            return HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
+            return CombatEnabled() &&
+                   HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
         };
         env.prop = [this](UObject* actor, game::PropSync::Touch& out) { return props_.PropOf(actor, out); };
         env.propActor = [this](uint64_t id) { return props_.ActorOf(id); };
@@ -969,7 +984,7 @@ private:
             else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
         };
         sev.allowed = [this](uint8_t attacker, uint8_t victim) {
-            return HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
+            return CombatEnabled() && HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
         };
         sev.nativeShown = [this](uint8_t e, uint8_t part) { gore_.NoteNativeSever(e, part); };
         sev.nativeLost = [this](uint8_t e, uint8_t part) { gore_.NoteNativeLost(e, part); };
@@ -979,10 +994,12 @@ private:
         gore_.Start(adapter_, std::move(gore));
         standIns_.SetDeadBones([this](uint8_t e) { return gore_.DeadBones(e); });
         standIns_.SetHeldWeapons([this](uint8_t e) { return severs_.HeldWeapons(e); });   // its blades held in my fighter
+        standIns_.SetHeldBones([this](uint8_t e) { return grabs_.HeldBones(e); });        // its bones held by my fighter's grab
         game::GrabSync::Env genv;
         genv.standInEntity = [this](const UObject* w) { return standIns_.EntityOf(w); };
         genv.standInActor = [this](uint8_t e) { return standIns_.ActorOf(e); };
         genv.dead = [this](uint8_t e) { const VitalsMsg* v = standIns_.Vitals(e); return v && (v->flags & 1); };
+        genv.down = [this](uint8_t e) { const VitalsMsg* v = standIns_.Vitals(e); return v && ((v->flags & 7) || v->health <= 0.f); };
         genv.send = [this](const std::vector<uint8_t>& b, bool reliable) {
             const uint8_t chan = reliable ? kChanReliable : kChanUnreliable;
             if (!net_) return;
@@ -1007,7 +1024,7 @@ private:
         penv.deadBones = [this](uint8_t e) { return gore_.DeadBones(e); };
         penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
         // Level props: the host censuses a fight level from its first tick in it; a client matches once its level gate is open.
-        penv.fightLevel = [this] { return InFightLevel() && (IsHost() || levelGate_.Open()); };
+        penv.fightLevel = [this] { return FighterLevel() && (IsHost() || levelGate_.Open()); };
         props_.Start(adapter_, standIns_, std::move(penv));
     }
 
@@ -1130,7 +1147,7 @@ private:
     // Owner sync, host: a client's stand-in the game destroyed while the client is still live is spawned again where it
     // was announced (at most every RecreateLimiter::kRetryMs); the servo then snaps it onto the client's stream.
     void RecoverLostStandIns(double now) {
-        if (!InFightLevel()) return;
+        if (!FighterLevel()) return;
         for (uint8_t slot = 1; slot < kMaxFighters; ++slot) if (fighters_[slot].actor.obj) FighterActor(slot);   // records losses
         for (auto it = lostSlots_.begin(); it != lostSlots_.end();) {
             const uint8_t slot = *it, e = Roster::EntityForSlot(slot);
@@ -1284,7 +1301,7 @@ private:
     // the next non-fight level or when the session ends.
     void RememberFoes() { if (savedFoes_ < 0) savedFoes_ = adapter_.FreeModeFoes(); }
     void StopStockFoes() {
-        if (foesStopped_ || !InFightLevel() || IsBotFormatHere()) return;
+        if (foesStopped_ || !FighterLevel() || IsBotFormatHere()) return;
         foesStopped_ = true;
         adapter_.SetFreeModeFoes(0);
         HSM_LOG("session: stock Free Mode foes stopped for this fight");
@@ -1775,6 +1792,7 @@ private:
         uint8_t ve = owner ? OwnedEntityOf(victim) : LocalEntityOf(victim);
         uint8_t ae = !attacker ? 0 : owner ? OwnedEntityOf(attacker) : LocalEntityOf(attacker);
         if (!ve) return false;                        // not a session fighter (e.g. a stock foe being removed), or a stand-in
+        if (!CombatEnabled()) { ++hitsBlocked_; return true; }
         bool ff = IsHost() ? match_.config().friendlyFire : info_.friendlyFire;
         if (!HitAllowed(true, ae ? KnownTeam(ae) : kNoTeam, KnownTeam(ve), ff)) { ++hitsBlocked_; return true; }
         if (ae && ae != ve) {
@@ -2109,6 +2127,14 @@ private:
     // Held G: the fighter concedes the Duel round being fought (Match::Forfeit); the feed says they gave up. In the bot
     // formats' break between waves it is the player's vote to skip the break (Match::VoteSkip).
     void HandleGiveUp(uint8_t e, uint32_t now) {
+        if (progression_ && !InWaveBreak(info_) && match_.GiveUpFight(e, now)) {
+            HSM_LOG("match: #%u gave up the Progression fight", e);
+            Kill k; k.victim = e; k.flags = 8;
+            net_->Broadcast(kChanReliable, Encode(k), true);
+            PushFeed(k);
+            infoDirty_ = true;
+            return;
+        }
         if (IsBotFormat(match_.config().format)) {
             if (!match_.VoteSkip(e, now)) { HSM_LOG("match: #%u held G, but there is no break to skip (or it already voted)", e); return; }
             HSM_LOG("match: #%u votes to skip the break (%zu/%zu)", e, match_.SkipVotes(), match_.SkipVotesNeeded());
@@ -2180,7 +2206,10 @@ private:
         const bool duel = info_.format == uint8_t(Format::Duel) && fought && !InRoundGap(info_) && own && !adapter_.IsDead(own) &&
                           EntityAlive(MyEntity());
         const bool skip = InWaveBreak(info_);
-        if (MatchLevel() && (duel || skip) && !ui::Typing()) {
+        // Progression co-op: the stock give-up screen is suppressed, so a downed player gives up with G instead.
+        const bool coop = oneFight_ && info_.format == uint8_t(Format::PlayersVsBots) && fought && !skip && own &&
+                          !adapter_.IsDead(own) && EntityAlive(MyEntity());
+        if (MatchLevel() && (duel || skip || coop) && !ui::Typing()) {
             if (GetAsyncKeyState('G') & 0x8000) {   // the key first: asking whose window is in front is the dearer call
                 DWORD pid = 0;
                 if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
@@ -2189,7 +2218,8 @@ private:
         }
         if (!giveUp_.Update(down, now)) return;
         const uint8_t me = MyEntity();
-        HSM_LOG("match: G held %u ms: %s (#%u)", unsigned(GiveUpHold::kHoldMs), skip ? "voting to skip the break" : "giving up the round", me);
+        HSM_LOG("match: G held %u ms: %s (#%u)", unsigned(GiveUpHold::kHoldMs),
+                skip ? "voting to skip the break" : coop ? "giving up the fight" : "giving up the round", me);
         if (IsHost()) HandleGiveUp(me, now);
         else if (hostPeer_) { GiveUpMsg g; g.entity = me; net_->Send(hostPeer_, kChanReliable, Encode(g), true); }
     }
@@ -2607,15 +2637,16 @@ private:
                 } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
             }
         });
-        // Only fights have steady host traffic (snapshots); menus and loading screens never count as silence.
-        if (welcomed_ && InFightLevel()) {
+        // Only fights have steady host traffic (snapshots); menus, the Progression hub and loading screens never count
+        // as silence.
+        if (welcomed_ && FighterLevel()) {
             HostLossAction a = hostLoss_.Tick(NowMs());
             if (a == HostLossAction::ShowReconnecting) HSM_LOG("client: host silent; waiting for it to come back");
             hostGone = hostGone || a == HostLossAction::ReturnToMenu;
         } else hostLoss_.OnPacket(NowMs());
         if (hostGone) { ReturnToMenuAfterHostLoss(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
-        if (!welcomed_ || !InFightLevel()) { myWillie_.store(nullptr); return; }
+        if (!welcomed_ || !FighterLevel()) { myWillie_.store(nullptr); return; }
         if (OwnerMode() && !ClientGateOpen()) { myWillie_.store(adapter_.PlayerWillie(0)); return; }
         if (OwnerMode()) RecoverLostPuppets();
         CreatePuppets();
@@ -2894,6 +2925,7 @@ private:
             }
             case MsgType::MatchInfo: {
                 MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
+                if (MatchLevel()) adapter_.SetMuscleTier(info_.tier);
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
                 if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) ClearDroppedWeapons();
                 break;
@@ -3016,6 +3048,7 @@ private:
     UObject* lastGameMode_ = nullptr;
     int32_t lastGameModeIndex_ = -1;
     std::string currentLevel_;
+    bool progressionHub_ = false;   // currentLevel_ is the Tavern outside Free Mode (FighterLevel)
     float sendAccum_ = 0;
     uint32_t travelSeq_ = 0;
     std::string pendingLevel_;

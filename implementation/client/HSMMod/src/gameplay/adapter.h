@@ -84,7 +84,9 @@ public:
     bool FreeModeActive();
     void PrepareFreeModeFight(int foes = -1);
     int FreeModeFoes();                                    // GI "Free Mode Foes Amount", -1 if unreadable
-    void SetFreeModeFoes(int foes);                           // GI settings the stock arena select uses for a Free Mode fight
+    void SetFreeModeFoes(int foes);
+    // Every fighter spawned from now on gets at least this tier's build (MuscleFor); -1: their own build.
+    void SetMuscleTier(int tier) { muscleTier_ = tier; }                           // GI settings the stock arena select uses for a Free Mode fight
     void QuitGame();
     bool GamePaused();
     void SetGamePaused(bool paused);
@@ -144,6 +146,7 @@ public:
     std::wstring SaveGamesDir();   // <Saved>/SaveGames/ (sweeps temporary slots left by a crash the first time); empty before the engine is up
 
 private:
+    int muscleTier_ = -1;
     bool TraceLine(const ue::FVector& start, const ue::FVector& end, const std::vector<ue::UObject*>& ignore, ue::FVector* impact,
                    std::string* hitName);
     bool ResolveBones(ue::UObject* mesh);
@@ -152,6 +155,7 @@ private:
     std::wstring saveDir_;
     uint32_t slotCounter_ = 0;
     bool CopyPassport(ue::UObject* willie, const SpawnOptions& o, double& height);
+    void ApplyMuscle(ue::UObject* willie, ue::FProperty* passport);
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
     ue::UObject* world_ = nullptr;
