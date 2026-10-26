@@ -196,11 +196,10 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   `sync_mode=host` only.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
-- Direct-IP (ENet) sessions have no lobby, so they always play Free-for-all with default settings.
+- Direct-IP (ENet) sessions have no lobby, so they play Free-for-all with default settings (Progression co-op
+  outside Free Mode).
 - Next: a spectator host (`role=server`): the retail game plus this mod hosting with no fighter of its own and
   automatic match start/rotation. It is a hosted retail instance, not a dedicated server build.
 - `sync_mode=host`: no client prediction (the client's own Willie responds with one round trip of delay); weapon
   transforms, grab constraints, dismemberment, gore and level props are not synced, and blocking hit delegates mutes
   client-side hit sounds and blood.
-- SaveGame bytes returned by the engine are copied and left on the engine heap (a few KB per export, at most once
-  per level per player).
