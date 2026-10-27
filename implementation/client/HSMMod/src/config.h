@@ -6,7 +6,7 @@
 
 namespace hsm {
 // Steam: lobby-driven (Multiplayer button on the main menu; lobby owner hosts). Host/Client: direct IP via ENet.
-enum class Role { Off, Steam, Host, Client };
+enum class Role { Off, Steam, Host, Client, Server };   // Server: a hosted retail instance with no fighter of its own, auto-starting matches
 
 struct Config {
     Role role = Role::Steam;
@@ -24,6 +24,19 @@ struct Config {
     bool standInGripLock = true;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
     // true: the host starts a match even while another player runs a different mod build (testing only).
     bool allowBuildMismatch = false;
+    // In-game bug reports ("/report" in the chat; net/report_client.h). Nothing is sent without the player's command.
+    // true: other fighters' names float over their heads in a match (name_tags=0 turns them off).
+    bool nameTags = true;
+    bool reports = true;
+    std::string reportUrl = "https://reports.dutybug.net";
+    // role=server only (see session/hsm_autoflow.h). transport: "direct" (ENet on `port`) or "steam" (experimental).
+    std::string serverTransport = "direct";
+    std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
+    std::string serverMaps = "all";            // comma list of map display names, or all
+    int serverScoreLimit = 0;                  // 0: the format's default
+    int serverTimeLimitS = 0;                  // 0: none
+    int serverCountdownS = 30;                 // lobby countdown once serverMinPlayers have joined
+    int serverMinPlayers = 2;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

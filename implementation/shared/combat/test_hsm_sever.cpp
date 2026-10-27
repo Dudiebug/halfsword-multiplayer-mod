@@ -207,15 +207,15 @@ static void TestSeverMalformed() {
     std::vector<uint8_t> huge(kMaxPacket + 1, 0); std::memcpy(huge.data(), b.data(), b.size());
     CHECK(!Decode(huge.data(), huge.size(), out));
 
-    // Fixed offsets: header 4, claimId 4 -> attacker at 8, victim at 9, ts 10..13, part at 14.
+    // Fixed offsets: header 4, claimId 4 -> attacker at 8, victim at 9, victimLife 10, ts 11..14, part at 15.
     CHECK(DecodePatched(c, 8, 3));                    // control: a different valid attacker still decodes
     CHECK(!DecodePatched(c, 8, 0));
     CHECK(!DecodePatched(c, 8, uint8_t(kMaxWillies + 1)));
     CHECK(!DecodePatched(c, 9, 0));
     CHECK(!DecodePatched(c, 9, uint8_t(kMaxWillies + 1)));
     CHECK(!DecodePatched(c, 8, c.victim));            // attacker == victim
-    CHECK(DecodePatched(c, 14, 14));                  // control: the last part
-    CHECK(!DecodePatched(c, 14, 15));
+    CHECK(DecodePatched(c, 15, 14));                  // control: the last part
+    CHECK(!DecodePatched(c, 15, 15));
 
     // Field-level rejects through the encoder.
     SeverClaim bad = c; bad.attachMarker = "";
@@ -310,7 +310,7 @@ static void TestSeverNoticeWire() {
     std::vector<uint8_t> ownAsClaim = Encode(SeverClaimMsg{n});   // one fighter, but typed as a claim: not a notice
     CHECK(!DecodeNotice(ownAsClaim, out));
 
-    // Fixed offsets as the claim: attacker at 8, victim at 9, part at 14.
+    // Fixed offsets as the claim: attacker at 8, victim at 9, part at 15 (victimLife at 10).
     auto patched = [&](std::initializer_list<std::pair<size_t, uint8_t>> at) {
         std::vector<uint8_t> p = b;
         for (auto [i, v] : at) if (i < p.size()) p[i] = v;
@@ -323,8 +323,8 @@ static void TestSeverNoticeWire() {
     CHECK(!patched({{8, 0}, {9, 0}}));
     CHECK(!patched({{8, uint8_t(kMaxWillies + 1)}, {9, uint8_t(kMaxWillies + 1)}}));
     CHECK(patched({{8, uint8_t(kMaxWillies)}, {9, uint8_t(kMaxWillies)}}));
-    CHECK(patched({{14, 14}}));                               // control: the last part
-    CHECK(!patched({{14, 15}}));
+    CHECK(patched({{15, 14}}));                               // control: the last part
+    CHECK(!patched({{15, 15}}));
 
     // Hostile bytes.
     for (size_t k = 0; k < b.size(); ++k) { std::vector<uint8_t> t(b.begin(), b.begin() + long(k)); CHECK(!DecodeNotice(t, out)); }

@@ -17,6 +17,8 @@ namespace {
 
 constexpr const char* kHookOwner = "fxsync";
 constexpr uint64_t kLogFirst = 10;   // the first reports and replays are logged in full (test evidence)
+constexpr size_t kMaxVoiceCueCache = 256;       // allowlist: max cached voice cues
+constexpr double kVoiceRateMin = 0.0, kVoiceRateMax = 2.0;  // clamp voice rate
 
 FVector ToF(const sync::V3& v) { return FVector{v.x, v.y, v.z}; }
 sync::V3 ToV(const FVector& v) { return sync::V3{v.x, v.y, v.z}; }
@@ -383,11 +385,17 @@ void FxSync::Apply(const PaintFxMsg& m) {
 // The owner's cue on the stand-in's own Voice Audio, then its Helmet Muffle Voice (the low-pass a helmet puts on it).
 void FxSync::ApplyVoice(const PaintFxMsg& m, UObject* standIn) {
     UObject* const* audio = Field<UObject*>(standIn, "Voice Audio");
+    // Clamp rate to safe range
+    double rate = Clamp(m.rate, kVoiceRateMin, kVoiceRateMax);
+    // Cap the cue cache: erase oldest if exceeding limit
+    if (cues_.size() >= kMaxVoiceCueCache) {
+        cues_.erase(cues_.begin());
+    }
     UObject*& sound = cues_[m.bone];
     if (!sound) sound = FindObject(m.bone, "SoundCue");
     if (!audio || !*audio || !sound) { Count(false, m); return; }
     Call(*audio, "SetSound").set<UObject*>("NewSound", sound).invoke();
-    Call(*audio, "SetVolumeMultiplier").set<float>("NewVolumeMultiplier", float(m.rate)).invoke();
+    Call(*audio, "SetVolumeMultiplier").set<float>("NewVolumeMultiplier", float(rate)).invoke();
     Call play(*audio, "Play");
     bool ok = play.set<float>("StartTime", 0.0f).invoke();
     {

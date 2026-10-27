@@ -114,6 +114,7 @@ struct HitClaim {
     StrikerKind striker = StrikerKind::Fighter;
     uint64_t propId = 0;                // Prop: the prop (session/hsm_lease.h ids); 0 for a fighter
     V3 propVelocity;                    // Prop: its velocity at the contact, in the hit bone's frame; zero for a fighter
+    uint8_t victimLife = 0;             // rev 19: the Spawn.life of the victim body the attacker saw (0 = unknown); a stale one is dropped
 };
 
 // The world-space "Deal Complex Damage" call inputs, same fields as the decompiled signature
@@ -581,6 +582,7 @@ inline void PutClaim(hsm::Writer& w, const HitClaim& m) {
     w.u8(uint8_t(m.striker));
     w.u64(m.propId);
     PutV3(w, m.propVelocity);
+    w.u8(m.victimLife);
 }
 
 inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
@@ -612,6 +614,7 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
     const uint8_t strikerRaw = r.u8();
     m.propId = r.u64();
     numOk &= GetV3(r, m.propVelocity);
+    m.victimLife = r.u8();
 
     if (!r.done() || !numOk) return false;
     if (lt > 1 || dpb > 1 || ehv > 1 || hasBox > 1) return false;

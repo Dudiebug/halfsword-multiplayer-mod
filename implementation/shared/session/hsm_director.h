@@ -72,10 +72,13 @@ public:
         uint8_t e = Roster::EntityForSlot(slot);
         return live_.erase(e) ? e : 0;
     }
-    void OnReady(uint8_t slot, uint32_t travelSeq, uint32_t nowMs) {
+    // currentSeq: the host's present travel (0 = not checked). A Ready for an older travel (a client that finished loading
+    // the previous level late) is noted but does not make the slot ready for the level now loading.
+    void OnReady(uint8_t slot, uint32_t travelSeq, uint32_t nowMs, uint32_t currentSeq = 0) {
         auto it = slots_.find(slot);
         if (it == slots_.end()) return;
         it->second.readySeq = travelSeq;
+        if (currentSeq && travelSeq != currentSeq) return;
         if (!it->second.ready) { it->second.ready = true; it->second.readyAt = nowMs; }
     }
     void OnBlob(uint8_t slot, uint32_t blobId) { auto it = slots_.find(slot); if (it != slots_.end()) it->second.blobId = blobId; }

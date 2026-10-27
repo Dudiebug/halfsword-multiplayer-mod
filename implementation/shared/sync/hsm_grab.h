@@ -235,7 +235,17 @@ public:
         fresh.retiredUntilMs = nowMs + kGrabLeaseMs;
         s = fresh;
     }
-    void Clear() { slots_ = {}; }
+    // Every hold is dropped, but what was retired stays retired and the highest ids heard are remembered: a refresh of a
+    // grab made before still on its way (or a stream replayed after a pause) must not bring it back.
+    void Clear() {
+        for (Slot& s : slots_) {
+            Slot fresh;
+            fresh.topId = s.topId;
+            fresh.retiredUpTo = s.retiredUpTo;
+            fresh.retiredUntilMs = s.retiredUntilMs;
+            s = fresh;
+        }
+    }
 
 private:
     struct Break { uint32_t grabId = 0; bool far = false, broken = false; double farSinceMs = 0; };

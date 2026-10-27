@@ -60,6 +60,7 @@ inline uint8_t KillLog::KillerOf(uint8_t victim, uint32_t nowMs) const {
     return it != last_.end() && nowMs - it->second.at <= kWindowMs ? it->second.attacker : 0;
 }
 inline void KillLog::Forget(uint8_t entity) { last_.erase(entity); }
+inline void KillLog::ForgetAttacker(uint8_t entity) { std::erase_if(last_, [&](const auto& kv) { return kv.second.attacker == entity; }); }
 
 inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs) {
     cfg_ = Sanitize(cfg); fighters_.clear(); score_.clear(); winner_ = kNoWinner; endedPending_ = false; ResetModeState();
@@ -71,7 +72,20 @@ inline void Match::AddFighter(const FighterInfo& f) {
     F x; x.team = f.team; x.human = f.human; fighters_[f.entity] = x;
     if (!f.human && spawnOwed_ > 0) --spawnOwed_;
 }
-inline void Match::RemoveFighter(uint8_t entity) { fighters_.erase(entity); skipVotes_.erase(entity); }
+inline void Match::RemoveFighter(uint8_t entity) {
+    fighters_.erase(entity); skipVotes_.erase(entity); gone_.erase(entity);
+    if (cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel) score_.erase(int(entity));   // teams keep their score
+}
+
+inline bool Match::Leave(uint8_t entity, uint32_t nowMs) {
+    auto it = fighters_.find(entity);
+    if (it == fighters_.end() || !CombatPhase(phase_)) return false;
+    const bool wasAlive = it->second.alive;
+    if (wasAlive) OnDeath(entity, 0, nowMs);
+    gone_.insert(entity);
+    return wasAlive;
+}
+inline void Match::Return(uint8_t entity) { gone_.erase(entity); }
 
 inline int Match::ScoreKeyOf(uint8_t entity) const { return cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel ? int(entity) : int(TeamOf(entity)); }
 
@@ -96,10 +110,37 @@ inline int Match::UniqueLeader() const {
     return tie ? kNoWinner : best;
 }
 
+inline void Match::ResolveDuelRound(uint32_t nowMs) {
+    if (roundOver_) return;
+    int alive = 0; uint8_t last = 0;
+    for (const auto& [e, f] : fighters_) if (f.alive) { ++alive; last = e; }
+    if (alive > 1) return;
+    roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = last;                 // 0: nobody standing, a drawn round
+    if (alive == 1) {
+        AddPoints(ScoreKeyOf(last), 1);
+        if (Score(ScoreKeyOf(last)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(last), nowMs);
+        else if (phase_ == MatchPhase::SuddenDeath) { int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
+    }
+}
+
 inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     auto it = fighters_.find(victim);
     if (it == fighters_.end() || !it->second.alive) return;          // unknown or already dead (repeat report)
     F& v = it->second;
+    // K7: two kills in one host tick (a trade at the score limit): the first one ended the match, the second still counts.
+    // Level on the limit, neither wins yet: sudden death, the next kill decides.
+    if (phase_ == MatchPhase::Results && endedPending_ && nowMs == phaseStart_ && winner_ != kNoWinner &&
+        (cfg_.format == Format::FreeForAll || TeamCount(cfg_.format) > 0) && !IsBotFormat(cfg_.format)) {
+        v.alive = false; v.diedAt = nowMs; ++v.deaths;
+        auto k = fighters_.find(killer);
+        if (killer == victim || k == fighters_.end() || (cfg_.format != Format::FreeForAll && k->second.team == v.team)) return;
+        AddPoints(ScoreKeyOf(killer), 1); ++k->second.kills;
+        const int key = ScoreKeyOf(killer);
+        if (key == winner_) return;
+        if (Score(key) > Score(winner_)) winner_ = key;
+        else if (Score(key) == Score(winner_)) { phase_ = MatchPhase::SuddenDeath; phaseStart_ = nowMs; winner_ = kNoWinner; endedPending_ = false; }
+        return;
+    }
     v.alive = false; v.diedAt = nowMs;
     bool scoring = phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath;
     if (!scoring) return;
@@ -108,16 +149,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     auto kit = fighters_.find(killer);
     if (cfg_.format == Format::Duel) {                     // rounds go to the last one standing, not to kills
         if (kit != fighters_.end() && killer != victim) ++kit->second.kills;
-        if (roundOver_) return;
-        int alive = 0; uint8_t last = 0;
-        for (const auto& [e, f] : fighters_) if (f.alive) { ++alive; last = e; }
-        if (alive > 1) return;
-        roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = last;                 // 0: nobody standing, a drawn round
-        if (alive == 1) {
-            AddPoints(ScoreKeyOf(last), 1);
-            if (Score(ScoreKeyOf(last)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(last), nowMs);
-            else if (phase_ == MatchPhase::SuddenDeath) { int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
-        }
+        ResolveDuelRound(nowMs);
         return;
     }
     if (killer == victim) { if (!pvb) AddPoints(ScoreKeyOf(victim), -1); }                    // suicide
@@ -276,10 +308,14 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
     if (endedPending_) { ev.ended = true; endedPending_ = false; }    // ended during this Tick (time limit)
     if (phase_ == MatchPhase::Idle || phase_ == MatchPhase::Results) return ev;
     if (cfg_.format == Format::Duel) {
+        if (phase_ == MatchPhase::Countdown)                            // F2: a fall before the fight would never see a round reset
+            for (auto& [e, f] : fighters_)
+                if (!f.alive && f.human && !gone_.count(e) && nowMs - f.diedAt >= 1000u) { f.alive = true; ev.respawn.push_back(e); }
         if (roundOver_ && nowMs - roundEnd_ >= uint32_t(cfg_.respawnDelayS) * 1000u) {
             roundOver_ = false; roundWinner_ = 0; ++round_; ev.roundReset = true;
-            for (auto& [e, f] : fighters_) { f.alive = true; ev.respawn.push_back(e); }
+            for (auto& [e, f] : fighters_) { if (gone_.count(e)) continue; f.alive = true; ev.respawn.push_back(e); }
         }
+        if (!roundOver_ && !gone_.empty() && CombatPhase(phase_)) ResolveDuelRound(nowMs);   // the opponent left: the round is the survivor's
         return ev;
     }
     if (IsBotFormat(cfg_.format)) {
@@ -297,7 +333,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
                 return ev;
             }
             inBreak_ = true; breakStart_ = nowMs;
-            for (const auto& [e, f] : fighters_) if (f.human && !f.alive) ev.respawn.push_back(e);
+            for (const auto& [e, f] : fighters_) if (f.human && !f.alive && !gone_.count(e)) ev.respawn.push_back(e);
             return ev;
         }
         int room = kMaxBotsAlive - alive - spawnOwed_;
@@ -306,7 +342,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         return ev;
     }
     for (const auto& [e, f] : fighters_)
-        if (!f.alive && f.human && nowMs - f.diedAt >= uint32_t(cfg_.respawnDelayS) * 1000u) ev.respawn.push_back(e);
+        if (!f.alive && f.human && !gone_.count(e) && nowMs - f.diedAt >= uint32_t(cfg_.respawnDelayS) * 1000u) ev.respawn.push_back(e);
     return ev;
 }
 
@@ -380,7 +416,7 @@ inline void Match::StartWave(uint32_t nowMs, Events& ev) {
 }
 inline void Match::ResetModeState() {
     wave_ = 0; remaining_ = 0; waveRank_ = 0; spawnOwed_ = 0; inBreak_ = false; clearedPending_ = false; breakStart_ = 0; skipVotes_.clear();
-    revive_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = cfg_.format == Format::Duel ? 1 : 0;
+    revive_.clear(); gone_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = cfg_.format == Format::Duel ? 1 : 0;
 }
 
 inline std::vector<int8_t> PartitionSides(const std::vector<Point3>& points, int teams) {

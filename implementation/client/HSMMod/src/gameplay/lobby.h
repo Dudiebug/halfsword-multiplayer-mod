@@ -11,7 +11,7 @@
 namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.6.5";   // bump with every release tag
+constexpr const char* kModVersion = "0.7.0";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
@@ -51,6 +51,8 @@ public:
     void SetConfig(const MatchConfig& c);
     std::string MapPick() const;                    // host's chosen level (package path), empty until picked
     void SetMapPick(const std::string& path);
+    bool Progression() const;                       // the host chose the Progression card (hsm_prog)
+    void SetProgression(bool on);
     void SetTeamPick(int team);
     void SetOverride(steam::SteamId member, int team);
     void ClearOverrides();

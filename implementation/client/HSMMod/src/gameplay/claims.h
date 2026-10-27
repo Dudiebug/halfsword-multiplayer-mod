@@ -65,7 +65,7 @@ public:
         coalescer_.Forget(entity);
         queue_.Forget(entity);                                       // blows queued against its old body are dropped
         parry_.Forget(entity);
-        if (entity <= kMaxWillies) lastClashMs_[entity] = {};
+        if (entity <= kMaxWillies) { lastClashMs_[entity] = {}; recent_[entity] = {}; }   // K4: a new body has no recent attacker
     }
     std::string HealthLine();                                        // since the previous call
 

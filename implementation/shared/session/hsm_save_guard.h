@@ -48,4 +48,21 @@ inline bool RestoreLeftBackup(bool backupExists, bool ownerAlive, bool ownBackup
     return backupExists && !ownBackup && !ownerAlive;
 }
 
+// What to do with a backup file left in the save folder (found at the next start, by RestoreLeft or the startup sweep).
+//   Restore   - put it back over GameProgress.sav (the session that made it ended without restoring)
+//   KeepAside - do not touch the save; rename the backup to HSMMP_stale_<utc>_... so nothing restores it later
+//   Ignore    - not ours to touch (no such file, our own live session's, or another live process's)
+// The stale rules (S1): an empty backup means "there was no save", and restoring it would delete one, so it is never
+// restored; a save written more than kSaveNewerSlackSec after the backup is progress made without the mod's help
+// (the mod was inert, or the session ended unseen) and the backup would wipe it.
+enum class LeftBackup : uint8_t { Ignore, Restore, KeepAside };
+constexpr int64_t kSaveNewerSlackSec = 60;
+inline LeftBackup DecideLeftBackup(bool exists, bool ownerAlive, bool own, uint64_t backupBytes, int64_t backupMtimeSec,
+                                   bool saveExists, int64_t saveMtimeSec) {
+    if (!RestoreLeftBackup(exists, ownerAlive, own)) return LeftBackup::Ignore;
+    if (backupBytes == 0) return LeftBackup::KeepAside;
+    if (saveExists && saveMtimeSec - backupMtimeSec > kSaveNewerSlackSec) return LeftBackup::KeepAside;
+    return LeftBackup::Restore;
+}
+
 }  // namespace hsm::session

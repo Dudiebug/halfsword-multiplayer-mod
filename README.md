@@ -3,9 +3,9 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build (v0.6.5) passes every offline check (unit tests under ASan/UBSan
-> and protocol fuzzing) and is being play-tested in two-player matches; each pre-release fixes what the last test
-> found. Expect bugs.
+> **Status: pre-release.** The current build (v0.7.0-pre1) passes every offline check (unit tests under ASan/UBSan
+> and protocol fuzzing). Its new features have not been play-tested yet; each pre-release fixes what the last test
+> found. Expect bugs. Everyone in a session needs the same version (0.7.0 does not connect to 0.6.x).
 
 ## What it does
 
@@ -20,6 +20,24 @@ No game files are changed; delete the DLL to go back to vanilla.
   and carrying another player (alive or down), loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
   props, which the host names for everyone.
 - Match modes, scores, chat and spectating.
+- **Name tags** over other fighters (team colours in team modes; `name_tags=0` turns them off), and **give up while
+  downed** in FFA and team matches (hold G): the last player who hit you in the past 60 s gets the kill.
+- **Crash notes:** if the game crashes, the last lines of `HSMMod.log` name the fault. Please attach the log and the
+  newest folder under `%LOCALAPPDATA%\HalfSwordUE5\Saved\Crashes\` to an issue.
+- **In-game bug reports:** type `/report <what went wrong>` in the chat (or use REPORT A BUG on the multiplayer
+  page) to open an issue here with your mod log attached privately. Other players in the session are asked whether
+  to add theirs (`/sendlog` or `/nolog`). **The report server is not online yet**, so reports currently fail; open an
+  issue on GitHub instead.
+
+## Bug reports and privacy
+
+`/report` sends your text, the mod and game version, the match setup and your OS version to the report server, which
+opens a public issue in this repository with those details. The end of your `HSMMod.log` goes along but is stored
+privately with the maintainers, never on the issue. Before it leaves your PC, Steam IDs and IP addresses in the log
+are replaced with one-off hashes and your Windows user name is removed from file paths. Player names stay in the log.
+
+The mod makes no web request unless you type `/report` or `/sendlog`. Set `reports=off` under `[net]` in
+`HSMMod.ini` to turn the commands off.
 
 ## Install
 

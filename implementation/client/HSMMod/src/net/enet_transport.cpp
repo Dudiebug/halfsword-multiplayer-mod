@@ -7,6 +7,8 @@ namespace hsm {
 namespace {
 std::once_flag g_enetInit;
 bool g_enetOk = false;
+constexpr size_t kMaxInboxMessages = 1024;      // drop oldest messages beyond this
+constexpr size_t kMaxWaitingDataBytes = 4 * 1024 * 1024;  // 4 MB (default is 32 MB)
 }
 
 bool ENetTransport::StartHost(uint16_t port, size_t maxClients, Validator v) { return StartCommon(true, "", port, maxClients, std::move(v)); }
@@ -27,6 +29,10 @@ bool ENetTransport::StartCommon(bool host, const std::string& addr, uint16_t por
         if (host_ && !enet_host_connect(static_cast<ENetHost*>(host_), &a, kChanCount, kProtocolRevision)) { HSM_LOG("net: connect setup failed"); }
     }
     if (!host_) { HSM_LOG("net: enet_host_create failed (port %u)", port); return false; }
+    // Set ENet limits: packet size and waiting data buffer
+    auto* h = static_cast<ENetHost*>(host_);
+    h->maximumPacketSize = kMaxPacket;
+    h->maximumWaitingData = kMaxWaitingDataBytes;
     peers_.assign(peers + 1, nullptr);
     rtt_.assign(peers + 1, 0);
     running_ = true;
@@ -98,6 +104,10 @@ void ENetTransport::Loop() {
                 if (!ok) continue;   // malformed packets never reach the game thread
             } else continue;
             std::lock_guard<std::mutex> lock(mu_);
+            // Bound the inbox queue: drop oldest messages beyond the limit
+            if (inbox_.size() >= kMaxInboxMessages) {
+                inbox_.pop_front();
+            }
             inbox_.push_back(std::move(ne));
         }
         std::lock_guard<std::mutex> lock(mu_);

@@ -30,7 +30,7 @@ static void TestEffective() {
     CHECK(EffectiveMap(Format::Duel, "/Game/Maps/Abyss/Abyss_Map_Open_EA") == Idx("Alley"));  // pick not allowed
     CHECK(EffectiveMap(Format::Zombies, "") == Idx("Abyss"));
     CHECK(EffectiveMap(Format::Zombies, "/Game/Maps/Arenas/Map_Arena_Yard") == Idx("Abyss"));
-    CHECK(EffectiveMap(Format::FreeForAll, "/Game/Maps/Map_Hub_Tavern_Frank") == Idx("Tavern"));
+    CHECK(EffectiveMap(Format::FreeForAll, "/Game/Maps/Map_Hub_Tavern_Frank") == Idx("Alley"));   // not pickable
     CHECK(EffectiveMap(Format::FreeForAll, "nonsense") == Idx("Alley"));
 }
 
@@ -38,7 +38,7 @@ static void TestRows() {
     std::vector<MapRow> d = MapRows(Format::Duel, "/Game/Maps/Arenas/Map_Arena_Yard");
     CHECK(d.size() == MapCount());
     for (size_t i = 0; i < d.size(); ++i) CHECK(d[i].index == i);
-    CHECK(Shown(d) == 8);                                               // the 8 arenas
+    CHECK(Shown(d) == 7);                                               // the 7 pickable arenas (not Cutting)
     CHECK(!d[Idx("Tavern")].shown && !d[Idx("Smithery")].shown && !d[Idx("Abyss")].shown);
     CHECK(Selected(d) == 1 && d[Idx("Yard")].selected);
     CHECK(d[Idx("Yard")].label == "> Yard <");
@@ -48,9 +48,9 @@ static void TestRows() {
     CHECK(Shown(z) == 1 && z[Idx("Abyss")].shown && z[Idx("Abyss")].selected && Selected(z) == 1);
 
     std::vector<MapRow> f = MapRows(Format::FreeForAll, "/Game/Maps/Map_Hub_Tavern_Frank");
-    CHECK(Shown(f) == MapCount());
-    CHECK(Selected(f) == 1 && f[Idx("Tavern")].selected && f[Idx("Tavern")].label == "> Tavern <");
-    CHECK(f[Idx("Alley")].label == "Alley");
+    CHECK(Shown(f) == 7);                                              // the pickable arenas; Abyss is Zombies only
+    CHECK(Selected(f) == 1 && f[Idx("Alley")].selected && f[Idx("Alley")].label == "> Alley <");
+    CHECK(!f[Idx("Tavern")].shown && !f[Idx("Cutting")].shown && !f[Idx("Abyss")].shown);
 
     std::vector<MapRow> none = MapRows(Format::Duel, "/Game/Maps/Abyss/Abyss_Map_Open_EA");
     CHECK(Selected(none) == 1 && none[Idx("Alley")].selected);         // what Start would use

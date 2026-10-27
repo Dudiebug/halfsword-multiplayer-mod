@@ -1,5 +1,6 @@
 #include "gameplay/travel.h"
 #include "log.h"
+#include "session/hsm_travel_gate.h"
 #include "ue/hook.h"
 #include <cstring>
 
@@ -88,8 +89,12 @@ size_t ApplyGameSettings(const std::vector<Setting>& settings) {
         if (!allowed) continue;                                // only the whitelist, never arbitrary fields
         FProperty* p = FindProperty(ClassOf(gi), s.name);
         if (!p || !PlainType(PropertyType(p))) continue;
-        if (PropertyType(p) == "BoolProperty") { if (s.value.size() == 1 && SetBool(gi, s.name, s.value[0] != 0)) ++applied; continue; }
+        const std::string type = PropertyType(p);
+        if (type == "BoolProperty") { if (SettingValueOk(SettingKind::Bool, s.value.data(), s.value.size()) && SetBool(gi, s.name, s.value[0] != 0)) ++applied; continue; }
         if (int32_t(s.value.size()) != PropertySize(p)) continue;
+        const SettingKind kind = type == "FloatProperty" ? SettingKind::Float : type == "DoubleProperty" ? SettingKind::Double
+                               : type == "IntProperty" || s.value.size() != 1 ? SettingKind::Int : SettingKind::Byte;   // L8: no NaN/Inf, no wild enum bytes
+        if (!SettingValueOk(kind, s.value.data(), s.value.size())) continue;
         std::memcpy(reinterpret_cast<uint8_t*>(gi) + PropertyOffset(p), s.value.data(), s.value.size());
         ++applied;
     }

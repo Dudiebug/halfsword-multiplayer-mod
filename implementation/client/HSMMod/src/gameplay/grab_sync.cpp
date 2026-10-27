@@ -53,6 +53,9 @@ void GrabSync::Stop() {
 void GrabSync::Clear() {
     inbox_.Clear();
     for (Grabber& g : grabbers_) { g.sender.Reset(); g.willie = nullptr; g.live = false; }   // seq keeps counting
+    std::vector<uint8_t> marked;   // each mark is undone (the game's "Being Grabbed" flag) before it is forgotten
+    for (const auto& [e, m] : marks_) marked.push_back(e);
+    for (uint8_t e : marked) Unmark(e);
     marks_.clear();
     lastGrab_ = {};
     heldBones_ = {};

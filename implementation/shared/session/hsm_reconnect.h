@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <vector>
 
 namespace hsm {
@@ -19,6 +20,8 @@ constexpr size_t kMaxReservations = 5;   // clients only (slots 1..5); the host 
 
 // True once nowMs is at least `window` ms after sinceMs. Wrap-safe: uint32 modular subtraction.
 inline bool ElapsedAtLeast(uint32_t sinceMs, uint32_t nowMs, uint32_t window) { return uint32_t(nowMs - sinceMs) >= window; }
+// K9: `nowMs` has reached the deadline `dueMs` on the 32-bit ms clock (modular: still right after the 49.7-day wrap).
+inline bool DueAt(uint32_t nowMs, uint32_t dueMs) { return int32_t(nowMs - dueMs) >= 0; }
 
 class ReservationTable {
 public:
@@ -142,6 +145,27 @@ private:
     }
     HostLink link_ = HostLink::Connected;
     uint32_t lastPacketMs_ = 0;
+};
+
+// Host side, Steam peers: the Steam transport has no timeout of its own, so a peer that stops sending (a crashed or frozen
+// client, a dead route) would keep its slot forever. Every message from a peer is Seen; Expired returns the peers silent for
+// kSilentMs and forgets them, once each. The limit is generous: a client loading a level sends nothing for a while.
+class PeerSilenceMonitor {
+public:
+    static constexpr uint32_t kSilentMs = 15000;
+    void Seen(uint32_t peer, uint32_t nowMs) { last_[peer] = nowMs; }
+    void Forget(uint32_t peer) { last_.erase(peer); }
+    void Clear() { last_.clear(); }
+    std::vector<uint32_t> Expired(uint32_t nowMs) {
+        std::vector<uint32_t> out;
+        for (auto it = last_.begin(); it != last_.end();) {
+            if (ElapsedAtLeast(it->second, nowMs, kSilentMs)) { out.push_back(it->first); it = last_.erase(it); }
+            else ++it;
+        }
+        return out;
+    }
+private:
+    std::map<uint32_t, uint32_t> last_;
 };
 
 }  // namespace hsm

@@ -165,7 +165,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 17);   // rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 19);   // rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so

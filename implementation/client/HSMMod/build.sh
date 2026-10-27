@@ -10,7 +10,7 @@ CFG=${1:-Release}
 OPT=$([ "$CFG" = Debug ] && echo "-O0 -g" || echo "-O2")
 mkdir -p build/obj
 
-COMMON="$OPT -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -DNOMINMAX"
+COMMON="$OPT -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -fstack-protector-strong"
 # The build string players compare (session/hsm_build.h): kModVersion plus this checkout's commit (and -dirty), if any.
 DESCRIBE=$(git describe --always --dirty --exclude='*' 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
 INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/enet/include -Ithird_party/minhook/include"
@@ -28,6 +28,11 @@ for f in src/*.cpp src/*/*.cpp; do
   "$CXX" -std=c++20 $COMMON -Werror $INC -DHSM_GIT_DESCRIBE="\"$DESCRIBE\"" -c "$f" -o "$o"
   objs+=("$o")
 done
+LINK_FLAGS="-fstack-protector-strong -s"
+# Try control flow guard if supported
+if "$CXX" -c -x c++ /dev/null -o /dev/null -mguard=cf 2>/dev/null; then
+  LINK_FLAGS="$LINK_FLAGS -mguard=cf"
+fi
 "$CXX" -shared -o build/dwmapi.dll "${objs[@]}" src/dwmapi.def \
-  -static -static-libgcc -static-libstdc++ -Wl,--kill-at -lws2_32 -lwinmm
+  $LINK_FLAGS -static -static-libgcc -static-libstdc++ -Wl,--kill-at -lws2_32 -lwinmm
 echo "built build/dwmapi.dll ($CFG)"

@@ -20,6 +20,29 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
 `.agents/workflow/tools/workflowctl.py verify`.
 
+## New in 0.7.0 (pre-release, not yet play-tested)
+
+- **Name tags** above other fighters, team colours in team formats (`name_tags=0` under `[net]` hides them).
+- **Give up while downed** in FFA and team matches (hold G). The last attacker within 60 s gets the kill; with none,
+  nobody scores. Holding G with nothing to give up shows why.
+- **Respawns retry** up to 5 times and log each attempt; a Duel always starts with both fighters alive.
+- **Leavers:** a fighter who quits mid-fight counts as dead; in a Duel the one left standing takes the rounds.
+  A rejoin within the reservation keeps its team; a reused FFA slot starts at 0.
+- **Spectating** follows only living fighters; the pause menu shows the cursor so Continue works without Alt+Tab.
+- **Map picker** offers only the arenas (the Abyss only for Zombies); **PROGRESSION (CO-OP)** card takes everyone to
+  the Tavern hub; the lobby columns scroll; **REPORT A BUG** on the multiplayer page.
+- **Flails:** the stand-in's chain no longer drags on the floor and is moved along with teleports.
+- **Saves:** a stale or empty backup never overwrites a newer save (it is renamed `HSMMP_stale_*`); leftover backups
+  are checked at every game start, even with `role=off`.
+- **Safety:** clients only follow travels to known maps; size caps on network input; `-hsm*` flags are ignored on a
+  Steam join launch (`+connect_lobby`).
+- **Crash notes:** a fault writes `crash: fault ... at <module>+<offset>` to `HSMMod.log` before the game closes.
+- **`role=server` (experimental):** the host runs matches without a fighter of its own and cycles maps by itself.
+  Keys under `[net]`: `server_format` (ffa, teams, survival, zombies, duel), `server_maps` (comma list or `all`),
+  `server_score_limit`, `server_time_limit_s`, `server_countdown_s` (30), `server_min_players` (2). Direct IP only.
+  This is a hosted copy of the retail game, not a dedicated server.
+- Protocol revision 19: 0.7.0 does not connect to 0.6.x.
+
 ## Steam lobbies (default, Phase 1)
 
 - `role=steam` (the default in a fresh `HSMMod.ini`) adds a **MULTIPLAYER** button under Free Mode on the main menu.
@@ -68,7 +91,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
    - Host: `role=host`, and forward UDP `27777` (or your `port`) to the host machine.
    - Client: `role=client`, `host=<host IP>`.
 4. Logs go to `HSMMod.log` in the same folder.
-5. Every player needs the same HSMMod build. The lobby names anyone on another build ("Bob on 0.6.3 - update") and the
+5. Every player needs the same HSMMod build. The lobby names anyone on another build ("Bob on 0.6.5 - update") and the
    host cannot start a match until it matches; `allow_build_mismatch=1` in `HSMMod.ini` overrides this for testing.
 
 ## Matches, teams and bots (Phase 3)
@@ -87,7 +110,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   for 1.5 s during a round to give it up: you are out of that round (one on one, it goes to the other), no kill is credited, and the kill
   feed says "gave up". G is also the game's talk key: while it is held the game's own give-up already shows on your
   fighter (it slows down and cowers), and letting go before 1.5 s cancels both.
-- **Kill credit** comes from weapon hit events: the last weapon holder to hit a fighter within 10 s gets the kill.
+- **Kill credit** comes from weapon hit events: the last weapon holder to hit a fighter within 60 s gets the kill.
   With friendly fire off, weapon hits between teammates are dropped before the game computes damage.
 - **Respawns** after the respawn delay at the team's side of the map: the level's Willie spawn points are split
   into one contiguous arc per team, and each respawn picks the point farthest from living enemies.
@@ -113,6 +136,24 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   stock disintegration and a 10 s break.
 - **HUD** inside the game's own `UI_HUD`: score line and clock, respawn countdown, kill feed, and a scoreboard while
   Tab is held.
+
+## In-game bug reports
+
+Type `/report <what went wrong>` (or `/bug ...`) in the chat. The mod sends the text, a few facts (mod and game
+build, protocol, host/client, Steam or direct IP, sync mode, level, match mode and phase, player count, Windows or
+Wine version) and the end of `HSMMod.log` and `HSMMod.prev.log` (at most 3 MB each) over HTTPS to the report relay
+(`report_url` in `HSMMod.ini`, default `https://reports.dutybug.net`).
+The relay opens a public GitHub issue with the text and the facts only (label `in-game-report`) and keeps the logs
+in a private repository. Before sending, Steam IDs and IP addresses in the logs become salted hashes (`steam:1a2b3c4d`,
+`ip:5e6f7a8b`; the salt is new for every report, so reports cannot be matched up) and the profile folder name in
+paths becomes `<user>`. Player names stay in the logs.
+
+When a session player files a report, every other player sees "<name> filed a bug report. Type /sendlog to add
+your log, or /nolog." `/sendlog` within 2 minutes adds that player's own log to the same report; nothing is sent
+otherwise. One report per player every 2 minutes; the host relays one share per player per minute.
+
+The mod makes no web request except on `/report` and `/sendlog`; WinHTTP is loaded from System32 only then.
+`reports=off` in `HSMMod.ini` turns the commands off.
 
 ## Command-line options and the agent bridge (testing)
 

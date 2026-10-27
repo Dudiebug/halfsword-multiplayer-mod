@@ -4,6 +4,7 @@
 #include "hsm_owner.h"
 #include "log.h"
 #include "match/hsm_match.h"
+#include "session/hsm_gvas.h"
 #include "sync/hsm_gore.h"
 #include "ue/hook.h"
 #include "ue/script_hook.h"
@@ -107,13 +108,50 @@ void Adapter::RestoreGameInput() {
     SetBool(ctrl, "bShowMouseCursor", false);
 }
 
+// The stock pause menu is UI_Pause_Eng (decomp Willie_BP.cpp:11091). Matched by the substring "UI_Pause" so a different
+// Blueprint suffix still works; the class name found is logged once. A closed menu can linger until garbage collection,
+// so only a widget IsInViewport counts. Esc or a paused game arms a 2 s window of searches, kept up while the menu is open.
+bool Adapter::PauseMenuOpen() {
+    const uint32_t now = GetTickCount();
+    if (pauseCheckAt_ && now - pauseCheckAt_ < 100) return pauseOpen_;
+    pauseCheckAt_ = now;
+    if (pauseOpen_ || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) || GamePaused()) pauseArmedUntil_ = now + 2000;
+    if (int32_t(pauseArmedUntil_ - now) <= 0 || (pauseScanAt_ && now - pauseScanAt_ < 250)) return pauseOpen_;
+    pauseScanAt_ = now;
+    bool found = false;
+    UClass* uw = FindClass("UserWidget");
+    for (int32_t i = 0, n = ObjectCount(); i < n && uw && !found; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o) || !IsA(o, uw)) continue;
+        const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(o)));
+        if (cls.find("UI_Pause") == std::string::npos) continue;
+        Call v(o, "IsInViewport");
+        if (!v.invoke() || !v.get<bool>("ReturnValue")) continue;
+        found = true;
+        if (!pauseLogged_) { pauseLogged_ = true; HSM_LOG("adapter: pause menu widget class '%s'", cls.c_str()); }
+    }
+    pauseOpen_ = found;
+    return pauseOpen_;
+}
+
+void Adapter::ShowPauseCursor() {
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!ctrl) return;
+    Call mode(WidgetLibrary(), "SetInputMode_GameAndUIEx");
+    mode.set<UObject*>("PlayerController", ctrl).set<UObject*>("InWidgetToFocus", nullptr).set<uint8_t>("InMouseLockMode", 0)
+        .set<bool>("bHideCursorDuringCapture", false).set<bool>("bFlushInput", false).invoke();
+    SetBool(ctrl, "bShowMouseCursor", true);
+}
+
 // The call the game makes when its death screen opens (decomp UI/UI_DeathDoor.cpp:226): UI-only, no widget focused, the
 // mouse not locked (EMouseLockMode::DoNotLock), the keys held now flushed (a running fighter stops). The viewport then
 // ignores keys, so G (inventory), R (slow motion) and Esc (pause) reach neither the fighter nor the pause menu; the
 // chat reads the OS key state and is unaffected.
 void Adapter::CaptureInput(bool on) {
     inputCaptured_ = on;
-    if (!on) { RestoreGameInput(); return; }
+    if (!on) { if (PauseMenuOpen()) ShowPauseCursor(); else RestoreGameInput(); return; }   // closing the chat must not take the pause menu's cursor
     Call pc(statics_, "GetPlayerController");
     pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
@@ -313,6 +351,9 @@ bool Adapter::ExportPassport(std::vector<uint8_t>& out) {
     const char* source = freeMode ? kPassportFreeMode : kPassportProgression;
     bool ok = SavePassportFrom(gi, FindProperty(ClassOf(gi), source), out);
     HSM_LOG("adapter: exported %s passport (%zu bytes)%s", freeMode ? "Free Mode" : "Progression", out.size(), ok ? "" : " FAILED");
+    std::string why;
+    if (ok && !hsm::CheckPassportSave(out.data(), out.size(), &why))        // peers would refuse it: a game update moved the save layout
+        HSM_LOG("adapter: own passport export FAILS the loadout check (%s); other players will see the default loadout", why.c_str());
     return ok;
 }
 
@@ -336,7 +377,11 @@ bool Adapter::SavePassportFrom(UObject* owner, FProperty* src, std::vector<uint8
 }
 
 UObject* Adapter::LoadPassportSave(const std::vector<uint8_t>& blob) {
-    if (blob.empty() || blob.size() > 64u * 1024 * 1024) return nullptr;
+    std::string why;
+    if (!hsm::CheckPassportSave(blob.data(), blob.size(), &why)) {     // before the engine creates and fills anything from it
+        HSM_LOG("adapter: refused loadout blob (%zu bytes): %s", blob.size(), why.c_str());
+        return nullptr;
+    }
     UClass* sgClass = FindClass(kSaveGameClass);
     std::wstring dir = SaveGamesDir();
     if (dir.empty()) return nullptr;
@@ -742,6 +787,8 @@ bool Adapter::IsWillie(UObject* o) {
 
 bool Adapter::FreeModeActive() { bool f = true; UObject* gi = GameInstance(); if (gi) GetBool(gi, "Free Mode Activated", f); return f; }
 
+void Adapter::ClearFreeMode() { if (UObject* gi = GameInstance()) SetBool(gi, "Free Mode Activated", false); }
+
 void Adapter::PrepareFreeModeFight(int foes) {
     UObject* gi = GameInstance();
     if (!gi) return;
@@ -963,11 +1010,11 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     UObject* old = PlayerWillie(0);
     SpawnOptions puppet = o; puppet.brain = false; puppet.stockBrain = false;
     UObject* w = SpawnFighter(puppet);
-    if (!w) return nullptr;
+    if (!w) { HSM_LOG("adapter: local player respawn failed: the new fighter did not spawn"); return nullptr; }
     Call pc(statics_, "GetPlayerController");
     pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
-    if (!ctrl) { DestroyActor(w); return nullptr; }
+    if (!ctrl) { HSM_LOG("adapter: local player respawn failed: no player controller (new body destroyed)"); DestroyActor(w); return nullptr; }
     Call(ctrl, "Possess").set<UObject*>("InPawn", w).invoke();
     SetBool(w, "Player", true);
     if (old && old != w) {
@@ -976,7 +1023,7 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     }
     Call(ctrl, "ResetIgnoreInputFlags").invoke();   // the new body must take input whatever the death left behind
     if (inputCaptured_) CaptureInput(true);         // a line being typed keeps the keyboard (the new controller's too)
-    else RestoreGameInput();
+    else if (!PauseMenuOpen()) RestoreGameInput();   // under the open pause menu the cursor stays (ShowPauseCursor)
     HSM_LOG("adapter: local player respawned");
     return w;
 }

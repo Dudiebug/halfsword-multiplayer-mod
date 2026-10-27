@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 17;         // 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 19;         // 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -60,6 +60,9 @@ enum class MsgType : uint8_t {
     SeverNotice = 33, // owner -> host -> others, reliable: a sever the owner's own fighter took natively (combat/hsm_sever.h)
     PropCensus = 34,  // host -> client, reliable: the level's physics props and their indices (session/hsm_prop_census.h)
     GiveUp = 35,      // client -> host, reliable: the sender's fighter concedes the Duel round (held G)
+    ReportShare = 36, // reporter -> host -> others, reliable: a bug report's id and attach token (session/hsm_report.h)
+    PeerMap = 37,     // host -> client, reliable: the other clients' slots and SteamIDs (mesh, session/hsm_mesh.h)
+    MeshHeard = 38,   // client -> host, reliable: which other slots this client hears directly (mesh fallback)
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
@@ -103,7 +106,10 @@ struct Welcome {
     std::string map;
     uint8_t syncMode = 0;    // session/hsm_authority.h SyncMode: 0 the host simulates every fighter, 1 each owner its own
     std::string modBuild;    // rev 17: the host's mod build
+    uint8_t flags = 0;       // rev 19: kWelcomeNoHostFighter | kWelcomeMesh
 };
+constexpr uint8_t kWelcomeNoHostFighter = 1;   // the host plays no fighter of its own
+constexpr uint8_t kWelcomeMesh = 2;            // mesh offered: clients send Pose/Vitals to each other too (PeerMap follows)
 struct Reject { RejectReason reason = RejectReason::Malformed; };
 
 struct InputFrame {
@@ -159,6 +165,7 @@ struct Spawn {
     int8_t team = -1;           // -1 = free-for-all
     uint32_t blobId = 0;        // loadout blob carrying this entity's passport (0 = none)
     float x = 0, y = 0, z = 0, yaw = 0;   // spawn location (cm, degrees)
+    uint8_t life = 0;           // rev 19: the host's count of this entity's bodies; a claim names the life it was made against (0 = unknown)
 };
 struct Despawn { uint8_t entity = 0; };
 
@@ -238,11 +245,11 @@ inline bool Decode(const uint8_t* d, size_t n, Hello& m) {
     m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); return r.done();
 }
 
-inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); w.str(m.modBuild, kMaxModBuild); return w.buf; }
+inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); w.str(m.modBuild, kMaxModBuild); w.u8(m.flags); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Welcome& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Welcome) return false;
-    m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8(); m.modBuild = r.str(kMaxModBuild);
-    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1;
+    m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8(); m.modBuild = r.str(kMaxModBuild); m.flags = r.u8();
+    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1 && (m.flags & ~(kWelcomeNoHostFighter | kWelcomeMesh)) == 0;
 }
 
 inline std::vector<uint8_t> Encode(const Reject& m) { Writer w; w.header(MsgType::Reject); w.u8(uint8_t(m.reason)); return w.buf; }
@@ -303,11 +310,11 @@ inline bool Decode(const uint8_t* d, size_t n, OwnerState& m) {
     return m.state.entity >= 1 && m.state.entity <= kMaxWillies;
 }
 
-struct DeathReport { uint8_t victim = 0, killer = 0; };   // killer 0 = environment / unknown
-inline std::vector<uint8_t> Encode(const DeathReport& m) { Writer w; w.header(MsgType::DeathReport); w.u8(m.victim); w.u8(m.killer); return w.buf; }
+struct DeathReport { uint8_t victim = 0, killer = 0; uint8_t victimLife = 0; };   // killer 0 = environment / unknown; victimLife: the Spawn.life of the body that died (rev 19)
+inline std::vector<uint8_t> Encode(const DeathReport& m) { Writer w; w.header(MsgType::DeathReport); w.u8(m.victim); w.u8(m.killer); w.u8(m.victimLife); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, DeathReport& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::DeathReport) return false;
-    m.victim = r.u8(); m.killer = r.u8();
+    m.victim = r.u8(); m.killer = r.u8(); m.victimLife = r.u8();
     return r.done() && m.victim >= 1 && m.victim <= kMaxWillies && m.killer <= kMaxWillies;
 }
 struct GiveUpMsg { uint8_t entity = 0; };
@@ -373,12 +380,12 @@ inline bool Decode(const uint8_t* d, size_t n, Ready& m) {
 
 inline std::vector<uint8_t> Encode(const Spawn& m) {
     Writer w; w.header(MsgType::Spawn); w.u8(m.entity); w.u8(uint8_t(m.kind)); w.u8(m.ownerSlot); w.u8(uint8_t(m.team)); w.u32(m.blobId);
-    w.f32(m.x); w.f32(m.y); w.f32(m.z); w.f32(m.yaw); return w.buf;
+    w.f32(m.x); w.f32(m.y); w.f32(m.z); w.f32(m.yaw); w.u8(m.life); return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, Spawn& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Spawn) return false;
     m.entity = r.u8(); uint8_t k = r.u8(); m.ownerSlot = r.u8(); m.team = int8_t(r.u8()); m.blobId = r.u32();
-    m.x = r.f32(); m.y = r.f32(); m.z = r.f32(); m.yaw = r.f32();
+    m.x = r.f32(); m.y = r.f32(); m.z = r.f32(); m.yaw = r.f32(); m.life = r.u8();
     if (k < 1 || k > 2 || m.entity == 0 || m.team < -1 || m.team > 7) return false;
     if (std::fabs(m.x) > 1e7f || std::fabs(m.y) > 1e7f || std::fabs(m.z) > 1e7f || std::fabs(m.yaw) > 720.f) return false;
     m.kind = EntityKind(k); return r.done();
@@ -444,6 +451,36 @@ inline bool Decode(const uint8_t* d, size_t n, Kill& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Kill) return false;
     m.killer = r.u8(); m.victim = r.u8(); m.flags = r.u8();
     return r.done() && m.victim != 0 && m.flags < 64;
+}
+
+// Mesh (rev 19). The host tells each client who else is in the session so clients can stream Pose/Vitals to each other;
+// a client tells the host which slots it hears directly so the host stops relaying those to it.
+constexpr size_t kMaxPeerMap = 6;   // == kMaxFighters (session/hsm_roster.h; static_assert in session/hsm_authority.h)
+struct PeerMapEntry { uint8_t slot = 0; uint64_t steamId = 0; };
+struct PeerMapMsg { std::vector<PeerMapEntry> peers; };
+inline std::vector<uint8_t> Encode(const PeerMapMsg& m) {
+    Writer w; w.header(MsgType::PeerMap);
+    const size_t n = m.peers.size() < kMaxPeerMap ? m.peers.size() : kMaxPeerMap; w.u8(uint8_t(n));
+    for (size_t i = 0; i < n; ++i) { w.u8(m.peers[i].slot); w.u64(m.peers[i].steamId); }
+    return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, PeerMapMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::PeerMap) return false;
+    const size_t cnt = r.u8(); if (cnt > kMaxPeerMap) return false;
+    m.peers.assign(cnt, PeerMapEntry{});
+    uint32_t seen = 0;
+    for (PeerMapEntry& e : m.peers) {
+        e.slot = r.u8(); e.steamId = r.u64();
+        if (e.slot >= kMaxPeerMap || e.steamId == 0 || (seen >> e.slot & 1)) return false;
+        seen |= 1u << e.slot;
+    }
+    return r.done();
+}
+struct MeshHeardMsg { uint8_t mask = 0; };   // bit s = this client received slot s's Pose or Vitals directly lately
+inline std::vector<uint8_t> Encode(const MeshHeardMsg& m) { Writer w; w.header(MsgType::MeshHeard); w.u8(m.mask); return w.buf; }
+inline bool Decode(const uint8_t* d, size_t n, MeshHeardMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MeshHeard) return false;
+    m.mask = r.u8(); return r.done() && (m.mask >> kMaxPeerMap) == 0;
 }
 
 // ---------------------------------------------------------------- quantization

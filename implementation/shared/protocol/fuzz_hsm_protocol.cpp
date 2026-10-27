@@ -9,6 +9,7 @@
 #include "hsm_protocol.h"
 #include "session/hsm_lease.h"
 #include "session/hsm_prop_census.h"
+#include "session/hsm_report.h"
 #include "sync/hsm_grab.h"
 #include <cmath>
 #include <cstdio>
@@ -41,7 +42,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
-    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<DeathReport>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -53,7 +54,7 @@ void TryAll(const uint8_t* d, size_t n) {
 std::vector<std::vector<uint8_t>> Seeds() {
     std::vector<std::vector<uint8_t>> s;
     Hello h; h.buildKey = 0x8EFA122909712000ull; h.name = "seed"; h.modBuild = "0.6.4 (v0.6.3-12-gdb82570)"; s.push_back(Encode(h));
-    Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; s.push_back(Encode(w));
+    Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; w.flags = kWelcomeMesh; s.push_back(Encode(w));
     Reject r; r.reason = RejectReason::Full; s.push_back(Encode(r));
     InputFrame f; f.seq = 7; f.axes[0] = 1; f.buttons = 5; s.push_back(Encode(f));
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
@@ -61,7 +62,10 @@ std::vector<std::vector<uint8_t>> Seeds() {
     Travel t; t.level = "/Game/Maps/Map_Hub_Tavern_Frank"; t.settings.push_back({"Free Mode Activated", {1}}); s.push_back(Encode(t));
     Ready rd; rd.level = "x"; s.push_back(Encode(rd));
     s.push_back(EncodePing(5, false));
-    Spawn sp; sp.entity = 2; sp.blobId = 9; sp.x = 10; s.push_back(Encode(sp));
+    Spawn sp; sp.entity = 2; sp.blobId = 9; sp.x = 10; sp.life = 3; s.push_back(Encode(sp));
+    PeerMapMsg pmm; pmm.peers = {{1, 76561198000000001ull}, {2, 76561198000000002ull}}; s.push_back(Encode(pmm));
+    MeshHeardMsg mh; mh.mask = 0x06; s.push_back(Encode(mh));
+    DeathReport dr; dr.victim = 2; dr.killer = 1; dr.victimLife = 3; s.push_back(Encode(dr));
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
     MatchInfo mi; mi.format = 1; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
@@ -74,13 +78,13 @@ std::vector<std::vector<uint8_t>> Seeds() {
     pf.weapons[0].hasHead = true; pf.weapons[0].head.pos = sync::V3{ 60, 5, 40 }; pf.weapons[0].head.vel = sync::V3{ 300, 0, -200 };   // a flail
     PoseMsg pm; pm.entity = 2; pm.rootX = 1; pm.rootZ = 90; pm.yawDeg = 30; pm.pose = sync::EncodePose(pf); s.push_back(Encode(pm));
     VitalsMsg vm; vm.entity = 2; vm.flags = 2; vm.health = 50; vm.partHealth[3] = 9; vm.severed = 4; s.push_back(Encode(vm));
-    combat::HitClaim hc; hc.claimId = 3; hc.attacker = 1; hc.victim = 2; hc.hitBone = "head"; hc.strikeComponent = "Blade";
+    combat::HitClaim hc; hc.claimId = 3; hc.victimLife = 2; hc.attacker = 1; hc.victim = 2; hc.hitBone = "head"; hc.strikeComponent = "Blade";
     hc.source = combat::StrikeSource::WeaponRight; hc.hasHitBox = true; hc.hitBoxExtent = sync::V3{ 5, 5, 5 };
     s.push_back(Encode(HitClaimMsg{ hc })); s.push_back(Encode(HitFxMsg{ hc }));
     combat::HitClaim rock = hc;
     combat::StruckByProp(rock, MakeLevelPropId(14), sync::V3{ 300, 0, -50 }, combat::Xform{ {}, sync::Q4{ 0, 0, 0, 1 }, { 1, 1, 1 } });
     s.push_back(Encode(HitClaimMsg{ rock })); s.push_back(Encode(HitFxMsg{ rock }));
-    combat::SeverClaim sc; sc.claimId = 4; sc.attacker = 1; sc.victim = 2; sc.part = 9; sc.masterMesh = "CharacterMesh0";
+    combat::SeverClaim sc; sc.claimId = 4; sc.victimLife = 2; sc.attacker = 1; sc.victim = 2; sc.part = 9; sc.masterMesh = "CharacterMesh0";
     sc.attachMarker = "DM Sphere Thigh_R 2"; sc.markers = {"DM Sphere Thigh_R 2", "DM Sphere Thigh_R 3"}; sc.frameBone = "thigh_r";
     sc.box1.local.rot = sync::Q4{ 0, 0, 0, 1 }; sc.box1.extent = sync::V3{ 100, 500, 100 }; sc.box1.local.pos = sync::V3{ 0, 500, 0 };
     sc.box2 = sc.box1; sc.box2.local.pos = sync::V3{ 0, -500, 0 }; sc.source = combat::StrikeSource::WeaponRight; sc.weaponComponent = "Blade";
@@ -106,6 +110,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     PropCensusMsg pc; pc.seq = 3; pc.part = 1; pc.parts = 2;
     pc.entries = {CensusEntry{0, 0x1234u, 10, -20, 30}, CensusEntry{9, 0xBEEFu, -500, 0.5f, 120}}; s.push_back(Encode(pc));
     GiveUpMsg gu; gu.entity = 2; s.push_back(Encode(gu));
+    ReportShareMsg rs; rs.fromSlot = 1; rs.id = "r7Kq2"; rs.token = "Ab3_x-9QwertyUiop12"; s.push_back(Encode(rs));
     return s;
 }
 }  // namespace
@@ -118,7 +123,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::GiveUp))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::MeshHeard))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

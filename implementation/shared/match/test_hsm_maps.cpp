@@ -82,8 +82,8 @@ static void TestFormatFilter() {
 
     // Abyss: Zombies, plus the big-level formats; not Duel.
     CHECK(MapAllowsFormat(abyss, Format::Zombies));
-    CHECK(MapAllowsFormat(abyss, Format::PlayersVsBots));
-    CHECK(MapAllowsFormat(abyss, Format::FreeForAll));
+    CHECK(!MapAllowsFormat(abyss, Format::PlayersVsBots));         // the picker's Abyss is Zombies only
+    CHECK(!MapAllowsFormat(abyss, Format::FreeForAll));
     CHECK(!MapAllowsFormat(abyss, Format::Duel));
 
     // Every catalog entry supports at least one format, and only abyss maps take Zombies.
@@ -102,7 +102,9 @@ static void TestNextMapCycles() {
     // Walking every map in the catalog cycles back to the start, and the allowed set is visited in order.
     const size_t n = MapCount();
     size_t cur = 0;
-    for (size_t step = 0; step < n; ++step) cur = NextMap(cur, Format::FreeForAll);
+    size_t pickable = 0;
+    for (size_t i = 0; i < n; ++i) if (MapAt(i).pick && MapAllowsFormat(MapAt(i), Format::FreeForAll)) ++pickable;
+    for (size_t step = 0; step < pickable; ++step) cur = NextMap(cur, Format::FreeForAll);
     CHECK(cur == 0);                                                  // wraps back to the start
     const size_t lastIdx = n - 1;
     CHECK(NextMap(lastIdx, Format::FreeForAll) == 0);                 // wrap-around at the end
@@ -122,7 +124,7 @@ static void TestNextMapCycles() {
         seen.insert(cur);
     }
     size_t arenas = 0;
-    for (size_t i = 0; i < n; ++i) if (MapAt(i).arena) ++arenas;
+    for (size_t i = 0; i < n; ++i) if (MapAt(i).arena && MapAt(i).pick) ++arenas;
     CHECK(seen.size() == arenas);
 
     // Zombies: the only allowed map cycles to itself.
@@ -131,8 +133,8 @@ static void TestNextMapCycles() {
     CHECK(NextMap(0, Format::Zombies) == abyss);
     CHECK(NextMap(n - 1, Format::Zombies) == abyss);
 
-    // Skips disallowed maps going forward: from Cutting (index 8) the next team-capable map is the hub (9).
-    CHECK(NextMap(IndexOfName("Arena_Cutting_Map"), Format::TwoTeams) == hub);
+    // Skips disallowed and unpickable maps going forward: from Cutting the next team-capable pickable map is Alley.
+    CHECK(NextMap(IndexOfName("Arena_Cutting_Map"), Format::TwoTeams) == 0);
     CHECK(NextMap(IndexOfName("Abyss_Map_Open_EA"), Format::Duel) == 0);
 
     // Out-of-range current index still lands on a valid allowed map.

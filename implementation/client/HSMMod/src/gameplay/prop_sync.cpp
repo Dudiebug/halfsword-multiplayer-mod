@@ -1015,6 +1015,8 @@ void PropSync::HostCensus(double nowMs) {
         if (live.count(index)) continue;
         ++gone;
         if (auto p = props_.find(MakeLevelPropId(index)); p != props_.end()) {
+            // A claim this machine still holds on a prop that left the census would otherwise never be given back
+            if (p->second.claim.sent != LeaseLevel::Free) Claim(p->first, ClaimSend::Release, LeaseLevel::Free, nowMs);
             byActor_.erase(p->second.actor);
             props_.erase(p);
         }

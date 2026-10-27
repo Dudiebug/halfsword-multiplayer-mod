@@ -41,6 +41,11 @@ public:
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
     void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
+    // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
+    // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
+    bool PauseMenuOpen();
+    // Game-and-UI input with the mouse cursor shown, so the pause menu can be clicked (the game's own menus do the same).
+    void ShowPauseCursor();
     // The chat's keyboard: on, UI-only input with the pressed keys flushed (the game's own UI_DeathDoor on open), so the
     // viewport ignores keys while the player types; off, RestoreGameInput.
     void CaptureInput(bool on);
@@ -83,6 +88,7 @@ public:
     bool WillieClassKnown() const { return willieClass_ != nullptr; }   // until then IsWillie answers false for everything
     bool FreeModeActive();
     void PrepareFreeModeFight(int foes = -1);
+    void ClearFreeMode();                       // the stock Progression: Free Mode off
     int FreeModeFoes();                                    // GI "Free Mode Foes Amount", -1 if unreadable
     void SetFreeModeFoes(int foes);
     // Every fighter spawned from now on gets at least this tier's build (MuscleFor); -1: their own build.
@@ -162,6 +168,8 @@ private:
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;
+    bool pauseOpen_ = false, pauseLogged_ = false;
+    uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;
     ue::FName weaponName_{};                       // ModularWeaponBP_C, once a class chain has shown it

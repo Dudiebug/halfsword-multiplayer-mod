@@ -18,7 +18,7 @@ struct MapRow {
 // The map a match of format f starts on: the host's pick when f allows it, else the first map that does.
 // MapCount() when no map allows f.
 inline size_t EffectiveMap(Format f, std::string_view pick) {
-    if (const MapInfo* m = FindMap(pick); m && MapAllowsFormat(*m, f)) return size_t(m - kMaps);
+    if (const MapInfo* m = FindMap(pick); m && m->pick && MapAllowsFormat(*m, f)) return size_t(m - kMaps);
     return NextMap(MapCount() - 1, f);
 }
 
@@ -28,7 +28,7 @@ inline std::vector<MapRow> MapRows(Format f, std::string_view pick) {
     for (size_t i = 0; i < rows.size(); ++i) {
         MapRow& r = rows[i];
         r.index = i;
-        r.shown = MapAllowsFormat(kMaps[i], f);
+        r.shown = kMaps[i].pick && MapAllowsFormat(kMaps[i], f);
         r.selected = i == chosen;
         r.label = r.selected ? std::string("> ") + kMaps[i].display + " <" : std::string(kMaps[i].display);
     }

@@ -4,7 +4,8 @@
 // instances, VFX and lighting layers, menus and Map_Test_Empty are not listed.
 //   arena    - a fight arena: Duel, and every other format
 //   bigArena - a large non-menu level: every format except Duel
-//   abyss    - the Abyss level: Zombies, and every format bigArena allows
+//   abyss    - the Abyss level: Zombies only (its picker entry; the owner's call)
+//   pick     - listed in the lobby's picker; Cutting, Tavern and Smithery are not (the Tavern is Progression's)
 #pragma once
 #include "match/hsm_match.h"
 #include <cctype>
@@ -19,21 +20,22 @@ struct MapInfo {
     bool arena;
     bool bigArena;
     bool abyss;
+    bool pick;             // offered in the lobby's map picker (the rest stay known to FindMap/MapAllowsFormat)
 };
 
 // Order is the cycling order of NextMap.
 inline constexpr MapInfo kMaps[] = {
-    {"/Game/Maps/Arenas/Map_Arena_Alley",       "Alley",      true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_Cellar",      "Cellar",     true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_EastTower",   "East Tower", true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_LordsHall",   "Lords Hall", true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_Pit",         "Pit",        true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_Slums",       "Slums",      true,  false, false},
-    {"/Game/Maps/Arenas/Map_Arena_Yard",        "Yard",       true,  false, false},
-    {"/Game/Maps/Arena_Cutting_Map",            "Cutting",    true,  false, false},
-    {"/Game/Maps/Map_Hub_Tavern_Frank",         "Tavern",     false, true,  false},
-    {"/Game/Maps/Workshop_Smithery_Map",        "Smithery",   false, true,  false},
-    {"/Game/Maps/Abyss/Abyss_Map_Open_EA",      "Abyss",      false, true,  true},
+    {"/Game/Maps/Arenas/Map_Arena_Alley",       "Alley",      true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Cellar",      "Cellar",     true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_EastTower",   "East Tower", true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_LordsHall",   "Lords Hall", true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Pit",         "Pit",        true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Slums",       "Slums",      true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Yard",        "Yard",       true,  false, false, true},
+    {"/Game/Maps/Arena_Cutting_Map",            "Cutting",    true,  false, false, false},
+    {"/Game/Maps/Map_Hub_Tavern_Frank",         "Tavern",     false, true,  false, false},
+    {"/Game/Maps/Workshop_Smithery_Map",        "Smithery",   false, true,  false, false},
+    {"/Game/Maps/Abyss/Abyss_Map_Open_EA",      "Abyss",      false, false, true,  true},
 };
 
 constexpr size_t MapCount() { return sizeof(kMaps) / sizeof(kMaps[0]); }
@@ -93,7 +95,7 @@ inline size_t NextMap(size_t current, Format f) {
     const size_t n = MapCount();
     for (size_t step = 1; step <= n; ++step) {
         const size_t i = (current % n + step) % n;
-        if (MapAllowsFormat(kMaps[i], f)) return i;
+        if (kMaps[i].pick && MapAllowsFormat(kMaps[i], f)) return i;
     }
     return n;
 }

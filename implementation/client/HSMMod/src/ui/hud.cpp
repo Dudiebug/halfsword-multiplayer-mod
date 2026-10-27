@@ -3,6 +3,7 @@
 #include "log.h"
 #include <windows.h>
 #include <array>
+#include <cmath>
 
 namespace hsm::ui {
 using namespace hsm::ue;
@@ -15,6 +16,7 @@ constexpr Rgba kFeedMine{0.22f, 0.025f, 0.02f, 0.80f}, kFeedOther{0.02f, 0.017f,
 
 struct Block { Box column; Panel panel; Text label, score; };
 struct FeedLine { Panel panel; std::array<Text, kFeedSpans> spans; };
+struct TagLabel { Text text; Slot slot{nullptr}; };
 struct BoardLine { Panel frame, panel; Icon swatch; Text name, badge, kills, deaths, score, ping, status; };
 
 struct State {
@@ -27,6 +29,10 @@ struct State {
     Box bannerBox; Text banner, bannerSub;                                                                      // centre
     Panel dead; Text deadTitle, deadDetail, deadHint; Fixed deadBarBox; Bar deadBar;                            // lower third
     Box feed; std::array<FeedLine, kFeedRows> feedLines;                                                       // top right
+    std::array<TagLabel, 16> tags;                                                                              // name tags over heads
+    UObject* statics = nullptr; UObject* layout = nullptr;                                                      // CDOs, resolved once
+    Format tagFormat = Format::Duel;
+    bool tagsOff = false;                                                                                       // a name was not found: hidden for good
     Blur board; Text boardTitle, boardFooter; BoardLine boardHeader; std::array<BoardLine, kBoardRows> boardLines;
 } g;
 
@@ -166,6 +172,71 @@ void BuildBoard(Canvas& root) {
     col.Add(g.boardFooter).Align(HAlign::Left, VAlign::Top).Padding({0, 10, 0, 0});
 }
 
+constexpr float kTagFont = 22.f;
+
+void BuildTags(Canvas& root) {
+    for (TagLabel& t : g.tags) {
+        t.text = MakeText(kTagFont, 2, style::kBone, Justify::Center);
+        if (!t.text) return;
+        t.slot = root.Add(t.text);
+        t.slot.Anchor({{0, 0}, {0, 0}}, {0.5, 1}).AutoSize().Z(kZOrder - 1);
+        t.text.Show(false);
+    }
+}
+
+void HideTags() { for (TagLabel& t : g.tags) if (t.text) t.text.Show(false); }
+
+// Every call here fails soft: a name the game does not have logs once and the tags stay hidden; nothing else is touched.
+void TagsFail(const char* what) {
+    if (!g.tagsOff) HSM_LOG("hud: name tags off (%s not found)", what);
+    g.tagsOff = true;
+    HideTags();
+}
+
+void ApplyTags(const std::vector<NameTagSrc>& src) {
+    if (g.tagsOff || !g.tags[0].text) return;
+    if (src.empty()) { HideTags(); return; }
+    if (!g.statics) if (UObject* c = FindObject("GameplayStatics", "Class")) g.statics = DefaultObject(reinterpret_cast<UClass*>(c));
+    if (!g.layout) if (UObject* c = FindObject("WidgetLayoutLibrary", "Class")) g.layout = DefaultObject(reinterpret_cast<UClass*>(c));
+    if (!g.statics || !g.layout) { TagsFail("GameplayStatics / WidgetLayoutLibrary"); return; }
+    Call pc(g.statics, "GetPlayerController");
+    if (!pc.valid()) { TagsFail("GetPlayerController"); return; }
+    pc.set<UObject*>("WorldContextObject", g.hud).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!ctrl) { HideTags(); return; }                       // no controller this frame: not a failure
+    Call sc(g.layout, "GetViewportScale"), vs(g.layout, "GetViewportSize");
+    if (!sc.valid()) { TagsFail("GetViewportScale"); return; }
+    if (!vs.valid()) { TagsFail("GetViewportSize"); return; }
+    sc.set<UObject*>("WorldContextObject", g.hud); vs.set<UObject*>("WorldContextObject", g.hud);
+    if (!sc.invoke() || !vs.invoke()) { HideTags(); return; }
+    const float scale = sc.get<float>("ReturnValue");
+    const Vec2 view = vs.get<Vec2>("ReturnValue");
+    Call cam(ctrl, "GetPlayerViewPoint");
+    if (!cam.valid()) { TagsFail("GetPlayerViewPoint"); return; }
+    FVector eye{}; if (cam.invoke()) eye = cam.get<FVector>("Location");
+    for (size_t i = 0; i < g.tags.size(); ++i) {
+        TagLabel& t = g.tags[i];
+        if (!t.text) continue;
+        if (i >= src.size()) { t.text.Show(false); continue; }
+        const NameTagSrc& n = src[i];
+        Call pj(ctrl, "ProjectWorldLocationToScreen");
+        if (!pj.valid()) { TagsFail("ProjectWorldLocationToScreen"); return; }
+        pj.set("WorldLocation", FVector{n.wx, n.wy, n.wz}).set<bool>("bPlayerViewportRelative", true);
+        const bool ok = pj.invoke() && pj.get<bool>("ReturnValue");
+        const Vec2 sp = ok ? pj.get<Vec2>("ScreenLocation") : Vec2{};
+        const double dx = n.wx - eye.x, dy = n.wy - eye.y, dz = n.wz - eye.z;
+        NameTagView v = NameTagLayout(ok, float(sp.x), float(sp.y), float(view.x), float(view.y), scale,
+                                      float(std::sqrt(dx * dx + dy * dy + dz * dz)), n.alive, n.team, g.tagFormat);
+        t.text.Show(v.visible);
+        if (!v.visible) continue;
+        t.text.Set(n.name);
+        t.text.Color(v.ink);
+        t.text.Opacity(v.alpha);
+        t.text.Scale(v.fontSize / kTagFont);
+        t.slot.Position({v.x, v.y});
+    }
+}
+
 bool Build() {
     g.built = true;
     g.kit = Kit(g.hud, Vis::HitTestInvisible);
@@ -176,6 +247,7 @@ bool Build() {
     BuildCentre(root);
     BuildFeed(root);
     BuildBoard(root);
+    BuildTags(root);
     if (!g.pillText || !g.banner || !g.boardTitle) { HSM_LOG("hud: could not make the match HUD widgets"); return false; }
     HSM_LOG("hud: match HUD added to UI_HUD");
     return true;
@@ -271,7 +343,7 @@ bool HudTabHeld() {
     return pid == GetCurrentProcessId();
 }
 
-void HudTick(const HudScene& s) {
+void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format format) {
     if (!g.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once a second
         const ULONGLONG now = GetTickCount64();
         if (now < g.nextScan) return;
@@ -293,6 +365,8 @@ void HudTick(const HudScene& s) {
     ApplyDead(s.dead);
     ApplyFeed(s.feed);
     ApplyBoard(s.board);
+    g.tagFormat = format;
+    ApplyTags(s.visible ? tags : std::vector<NameTagSrc>{});
 }
 
 }  // namespace hsm::ui

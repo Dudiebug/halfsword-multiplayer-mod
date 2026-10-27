@@ -146,20 +146,27 @@ bool HasBone(UObject* mesh, const char* bone) {
 UObject* FlailComponent(UObject* actor) {
     UClass* skel = FindClass("SkeletalMeshComponent");
     if (!skel) return nullptr;
+    // The engine filled the returned array: its buffer is released through the property's own ClearValue (Call frees nothing).
+    auto first = [](Call& c, bool joint) -> UObject* {
+        UObject* found = nullptr;
+        if (!c.invoke()) return nullptr;
+        void* value = c.paramPtr("ReturnValue");
+        const FObjArray* arr = static_cast<const FObjArray*>(value);
+        if (arr && arr->data && arr->num > 0 && arr->num <= 64) {
+            if (!joint) found = arr->data[0];
+            else
+                for (int32_t i = 0; i < arr->num && !found; ++i)
+                    if (UObject* o = arr->data[i]; o && HasBone(o, "Joint1")) found = o;
+        }
+        if (FProperty* prop = FindProperty(c.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
+        return found;
+    };
     Call byTag(actor, "GetComponentsByTag");
     byTag.set<UClass*>("ComponentClass", skel).setName("Tag", MakeName(kFlailTag));
-    if (byTag.invoke()) {
-        const FObjArray* arr = static_cast<const FObjArray*>(byTag.paramPtr("ReturnValue"));
-        if (arr && arr->data && arr->num > 0 && arr->num <= 64 && arr->data[0]) return arr->data[0];
-    }
+    if (UObject* c = first(byTag, false)) return c;
     Call byClass(actor, "K2_GetComponentsByClass");
     byClass.set<UClass*>("ComponentClass", skel);
-    if (!byClass.invoke()) return nullptr;
-    const FObjArray* arr = static_cast<const FObjArray*>(byClass.paramPtr("ReturnValue"));
-    if (!arr || !arr->data || arr->num <= 0 || arr->num > 64) return nullptr;
-    for (int32_t i = 0; i < arr->num; ++i)
-        if (UObject* c = arr->data[i]; c && HasBone(c, "Joint1")) return c;
-    return nullptr;
+    return first(byClass, true);
 }
 
 // A flail's chain simulates only below Joint1, and the game switches it on again after every BaseMesh.SetSimulatePhysics
@@ -670,6 +677,20 @@ void FighterRig::Shift(const V3& d) {
     for (int w = 0; w < sync::kPoseWeapons; ++w) {
         Weapon& wp = weapons_[w];
         if (!wp.read || Pinned(w)) continue;
+        if (Live(wp.flail, wp.flailIndex)) {
+            // A teleport of the handle leaves the simulated chain behind (it would be dragged across the map by its
+            // joints): every body goes by the same delta, measured from the chain's root before the handle moves.
+            Call at(wp.flail, "K2_GetComponentLocation");
+            if (at.invoke()) {
+                const V3 root = ToV3(at.get<FVector>("ReturnValue"));
+                if (!Call(wp.flail, "SetAllPhysicsPosition").set("NewPos", ToF(Add(root, d))).invoke() && !flailShiftLogged_) {
+                    flailShiftLogged_ = true;
+                    HSM_LOG("rig: %s: flail chain NOT shifted with the body", ObjectName(willie_).c_str());
+                }
+                Call(wp.flail, "SetAllPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
+                Call(wp.flail, "SetAllPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
+            }
+        }
         MoveTo(wp.root, Add(wp.pos, d));   // wp.pos is the root component's location as read this frame
         HoldStill(wp);
     }
@@ -884,6 +905,7 @@ bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
     SetWorldTransform(root, keep);
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmFlail(weaponR);
+    if (weapons_[0].flail && Live(weapons_[0].flail, weapons_[0].flailIndex)) SetBodyPolicy(weapons_[0].flail);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
     switchOn_ = false;
     HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
@@ -927,7 +949,7 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
         heldCheck_.Reset();
         return;
     }
-    if (!heldCheck_.Update(nowMs, owner, mine)) return;
+    if (!heldCheck_.Update(nowMs, owner, mine, sync::HeldToleranceFor(wp.flail != nullptr))) return;
     FTransform keep;
     if (!WorldTransform(wp.root, keep)) return;
     V3 pos;
@@ -943,6 +965,7 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
     SetWorldTransform(wp.root, keep);
     Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmFlail(wp.actor);
+    if (wp.flail && Live(wp.flail, wp.flailIndex)) SetBodyPolicy(wp.flail);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again on the next Drive
     switchOn_ = false;
     if (offJoint_) {            // the off hand is attached again to the weapon's new seat on the next ApplyGrip
@@ -992,7 +1015,12 @@ void FighterRig::NeutraliseFull() {
     }
     SetBodyPolicy(mesh_);
     for (Weapon& wp : weapons_)   // as of the last Read (Neutralise runs before this frame's): checked live
-        if (Live(wp.actor, wp.index) && Live(wp.root, wp.rootIndex)) SetBodyPolicy(wp.root);
+        if (Live(wp.actor, wp.index) && Live(wp.root, wp.rootIndex)) {
+            SetBodyPolicy(wp.root);
+            // The flail chain follows the handle's policy (every body of the component): gravity and world geometry left
+            // on sagged it and snagged it on the floor while the handle and body ignored both.
+            if (wp.flail && Live(wp.flail, wp.flailIndex)) SetBodyPolicy(wp.flail);
+        }
     CollisionOff(ObjField(willie_, "BoneCore"));   // HSMP main.lua:4673
     Call rc(willie_, "K2_GetRootComponent");
     CollisionOff(rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr);   // the capsule only marks the position

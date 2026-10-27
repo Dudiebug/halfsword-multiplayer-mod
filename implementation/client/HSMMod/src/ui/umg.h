@@ -198,6 +198,14 @@ private:
     Sent<Rgba> background_;
 };
 
+// EditableTextBox: a one-line text field the player types into (the game's own Slate text box).
+class EditBox : public Widget {
+public:
+    std::string Value() const;                // what is typed now (empty when it cannot be read)
+    void Clear();
+    void Hint(const std::string& s);          // greyed text shown while empty
+};
+
 // Makes widgets in one user widget's tree.
 class Kit {
 public:
@@ -221,6 +229,7 @@ public:
     Bar MakeBar();
     Icon MakeIcon();
     Button MakeButton();
+    EditBox MakeEditBox();
 private:
     ue::UObject* Spawn(ue::UClass* cls) const;
     template <class W> W Made(ue::UObject* o) const;

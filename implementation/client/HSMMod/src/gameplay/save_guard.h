@@ -15,6 +15,10 @@
 
 namespace hsm::game {
 
+// Startup sweep (S1): backups left by sessions that did not end are restored, kept aside or ignored before anything
+// else, even with role=off. Win32 only (resolves %LOCALAPPDATA%\HalfSwordUE5\Saved\SaveGames itself).
+void SweepAtStartup();
+
 class SaveGuard {
 public:
     // Every tick. joined: in a session (lobby joined or hosting); matchLevel: this machine is in a session fight level.
@@ -26,7 +30,7 @@ private:
     void Backup(Adapter& adapter);
     void Restore(Adapter& adapter);
     void RestoreLeft(Adapter& adapter);   // once per process: backups of sessions whose process is gone
-    static bool PutBack(const std::wstring& dir, const std::wstring& backup, const char* why);
+    void RetryPutBack(Adapter& adapter);   // S2: a failed put-back keeps the backup; tried again every few seconds
     static void Reload(Adapter& adapter);
 
     session::SaveGuardPolicy policy_;
@@ -35,7 +39,7 @@ private:
     std::wstring backup_;                 // this session's backup file (empty: none made)
     std::vector<Setting> settings_;       // the game instance's settings before the session
     unsigned blocked_ = 0;                // calls blocked this session
-    unsigned hookRetryTicks_ = 0;
+    unsigned hookRetryTicks_ = 0, putBackTicks_ = 0, putBackTries_ = 0;
 };
 
 }  // namespace hsm::game

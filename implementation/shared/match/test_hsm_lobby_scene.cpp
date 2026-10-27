@@ -19,6 +19,8 @@ static LobbyPlayer Player(const char* name, bool host = false, bool me = false, 
     LobbyPlayer p; p.name = name; p.host = host; p.me = me; p.team = team; p.hostOverride = over;
     return p;
 }
+static size_t PickableCount() { size_t n = 0; for (size_t i = 0; i < MapCount(); ++i) if (kMaps[i].pick) ++n; return n; }
+
 static LobbyLocal InLobby(bool host, Format f = Format::FreeForAll, Gear g = Gear::Own) {
     LobbyLocal l;
     l.phase = LobbyPhase::InLobby; l.host = host; l.version = "0.2.0"; l.myName = host ? "Ann" : "Bob";
@@ -214,7 +216,7 @@ static void TestHostAgainstMember() {
 
     LobbyScene m = BuildLobbyScene(InLobby(false, Format::TwoTeams, Gear::RandomTier));
     CHECK(!m.start && m.waiting == "Waiting for the host" && m.hostOnly == "Only the host can change these." && !m.balance);
-    CHECK(m.modes.size() == kFormatCount && m.settings.size() == h.settings.size() && m.maps.size() == MapCount());
+    CHECK(m.modes.size() == kModeCardCount && m.settings.size() == h.settings.size() && m.maps.size() == PickableCount());
     for (const ModeCard& c : m.modes) CHECK(!c.enabled);
     for (const SettingRow& r : m.settings) CHECK(r.enabled == (r.id == LobbyRow::MyTeam));   // their own team only
     for (const MapCard& c : m.maps) CHECK(!c.enabled);
@@ -400,7 +402,7 @@ static void TestReady() {
 
 static void TestModes() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::Duel));
-    CHECK(s.modes.size() == kFormatCount);
+    CHECK(s.modes.size() == kModeCardCount);
     const Format order[] = {Format::FreeForAll, Format::Duel, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies};
     const char* names[] = {"FREE-FOR-ALL", "DUEL", "2 TEAMS", "3 TEAMS", "SURVIVAL", "ZOMBIES"};
     for (size_t i = 0; i < s.modes.size() && i < kFormatCount; ++i) {
@@ -418,34 +420,37 @@ static void TestModes() {
 
 static size_t IndexOf(const char* display) { for (size_t i = 0; i < MapCount(); ++i) if (std::string(kMaps[i].display) == display) return i; return MapCount(); }
 
+static const MapCard* Card(const LobbyScene& s, size_t index) { for (const MapCard& m : s.maps) if (m.index == index) return &m; return nullptr; }
+
 static void TestMaps() {
     LobbyLocal l = InLobby(true, Format::FreeForAll);
     l.mapPick = "/Game/Maps/Arenas/Map_Arena_Yard";
     LobbyScene s = BuildLobbyScene(l);
-    CHECK(s.maps.size() == MapCount());
+    CHECK(s.maps.size() == PickableCount());                    // Cutting, Tavern and Smithery are not offered
     size_t yard = IndexOf("Yard"), tavern = IndexOf("Tavern"), abyss = IndexOf("Abyss"), alley = IndexOf("Alley");
     CHECK(yard < MapCount() && tavern < MapCount() && abyss < MapCount() && alley < MapCount());
-    if (s.maps.size() != MapCount() || yard >= MapCount() || tavern >= MapCount() || abyss >= MapCount() || alley >= MapCount()) return;
-    for (size_t i = 0; i < s.maps.size(); ++i) {
-        CHECK(s.maps[i].index == i && s.maps[i].name == kMaps[i].display && s.maps[i].allowed && s.maps[i].reason.empty());
-        CHECK(s.maps[i].selected == (i == yard));
+    if (s.maps.size() != PickableCount() || yard >= MapCount() || tavern >= MapCount() || abyss >= MapCount() || alley >= MapCount()) return;
+    CHECK(!Card(s, tavern) && !Card(s, IndexOf("Cutting")) && !Card(s, IndexOf("Smithery")) && Card(s, abyss));
+    for (const MapCard& m : s.maps) {
+        CHECK(m.name == kMaps[m.index].display);
+        CHECK(m.selected == (m.index == yard));
+        CHECK(m.allowed == (m.index != abyss));                  // the Abyss is Zombies only
     }
-    CHECK(s.maps[yard].tag == "Arena" && s.maps[tavern].tag == "Large level");
-    CHECK(s.maps[abyss].tag == "Large level " + kDot + " no spawn points: ring spawn");
+    CHECK(Card(s, yard)->tag == "Arena");
+    CHECK(Card(s, abyss)->tag == "Large level " + kDot + " no spawn points: ring spawn");
 
     l.config = SelectFormat(l.config, Format::Duel);
-    l.mapPick = "/Game/Maps/Map_Hub_Tavern_Frank";              // a pick Duel refuses: the first arena instead
+    l.mapPick = "/Game/Maps/Map_Hub_Tavern_Frank";              // not pickable: the first arena instead
     s = BuildLobbyScene(l);
-    CHECK(s.maps[alley].selected && !s.maps[tavern].selected);
-    CHECK(!s.maps[tavern].allowed && s.maps[tavern].reason == "Duel needs an arena" && !s.maps[tavern].enabled);
-    CHECK(!s.maps[abyss].allowed && s.maps[abyss].reason == "Duel needs an arena");
-    CHECK(s.maps[yard].allowed && s.maps[yard].enabled && s.maps[yard].reason.empty());
+    CHECK(Card(s, alley)->selected);
+    CHECK(!Card(s, abyss)->allowed && Card(s, abyss)->reason == "Duel needs an arena" && !Card(s, abyss)->enabled);
+    CHECK(Card(s, yard)->allowed && Card(s, yard)->enabled && Card(s, yard)->reason.empty());
 
     l.config = SelectFormat(l.config, Format::Zombies);
     s = BuildLobbyScene(l);
-    for (size_t i = 0; i < s.maps.size(); ++i) {
-        CHECK(s.maps[i].allowed == (i == abyss) && s.maps[i].selected == (i == abyss));
-        if (i != abyss) CHECK(s.maps[i].reason == "Zombies needs the Abyss");
+    for (const MapCard& m : s.maps) {
+        CHECK(m.allowed == (m.index == abyss) && m.selected == (m.index == abyss));
+        if (m.index != abyss) CHECK(m.reason == "Zombies needs the Abyss");
     }
     CHECK(std::string(MapRefusal(Format::FreeForAll)) == "Not for this mode");
 }

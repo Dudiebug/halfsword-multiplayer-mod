@@ -5,6 +5,9 @@
 namespace hsm {
 void LogInit();
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// Like Log, but gives up instead of waiting if another thread holds the log (for the fault handler).
+void LogTry(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void InstallCrashLog();   // crash_log.cpp
 }  // namespace hsm
 
 #define HSM_LOG(...) ::hsm::Log(__VA_ARGS__)

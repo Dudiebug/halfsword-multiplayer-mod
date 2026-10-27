@@ -37,6 +37,15 @@ constexpr double kHeldSteadyUu = 4.0;
 constexpr double kHeldPersistMs = 300.0;    // wrong and steady this long: re-seat (a hand mid-slide is not a seat)
 constexpr double kHeldMinGapMs = 1000.0;    // the locked joint needs time to carry the weapon to a new seat
 
+// A flail's chain drags its handle about: a seat that is a little off is the chain's doing, and a re-seat shakes the chain
+// (the joint is made again and the chain re-armed), so a flail is re-seated later and less often.
+struct HeldTolerance {
+    double deg, uu, minGapMs;
+};
+inline HeldTolerance HeldToleranceFor(bool hasChain) {
+    return hasChain ? HeldTolerance{45.0, 20.0, 3000.0} : HeldTolerance{kHeldReseatDeg, kHeldReseatUu, kHeldMinGapMs};
+}
+
 inline bool HeldDiffers(const HeldPose& a, const HeldPose& b, double deg, double uu) {
     return QuatAngleDeg(a.rot, b.rot) > deg || Vec3Dist(a.pos, b.pos) > uu;
 }
@@ -51,14 +60,14 @@ public:
     // current seat is not made again: when the joint could not carry the weapon all the way there (mirror test,
     // 2026-10-25: "28 deg, 0.6 uu off" logged every second), another re-seat at the same place only shakes it. The owner
     // moving the weapon in the hand (kHeldSteadyDeg / kHeldSteadyUu from that seat) allows the next one.
-    bool Update(double nowMs, const HeldPose& owner, const HeldPose& standIn) {
-        if (!HeldDiffers(owner, standIn, kHeldReseatDeg, kHeldReseatUu)) { since_ = -1.0; return false; }
+    bool Update(double nowMs, const HeldPose& owner, const HeldPose& standIn, const HeldTolerance& tol = HeldToleranceFor(false)) {
+        if (!HeldDiffers(owner, standIn, tol.deg, tol.uu)) { since_ = -1.0; return false; }
         if (since_ < 0.0 || HeldDiffers(owner, anchor_, kHeldSteadyDeg, kHeldSteadyUu)) {
             since_ = nowMs;
             anchor_ = owner;
             return false;
         }
-        if (nowMs - since_ < kHeldPersistMs || nowMs - lastSeatMs_ < kHeldMinGapMs) return false;
+        if (nowMs - since_ < kHeldPersistMs || nowMs - lastSeatMs_ < tol.minGapMs) return false;
         if (seated_ && !HeldDiffers(owner, seatedAt_, kHeldSteadyDeg, kHeldSteadyUu)) return false;
         lastSeatMs_ = nowMs;
         since_ = -1.0;

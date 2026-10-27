@@ -50,6 +50,7 @@ struct SeverBox {
 struct SeverClaim {
     uint32_t claimId = 0;
     uint8_t attacker = 0, victim = 0;
+    uint8_t victimLife = 0;                 // rev 19: the Spawn.life of the victim body the attacker saw (0 = unknown)
     uint32_t attackerTsMs = 0;              // the attacker's stream clock
     uint8_t part = 0;                       // Enum_DismembermentPart
     std::string masterMesh;                 // the victim mesh component's name; empty: its Mesh
@@ -166,6 +167,7 @@ inline void PutSeverBody(Writer& w, const SeverClaim& c) {
     w.u32(c.claimId);
     w.u8(c.attacker);
     w.u8(c.victim);
+    w.u8(c.victimLife);
     w.u32(c.attackerTsMs);
     w.u8(c.part);
     w.str(c.masterMesh, kMaxClaimString);
@@ -186,6 +188,7 @@ inline bool GetSeverBody(Reader& r, SeverClaim& c) {
     c.claimId = r.u32();
     c.attacker = r.u8();
     c.victim = r.u8();
+    c.victimLife = r.u8();
     c.attackerTsMs = r.u32();
     c.part = r.u8();
     c.masterMesh = r.str(kMaxClaimString);

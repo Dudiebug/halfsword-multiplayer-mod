@@ -548,8 +548,8 @@ static void TestHostileDecode() {
     PutClaim(w0, ref);
     // Fixed wire layout for these string lengths: 10 (header) + 2 (hitBone) + 4*24 (vectors) +
     // 5*8 (doubles) + 4 (bluntDestruction) + 4 (bools+source) + 2 (strikeComponent) + 1 (strikeBone)
-    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) + 1 (striker) + 8 (propId) + 24 (propVelocity) = 297.
-    CHECK(w0.buf.size() == 297);
+    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) + 1 (striker) + 8 (propId) + 24 (propVelocity) + 1 (victimLife, rev 19) = 298.
+    CHECK(w0.buf.size() == 298);
 
     {
         HitClaim back;
@@ -746,7 +746,7 @@ static void TestPropClaimDecode() {
     }
     std::vector<uint8_t> buf = w.buf;
     const uint64_t nanBits = 0x7FF8000000000000ull;
-    std::memcpy(buf.data() + buf.size() - 24, &nanBits, 8);   // propVelocity.x
+    std::memcpy(buf.data() + buf.size() - 25, &nanBits, 8);   // propVelocity.x
     hsm::Reader r(buf.data(), buf.size());
     CHECK(!GetClaim(r, back));
 }

@@ -364,7 +364,13 @@ public:
     void OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
         Entry& e = entries_[propId];
         const uint8_t streamer = level == LeaseLevel::Free ? kHostSlot : slot;
-        if (streamer != e.streamer) { e.streamer = streamer; e.fresh = false; }
+        if (streamer != e.streamer) {
+            // A-B-A: the first streamer's late packets must not apply again just because the stream changed hands twice;
+            // what each streamer last got through is remembered, and its next state must be newer than that.
+            if (e.fresh) e.lastTime[e.streamer] = e.state.senderTimeMs;
+            e.streamer = streamer;
+            e.fresh = false;
+        }
         e.level = level;
     }
     // True if m came from the streamer and was newer: it is now the current state (drive the prop's actor to it).
@@ -374,6 +380,10 @@ public:
         if (it == entries_.end()) it = entries_.emplace(m.propId, Entry{}).first;
         Entry& e = it->second;
         if (e.fresh && !SeqNewer(m.senderTimeMs, e.state.senderTimeMs)) return false;
+        if (!e.fresh) {
+            const auto seen = e.lastTime.find(m.lessee);
+            if (seen != e.lastTime.end() && !SeqNewer(m.senderTimeMs, seen->second)) return false;
+        }
         e.state = m; e.fresh = true; e.have = true;
         return true;
     }
@@ -399,6 +409,7 @@ private:
         bool fresh = false;           // state came from the current streamer (its time is the staleness baseline)
         bool have = false;            // state holds anything at all
         PropStateMsg state;
+        std::map<uint8_t, decltype(PropStateMsg::senderTimeMs)> lastTime;   // per former streamer: its last applied time
     };
     std::map<uint64_t, Entry> entries_;
 };

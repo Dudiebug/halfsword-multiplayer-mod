@@ -66,14 +66,23 @@ Rgba TeamColor(int team);             // a == 0: no tint (free-for-all keeps pla
 
 class KillLog {
 public:
-    static constexpr uint32_t kWindowMs = 60000;   // a bleed-out often comes long after the last blow (CSLewin's PR #1: 10 s lost kills)
+    static constexpr uint32_t kWindowMs = 60000;   // a bleed-out often comes long after the last blow (CSLewin's PR #1: 60 s lost kills)
     void OnHit(uint8_t victim, uint8_t attacker, uint32_t nowMs);
     uint8_t KillerOf(uint8_t victim, uint32_t nowMs) const;   // 0 = nobody within the window
     void Forget(uint8_t entity);
+    void ForgetAttacker(uint8_t entity);   // K3: hits it landed are not credited to whoever takes its slot next
 private:
     struct Hit { uint8_t attacker = 0; uint32_t at = 0; };
     std::map<uint8_t, Hit> last_;
 };
+
+// A free-for-all or team fighter held G while downed (HandleGiveUp marks the time); the death it then causes lands
+// within this window and is scored as a give-up: the last attacker (KillLog) gets the kill, nobody else scores.
+inline constexpr uint32_t kGaveUpWindowMs = 3000;
+inline bool GaveUpDeath(uint32_t markedAtMs, uint32_t nowMs) {
+    const uint32_t d = nowMs - markedAtMs;                 // wrap-safe; a mark ahead of now (clock stepped back) is stale
+    return d <= kGaveUpWindowMs;
+}
 
 enum class MatchPhase : uint8_t { Idle = 0, Countdown = 1, Live = 2, SuddenDeath = 3, Results = 4 };
 inline bool CombatPhase(MatchPhase phase) { return phase == MatchPhase::Live || phase == MatchPhase::SuddenDeath; }   // blows count
@@ -97,7 +106,13 @@ public:
 
     void Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs);
     void AddFighter(const FighterInfo& f);              // joins mid-match: alive, no score change
-    void RemoveFighter(uint8_t entity);
+    void RemoveFighter(uint8_t entity);                 // free-for-all / Duel: its score goes with it (the slot's next player starts at 0)
+    // K1/K2: a fighter who left (or is held for a rejoin) in a fought phase falls with no kill credited (a Duel round goes to
+    // whoever is left; Survival: the last human gone ends it) and is neither respawned nor counted until Return/RemoveFighter.
+    // False, and no effect, outside a fought phase, for an unknown fighter or one already down (it is still marked gone).
+    bool Leave(uint8_t entity, uint32_t nowMs);
+    void Return(uint8_t entity);                        // a leaver is back: it stays down until the next respawn / round
+    bool Gone(uint8_t e) const { return gone_.count(e) != 0; }
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
     // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
@@ -149,6 +164,7 @@ public:
 private:
     struct F { int8_t team = kNoTeam; bool human = true, alive = true; uint32_t diedAt = 0; int kills = 0, deaths = 0; };
     void AddPoints(int key, int points);
+    void ResolveDuelRound(uint32_t nowMs);              // Duel: the round goes to the last one standing
     void End(int winnerKey, uint32_t nowMs);
     Events Advance(uint32_t nowMs);                     // Tick without the regear decision
     int UniqueLeader() const;                           // kNoWinner when tied or empty
@@ -157,6 +173,7 @@ private:
     uint32_t phaseStart_ = 0;
     std::map<uint8_t, F> fighters_;
     std::map<int, int> score_;
+    std::set<uint8_t> gone_;                            // K1: left mid-match, down until Return
     int winner_ = kNoWinner;
     bool endedPending_ = false;
     // bot formats

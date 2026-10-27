@@ -4,10 +4,13 @@
 // Game thread only.
 #pragma once
 #include "match/hsm_hud_scene.h"
+#include "match/hsm_nametag.h"
+#include <vector>
 
 namespace hsm::ui {
 
-void HudTick(const HudScene& scene);
+// tags: name tags to draw over other fighters this frame (empty: none); format picks team ink.
+void HudTick(const HudScene& scene, const std::vector<NameTagSrc>& tags = {}, Format format = Format::Duel);
 bool HudTabHeld();   // the scoreboard key (Tab), while the game window has focus
 
 }  // namespace hsm::ui

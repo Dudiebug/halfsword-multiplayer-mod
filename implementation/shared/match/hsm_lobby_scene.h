@@ -41,6 +41,7 @@ struct LobbyLocal {
     bool allowBuildMismatch = false;    // allow_build_mismatch=1: the host may start with other builds in
     MatchConfig config;
     std::string mapPick;                // the host's pick (package path), empty until picked
+    bool progression = false;           // the host chose the Progression card (LobbyData hsm_prog): the stock hub, no match
     std::vector<LobbyPlayer> players;
     std::vector<LobbyFound> found;
     int maxPlayers = 6;
@@ -49,7 +50,7 @@ struct LobbyLocal {
 enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, MyTeam };
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
-struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; };
+struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; };   // progression: the extra last card
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false; };
 struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; };
 struct RosterRow {
@@ -59,6 +60,7 @@ struct RosterRow {
 };
 
 inline constexpr size_t kBrowserRows = 6;
+inline constexpr size_t kModeCardCount = kFormatCount + 1;   // the formats, then Progression
 
 struct LobbyScene {
     Span pill;
@@ -75,7 +77,7 @@ struct LobbyScene {
     std::vector<ModeCard> modes;        // the grid's reading order, two to a row
     std::vector<SettingRow> settings;
     std::string hostOnly;               // members: "Only the host can change these."
-    std::vector<MapCard> maps;          // kMaps order
+    std::vector<MapCard> maps;          // the pickable maps, kMaps order; none for Progression
     bool start = false;                 // START MATCH: the host, while every known build matches (or the override is on)
     std::string waiting;                // members: "Waiting for the host"; anyone: the build warning, which replaces it
     bool buildMismatch = false;         // another player is on a different build (waiting says who)
@@ -310,11 +312,19 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.readyLabel = s.readyOn ? "Ready \xC2\xB7 click to undo" : "Mark me ready";
     }
     s.balance = l.host && HasTeams(f);
-    for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f, l.host});
-    for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
+    for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f && !l.progression, l.host});
+    {
+        ModeCard p;
+        p.name = "PROGRESSION (CO-OP)";
+        p.description = "Stock Progression in the Tavern, together. Free Mode off; your own save is untouched.";
+        p.selected = l.progression; p.enabled = l.host; p.progression = true;
+        s.modes.push_back(p);
+    }
+    if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
     if (!l.host) s.hostOnly = "Only the host can change these.";
     size_t chosen = EffectiveMap(f, l.mapPick);
-    for (size_t i = 0; i < MapCount(); ++i) {
+    for (size_t i = 0; i < MapCount() && !l.progression; ++i) {
+        if (!kMaps[i].pick) continue;
         MapCard m;
         m.index = i;
         m.name = kMaps[i].display;

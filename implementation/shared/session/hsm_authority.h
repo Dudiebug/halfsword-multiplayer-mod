@@ -38,6 +38,26 @@ inline std::vector<uint8_t> RelayTargets(uint8_t fromSlot, const std::vector<uin
     return out;
 }
 
+static_assert(size_t(kMaxFighters) == kMaxPeerMap, "PeerMap carries one entry per fighter slot");
+
+// Body lives (rev 19). The host counts every body it spawns for an entity (Spawn.life, 1..255, wrapping past 0);
+// a claim or death report names the life it was made against, and one that names an older body is dropped, so a late
+// report can never kill the next body. 0 is "unknown" on either side (a missing Spawn must not block play) and passes.
+class LifeBook {
+public:
+    uint8_t Bump(uint8_t entity) {
+        if (!ValidEntity(entity)) return 0;
+        uint8_t& v = life_[entity];
+        v = (v == 255) ? uint8_t(1) : uint8_t(v + 1);
+        return v;
+    }
+    uint8_t Current(uint8_t entity) const { return ValidEntity(entity) ? life_[entity] : uint8_t(0); }
+    void Clear() { for (uint8_t& v : life_) v = 0; }
+private:
+    uint8_t life_[kMaxWillies + 1] = {};
+};
+inline bool LifeCurrent(uint8_t claimed, uint8_t current) { return current == 0 || claimed == 0 || claimed == current; }
+
 // A HitClaim the host received from senderSlot (or made itself, senderSlot = kHostSlot).
 struct ClaimRoute {
     bool accept = false;

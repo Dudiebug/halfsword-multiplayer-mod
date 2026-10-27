@@ -80,4 +80,17 @@ inline std::optional<uint8_t> SpectateCycler::Step(bool forward) {
 inline std::optional<uint8_t> SpectateCycler::Next() { return Step(true); }
 inline std::optional<uint8_t> SpectateCycler::Prev() { return Step(false); }
 
+// A client's view of whether a fighter lives is the host's roster entry (MatchInfo::fighters[].alive), not its own
+// stand-in guesses; a fighter not on the roster is not alive. `alive` is that entry's flag, or nullptr when absent.
+inline bool ClientAlive(const bool* alive) { return alive ? *alive : false; }
+
+// The host: a fighter waiting in the respawn queue has a dead body still lying around, so it is not a target.
+inline bool HostAlive(bool matchAlive, bool respawnQueued) { return matchAlive && !respawnQueued; }
+
+// Whether to (re)apply SetViewTarget: on a new target, and again every `everyMs` so a camera the game reset
+// (a respawn, a level event) comes back to the fighter being watched. lastApplyMs wraps like NowMs().
+inline bool ShouldApplyView(int target, int lastTarget, uint32_t lastApplyMs, uint32_t nowMs, uint32_t everyMs = 500) {
+    return target != lastTarget || uint32_t(nowMs - lastApplyMs) >= everyMs;
+}
+
 }  // namespace hsm

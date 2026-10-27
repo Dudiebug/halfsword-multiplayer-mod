@@ -178,6 +178,7 @@ struct LocalHud {
     bool oneFight = false;           // a Progression fight (Free Mode off): the host plays it as one fight, no waves
     BannerShot banner;               // BannerTracker::shot()
     std::vector<FeedItem> feed;      // oldest first
+    bool giveUpWait = false;         // G is held with nothing to give up (dead, or waiting for the next round)
     float giveUp = 0;                // Duel / wave break: how far the G hold is (GiveUpHold::progress), 0 = not held
 };
 
@@ -362,6 +363,8 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
         s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
     if (l.giveUp > 0 && InWaveBreak(m))          // the same G hold votes to skip the loot break
         s.pill = {true, "SKIPPING THE BREAK " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kOk, 1, 1};
+    if (l.giveUpWait && fought)
+        s.pill = {true, m.roundGapLeftMs ? "NOTHING TO GIVE UP - NEXT ROUND IN " + Seconds(m.roundGapLeftMs) : std::string("NOTHING TO GIVE UP - YOU ARE OUT"), style::kIron, 1, 1};
     if (m.phase == uint8_t(MatchPhase::Countdown)) {
         if (m.timeLeftMs) {                      // the digits, each popping as it appears
             Look look = BannerLook((1000 - m.timeLeftMs % 1000) % 1000);

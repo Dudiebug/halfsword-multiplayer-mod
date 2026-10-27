@@ -21,6 +21,7 @@ constexpr const char* kUniformGridPanelClass = "UniformGridPanel";
 constexpr const char* kProgressBarClass = "ProgressBar";
 constexpr const char* kImageClass = "Image";
 constexpr const char* kButtonClass = "Button";
+constexpr const char* kEditBoxClass = "EditableTextBox";
 
 // A TextBlock's font size when the copied font's own cannot be read (UMG's default).
 constexpr float kAssumedFontSize = 24;
@@ -341,6 +342,23 @@ Grid Kit::MakeGrid() { return Made<Grid>(Spawn(WidgetClass(kUniformGridPanelClas
 Bar Kit::MakeBar() { return Made<Bar>(Spawn(WidgetClass(kProgressBarClass))); }
 Icon Kit::MakeIcon() { return Made<Icon>(Spawn(WidgetClass(kImageClass))); }
 Button Kit::MakeButton() { return Made<Button>(Spawn(WidgetClass(kButtonClass))); }
+EditBox Kit::MakeEditBox() { return Made<EditBox>(Spawn(WidgetClass(kEditBoxClass))); }
+
+std::string EditBox::Value() const {
+    if (!w_) return {};
+    static UObject* lib = nullptr;
+    if (!lib) if (UObject* cls = FindObject("KismetTextLibrary", "Class")) lib = DefaultObject(reinterpret_cast<UClass*>(cls));
+    Call get(w_, "GetText");
+    if (!get.invoke()) return {};
+    const FText text = get.get<FText>("ReturnValue");
+    Call str(lib, "Conv_TextToString");
+    str.set("InText", text);
+    if (!str.invoke()) return {};
+    return ReadFString(str.paramPtr("ReturnValue"));      // the Call frees the engine's string with its buffer
+}
+
+void EditBox::Clear() { if (w_) Call(w_, "SetText").set("InText", MakeText("")).invoke(); }
+void EditBox::Hint(const std::string& s) { if (w_) Call(w_, "SetHintText").set("InText", MakeText(s)).invoke(); }
 
 bool InViewport(UObject* userWidget) {
     Call v(userWidget, "IsInViewport"); v.invoke();

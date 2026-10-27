@@ -25,7 +25,7 @@ public:
     // Adds a member or returns the existing slot for a known key. Fails when all slots are taken.
     std::optional<uint8_t> Add(uint64_t key, const std::string& name) {
         if (const RosterMember* m = Find(key)) return m->slot;
-        for (uint8_t slot = 0; slot < kMaxFighters; ++slot) {
+        for (uint8_t slot = firstSlot_; slot < kMaxFighters; ++slot) {
             if (BySlot(slot)) continue;
             members_.push_back({key, slot, EntityForSlot(slot), name});
             return slot;
@@ -54,9 +54,12 @@ public:
     const std::vector<RosterMember>& members() const { return members_; }
     size_t size() const { return members_.size(); }
     void Clear() { members_.clear(); }
+    // role=server: the host has no fighter, so slot 0 (entity 1) is never given to anyone. Survives Clear().
+    void ReserveHostSlot(bool on) { firstSlot_ = on ? 1 : 0; }
 
 private:
     std::vector<RosterMember> members_;
+    uint8_t firstSlot_ = 0;
 };
 
 }  // namespace hsm

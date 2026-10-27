@@ -3,6 +3,7 @@
 #include "util/hsm_names.h"
 #include "gameplay/session.h"
 #include "log.h"
+#include "net/report_client.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
@@ -72,6 +73,11 @@ struct State {
     Panel pill;
     Box middle, right;
     Flat hostFriends, hostPublic, find, invite, readyUp, balance, leave, close;
+    Flat reportOpen, reportSend, reportCancel;   // REPORT A BUG, and the box it opens
+    Box reportBox;
+    EditBox reportText;
+    Text reportNote;
+    bool reportOpenNow = false;
     std::vector<BrowserView> rows;           // kBrowserRows
     std::vector<uint64_t> rowLobbies;
     std::vector<MemberView> members;         // kMaxLobbyMembers
@@ -80,7 +86,7 @@ struct State {
     bool avatarFailLogged = false;
     std::vector<ModeView> modes;             // kModeOrder
     std::vector<StepperView> steppers;       // one per LobbyRow, in its order
-    std::vector<MapView> maps;               // kMaps order
+    std::vector<MapView> maps;               // the pickable maps, kMaps order
     Card start;
     Text startLabel;
     LobbyScene scene;                        // the last drawn: what the clicks act on
@@ -244,6 +250,23 @@ void BuildLobbyColumn(Box& left) {
     g.balance = MakeFlat("Auto-balance teams", 17);
     g.leave = MakeFlat("Leave lobby", 17);
     AddFlat(left, g.invite, 14); AddFlat(left, g.readyUp, 6); AddFlat(left, g.balance, 6); AddFlat(left, g.leave, 6);
+
+    // REPORT A BUG: a text box with SEND and CANCEL; the text becomes a public GitHub issue (net/report_client).
+    g.reportOpen = MakeFlat("REPORT A BUG", 17);
+    g.reportSend = MakeFlat("SEND", 17);
+    g.reportCancel = MakeFlat("CANCEL", 17);
+    g.reportText = g.kit.MakeEditBox();
+    g.reportBox = g.kit.MakeColumn();
+    g.reportNote = NewText("", 14, style::kIron);
+    AddFlat(left, g.reportOpen, 26);
+    if (g.reportBox && g.reportText) {
+        g.reportText.Hint("What went wrong?");
+        AddToVerticalBox(g.reportBox, g.reportText, 0);
+        AddFlat(g.reportBox, g.reportSend, 6); AddFlat(g.reportBox, g.reportCancel, 6);
+        AddToVerticalBox(left, g.reportBox, 8);
+        SetShown(g.reportBox, false);
+    }
+    if (g.reportNote) { g.reportNote.Wrap(true); AddToVerticalBox(left, g.reportNote, 8); }
 }
 
 // Middle column: the mode cards two to a row, then a stepper row per setting with its hint.
@@ -253,7 +276,7 @@ void BuildMatchColumn() {
     if (grid) {
         grid.SlotPadding({4, 4, 4, 4});
         AddToVerticalBox(g.middle, grid, 6);
-        for (size_t i = 0; i < kFormatCount; ++i) {
+        for (size_t i = 0; i < kModeCardCount; ++i) {
             ModeView v;
             Box body = g.kit.MakeColumn();
             v.name = NewText("", 19, style::kBone); v.blurb = NewText("", 13, style::kIron);
@@ -263,7 +286,7 @@ void BuildMatchColumn() {
                 v.card = MakeCard(body, {14, 9, 14, 10});
             }
             if (v.card) grid.Add(v.card.button, int32_t(i / 2), int32_t(i % 2)).Align(HAlign::Fill, VAlign::Fill);
-            g.modes.push_back(v);               // kept even if empty: g.modes[i] is kModeOrder[i]
+            g.modes.push_back(v);               // kept even if empty: g.modes[i] is kModeOrder[i], the last one Progression
         }
     }
     Section(g.middle, "SETTINGS", 18);
@@ -299,6 +322,7 @@ void BuildMapColumn() {
     if (list) {
         FillVerticalBox(g.right, list, 6);
         for (size_t i = 0; i < MapCount(); ++i) {
+            if (!MapAt(i).pick) continue;
             MapView v;
             Box body = g.kit.MakeColumn();
             v.name = NewText(MapAt(i).display, 18, style::kBone); v.tag = NewText("", 13, style::kIron);
@@ -307,7 +331,7 @@ void BuildMapColumn() {
                 v.card = MakeCard(body, {12, 6, 12, 7});
             }
             if (v.card) list.Add(v.card.button).Padding({0, 3, 0, 3});
-            g.maps.push_back(v);                // kept even if empty: g.maps[i] is kMaps[i]
+            g.maps.push_back(v);                // kept even if empty: g.maps[j] is s.maps[j] (the pickable maps, kMaps order)
         }
     }
     g.startLabel = NewText("START MATCH", 26, style::kBone);
@@ -366,8 +390,16 @@ bool BuildPanel() {
     if (g.status) AddToVerticalBox(page, g.status, 8);
 
     FillVerticalBox(page, body, 18);
-    AddToHorizontalBox(body, left, 0.95f, 40);
-    AddToHorizontalBox(body, g.middle, 1.35f, 40);
+    // The left and middle columns scroll (a long mode and settings list, or a small window, no longer cuts them off).
+    Box leftScroll = g.kit.MakeScroll(), midScroll = g.kit.MakeScroll();
+    if (leftScroll && midScroll) {
+        leftScroll.Add(left); midScroll.Add(g.middle);
+        AddToHorizontalBox(body, leftScroll, 0.95f, 40);
+        AddToHorizontalBox(body, midScroll, 1.35f, 40);
+    } else {
+        AddToHorizontalBox(body, left, 0.95f, 40);
+        AddToHorizontalBox(body, g.middle, 1.35f, 40);
+    }
     AddToHorizontalBox(body, g.right, 0.85f, 0);
     BuildLobbyColumn(left);
     BuildMatchColumn();
@@ -425,6 +457,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
+        l.progression = lobby.Progression();
         for (const game::LobbyMember& m : lobby.members()) {
             LobbyPlayer p;
             p.name = m.name; p.host = m.host; p.ready = m.ready; p.me = m.id == steam::MySteamId();
@@ -522,9 +555,11 @@ void Draw(const LobbyScene& s) {
     }
     g.hostOnly.Set(s.hostOnly);
     g.hostOnly.Show(!s.hostOnly.empty());
-    for (size_t i = 0; i < g.maps.size() && i < s.maps.size(); ++i) {
+    for (size_t i = 0; i < g.maps.size(); ++i) {
         MapView& v = g.maps[i];
         if (!v.card) continue;
+        v.card.button.Show(i < s.maps.size());          // none while Progression is the choice
+        if (i >= s.maps.size()) continue;
         const MapCard& m = s.maps[i];
         v.name.Color(m.selected ? style::kBloodInk : style::kBone);
         v.tag.Set(m.allowed ? m.tag : m.reason);
@@ -612,7 +647,24 @@ void HandleClicks(Session& session) {
     bool acted = false;
     auto act = [&](bool clicked, bool allowed) { bool go = clicked && allowed; acted = acted || go; return go; };
 
-    for (Flat* f : {&g.hostFriends, &g.hostPublic, &g.find, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close}) Paint(f->card);
+    for (Flat* f : {&g.hostFriends, &g.hostPublic, &g.find, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.reportOpen, &g.reportSend, &g.reportCancel}) Paint(f->card);
+    g.reportOpen.card.button.Show(report::Enabled());
+    if (act(Clicked(g.reportOpen.card), report::Enabled())) {
+        g.reportOpenNow = !g.reportOpenNow;
+        SetShown(g.reportBox, g.reportOpenNow);
+        g.reportNote.Set("");
+    }
+    if (g.reportOpenNow && act(Clicked(g.reportCancel.card), true)) { g.reportOpenNow = false; SetShown(g.reportBox, false); g.reportText.Clear(); }
+    if (g.reportOpenNow && act(Clicked(g.reportSend.card), true)) {
+        std::string text = g.reportText.Value();
+        if (text.empty()) {
+            g.reportNote.Set("Type what went wrong first.");
+        } else {
+            g.reportNote.Set(session.SubmitReport(text));
+            g.reportText.Clear();
+            g.reportOpenNow = false; SetShown(g.reportBox, false);
+        }
+    }
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
     if (act(Clicked(g.hostPublic.card), s.idle)) lobby.Host(steam::LobbyType::Public);
     if (act(Clicked(g.find.card), s.idle)) lobby.RefreshList();
@@ -637,6 +689,8 @@ void HandleClicks(Session& session) {
     for (size_t i = 0; i < g.modes.size(); ++i) {
         Paint(g.modes[i].card);
         if (!act(Clicked(g.modes[i].card), i < s.modes.size() && s.modes[i].enabled)) continue;
+        if (s.modes[i].progression) { lobby.SetProgression(true); continue; }
+        if (lobby.Progression()) lobby.SetProgression(false);
         MatchConfig next = SelectFormat(c, s.modes[i].format);
         if (next.format != c.format) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
     }
@@ -660,7 +714,7 @@ void HandleClicks(Session& session) {
     }
     for (size_t i = 0; i < g.maps.size(); ++i) {
         Paint(g.maps[i].card);
-        if (act(Clicked(g.maps[i].card), i < s.maps.size() && s.maps[i].enabled)) lobby.SetMapPick(MapAt(i).path);
+        if (act(Clicked(g.maps[i].card), i < s.maps.size() && s.maps[i].enabled)) lobby.SetMapPick(MapAt(s.maps[i].index).path);
     }
     if (g.start) {
         bool hover = g.start.button.Hovered();
@@ -668,8 +722,11 @@ void HandleClicks(Session& session) {
         g.start.face.Color(hover ? kStartHover : style::kBlood);
     }
     if (act(Clicked(g.start), s.start)) {
-        size_t m = EffectiveMap(c.format, lobby.MapPick());
-        if (m < MapCount()) session.StartOnMap(MapAt(m).path);
+        if (s.modes.size() == kModeCardCount && s.modes.back().selected) session.StartProgression();
+        else {
+            size_t m = EffectiveMap(c.format, lobby.MapPick());
+            if (m < MapCount()) session.StartOnMap(MapAt(m).path);
+        }
     }
     if (acted) g.nextText = 0;                  // redraw now, not at the next quarter second
 }
