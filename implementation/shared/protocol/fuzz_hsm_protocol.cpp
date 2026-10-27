@@ -42,7 +42,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
-    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<DeathReport>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<DeathReport>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -66,6 +66,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     Spawn sp; sp.entity = 2; sp.blobId = 9; sp.x = 10; sp.life = 3; s.push_back(Encode(sp));
     PeerMapMsg pmm; pmm.peers = {{1, 76561198000000001ull}, {2, 76561198000000002ull}}; s.push_back(Encode(pmm));
     MeshHeardMsg mh; mh.mask = 0x06; s.push_back(Encode(mh));
+    PingTableMsg pt; pt.entries = {{0, 40, 38, 0}, {2, 95, 0xFFFF, 12}}; s.push_back(Encode(pt));
+    VoiceMsg vo; vo.entity = 4; vo.seq = 77; vo.flags = 1; vo.data = {9, 8, 7, 6, 5, 4}; s.push_back(Encode(vo));
     DeathReport dr; dr.victim = 2; dr.killer = 1; dr.victimLife = 3; s.push_back(Encode(dr));
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
@@ -100,12 +102,12 @@ std::vector<std::vector<uint8_t>> Seeds() {
     ps.rot = PackQuat(0, 0, 0.3f, 0.95f); ps.vx = 300; ps.wz = 720; s.push_back(Encode(ps));
     PropLeaseMsg pl; pl.propId = ps.propId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
     PropLeaseMsg lv; lv.propId = MakeLevelPropId(3); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
-    PropStateMsg pe = ps; pe.propId = MakeDropPropId(16, 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
+    PropStateMsg pe = ps; pe.propId = MakeDropPropId(uint8_t(kMaxWillies), 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
     PropLeaseMsg le = pl; le.propId = pe.propId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
     combat::PaintFxMsg bl; bl.entity = 3; bl.kind = combat::FxKind::Blood; bl.seq = 7; bl.bone = "lowerarm_r"; bl.bodyPart = 2;
     bl.local.pos = sync::V3{ 4, -2, 7.5 }; bl.local.rot = sync::Q4{ 0, 0, std::sin(0.3), std::cos(0.3) }; bl.rate = 12.5; bl.damageRate = 1;
     bl.loopCount = 4; bl.extraVelocity = true; bl.velocity = sync::V3{ -30, 12, 400 }; bl.bleeding = 37; s.push_back(Encode(bl));
-    combat::PaintFxMsg wd; wd.entity = 16; wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
+    combat::PaintFxMsg wd; wd.entity = uint8_t(kMaxWillies); wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
     wd.damageRate = 1.5; s.push_back(Encode(wd));
     combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
     PropCensusMsg pc; pc.seq = 3; pc.part = 1; pc.parts = 2;
@@ -124,7 +126,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::MeshHeard))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::Voice))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

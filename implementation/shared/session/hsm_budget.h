@@ -6,10 +6,10 @@
 // The numbers are one machine's own legitimate traffic times a margin of 2 or more. A machine owns one fighter, so
 // toward the host a client sends at most: Pose + Vitals about 60 Hz each, PropState for the props it leases (up to ~20
 // at 60 Hz), claims bounded by physics contacts, PaintFx at most 6 kinds x 30/s (the sender's own FxLimiter). The host
-// relays every fighter's streams to a client (6 fighters + up to 10 bots, kMaxWillies), so a client's budget for what
+// relays every fighter's streams to a client (8 fighters + up to 10 bots, kMaxWillies), so a client's budget for what
 // the HOST sends is the per-peer one times kMaxWillies (MsgBudget(kMaxWillies)). Classes that carry setup or are
 // already bounded elsewhere (Hello's own repeat gate, Chat's ChatRateLimiter, Travel, Spawn, MatchInfo, Event, ...) are
-// not budgeted here (BudgetClass::Free). Normal play, a full 6-fighter lobby with 10 bots and many props, stays far
+// not budgeted here (BudgetClass::Free). Normal play, a full 8-fighter lobby with 10 bots and many props, stays far
 // below every limit; only a flood reaches one.
 #pragma once
 #include "hsm_protocol.h"
@@ -34,7 +34,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
             return BudgetClass::Combat;
         case MsgType::PaintFx: return BudgetClass::Fx;
         case MsgType::BlobChunk: return BudgetClass::Blob;
-        case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard:
+        case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard: case MsgType::PingTable:
             return BudgetClass::Control;
         default: return BudgetClass::Free;
     }
@@ -49,7 +49,7 @@ struct BudgetRate { double perSec; double burst; };
 //   Combat  600/s burst 1200  (a pile-up of weapon contacts; the claim senders have their own limits)
 //   Fx      360/s burst 720   (legit at most 180/s: 6 kinds x kFxMaxPerSecond)
 //   Blob    200/s burst 600   (one loadout is 32 chunks; a joiner gets every fighter's: ~200 in one burst)
-//   Control  20/s burst 60    (Ready, ReportShare, MeshHeard: a few per join or level load)
+//   Control  20/s burst 60    (Ready, ReportShare, MeshHeard, PingTable: a few per join, level load or 10 s)
 constexpr BudgetRate kBudgetRates[size_t(BudgetClass::Count)] = {
     {0, 0},          // Free: never budgeted
     {300, 600}, {1500, 3000}, {300, 600}, {600, 1200}, {360, 720}, {200, 600}, {20, 60},

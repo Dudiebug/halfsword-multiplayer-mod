@@ -59,6 +59,7 @@ void Lobby::Tick() {
                 steam::SetLobbyData(e.lobby, "hsm_ver", kModVersion);
                 steam::SetLobbyData(e.lobby, "name", steam::PersonaName(steam::MySteamId()) + "'s fight");
                 steam::SetLobbyData(e.lobby, "state", "menu");
+                steam::SetLobbyData(e.lobby, "hsm_srv", server_ ? "1" : "0");
                 Enter(e.lobby);
                 break;
             case steam::Event::LobbyEntered:
@@ -114,7 +115,8 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     LobbyListing l; l.id = lobby;
     l.name = steam::LobbyData(lobby, "name"); l.map = steam::LobbyData(lobby, "map"); l.mode = steam::LobbyData(lobby, "mode");
     const std::vector<steam::SteamId> members = steam::LobbyMembers(lobby);
-    l.players = int(members.size());
+    const bool server = steam::LobbyData(lobby, "hsm_srv") == "1";
+    l.players = int(members.size()) - (server && !members.empty() ? 1 : 0);
     std::string proto = steam::LobbyData(lobby, "hsm_proto"), build = steam::LobbyData(lobby, "hsm_build");
     if (proto.empty()) l.reason = "not a HalfSwordMP lobby";
     else if (proto != ProtocolStr()) l.reason = "different mod version (host " + steam::LobbyData(lobby, "hsm_ver") + ", you " + kModVersion + ")";
@@ -125,11 +127,15 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     return l;
 }
 
-void Lobby::Host(steam::LobbyType type) {
+void Lobby::Host(steam::LobbyType type, bool server) {
     if (state_ != State::Idle) return;
-    type_ = type; state_ = State::Creating; SetStatus("Creating lobby...");
-    steam::CreateLobby(type, kMaxLobbyMembers);
+    type_ = type; server_ = server; state_ = State::Creating; SetStatus("Creating lobby...");
+    steam::CreateLobby(type, kMaxLobbyMembers + (server ? 1 : 0));
 }
+
+bool Lobby::ServerLobby() const { return InLobby() && steam::LobbyData(lobby_, "hsm_srv") == "1"; }
+
+int Lobby::PlayerCount() const { return int(members_.size()) - (ServerLobby() && !members_.empty() ? 1 : 0); }
 
 void Lobby::Join(steam::SteamId lobby) {
     if (state_ != State::Idle || !lobby) return;
@@ -214,11 +220,15 @@ void Lobby::RefreshList() {
 
 void Lobby::RefreshMembers() {
     steam::SteamId owner = steam::LobbyOwner(lobby_);
-    if (owner && owner != owner_) {           // host left and Steam promoted someone: no host migration
+    if (owner && owner != owner_) {           // host left and Steam promoted someone
+        const steam::SteamId old = owner_;
         owner_ = owner;
-        SetStatus("Host left the lobby");
-        Leave();
-        return;
+        if (!onOwnerChanged || !onOwnerChanged(old, owner)) {
+            SetStatus("Host left the lobby");
+            Leave();
+            return;
+        }
+        SetStatus(owner == steam::MySteamId() ? "The host left. You are the new host." : "The host left. " + (steam::PersonaName(owner).empty() ? std::string("Another player") : steam::PersonaName(owner)) + " is the new host.");
     }
     std::vector<steam::SteamId> ids = steam::LobbyMembers(lobby_);
     const bool synced = !members_.empty();   // the first refresh after Enter lists whoever was here: not "joined" lines

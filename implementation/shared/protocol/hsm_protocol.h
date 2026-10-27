@@ -13,11 +13,11 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 21;         // 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 22;         // 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
-constexpr size_t kMaxWillies = 16;           // 6 fighters + up to 10 bots
+constexpr size_t kMaxWillies = 19;           // 9 fighter slots (host + 8 clients) + up to 10 bots
 constexpr size_t kMaxBodies = 64;
 constexpr size_t kMaxPacket = 16 * 1024;
 
@@ -63,6 +63,8 @@ enum class MsgType : uint8_t {
     ReportShare = 36, // reporter -> host -> others, reliable: a bug report's id and attach token (session/hsm_report.h)
     PeerMap = 37,     // host -> client, reliable: the other clients' slots and SteamIDs (mesh, session/hsm_mesh.h)
     MeshHeard = 38,   // client -> host, reliable: which other slots this client hears directly (mesh fallback)
+    PingTable = 39,   // client -> host, reliable: this client's measured ping to the host and to each other client
+    Voice = 40,       // both ways, unreliable: one chunk of a fighter's microphone (Steam-compressed), proximity voice
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
@@ -107,10 +109,12 @@ struct Welcome {
     std::string map;
     uint8_t syncMode = 0;    // session/hsm_authority.h SyncMode: 0 the host simulates every fighter, 1 each owner its own
     std::string modBuild;    // rev 17: the host's mod build
-    uint8_t flags = 0;       // rev 19: kWelcomeNoHostFighter | kWelcomeMesh
+    uint8_t flags = 0;       // rev 19: kWelcomeNoHostFighter | kWelcomeMesh; rev 22: kWelcomePeerPing | kWelcomeVoice
 };
 constexpr uint8_t kWelcomeNoHostFighter = 1;   // the host plays no fighter of its own
 constexpr uint8_t kWelcomeMesh = 2;            // mesh offered: clients send Pose/Vitals to each other too (PeerMap follows)
+constexpr uint8_t kWelcomePeerPing = 4;        // rev 22: the PeerMap follows so clients can ping each other (mesh on or off)
+constexpr uint8_t kWelcomeVoice = 8;           // rev 22: the host relays proximity voice (voice=1 in its HSMMod.ini)
 struct Reject { RejectReason reason = RejectReason::Malformed; };
 
 struct InputFrame {
@@ -250,7 +254,7 @@ inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgTyp
 inline bool Decode(const uint8_t* d, size_t n, Welcome& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Welcome) return false;
     m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8(); m.modBuild = r.str(kMaxModBuild); m.flags = r.u8();
-    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1 && (m.flags & ~(kWelcomeNoHostFighter | kWelcomeMesh)) == 0;
+    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1 && (m.flags & ~(kWelcomeNoHostFighter | kWelcomeMesh | kWelcomePeerPing | kWelcomeVoice)) == 0;
 }
 
 inline std::vector<uint8_t> Encode(const Reject& m) { Writer w; w.header(MsgType::Reject); w.u8(uint8_t(m.reason)); return w.buf; }
@@ -456,7 +460,7 @@ inline bool Decode(const uint8_t* d, size_t n, Kill& m) {
 
 // Mesh (rev 19). The host tells each client who else is in the session so clients can stream Pose/Vitals to each other;
 // a client tells the host which slots it hears directly so the host stops relaying those to it.
-constexpr size_t kMaxPeerMap = 6;   // == kMaxFighters (session/hsm_roster.h; static_assert in session/hsm_authority.h)
+constexpr size_t kMaxPeerMap = 9;   // == kMaxFighters (session/hsm_roster.h; static_assert in session/hsm_authority.h)
 struct PeerMapEntry { uint8_t slot = 0; uint64_t steamId = 0; };
 struct PeerMapMsg { std::vector<PeerMapEntry> peers; };
 inline std::vector<uint8_t> Encode(const PeerMapMsg& m) {
@@ -477,11 +481,57 @@ inline bool Decode(const uint8_t* d, size_t n, PeerMapMsg& m) {
     }
     return r.done();
 }
-struct MeshHeardMsg { uint8_t mask = 0; };   // bit s = this client received slot s's Pose or Vitals directly lately
-inline std::vector<uint8_t> Encode(const MeshHeardMsg& m) { Writer w; w.header(MsgType::MeshHeard); w.u8(m.mask); return w.buf; }
+struct MeshHeardMsg { uint16_t mask = 0; };   // bit s = this client received slot s's Pose or Vitals directly lately
+inline std::vector<uint8_t> Encode(const MeshHeardMsg& m) { Writer w; w.header(MsgType::MeshHeard); w.u16(m.mask); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, MeshHeardMsg& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MeshHeard) return false;
-    m.mask = r.u8(); return r.done() && (m.mask >> kMaxPeerMap) == 0;
+    m.mask = r.u16(); return r.done() && (m.mask >> kMaxPeerMap) == 0;
+}
+
+// Ping table (rev 22): what one client measured to the host (slot 0) and to the other clients (session/hsm_peer_ping.h).
+// rttMs and steamMs 0xFFFF: not measured. One entry per slot at most, never the sender's own.
+struct PingTableEntry { uint8_t slot = 0; uint16_t rttMs = 0xFFFF; uint16_t steamMs = 0xFFFF; uint8_t lossPct = 0; };
+struct PingTableMsg { std::vector<PingTableEntry> entries; };
+inline std::vector<uint8_t> Encode(const PingTableMsg& m) {
+    Writer w; w.header(MsgType::PingTable);
+    const size_t n = m.entries.size() < kMaxPeerMap ? m.entries.size() : kMaxPeerMap; w.u8(uint8_t(n));
+    for (size_t i = 0; i < n; ++i) {
+        const PingTableEntry& e = m.entries[i];
+        w.u8(e.slot); w.u16(e.rttMs); w.u16(e.steamMs); w.u8(e.lossPct);
+    }
+    return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, PingTableMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::PingTable) return false;
+    const size_t cnt = r.u8(); if (cnt > kMaxPeerMap) return false;
+    m.entries.assign(cnt, PingTableEntry{});
+    uint32_t seen = 0;
+    for (PingTableEntry& e : m.entries) {
+        e.slot = r.u8(); e.rttMs = r.u16(); e.steamMs = r.u16(); e.lossPct = r.u8();
+        if (e.slot >= kMaxPeerMap || e.lossPct > 100 || (seen >> e.slot & 1)) return false;
+        seen |= 1u << e.slot;
+    }
+    return r.done();
+}
+
+// Voice (rev 22): one Steam-compressed microphone chunk. A client sends its own (entity = its fighter); the host
+// relays it to the players who may hear it (voice/hsm_voice.h) with the entity it checked. flags bit0: the first
+// chunk of a talk spurt.
+constexpr size_t kMaxVoiceBytes = 4096;   // over a second of speech: only a long hitch makes a chunk this big
+struct VoiceMsg { uint8_t entity = 0; uint16_t seq = 0; uint8_t flags = 0; std::vector<uint8_t> data; };
+inline std::vector<uint8_t> Encode(const VoiceMsg& m) {
+    Writer w; w.header(MsgType::Voice); w.u8(m.entity); w.u16(m.seq); w.u8(m.flags);
+    const size_t len = m.data.size() < kMaxVoiceBytes ? m.data.size() : kMaxVoiceBytes;
+    w.u16(uint16_t(len)); w.buf.insert(w.buf.end(), m.data.begin(), m.data.begin() + long(len));
+    return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, VoiceMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Voice) return false;
+    m.entity = r.u8(); m.seq = r.u16(); m.flags = r.u8();
+    const size_t len = r.u16();
+    if (!r.ok() || m.entity == 0 || m.flags > 1 || len == 0 || len > kMaxVoiceBytes || n < 10 || n - 10 != len) return false;   // 4 header + 6 fields
+    m.data.assign(d + 10, d + n);
+    return true;
 }
 
 // ---------------------------------------------------------------- quantization

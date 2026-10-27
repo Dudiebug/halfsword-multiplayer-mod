@@ -69,6 +69,15 @@ void SetRichPresence(const std::string& key, const std::string& value);
 int MediumAvatar(SteamId user);
 bool AvatarRGBA(int image, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba);
 
+// Voice (ISteamUser): Steam records the default microphone and compresses it (optional exports; false without them).
+bool VoiceAvailable();
+void StartVoice();
+void StopVoice();
+// The compressed bytes recorded since the last call; empty when there are none. false: Steam refused (logged once).
+bool TakeVoice(std::vector<uint8_t>& out);
+// One compressed chunk (anyone's) to 16-bit mono PCM at sampleRate. false: corrupt or unsupported.
+bool DecompressVoice(const uint8_t* data, size_t size, uint32_t sampleRate, std::vector<int16_t>& pcm);
+
 // Networking (ISteamNetworkingMessages; relayed, NAT-traversing)
 void InitRelay();
 bool Send(SteamId to, int channel, const void* data, uint32_t size, int flags);

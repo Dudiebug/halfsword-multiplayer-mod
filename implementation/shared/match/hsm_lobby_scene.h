@@ -44,7 +44,7 @@ struct LobbyLocal {
     bool progression = false;           // the host chose the Progression card (LobbyData hsm_prog): the stock hub, no match
     std::vector<LobbyPlayer> players;
     std::vector<LobbyFound> found;
-    int maxPlayers = 6;
+    int maxPlayers = 8;
 };
 
 enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, MyTeam };

@@ -593,7 +593,9 @@ LobbyLocal Local(game::Lobby& lobby) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
         l.progression = lobby.Progression();
+        const bool server = lobby.ServerLobby();
         for (const game::LobbyMember& m : lobby.members()) {
+            if (server && m.host) continue;   // role=server: the server is not a player
             LobbyPlayer p;
             p.name = m.name; p.host = m.host; p.ready = m.ready; p.me = m.id == steam::MySteamId();
             p.team = m.team; p.hostOverride = m.hostOverride; p.build = m.build;
@@ -793,7 +795,7 @@ void UpdatePanel(Session& session) {
 void UpdateOpenLabel(Session& session) {
     game::Lobby& lobby = session.lobby();
     std::string label = "MULTIPLAYER";
-    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.members().size()) + "/" + std::to_string(game::kMaxLobbyMembers);
+    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(game::kMaxLobbyMembers);
     g.openButton.label.Set(label);
 }
 

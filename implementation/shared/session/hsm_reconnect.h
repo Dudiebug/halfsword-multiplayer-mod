@@ -16,7 +16,7 @@
 namespace hsm {
 
 constexpr uint32_t kReserveMs = 60000;   // how long a disconnected member's slot, entity and score are held
-constexpr size_t kMaxReservations = 5;   // clients only (slots 1..5); the host (slot 0) is never reserved
+constexpr size_t kMaxReservations = size_t(kMaxPlayers);   // clients only (slots 1..8); the host (slot 0) is never reserved
 
 // True once nowMs is at least `window` ms after sinceMs. Wrap-safe: uint32 modular subtraction.
 inline bool ElapsedAtLeast(uint32_t sinceMs, uint32_t nowMs, uint32_t window) { return uint32_t(nowMs - sinceMs) >= window; }

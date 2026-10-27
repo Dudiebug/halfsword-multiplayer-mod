@@ -1,6 +1,7 @@
 #include "ui/hud.h"
 #include "ui/umg.h"
 #include "log.h"
+#include "hsm_protocol.h"
 #include <windows.h>
 #include <array>
 #include <cmath>
@@ -10,7 +11,7 @@ using namespace hsm::ue;
 namespace {
 
 constexpr int32_t kZOrder = 50;
-constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12;   // six fighters, three team bands, slack
+constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12;   // eight fighters, three team bands, slack
 constexpr Rgba kOutline{0, 0, 0, 0.9f}, kClear{0, 0, 0, 0};
 constexpr Rgba kFeedMine{0.22f, 0.025f, 0.02f, 0.80f}, kFeedOther{0.02f, 0.017f, 0.014f, 0.55f};
 
@@ -31,7 +32,7 @@ struct State {
     Panel hold; Text holdText; Fixed holdBarBox; Bar holdBar;                                                   // the G hold, mid screen
     Panel dead; Text deadTitle, deadDetail, deadHint; Fixed deadBarBox; Bar deadBar;                            // lower third
     Box feed; std::array<FeedLine, kFeedRows> feedLines;                                                       // top right
-    std::array<TagLabel, 16> tags;                                                                              // name tags over heads
+    std::array<TagLabel, kMaxWillies> tags;                                                                              // name tags over heads
     UObject* statics = nullptr; UObject* layout = nullptr;                                                      // CDOs, resolved once
     Format tagFormat = Format::Duel;
     bool tagsOff = false;                                                                                       // a name was not found: hidden for good

@@ -3,15 +3,20 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build is v0.7.0-pre4. Expect rough edges, and please report what you find
-> with `/bug` in the game. 0.7.0-pre4 and 0.7.0-pre3 can play together; everyone should still update, since most
-> fixes need the host or every player on pre4.
+> **Status: pre-release.** The current build is v0.7.0-pre5. Expect rough edges, and please report what you find
+> with `/bug` in the game. Everyone in a session needs the same version (0.7.0-pre5 connects only to 0.7.0-pre5).
 
 ## What it does
 
 - **Steam lobbies:** a MULTIPLAYER button on the main menu; host for friends or in public, invite through the Steam
   overlay, join from the friends list. Traffic goes through Steam's relay network, so no port forwarding.
-- **Up to 6 fighters** with their own loadouts, carried over from each player's game.
+- **Up to 8 players** with their own loadouts, carried over from each player's game, plus bots.
+- **Host migration:** if the host of a Steam lobby leaves, another player takes over the lobby and reopens the map,
+  and everyone else follows (scores start over). `host_migration=0` under `[net]` in `HSMMod.ini` turns it off.
+- **Proximity voice chat (off by default):** `voice=1` under `[net]` in `HSMMod.ini`, on the host and on each player
+  who wants it. You hear players near you, from the side they stand on, fading out by 30 m. It sends while you speak
+  (`voice_mode=ptt` for push-to-talk on `V`). A badly hurt, knocked-out or dead fighter goes quiet; the dead talk only
+  to each other. A `> ` before a name tag shows who is talking. Steam must be running.
 - **Owner sync (default):** your own machine simulates your fighter, so your body has no added latency. Other players
   are physics stand-ins driven by a 60 Hz pose stream.
 - **Hits through the game's own damage code:** the attacker claims a hit; the victim's machine replays it on its own
@@ -33,7 +38,8 @@ No game files are changed; delete the DLL to go back to vanilla.
   here with your mod log attached privately. You see "Sending...", then the issue link once it is filed, or a short
   reason if it was not. Other players in the session are asked whether to add theirs (`/sendlog` or `/nolog`).
 - **Direct client-to-client movement (experimental):** `mesh=1` under `[net]` in `HSMMod.ini`, on the host and the
-  clients, lets players in a Steam lobby send their movement straight to each other instead of through the host. It is
+  clients, lets players in a Steam lobby send their movement, blows and other fight events straight to each other instead of
+  through the host. It is
   off by default; the host relays again by itself if a direct path fails.
 - **Hosting without playing (experimental):** `role=server` runs matches and rotates maps with no fighter of its own;
   players spawn at the map's start points. It runs a normal copy of the game.

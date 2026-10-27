@@ -82,7 +82,7 @@ void TestFraming() {
 
 void TestRanges() {
     { PaintFxMsg m = Blood(); m.entity = 0; CHECK(!Dec(Wire(m))); }
-    { PaintFxMsg m = Blood(); m.entity = 17; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Blood(); m.entity = uint8_t(hsm::kMaxWillies + 1); CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Blood(); m.entity = 1; CHECK(Dec(Wire(m))); }
     CHECK(!Dec(Wire(Blood(), 0, 1)));
     CHECK(!Dec(Wire(Blood(), 7, 1)));                          // rev 15: kinds 1..6 (3 Voice, 4 HitSound, 5 Armor, 6 ArmorOn)

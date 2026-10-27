@@ -7,7 +7,7 @@ static int g_fail = 0;
 using namespace hsm;
 
 int main() {
-    MeshHearing h; uint8_t m = 0xAA;
+    MeshHearing h; uint16_t m = 0xAA;
     CHECK(h.Mask(0) == 0 && !h.Heard(1, 0));
     CHECK(!h.TakeChange(5000, &m));                          // nothing heard, nothing sent: no report
     h.Note(2, 10000); h.Note(3, 10100);
@@ -27,9 +27,11 @@ int main() {
     h.Clear(); CHECK(h.Mask(20000) == 0);
 
     MeshMasks k;
-    k.Set(1, 0xFF);                                          // own bit and bits >= 6 stripped
-    CHECK(!k.Hears(1, 1) && k.Hears(1, 0) && k.Hears(1, 5) && !k.Hears(1, 6));
-    k.Set(6, 0xFF); CHECK(!k.Hears(6, 0));
+    k.Set(1, 0xFF);                                          // own bit stripped
+    CHECK(!k.Hears(1, 1) && k.Hears(1, 0) && k.Hears(1, 5) && k.Hears(1, 7) && !k.Hears(1, 8));
+    k.Set(9, 0xFF); CHECK(!k.Hears(9, 0));                 // no slot 9
+    k.Set(8, 0x3FF); CHECK(k.Hears(8, 0) && k.Hears(8, 7) && !k.Hears(8, 8));   // slot 8 (a server's 8th client); bit 9 stripped
+    k.Set(7, 0xFF); CHECK(k.Hears(7, 0) && !k.Hears(7, 7));
     std::vector<uint8_t> conn = {0, 1, 2, 3};
     k.Clear(); k.Set(2, 0x02);                               // slot 2 hears slot 1 directly
     auto t = RelayTargets(1, conn, k);
@@ -43,8 +45,8 @@ int main() {
 
     // MakePeerMap: host out, bad entries out, slot order.
     auto pe = [](uint8_t slot, uint64_t id) { PeerMapEntry e; e.slot = slot; e.steamId = id; return e; };
-    PeerMapMsg pm = MakePeerMap({pe(3, 33), pe(0, 10), pe(1, 11), pe(2, 0), pe(1, 99), pe(4, 11), pe(7, 77), pe(5, 55)});
-    CHECK(pm.peers.size() == 3 && pm.peers[0].slot == 1 && pm.peers[1].slot == 3 && pm.peers[2].slot == 5);   // host, no id, dup slot, dup id, slot 7 gone
+    PeerMapMsg pm = MakePeerMap({pe(3, 33), pe(0, 10), pe(1, 11), pe(2, 0), pe(1, 99), pe(4, 11), pe(9, 77), pe(5, 55)});
+    CHECK(pm.peers.size() == 3 && pm.peers[0].slot == 1 && pm.peers[1].slot == 3 && pm.peers[2].slot == 5);   // host, no id, dup slot, dup id, slot 9 gone
     CHECK(pm.peers[0].steamId == 11 && pm.peers[2].steamId == 55);
     { PeerMapMsg dec; auto b = Encode(pm); CHECK(Decode(b.data(), b.size(), dec) && dec.peers.size() == 3); }   // what it makes the wire accepts
     CHECK(MakePeerMap({}).peers.empty());

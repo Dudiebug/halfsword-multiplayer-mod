@@ -1,4 +1,5 @@
-// AC-1: roster assigns at most 6 unique slots/entities by join order, reuses freed slots, rejects a 7th member.
+// AC-1: roster assigns at most kMaxPlayers (8) unique slots/entities by join order, reuses freed slots, rejects a 9th
+// member; with the host slot reserved (role=server) the 8 players get slots 1..8.
 #include "session/hsm_roster.h"
 #include <cstdio>
 #include <set>
@@ -9,15 +10,25 @@ using namespace hsm;
 
 static void TestJoinOrderAndLimit() {
     Roster r;
-    for (uint64_t k = 100; k < 106; ++k) {
+    for (uint64_t k = 100; k < 100 + kMaxPlayers; ++k) {
         auto slot = r.Add(k, "p" + std::to_string(k));
         CHECK(slot.has_value() && *slot == k - 100);
     }
-    CHECK(r.size() == kMaxFighters);
-    CHECK(!r.Add(999, "seventh").has_value());          // 7th member rejected
+    CHECK(r.size() == kMaxPlayers && kMaxPlayers == 8 && kMaxFighters == 9);
+    CHECK(!r.Add(999, "ninth").has_value());            // 9th member rejected: slot 8 stays empty with a host fighter
+    CHECK(!r.BySlot(8));
     std::set<uint8_t> entities;
     for (const RosterMember& m : r.members()) { entities.insert(m.entity); CHECK(m.entity == m.slot + 1); }
-    CHECK(entities.size() == kMaxFighters);                // unique entities 1..6
+    CHECK(entities.size() == kMaxPlayers);                 // unique entities 1..8
+    CHECK(r.Remove(103) && *r.Add(998, "late") == 3);      // a freed slot is reused, never slot 8
+}
+
+static void TestServerSeatsEight() {
+    Roster r; r.ReserveHostSlot(true);
+    for (uint64_t k = 1; k <= uint64_t(kMaxPlayers); ++k) CHECK(r.Add(k, "c") == std::optional<uint8_t>(uint8_t(k)));
+    CHECK(r.size() == 8 && r.BySlot(8) && r.ByEntity(9) && !r.BySlot(0));
+    CHECK(!r.Add(99, "ninth").has_value());
+    CHECK(r.Remove(8) && *r.Add(99, "ninth") == 8);
 }
 
 static void TestIdempotentAndReuse() {
@@ -34,7 +45,7 @@ static void TestIdempotentAndReuse() {
 }
 
 int main() {
-    TestJoinOrderAndLimit(); TestIdempotentAndReuse();
+    TestJoinOrderAndLimit(); TestIdempotentAndReuse(); TestServerSeatsEight();
     std::printf(g_fail ? "%d FAILED\n" : "all roster tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

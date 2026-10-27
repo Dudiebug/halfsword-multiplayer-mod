@@ -49,7 +49,9 @@ static void TestWelcomeFlags() {
     auto b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 0);
     w.flags = kWelcomeNoHostFighter | kWelcomeMesh; b = Encode(w);
     CHECK(Decode(b.data(), b.size(), o) && o.flags == 3 && o.map == "m");
-    w.flags = 4; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));      // an unknown bit
+    w.flags = kWelcomePeerPing; b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 4);   // rev 22
+    w.flags = kWelcomeVoice; b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 8);      // rev 22: voice
+    w.flags = 16; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));     // an unknown bit
     w.flags = 0x80; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));
     w.flags = 1; b = Encode(w);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
@@ -58,23 +60,24 @@ static void TestWelcomeFlags() {
 static void TestPeerMap() {
     PeerMapMsg m; PeerMapMsg o;
     auto b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.empty());   // a lone host in the lobby
-    for (uint8_t s = 0; s < 6; ++s) m.peers.push_back({s, 76561198000000000ull + s});
-    b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 6 && o.peers[5].slot == 5 && o.peers[5].steamId == 76561198000000005ull);
+    for (uint8_t s = 0; s < kMaxPeerMap; ++s) m.peers.push_back({s, 76561198000000000ull + s});
+    b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 9 && o.peers[8].slot == 8 && o.peers[8].steamId == 76561198000000008ull);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), o));
-    auto seven = b; seven[4] = 7; CHECK(!Decode(seven.data(), seven.size(), o));    // count byte follows the 4-byte header
-    PeerMapMsg bad; bad.peers = {{6, 5}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));      // slot out of range
+    auto ten = b; ten[4] = 10; CHECK(!Decode(ten.data(), ten.size(), o));    // count byte follows the 4-byte header
+    PeerMapMsg bad; bad.peers = {{9, 5}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));      // slot out of range
     bad.peers = {{1, 0}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));                      // no SteamID
     bad.peers = {{1, 5}, {1, 6}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));              // duplicate slot
-    PeerMapMsg many; for (int i = 0; i < 9; ++i) many.peers.push_back({uint8_t(i % 6), uint64_t(i + 1)});
-    b = Encode(many); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 6);                     // the encoder bounds it
+    PeerMapMsg many; for (int i = 0; i < 11; ++i) many.peers.push_back({uint8_t(i % kMaxPeerMap), uint64_t(i + 1)});
+    b = Encode(many); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 9);                     // the encoder bounds it
 }
 
 static void TestMeshHeard() {
     MeshHeardMsg m; MeshHeardMsg o;
     auto b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0);
     m.mask = 0x3F; b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0x3F);
-    m.mask = 0x40; b = Encode(m); CHECK(!Decode(b.data(), b.size(), o));
+    m.mask = 0x1FE; b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0x1FE);   // rev 22: nine slots, two bytes
+    m.mask = 0x200; b = Encode(m); CHECK(!Decode(b.data(), b.size(), o));                     // no slot 9
     m.mask = 0x3F; b = Encode(m);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), o));

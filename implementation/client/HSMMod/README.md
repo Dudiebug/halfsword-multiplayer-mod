@@ -2,7 +2,7 @@
 
 One DLL, no game files changed. It installs as `dwmapi.dll` next to the game exe (a DLL the game loads at
 startup, the same load point UE4SS uses), forwards every dwmapi export to the real system DLL, and (when enabled in
-`HSMMod.ini`) adds host-authoritative online play for up to 6 fighters, each in their own loadout. Delete the DLL to
+`HSMMod.ini`) adds host-authoritative online play for up to 8 fighters, each in their own loadout. Delete the DLL to
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
@@ -25,9 +25,11 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
 - **`mesh=1` under `[net]` (experimental, off by default):** in a Steam lobby the players also send their movement
   straight to each other, which should cut the delay between two clients. Set it on the host and on every client that
-  should use it. The host stops relaying what a client already receives directly and relays it again within a few
-  seconds if the direct path breaks; claims, effects, equipment, grabs and props still go through the host. Direct-IP
-  (ENet) sessions stay a star, and `mesh=0` is exactly the old behaviour.
+  should use it. The host stops relaying movement a client already receives directly and relays it again within a few
+  seconds if the direct path breaks. From 0.7.0-pre5 hits, cuts, stuck blades, blood and wounds, drawn weapons, grabs
+  and prop movement also go straight to the players they concern, with a copy to the host, which still checks, scores
+  and relays everything; whichever copy arrives first is used and the second is dropped. Direct-IP (ENet) sessions
+  stay a star, and `mesh=0` is exactly the old behaviour.
 - **Hold G to give up** in FFA, team matches and Duel, downed or not: your fighter dies, and the last player who hit
   you within 60 s gets the kill (in a Duel, the round too); with none, nobody scores. The hold shows as a bar in the
   middle of the screen. Holding G with nothing to give up shows why.
@@ -76,7 +78,33 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   This is a hosted copy of the retail game, not a dedicated server. With no host fighter to spawn around, players
   spawn at the map's PlayerStart, else a navmesh point, else the floor found by a trace, and the map origin only as
   the last resort.
-- Protocol revision 21: 0.7.0-pre4 and 0.7.0-pre3 connect to each other (not to earlier pre-releases or 0.6.x).
+- Protocol revision 22: 0.7.0-pre5 connects only to pre5 (8-player lobbies changed every fighter and bot number;
+  rev 22 also adds the Voice message).
+
+### New in 0.7.0-pre5
+
+- **8-player lobbies**, with up to 10 bots on top. A `role=server` host has no fighter and does not take a place:
+  it seats 8 players too (its Steam lobby lists the server and the 8 players as `8/8`).
+- **Host migration:** when a Steam lobby's host leaves, Steam makes another player the lobby owner. That player
+  becomes the host of the same lobby and opens the current map again with the lobby's settings (scores start over);
+  everyone else connects to them and follows. If Steam names nobody within 30 s, or the new host does not answer within
+  20 s, players go back to the menu as before. `host_migration=0` under `[net]` turns it off.
+- **Per-player pings in the log:** in a Steam lobby every client pings the host and every other client every 2 s
+  (`peer_ping=1`, the default; the mesh can stay off). Each client logs its own row and the host logs everyone's, in
+  the health lines every 5 s, e.g. `client: ping: slot2 -> host 48 ms (steam 45); slot1 61 ms (steam 58) loss 12%`.
+  The figure is the median of the last 8 pings; `steam` is Steam's own estimate for the same link.
+- **Mesh v2** (with `mesh=1`): see the mesh entry above.
+- **Proximity voice chat**, off by default: `voice=1` under `[net]` turns it on. It needs it on the host and on every
+  player who wants to talk or listen. It uses Steam voice (your default microphone; Steam must be running, also for
+  direct-IP games) and sends while you speak above a level: no key to hold. You hear other players at full volume
+  within 5 m, fading out by 30 m, from the side they stand on. A fighter whose consciousness drops below 30% of full,
+  or who is knocked out or dead, is cut off. The dead and waiting players hear the living from their camera, and talk
+  only to each other, at full volume. A `> ` before a name tag shows who is talking. Keys under `[net]`:
+  `voice=0` (the default) turns it off (the host's `voice=0` turns it off for the whole session); `voice_mode=ptt` sends only while
+  `voice_key` is held (default `v`; a letter, a digit, `f1`..`f12`, `mouse4` or `mouse5`); `voice_level_db=-40` is the
+  open-microphone level (`-60` picks up quiet speech, `-30` only a firm voice); `voice_near_m=5`, `voice_far_m=30`;
+  `voice_cutoff=30` (percent of full consciousness); `voice_volume=100` (0..200). Voice always goes through the host,
+  also with `mesh=1`; a `role=server` host relays it and records and plays nothing.
 
 ### Fixed in 0.7.0-pre4
 
@@ -104,7 +132,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - Traffic goes through Steam's relay network, so no port forwarding is needed. Lobbies and joins are checked for mod
   protocol and game build, and incompatible lobbies show the reason.
 
-## Up to 6 fighters with their own loadouts (Phase 2)
+## Up to 8 fighters with their own loadouts (Phase 2)
 
 - **Loadouts**: each player's own fighter is exported from their game (Free Mode: `Free Mode Player Character 1`;
   Progression: `Player Character`) into an `SG_GameProgress_C` SaveGame serialized in memory. The engine deep-copies
@@ -126,7 +154,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 | Load / vanilla safety | XInput proxy; `role=off` or an unknown build = pure passthrough |
 | Engine access | Runtime reflection by name; startup self-test (`Add_IntInt` layout, object index round trip, a ProcessEvent call) or it disables itself |
 | Transport | Steam relay (default) or ENet UDP: reliable channel (hello/welcome/travel/spawn/blobs/events), unreliable channel (input 60 Hz, snapshots 30 Hz); every packet decoded and validated before the game thread sees it |
-| Host | Up to 6 fighters; snapshots 23 body bones + vitals per fighter to every client; announces spawns, despawns and deaths |
+| Host | Up to 8 fighters; snapshots 23 body bones + vitals per fighter to every client; announces spawns, despawns and deaths |
 | Client | Captures its input and blocks it locally (camera look/turn still local); velocity-tracks its fighter and puppets to host poses; copies vitals; plays deaths on host events |
 | Damage authority | Clients block all `...ComponentHitSignature` delegates while joined, so Chaos contacts never run damage locally |
 

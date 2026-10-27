@@ -3,6 +3,7 @@
 #include "log.h"
 #include "ue/hook.h"
 #include <windows.h>
+#include <algorithm>
 #include <iterator>
 #include <string>
 #include <atomic>
@@ -67,7 +68,13 @@ struct Api {
     FLAT(void, InitRelayNetworkAccess, void*)
     FLAT(int64_t, GetLocalTimestamp, void*)
     FLAT(void, ReleaseMessage, void*)
+    FLAT(void, StartVoiceRecording, void*)
+    FLAT(void, StopVoiceRecording, void*)
+    FLAT(int, GetAvailableVoice, void*, uint32_t*, uint32_t*, uint32_t)
+    FLAT(int, GetVoice, void*, bool, void*, uint32_t, uint32_t*, bool, void*, uint32_t, uint32_t*, uint32_t)
+    FLAT(int, DecompressVoice, void*, const void*, uint32_t, void*, uint32_t, uint32_t*, uint32_t)
 } g;
+bool VoiceAvailableUnchecked() { return g.StartVoiceRecording && g.StopVoiceRecording && g.GetAvailableVoice && g.GetVoice && g.DecompressVoice; }
 #undef FLAT
 
 NetIdentity Identity(SteamId id) { NetIdentity n{}; n.type = kIdentitySteamId; n.size = 8; n.steamId = id; return n; }
@@ -231,6 +238,13 @@ bool Init() {
     g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
     g.GetImageRGBA = Fn<Api::GetImageRGBA_t>("SteamAPI_ISteamUtils_GetImageRGBA");
     if (!g.GetMediumFriendAvatar || !g.GetImageSize || !g.GetImageRGBA) HSM_LOG("steam: no avatar exports; the page shows no avatars");
+    // Optional: proximity voice; without these exports the voice stays off.
+    g.StartVoiceRecording = Fn<Api::StartVoiceRecording_t>("SteamAPI_ISteamUser_StartVoiceRecording");
+    g.StopVoiceRecording = Fn<Api::StopVoiceRecording_t>("SteamAPI_ISteamUser_StopVoiceRecording");
+    g.GetAvailableVoice = Fn<Api::GetAvailableVoice_t>("SteamAPI_ISteamUser_GetAvailableVoice");
+    g.GetVoice = Fn<Api::GetVoice_t>("SteamAPI_ISteamUser_GetVoice");
+    g.DecompressVoice = Fn<Api::DecompressVoice_t>("SteamAPI_ISteamUser_DecompressVoice");
+    if (!VoiceAvailableUnchecked()) HSM_LOG("steam: no voice exports; proximity voice is off");
     if (!g_mm || !g_friends || !g_user || !g_utils || !g_msgs || !g_netUtils) { HSM_LOG("steam: interface accessor returned null"); return false; }
     for (CallbackObj& cb : g_callbacks) g.RegisterCallback(&cb, cb.id);
     const bool hooked = ue::HookNative(reinterpret_cast<void*>(g.RunCallbacks), reinterpret_cast<void*>(&RunCallbacksDetour),
@@ -298,6 +312,46 @@ std::string PersonaName(SteamId user) {
     return n ? n : "";
 }
 uint32_t AppId() { return g_ready ? g.GetAppID(g_utils) : 0; }
+
+// EVoiceResult: 0 OK, 1 not initialised, 2 not recording, 3 no data, 4 buffer too small, 5 corrupt, 6 restricted,
+// 7 unsupported codec.
+bool VoiceAvailable() { return g_ready && VoiceAvailableUnchecked(); }
+void StartVoice() { if (VoiceAvailable()) g.StartVoiceRecording(g_user); }
+void StopVoice() { if (VoiceAvailable()) g.StopVoiceRecording(g_user); }
+
+bool TakeVoice(std::vector<uint8_t>& out) {
+    out.clear();
+    if (!VoiceAvailable()) return false;
+    static int lastBad = 0;
+    uint32_t avail = 0, unused = 0;
+    int r = g.GetAvailableVoice(g_user, &avail, &unused, 0);
+    if (r == 3 || r == 2 || (r == 0 && avail == 0)) return true;   // nothing yet, or not recording
+    if (r == 0) {
+        out.resize(std::min<uint32_t>(avail, 64 * 1024));   // all of it: a smaller buffer is refused and the backlog stays
+        uint32_t written = 0;
+        r = g.GetVoice(g_user, true, out.data(), uint32_t(out.size()), &written, false, nullptr, 0, nullptr, 0);
+        if (r == 0) { out.resize(std::min<size_t>(written, out.size())); return true; }
+        out.clear();
+        if (r == 3) return true;
+    }
+    if (r != lastBad) { lastBad = r; HSM_LOG("steam: voice recording returned %d (6: restricted account, 1: Steam voice not ready)", r); }
+    return false;
+}
+
+bool DecompressVoice(const uint8_t* data, size_t size, uint32_t sampleRate, std::vector<int16_t>& pcm) {
+    pcm.clear();
+    if (!VoiceAvailable() || !data || size == 0 || size > 8 * 1024) return false;
+    pcm.resize(size_t(sampleRate) / 2);   // up to 500 ms per chunk; a bigger one asks again with room for it
+    for (int tries = 0; tries < 2; ++tries) {
+        uint32_t written = 0;
+        const int r = g.DecompressVoice(g_user, data, uint32_t(size), pcm.data(), uint32_t(pcm.size() * 2), &written, sampleRate);
+        if (r == 0) { pcm.resize(std::min<size_t>(written / 2, pcm.size())); return true; }
+        if (r != 4 || written / 2 <= pcm.size() || written > 4 * sampleRate * 2) break;
+        pcm.resize(written / 2);
+    }
+    pcm.clear();
+    return false;
+}
 
 int MediumAvatar(SteamId user) { return g_ready && g.GetMediumFriendAvatar && user ? g.GetMediumFriendAvatar(g_friends, user) : 0; }
 

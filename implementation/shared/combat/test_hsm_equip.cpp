@@ -56,8 +56,8 @@ void TestFraming() {
 void TestRanges() {
     CHECK(!Dec(Wire(0, 1, 0, 0, 0)));
     CHECK(Dec(Wire(1, 1, 0, 0, 0)));
-    CHECK(Dec(Wire(16, 1, 0, 0, 0)));
-    CHECK(!Dec(Wire(17, 1, 0, 0, 0)));
+    CHECK(Dec(Wire(uint8_t(hsm::kMaxWillies), 1, 0, 0, 0)));
+    CHECK(!Dec(Wire(uint8_t(hsm::kMaxWillies + 1), 1, 0, 0, 0)));
     CHECK(Dec(Wire(2, 1, 5, 0, 0)));
     CHECK(!Dec(Wire(2, 1, 6, 0, 0)));                      // tokens are 0..5
     CHECK(Dec(Wire(2, 1, 0, 5, 0)));

@@ -15,8 +15,8 @@ static Spawn Sp(uint8_t entity, uint32_t blob) { Spawn s; s.entity = entity; s.o
 static void TestBlobIds() {
     CHECK(MakeBlobId(0, 1) == 0x01000001u && MakeBlobId(5, 7) == 0x06000007u);
     CHECK(MakeBlobId(2, 0) != 0 && (MakeBlobId(2, 0) & 0xFFFFFFu) == 1);            // version 0 never yields id 0 / version 0
-    // Spec revision (Phase 3): bots relay loadouts too, so every entity slot 0..15 has blob ids.
-    CHECK(BlobSlot(MakeBlobId(3, 9)) == 3 && BlobSlot(0) == -1 && BlobSlot(0x07000001u) == 6 && BlobSlot(MakeBlobId(15, 1)) == 15 && BlobSlot(0x11000001u) == -1);
+    // Spec revision (Phase 3): bots relay loadouts too, so every entity slot 0..18 has blob ids.
+    CHECK(BlobSlot(MakeBlobId(3, 9)) == 3 && BlobSlot(0) == -1 && BlobSlot(0x07000001u) == 6 && BlobSlot(MakeBlobId(18, 1)) == 18 && BlobSlot(0x14000001u) == -1);
 }
 
 static void TestBlobStore() {

@@ -10,8 +10,9 @@
 
 namespace hsm::game {
 
-constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.7.0-pre4";   // bump with every release tag
+constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
+                                      // A role=server lobby has one member more: the server, which is not a player.
+constexpr const char* kModVersion = "0.7.0-pre5";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
@@ -23,7 +24,7 @@ struct LobbyMember { steam::SteamId id = 0; std::string name; bool ready = false
 struct LobbyListing {
     steam::SteamId id = 0;
     std::string name, map, mode;
-    int players = 0;
+    int players = 0;      // players: a role=server lobby's server is not counted
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
 };
@@ -35,12 +36,15 @@ public:
     // Membership callbacks for the session (fired on the game thread).
     std::function<void(steam::SteamId)> onMemberJoined, onMemberLeft;
     std::function<void()> onEntered, onLeft;
+    // The host left and Steam made another member the owner. True: the session migrates to the new owner and the lobby
+    // stays; false (or unset): leave the lobby, as before 0.7.0-pre5.
+    std::function<bool(steam::SteamId oldOwner, steam::SteamId newOwner)> onOwnerChanged;
     std::function<void(steam::SteamId from, const std::string& text)> onChat;   // a lobby chat line (ours too); the text is unchecked
     std::function<void(const std::string& name, bool joined)> onPresence;       // someone else came or went, after we entered
 
     void Tick();                                   // drives Steam init + callback processing
 
-    void Host(steam::LobbyType type);
+    void Host(steam::LobbyType type, bool server = false);   // server: role=server, one member more (hsm_srv=1)
     void Join(steam::SteamId lobby);
     void Leave();
     void Invite();
@@ -63,6 +67,8 @@ public:
     State state() const { return state_; }
     bool IsHost() const { return state_ == State::InLobby && owner_ == steam::MySteamId(); }
     bool InLobby() const { return state_ == State::InLobby; }
+    bool ServerLobby() const;                       // a role=server lobby: the owner is the server, not a player
+    int PlayerCount() const;                        // members, minus the server in a role=server lobby
     steam::SteamId id() const { return lobby_; }
     steam::SteamId owner() const { return owner_; }
     steam::LobbyType type() const { return type_; }
@@ -75,6 +81,7 @@ private:
     void RefreshMembers();
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
+    bool server_ = false;   // Host(type, true): this machine runs role=server
     State state_ = State::Offline;
     steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;   // joining_: the lobby Join asked for, until its enter
     steam::LobbyType type_ = steam::LobbyType::FriendsOnly;

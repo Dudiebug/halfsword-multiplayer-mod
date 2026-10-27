@@ -57,7 +57,7 @@ constexpr double kFreeIdleMs = 1000.0;        // ... and one at rest once a seco
 // M4: a slot holds at most this many leases (TOUCH or HOLD) at once; a request for one more is denied and counted. A
 // fighter holds two weapons and touches the few props it is pushing (a touch ends 1.5 s after the prop comes to rest), so
 // normal play stays in the low tens even through a pile of barrels. 128 per slot bounds the host's table (and the Grants
-// every machine keeps) at 6 x 128 entries, however many fresh prop ids a peer invents.
+// every machine keeps) at 8 x 128 entries, however many fresh prop ids a peer invents.
 constexpr int kMaxLeasesPerSlot = 128;
 
 // ---------------------------------------------------------------- identity

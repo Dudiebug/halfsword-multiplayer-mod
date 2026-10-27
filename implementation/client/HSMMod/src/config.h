@@ -22,6 +22,24 @@ struct Config {
     // stops relaying what a client already hears directly. false (default): every stream goes through the host, as in 0.6.5.
     // Needs mesh=1 on the host and on the clients that should use it; ENet (direct IP) stays a star either way.
     bool mesh = false;
+    // true (default): on a Steam lobby every client pings the host and every other client every 2 s and reports the
+    // results to the host every 10 s; both log them in the health window ("ping:" lines). Measures what a mesh would get
+    // without turning it on. Host and clients both need it; mesh=1 is not needed.
+    bool peerPing = true;
+    // true (default): when a Steam lobby's host leaves, the member Steam makes the new lobby owner hosts the same lobby
+    // and the others follow it (session/hsm_migration.h) instead of everyone going back to the menu.
+    bool hostMigration = true;
+    // Proximity voice (gameplay/voice.h): Steam records the microphone; the host relays it to the players near the
+    // speaker. A fighter below voiceCutoff of full consciousness (or knocked out, or dead) is cut off; the dead hear
+    // only the dead. voiceMode 0: open microphone above voiceLevelDb (default); 1: push to talk on voiceKey.
+    // Off by default (voice=1 turns it on); the host's voice=0 turns it off for the whole session.
+    bool voice = false;
+    int voiceMode = 0;
+    float voiceLevelDb = -40.f;
+    int voiceKey = 'V';          // a virtual-key code
+    float voiceNearM = 5.f, voiceFarM = 30.f;
+    float voiceCutoff = 0.3f;
+    float voiceVolume = 1.f;
     ChatKey chatKey = ChatKey::Enter;
     // true: a stand-in's hands lock their grip joints and carry the weapon (the game's own firm grip); false: the grips
     // are freed and each weapon is servoed on its own (pre7 behaviour). Each machine's own setting applies to its stand-ins.

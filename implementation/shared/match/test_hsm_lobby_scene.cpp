@@ -173,19 +173,19 @@ static void TestBrowser() {
     LobbyFound ok; ok.name = "Ann's fight"; ok.map = "Yard"; ok.mode = "Duel"; ok.players = 2; ok.compatible = true;
     LobbyFound old; old.name = "Old"; old.players = 1; old.compatible = false; old.reason = "different mod version (host 0.1.0, you 0.2.0)";
     LobbyFound bare; bare.players = 3; bare.compatible = false;
-    LobbyFound full; full.name = "Full"; full.map = "Pit"; full.players = 6; full.compatible = true;
+    LobbyFound full; full.name = "Full"; full.map = "Pit"; full.players = 8; full.compatible = true;
     LobbyFound modeOnly; modeOnly.name = "M"; modeOnly.mode = "Zombies"; modeOnly.players = 5; modeOnly.compatible = true;
     l.found = {ok, old, bare, full, modeOnly};
     LobbyScene s = BuildLobbyScene(l);
     CHECK(s.browser.size() == 5);
     if (s.browser.size() == 5) {
-        CHECK(s.browser[0].name == "Ann's fight" && s.browser[0].players == "2/6" && s.browser[0].detail == "Yard " + kDot + " Duel");
+        CHECK(s.browser[0].name == "Ann's fight" && s.browser[0].players == "2/8" && s.browser[0].detail == "Yard " + kDot + " Duel");
         CHECK(s.browser[0].joinable && s.browser[0].note.text == "Join" && Same(s.browser[0].note.color, kOk));
         CHECK(!s.browser[1].joinable && s.browser[1].note.text == old.reason && Same(s.browser[1].note.color, kWarn));
-        CHECK(s.browser[1].detail.empty() && s.browser[1].players == "1/6");
+        CHECK(s.browser[1].detail.empty() && s.browser[1].players == "1/8");
         CHECK(s.browser[2].name == "Unnamed lobby" && s.browser[2].note.text == "Incompatible" && !s.browser[2].joinable);
         CHECK(!s.browser[3].joinable && s.browser[3].note.text == "Full" && Same(s.browser[3].note.color, kWarn) && s.browser[3].detail == "Pit");
-        CHECK(s.browser[4].joinable && s.browser[4].detail == "Zombies" && s.browser[4].players == "5/6");
+        CHECK(s.browser[4].joinable && s.browser[4].detail == "Zombies" && s.browser[4].players == "5/8");
     }
     l.found.assign(8, ok);
     CHECK(BuildLobbyScene(l).browser.size() == kBrowserRows && kBrowserRows == 6);
@@ -342,7 +342,7 @@ static void TestRoster() {
     LobbyPlayer cy = Player("Cy", false, false, 0, 1); cy.ready = true;
     l.players = {Player("Ann", true, true, 1), Player("", false, false, 2), cy};
     LobbyScene s = BuildLobbyScene(l);
-    CHECK(s.playersTitle == "PLAYERS 3/6" && s.roster.size() == 3);
+    CHECK(s.playersTitle == "PLAYERS 3/8" && s.roster.size() == 3);
     if (s.roster.size() == 3) {
         const RosterRow& a = s.roster[0];
         CHECK(a.name == "Ann" && a.host && a.me && a.team == "Blue" && Same(a.swatch, TeamColor(1)) && !a.moved && !a.ready);

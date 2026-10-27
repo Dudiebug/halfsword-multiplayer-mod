@@ -892,6 +892,8 @@ bool PropSync::OnPropState(const uint8_t* d, size_t n, uint8_t fromSlot) {
     if (!Decode(d, n, m) || (IsLevelProp(m.propId) && !InCensus(m.propId))) { ++n_.statesRejected; return false; }
     if (env_.host && !table_.Accepts(m, fromSlot)) { ++n_.statesRejected; return false; }
     if (!env_.host && m.lessee == MySlot()) { ++n_.statesRejected; return false; }   // never mine back
+    // Mesh v2: a state straight from another client must be that client's, for a prop the host granted it.
+    if (!env_.host && fromSlot != kHostSlot && (m.lessee != fromSlot || view_.Streamer(m.propId) != fromSlot)) { ++n_.statesRejected; return false; }
     heardMs_[m.propId] = SteadyNowMs();
     if (!view_.Apply(m)) { ++n_.statesStale; return false; }
     ++n_.statesApplied;

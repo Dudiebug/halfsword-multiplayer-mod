@@ -14,7 +14,7 @@ namespace hsm {
 
 // Blob ids are assigned by the host: high byte = slot + 1 (entity - 1 for bots), low 24 bits = per-slot version (>= 1). Never 0.
 inline uint32_t MakeBlobId(uint8_t slot, uint32_t version) { return (uint32_t(slot + 1) << 24) | ((version & 0xFFFFFFu) ? (version & 0xFFFFFFu) : 1u); }
-inline int BlobSlot(uint32_t blobId) { uint32_t s = blobId >> 24; return s >= 1 && s <= uint32_t(kMaxWillies) ? int(s - 1) : -1; }   // fighters 0..5, bots 6..15
+inline int BlobSlot(uint32_t blobId) { uint32_t s = blobId >> 24; return s >= 1 && s <= uint32_t(kMaxWillies) ? int(s - 1) : -1; }   // fighter slots 0..8, bots 9..18
 
 class BlobStore {
 public:

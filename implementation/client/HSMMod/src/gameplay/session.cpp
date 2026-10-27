@@ -1,7 +1,7 @@
 // Session orchestration on the game thread, pumped from BP_HalfSwordGameMode_C::ReceiveTick (menus included).
 // Steam mode: the Steam lobby decides roles (owner hosts) and membership; the host's level changes pull every
 //   member along (Travel), and clients may not leave the menu on their own while joined.
-// Gameplay (Phase 2): the host is the authority for up to 6 fighters. Slot 0 is the host's stock fighter; every
+// Gameplay (Phase 2): the host is the authority for up to 8 fighters. Slot 0 is the host's stock fighter; every
 //   client gets a mod-spawned Willie on the host wearing the client's own passport (relayed as a SaveGame blob),
 //   driven by the client's input and aim. Clients fight as their own stock player 0, mirror host poses, and
 //   show every other fighter as a brainless puppet with the right loadout. Decisions live in hsm_director.h.
@@ -35,6 +35,7 @@
 #include "gameplay/lobby.h"
 #include "gameplay/session.h"
 #include "gameplay/travel.h"
+#include "gameplay/voice.h"
 #include "gameplay/world_sync.h"
 #include "hsm_chat.h"
 #include "hsm_input.h"
@@ -58,6 +59,8 @@
 #include "net/transport.h"
 #include "session/hsm_authority.h"
 #include "session/hsm_mesh.h"
+#include "session/hsm_peer_ping.h"
+#include "session/hsm_migration.h"
 #include "session/hsm_autoflow.h"
 #include "session/hsm_blob.h"
 #include "session/hsm_budget.h"
@@ -110,6 +113,7 @@ constexpr double kNoSpawnerRingCm = 400.0;       // spawner-less maps: candidate
 constexpr double kSideRingCm = 900.0;            // spawner-less maps: team sides on a ring this far around the host
 constexpr double kTeleportDistance = 300.0;
 constexpr size_t kHitImpactPointOffset = 40;     // FHitResult: FaceIndex, Time, Distance, Location(24) then ImpactPoint
+static_assert(game::kMaxLobbyMembers == kMaxPlayers, "a Steam lobby holds exactly the players a session can seat (a server lobby one more)");
 constexpr uint8_t kFirstBotEntity = kMaxFighters + 1, kLastBotEntity = uint8_t(kMaxWillies);
 static_assert(Match::kMaxBotsAlive <= kLastBotEntity - kFirstBotEntity + 1, "every live bot needs an entity");
 constexpr uint32_t kInfoIntervalMs = 1000, kScanIntervalMs = 1000, kTintRetryMs = 500;
@@ -171,6 +175,8 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Equip: { combat::EquipStateMsg m; return Decode(d, n, m); }
         case MsgType::ReportShare: { ReportShareMsg m; return Decode(d, n, m); }
         case MsgType::MeshHeard: { MeshHeardMsg m; return Decode(d, n, m); }
+        case MsgType::PingTable: { PingTableMsg m; return Decode(d, n, m); }
+        case MsgType::Voice: { VoiceMsg m; return Decode(d, n, m); }
         default: return false;
     }
 }
@@ -206,6 +212,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Equip: { combat::EquipStateMsg m; return Decode(d, n, m); }
         case MsgType::ReportShare: { ReportShareMsg m; return Decode(d, n, m); }
         case MsgType::PeerMap: { PeerMapMsg m; return Decode(d, n, m); }
+        case MsgType::Voice: { VoiceMsg m; return Decode(d, n, m); }
         default: return false;
     }
 }
@@ -226,6 +233,7 @@ public:
             ResetNetwork("left lobby");
             if (strandedInFight) { HSM_LOG("client: lobby gone; returning to the main menu"); game::OpenLevel(lastGameMode_, kMenuLevel, true, ""); }
         };
+        lobby_.onOwnerChanged = [this](steam::SteamId old, steam::SteamId now) { return OnLobbyOwnerChanged(old, now); };
         lobby_.onMemberJoined = [this](steam::SteamId id) { if (steamNet_ && lobby_.IsHost()) steamNet_->AllowPeer(id); };
         lobby_.onMemberLeft = [this](steam::SteamId id) { lobbyGate_.Forget(id); meshPeers_.Forget(id); if (steamNet_) steamNet_->DropPeer(id); };
         lobby_.onChat = [this](steam::SteamId from, const std::string& text) { OnLobbyChat(from, text); };
@@ -236,7 +244,7 @@ public:
     bool Start() {
         if (steamMode()) return true;   // transport is created when a lobby is entered (role=server over Steam: ServerLobbyTick)
         auto enet = std::make_unique<ENetTransport>();
-        bool ok = cfg_.role == Role::Host || cfg_.role == Role::Server ? enet->StartHost(cfg_.port, kMaxFighters - 1, ValidateForHost)
+        bool ok = cfg_.role == Role::Host || cfg_.role == Role::Server ? enet->StartHost(cfg_.port, cfg_.role == Role::Server ? kMaxPlayers : kMaxPlayers - 1, ValidateForHost)
                                           : enet->StartClient(cfg_.hostAddress, cfg_.port, ValidateForClient);
         if (ok) { net_ = std::move(enet); ++sessionGen_; }
         if (ok && (cfg_.role == Role::Host || cfg_.role == Role::Server)) hostPending_ = true;
@@ -421,6 +429,7 @@ public:
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
+        if (steamMode()) MigrationTick();
         if (SteamServer()) ServerLobbyTick();
         // Level change first: everything after this point must use the current world, never the old game mode.
         bool levelChanged = gameMode != lastGameMode_;
@@ -459,6 +468,7 @@ public:
         if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
         if (!net_) { ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
         if (IsHost()) HostTick(dt); else ClientTick(dt);
+        VoiceTick();
         TintTick();
         // Twice: after the level's own setup, then once more; never while the chat holds the keyboard (it gives it back).
         // The pause menu owns the input mode while it is open (cursor shown once); closing it restores the game's, once.
@@ -483,7 +493,7 @@ public:
             if (report::Enabled())
                 ui::ShowLine("HSMMod", style::kBone, "Found a bug? Open the chat, type /bug and what happened, press Enter. Your log goes with it.");
         }
-        if (net_ && InFightLevel() && NowMs() >= nextHealth_) { nextHealth_ = NowMs() + 5000; LogHealth(); }
+        if (net_ && InFightLevel() && NowMs() >= nextHealth_) { nextHealth_ = NowMs() + 5000; LogHealth(); VoiceHealth(); }
         if (info_.phase != chatPhase_) {   // the results: a line being typed is dropped, a new one may be opened
             if (info_.phase == uint8_t(MatchPhase::Results)) ui::ChatDrop("match over");
             chatPhase_ = info_.phase;
@@ -530,6 +540,7 @@ public:
     // Mesh: off prints nothing. Host: what each client says it hears directly and how many relays that saved. Client: the
     // direct peers, streams that arrived and were used, anything else from a non-host peer that was dropped.
     void LogMeshHealth(const char* who) {
+        LogPingHealth(who);
         if (IsHost() ? !MeshHost() : !meshOn_) return;
         if (IsHost()) {
             std::string heard;
@@ -537,15 +548,50 @@ public:
                 if (!PeerOfSlot(l)) continue;
                 unsigned mask = 0;
                 for (uint8_t f = 0; f < kMaxFighters; ++f) if (meshMasks_.Hears(l, f)) mask |= 1u << f;
-                char b[32]; std::snprintf(b, sizeof b, " slot%u 0x%02x;", l, mask);
+                char b[32]; std::snprintf(b, sizeof b, " slot%u 0x%03x;", l, mask);
                 heard += b;
             }
             HSM_LOG("%s: mesh: hears directly:%s relays skipped %u", who, heard.empty() ? " (no clients)" : heard.c_str(), meshRelaySkipped_);
         } else {
-            HSM_LOG("%s: mesh: %zu direct peers, %u streams received directly, %u dropped from non-host peers, hearing 0x%02x", who, meshSend_.size(),
-                    meshRx_, meshDropped_, unsigned(meshHearing_.Mask(NowMs())));
+            HSM_LOG("%s: mesh: %zu direct peers, %u messages received directly, %u dropped from non-host peers, %u direct copies sent, "
+                    "%u second copies dropped, hearing 0x%02x", who, meshSend_.size(), meshRx_, meshDropped_, meshDirectTx_, meshDupes_,
+                    unsigned(meshHearing_.Mask(NowMs())));
         }
         meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
+        meshDirectTx_ = meshDupes_ = 0;
+    }
+
+    static std::string PingCell(uint16_t rttMs, uint16_t steamMs, uint8_t lossPct) {
+        char b[64];
+        if (rttMs == kPingUnknown) std::snprintf(b, sizeof b, "-");
+        else std::snprintf(b, sizeof b, "%u ms", rttMs);
+        std::string s = b;
+        if (steamMs != kPingUnknown) { std::snprintf(b, sizeof b, " (steam %u)", steamMs); s += b; }
+        if (lossPct) { std::snprintf(b, sizeof b, " loss %u%%", lossPct); s += b; }
+        return s;
+    }
+
+    // Per-player pings (peer_ping=1): a client's own row (the host and every other client, median of the last pings, what
+    // Steam measures for the same link, lost pings); the host's table of every client's last report.
+    void LogPingHealth(const char* who) {
+        if (IsHost()) {
+            if (!PeerMapHost() || !cfg_.peerPing || pingTables_.empty()) return;
+            for (const auto& [from, table] : pingTables_) {
+                std::string row;
+                for (const PingTableEntry& e : table.entries)
+                    row += std::string(row.empty() ? "" : "; ") + (e.slot == kHostSlot ? std::string("host") : "slot" + std::to_string(e.slot)) + " " +
+                           PingCell(e.rttMs, e.steamMs, e.lossPct);
+                HSM_LOG("%s: ping: slot%u -> %s", who, from, row.empty() ? "(nothing measured)" : row.c_str());
+            }
+            return;
+        }
+        if (!peerPingOn_ || !net_) return;
+        const PingTableMsg m = MyPingTable(NowMs());
+        std::string row;
+        for (const PingTableEntry& e : m.entries)
+            row += std::string(row.empty() ? "" : "; ") + (e.slot == kHostSlot ? std::string("host") : "slot" + std::to_string(e.slot)) + " " +
+                   PingCell(e.rttMs, e.steamMs, e.lossPct);
+        HSM_LOG("%s: ping: slot%u -> %s", who, mySlot_, row.empty() ? "(nothing measured yet)" : row.c_str());
     }
 
     // Owner sync: what this machine streamed, how every stand-in tracks its owner, and every claim's fate.
@@ -1450,7 +1496,11 @@ private:
         puppets_.clear(); world_ = ClientWorld{}; clientBlobs_.Clear(); clientAssembler_ = BlobAssembler{}; lastUpload_.clear();
         hostPeer_ = 0; welcomed_ = false; haveSnapshot_ = false; snappedOwn_ = false; hellosSent_ = 0;
         hostSteam_ = 0; meshOn_ = false; meshPeers_.Clear(); meshHearing_.Clear(); meshMasks_.Clear(); peerMapDirty_ = false;
+        peerPingOn_ = false; meshDedupe_.Clear(); pings_.Clear(); pongs_.Clear(); pingTables_.clear(); nextPingTable_ = 0;
+        for (MsgBudget& b : meshBudget_) b = MsgBudget{};
         meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
+        voice_.Stop(); voiceState_ = {}; hostVoice_ = false; voiceSeq_ = 0; voiceDrops_ = VoiceDrops{}; voiceRelayed_ = 0; voiceCutLogs_ = 0;
+        meshDirectTx_ = meshDupes_ = 0;
         reservations_.Clear(); jitter_.clear(); placed_.clear();
         RestoreFoes();
         myWillie_.store(nullptr);                    // the permanent input hooks must stop swallowing this pawn's look
@@ -1570,8 +1620,8 @@ private:
         // Owner sync needs the script VM hook (claims); without it the host falls back to simulating everyone.
         syncMode_ = cfg_.ownerSync && ScriptHookActive() ? SyncMode::Owner : SyncMode::Host;
         if (cfg_.ownerSync && !OwnerMode()) HSM_LOG("host: owner sync needs the script VM hook, which is unavailable; using host sync");
-        if (localFighter_) HSM_LOG("host: hosting as slot 0 (up to %d fighters), %s sync", kMaxFighters, OwnerMode() ? "owner" : "host");
-        else HSM_LOG("server: no local fighter, slot 0 reserved (up to %d clients), %s sync", kMaxFighters - 1, OwnerMode() ? "owner" : "host");
+        if (localFighter_) HSM_LOG("host: hosting as slot 0 (up to %d fighters), %s sync", kMaxPlayers, OwnerMode() ? "owner" : "host");
+        else HSM_LOG("server: no local fighter, slot 0 reserved (up to %d clients), %s sync", kMaxPlayers, OwnerMode() ? "owner" : "host");
         if (!localFighter_ && !serverReadyLogged_) { serverReadyLogged_ = true; HSM_LOG("hsm: server ready"); }
         if (OwnerMode()) StartOwner();
     }
@@ -1586,7 +1636,11 @@ private:
         env.send = [this](const combat::HitClaim& c0) {
             combat::HitClaim c = c0; c.victimLife = LifeOf(c.victim);
             if (IsHost()) RouteHostClaim(kHostSlot, c);
-            else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(HitClaimMsg{c}), true);
+            else if (net_ && hostPeer_) {
+                net_->Send(hostPeer_, kChanReliable, Encode(HitClaimMsg{c}), true);
+                MeshCopy(MsgType::HitClaim, c.victim, Encode(HitClaimMsg{c}), true);   // to the victim's owner
+                MeshCopy(MsgType::HitFx, c.victim, Encode(HitFxMsg{c}), true);         // to everyone else
+            }
         };
         env.allowed = [this](uint8_t attacker, uint8_t victim) {
             return CombatEnabled() &&
@@ -1606,7 +1660,10 @@ private:
             if (IsHost() && combat::IsStripRequest(m)) {   // to the fallen fighter's owner only
                 if (std::optional<uint32_t> to = PeerOfSlot(OwnerSlotOf(m.entity))) net_->Send(*to, kChanReliable, Encode(m), true);
             } else if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
-            else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+            else if (hostPeer_) {
+                net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+                if (!combat::IsStripRequest(m)) MeshCopy(MsgType::PaintFx, 0, Encode(m), true);   // a strip request goes through the host
+            }
         };
         fx_.Start(adapter_, standIns_, std::move(fenv));
         // Weapons drawn and sheathed by fighters simulated here, matched by every other machine's stand-in of them.
@@ -1614,7 +1671,7 @@ private:
         eenv.send = [this](const combat::EquipStateMsg& m) {
             if (!net_) return;
             if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
-            else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+            else if (hostPeer_) { net_->Send(hostPeer_, kChanReliable, Encode(m), true); MeshCopy(MsgType::Equip, 0, Encode(m), true); }
         };
         equip_.Start(adapter_, standIns_, std::move(eenv));
         game::Severs::Env sev;
@@ -1623,16 +1680,22 @@ private:
         sev.sendSever = [this](const combat::SeverClaim& c0) {
             combat::SeverClaim c = c0; c.victimLife = LifeOf(c.victim);
             if (IsHost()) RouteHostSever(kHostSlot, c);
-            else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverClaimMsg{c}), true);
+            else if (net_ && hostPeer_) {
+                net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverClaimMsg{c}), true);
+                MeshCopy(MsgType::SeverClaim, c.victim, Encode(combat::SeverClaimMsg{c}), true);
+            }
         };
         sev.sendNotice = [this](const combat::SeverClaim& c0) {
             combat::SeverClaim c = c0; c.victimLife = LifeOf(c.victim);
             if (IsHost()) RouteHostNotice(kHostSlot, c);
-            else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverNoticeMsg{c}), true);
+            else if (net_ && hostPeer_) {
+                net_->Send(hostPeer_, kChanReliable, Encode(combat::SeverNoticeMsg{c}), true);
+                MeshCopy(MsgType::SeverNotice, c.victim, Encode(combat::SeverNoticeMsg{c}), true);
+            }
         };
         sev.sendStuck = [this](const combat::StuckBladeMsg& m) {
             if (IsHost()) RouteHostStuck(kHostSlot, m);
-            else if (net_ && hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+            else if (net_ && hostPeer_) { net_->Send(hostPeer_, kChanReliable, Encode(m), true); MeshCopy(MsgType::StuckBlade, m.victim, Encode(m), true); }
         };
         sev.allowed = [this](uint8_t attacker, uint8_t victim) {
             return CombatEnabled() && HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
@@ -1655,7 +1718,7 @@ private:
             const uint8_t chan = reliable ? kChanReliable : kChanUnreliable;
             if (!net_) return;
             if (IsHost()) net_->Broadcast(chan, b, reliable);
-            else if (hostPeer_) net_->Send(hostPeer_, chan, b, reliable);
+            else if (hostPeer_) { net_->Send(hostPeer_, chan, b, reliable); MeshCopy(MsgType::GrabState, 0, b, reliable); }
         };
         grabs_.Start(adapter_, std::move(genv));
         game::PropSync::Env penv;
@@ -1666,7 +1729,11 @@ private:
             if (!net_) return;
             const auto chan = reliable ? kChanReliable : kChanUnreliable;
             if (IsHost()) net_->Broadcast(chan, b, reliable);
-            else if (hostPeer_) net_->Send(hostPeer_, chan, b, reliable);
+            else if (hostPeer_) {
+                net_->Send(hostPeer_, chan, b, reliable);
+                MsgType t;
+                if (PeekType(b.data(), b.size(), t) && t == MsgType::PropState) MeshCopy(t, 0, b, reliable);   // leases stay with the host
+            }
         };
         // Stand-in hands matched to their owners' poses (pickups, leftover weapons): Equip's view of each hand, gore's cut-off hands.
         penv.equipToken = [this](uint8_t e, int hand, uint8_t& token) { return equip_.OwnerToken(e, hand, token); };
@@ -1877,6 +1944,7 @@ private:
             gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
             severs_.OnVitals(v, game::SteadyNowMs());
             NoteVitals(v);
+            VoiceVitals(v);
         }
         // A client that hears this sender directly (its MeshHeard mask) is skipped; with mesh off every mask is 0 and all get it.
         const std::vector<uint8_t> all = ConnectedSlots();
@@ -1889,18 +1957,21 @@ private:
     // ------------------------------------------------------------------ mesh (host side)
     // Offered only on a Steam lobby with owner sync; ENet (direct IP) stays a star.
     bool MeshHost() const { return cfg_.mesh && steamNet_ && OwnerMode(); }
+    // The PeerMap goes out for the mesh and for per-player pings (peer_ping=1, on with the mesh off).
+    bool PeerMapHost() const { return steamNet_ && OwnerMode() && (cfg_.mesh || cfg_.peerPing); }
 
     // A client joined, left or was dropped: its own report is void, nobody hears it any more, and the clients get a new map.
     void MeshRosterChanged(uint8_t slot) {
-        if (!MeshHost()) return;
+        if (!PeerMapHost()) return;
         meshMasks_.Reset(slot);
+        pingTables_.erase(slot);
         peerMapDirty_ = true;
     }
 
     // Every joined Steam client's slot and SteamID, to every joined client (each skips its own entry).
     void SendPeerMap() {
         peerMapDirty_ = false;
-        if (!MeshHost()) return;
+        if (!PeerMapHost()) return;
         std::vector<PeerMapEntry> all;
         for (const auto& [peer, p] : peers_) if (!(p.key >> 63)) all.push_back({p.slot, p.key});
         const PeerMapMsg m = MakePeerMap(all);
@@ -2367,7 +2438,9 @@ private:
         if (it == peers_.end()) return;                // nothing but Hello/Ping before Welcome
         Peer& peer = it->second;
         if (!peer.budget.Allow(t, NowMs())) { BudgetDropped(peer.budget, t, "host", peer.slot); return; }   // M3: a flood ends here, unrelayed
-        if (OwnerMode() && (t == MsgType::Pose || t == MsgType::Vitals)) {
+        if (t == MsgType::Voice) {
+            VoiceFromClient(ev, peer);
+        } else if (OwnerMode() && (t == MsgType::Pose || t == MsgType::Vitals)) {
             HostOwnerStream(ev, peer, t);
         } else if (OwnerMode() && t == MsgType::HitClaim) {
             HitClaimMsg m; Decode(d, n, m);
@@ -2435,7 +2508,11 @@ private:
             MeshHeardMsg m;
             if (!MeshHost() || !Decode(d, n, m)) return;   // 0.6.5 behaviour: the host relays everything
             meshMasks_.Set(peer.slot, m.mask);
-            HSM_LOG("host: mesh: slot %u hears 0x%02x directly", peer.slot, m.mask);
+            HSM_LOG("host: mesh: slot %u hears 0x%03x directly", peer.slot, unsigned(m.mask));
+        } else if (t == MsgType::PingTable) {
+            PingTableMsg m;
+            if (!PeerMapHost() || !cfg_.peerPing || !Decode(d, n, m)) return;
+            pingTables_[peer.slot] = std::move(m);   // logged in the health window (LogPingHealth)
         } else if (t == MsgType::Input) {
             if (OwnerMode()) return;                    // every owner plays its own fighter
             InputFrame f; Decode(d, n, f);
@@ -2539,6 +2616,8 @@ private:
         w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(syncMode_); w.modBuild = game::ModBuild();
         if (IsServer()) w.flags |= kWelcomeNoHostFighter;   // role=server: no host fighter to spectate or score
         if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
+        if (cfg_.voice) w.flags |= kWelcomeVoice;   // rev 22: this host relays proximity voice
+        if (PeerMapHost() && cfg_.peerPing) w.flags |= kWelcomePeerPing;   // rev 22: clients ping each other and report
         net_->Send(ev.peer, kChanReliable, Encode(w), true);
         SendAllBlobs(ev.peer);
         if (InFightLevel()) {                          // late joiner: follow the host into the running level
@@ -2548,7 +2627,7 @@ private:
             if (!t.seq) t.seq = ++travelSeq_;
             net_->Send(ev.peer, kChanReliable, Encode(t), true);
         }
-        HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxFighters);
+        HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxPlayers);
     }
 
     // A Steam member who drops mid-match keeps slot, fighter and score for ReservationTable's window.
@@ -2590,6 +2669,7 @@ private:
         standIns_.Forget(Roster::EntityForSlot(slot)); severs_.Forget(Roster::EntityForSlot(slot)); gore_.Forget(Roster::EntityForSlot(slot)); lives_.erase(Roster::EntityForSlot(slot));
         claims_.Forget(Roster::EntityForSlot(slot)); fx_.Forget(Roster::EntityForSlot(slot)); equip_.Forget(Roster::EntityForSlot(slot));
         grabs_.Forget(Roster::EntityForSlot(slot));
+        VoiceForget(Roster::EntityForSlot(slot));
         if (OwnerMode()) { props_.SlotLeft(slot); props_.ForgetEntity(Roster::EntityForSlot(slot)); }
         hostBlobs_.DropSlot(slot);
         if (uint8_t e = director_.OnLeave(slot)) { Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true); }
@@ -2831,7 +2911,7 @@ private:
         if (lobby_.state() == game::Lobby::State::Idle && DueAt(now, serverLobbyAt_)) {
             serverLobbyAt_ = now + 15000;
             HSM_LOG("server: opening a public Steam lobby");
-            lobby_.Host(steam::LobbyType::Public);
+            lobby_.Host(steam::LobbyType::Public, true);   // one member more: the server is not a player
         }
         if (lobby_.IsHost() && DueAt(now, serverConfigAt_)) {
             serverConfigAt_ = now + 5000;
@@ -3508,7 +3588,7 @@ private:
         tagSight_.Begin(now);
         FVector eye; int eyeKnown = -1;   // the camera, asked for once a frame and only when a trace is due
         for (const FighterEntry& f : info_.fighters) {
-            if (f.entity == me || !f.alive || f.name.empty() || out.size() >= 16) continue;
+            if (f.entity == me || !f.alive || f.name.empty() || out.size() >= kMaxWillies) continue;
             UObject* actor = IsHost() ? EntityActor(f.entity) : ClientActor(f.entity);
             FVector head;
             if (!actor || !adapter_.BoneLocation(actor, "head", head)) continue;
@@ -3526,11 +3606,207 @@ private:
                 CountTagTrace(now);
             }
             NameTagSrc t;
-            t.name = f.name; t.wx = head.x; t.wy = head.y; t.wz = head.z + 25.0; t.team = f.team; t.alive = f.alive;
+            t.name = voice_.Talking(f.entity, now) ? "> " + f.name : f.name;   // talking (proximity voice)
+            t.wx = head.x; t.wy = head.y; t.wz = head.z + 25.0; t.team = f.team; t.alive = f.alive;
             t.seen = tagSight_.Seen(f.entity);
             out.push_back(std::move(t));
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------ proximity voice (gameplay/voice.h, voice/hsm_voice.h)
+    // Steam records the microphone; a client sends its chunks to the host, which relays each one to the machines that
+    // may hear it (near the speaker, or dead with the dead). A fighter below voice_cutoff of full consciousness, knocked
+    // out or dead is cut off from the living: by its own machine, by the host and by each listener. With the mesh on,
+    // voice still goes through the host. A role=server host relays only: it records and plays nothing.
+    bool VoiceHostOn() const { return cfg_.voice && net_ && IsHost(); }
+    bool VoiceClientOn() const { return cfg_.voice && net_ && !IsHost() && welcomed_ && hostVoice_; }
+    voice::Range VoiceRange() const { return {cfg_.voiceNearM * 100.f, cfg_.voiceFarM * 100.f}; }
+
+    // Alive: in the match list, not marked dead there or (when known) by its vitals. Not listed (waiting, spectating):
+    // counts as dead, so it hears the dead and the living, and talks only to the dead.
+    bool VoiceAlive(uint8_t e) const {
+        if (e == 0 || e >= voice::kMaxSpeakers) return false;
+        for (const FighterEntry& f : info_.fighters)
+            if (f.entity == e) return f.alive && !(voiceState_[e].vitalsAt && voiceState_[e].dead);
+        return false;
+    }
+    // Conscious enough to talk. Nothing known yet: an owner-sync fighter waits for its first vitals; with host sync a
+    // client trusts the host's relay (the host reads the real bodies).
+    bool VoiceAwake(uint8_t e) const {
+        if (e == 0 || e >= voice::kMaxSpeakers) return false;
+        const VoiceState& s = voiceState_[e];
+        if (!s.vitalsAt) return !OwnerMode() && !IsHost();
+        return s.gate.ok();
+    }
+    void VoiceVitals(const VitalsMsg& v) {
+        if (v.entity == 0 || v.entity >= voice::kMaxSpeakers) return;
+        VoiceState& s = voiceState_[v.entity];
+        s.vitalsAt = std::max(NowMs(), 1u);
+        s.dead = (v.flags & 1) != 0;
+        const bool was = s.gate.ok();
+        s.gate.Update(v.consciousness, (v.flags & 5) != 0, cfg_.voiceCutoff);   // dead or knocked out: cut off
+        if (s.gate.ok() != was && voiceCutLogs_ < 200) {
+            ++voiceCutLogs_;
+            HSM_LOG("voice: entity %u %s (consciousness %.1f, full %.1f%s)", unsigned(v.entity), s.gate.ok() ? "may talk again" : "cut off",
+                    double(v.consciousness), double(s.gate.peak()), s.dead ? ", dead" : (v.flags & 4) ? ", knocked out" : "");
+        }
+    }
+    void VoiceForget(uint8_t e) {
+        if (e == 0 || e >= voice::kMaxSpeakers) return;
+        voice_.Forget(e);
+        voiceState_[e] = VoiceState{};
+    }
+    bool VoiceHead(uint8_t e, FVector& out) {
+        UObject* a = IsHost() ? EntityActor(e) : ClientActor(e);
+        return a && adapter_.BoneLocation(a, "head", out);
+    }
+
+    // Each frame, after the host or client tick.
+    void VoiceTick() {
+        if (!net_ || !cfg_.voice || !localFighter_) return;   // role=server: VoiceRelay only, nothing recorded or played
+        const uint32_t now = NowMs();
+        const bool on = VoiceHostOn() || VoiceClientOn();
+        if (!voiceConfigured_) {
+            voiceConfigured_ = true;
+            game::VoiceSettings s; s.mode = cfg_.voiceMode; s.levelDb = cfg_.voiceLevelDb; s.key = cfg_.voiceKey; s.volume = cfg_.voiceVolume;
+            voice_.Configure(s);
+        }
+        if (on && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam is still what records and decodes
+            voiceSteamTried_ = true;
+            if (!steam::Init()) HSM_LOG("voice: Steam is not running here; proximity voice is off on this machine");
+        }
+        const uint8_t me = MyEntity();
+        if (on && now >= voiceVitalsAt_) {   // 10 Hz: my own fighter's consciousness, read here; host sync: every body
+            voiceVitalsAt_ = now + 100;
+            if (me && (OwnerMode() || IsHost()))
+                if (UObject* own = adapter_.PlayerWillie(0)) { VitalsMsg v; if (adapter_.ReadVitals(own, me, v)) { v.entity = me; VoiceVitals(v); } }
+            if (IsHost() && !OwnerMode())
+                for (const FighterEntry& f : info_.fighters)
+                    if (f.entity != me)
+                        if (UObject* a = EntityActor(f.entity)) { VitalsMsg v; if (adapter_.ReadVitals(a, f.entity, v)) { v.entity = f.entity; VoiceVitals(v); } }
+        }
+        bool mayTalk = false;
+        if (on && me && InFightLevel()) {
+            // The dead talk (to the dead); the living only while conscious enough. Push to talk: the game in front, not typing.
+            mayTalk = !VoiceAlive(me) || VoiceAwake(me);
+            if (mayTalk && cfg_.voiceMode == 1) {
+                DWORD pid = 0;
+                if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
+                mayTalk = pid == GetCurrentProcessId() && !ui::Typing();
+            }
+        }
+        bool spurt = false;
+        voice_.Capture(mayTalk, now, voiceOut_, &spurt);
+        for (size_t i = 0; i < voiceOut_.size(); ++i) {
+            if (voiceOut_[i].size() > kMaxVoiceBytes) { ++voiceDrops_.big; continue; }   // a long hitch: dropped, never cut
+            VoiceMsg m; m.entity = me; m.seq = ++voiceSeq_; m.flags = (i == 0 && spurt) ? 1 : 0; m.data = std::move(voiceOut_[i]);
+            const std::vector<uint8_t> bytes = Encode(m);
+            if (IsHost()) VoiceRelay(m, bytes);
+            else if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, bytes, false);
+        }
+        if (on) VoiceGains(now);
+    }
+
+    // Host: a client's chunk, for its own fighter only and at most VoiceRate, then on to whoever may hear it.
+    void VoiceFromClient(const NetEvent& ev, const Peer& peer) {
+        VoiceMsg m;
+        if (!cfg_.voice || !Decode(ev.data.data(), ev.data.size(), m)) { ++voiceDrops_.off; return; }
+        if (m.entity != Roster::EntityForSlot(peer.slot) || m.entity >= voice::kMaxSpeakers) { ++voiceDrops_.sender; return; }
+        if (!voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
+        VoiceRelay(m, ev.data);
+    }
+
+    // Host: one chunk of speaker m.entity (a client's or the host's own) to every machine that may hear it, and to the
+    // host's own player. A living listener gets it only within voice_far_m (and a margin); a dead one wherever it is.
+    void VoiceRelay(const VoiceMsg& m, const std::vector<uint8_t>& bytes) {
+        const uint8_t from = m.entity;
+        const bool alive = VoiceAlive(from), awake = VoiceAwake(from);
+        if (alive && !awake) { ++voiceDrops_.cut; return; }
+        FVector at{};
+        const bool placed = VoiceHead(from, at);
+        for (const auto& [peerId, p] : peers_) {
+            const uint8_t e = Roster::EntityForSlot(p.slot);
+            if (e == from) continue;
+            const bool listenerAlive = VoiceAlive(e);
+            const voice::Hear h = voice::Audible(alive, awake, listenerAlive);
+            if (h == voice::Hear::None) { ++voiceDrops_.deaf; continue; }
+            float dist = -1.f;
+            FVector to{};
+            if (placed && h == voice::Hear::Spatial && listenerAlive && VoiceHead(e, to)) {
+                const double dx = at.x - to.x, dy = at.y - to.y, dz = at.z - to.z;
+                dist = float(std::sqrt(dx * dx + dy * dy + dz * dz));
+            }
+            if (!voice::RelayVoice(h, dist, listenerAlive, VoiceRange())) { ++voiceDrops_.distant; continue; }
+            net_->Send(peerId, kChanUnreliable, bytes, false);
+            ++voiceRelayed_;
+        }
+        if (localFighter_ && from != HostEntity()) VoiceIn(m);
+    }
+
+    // A chunk this machine may play: checked again as this machine sees the speaker and itself, then decoded.
+    void VoiceIn(const VoiceMsg& m) {
+        if (!localFighter_ || !cfg_.voice || !net_) { ++voiceDrops_.off; return; }
+        const uint8_t me = MyEntity();
+        if (m.entity == 0 || m.entity > kMaxFighters || m.entity == me) { ++voiceDrops_.sender; return; }
+        if (!IsHost() && !voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
+        const bool alive = VoiceAlive(m.entity);
+        const voice::Hear h = voice::Audible(alive, VoiceAwake(m.entity), VoiceAlive(me));
+        if (h == voice::Hear::None) { ++(alive ? voiceDrops_.cut : voiceDrops_.deaf); return; }
+        voice_.Receive(m.entity, m.seq, m.data.data(), m.data.size(), NowMs());
+    }
+
+    // Each frame: every speaker heard in the last second gets its left/right gain from this machine's camera (the
+    // living hear the living by distance and side; the dead hear the dead at full volume; a cut-off speaker goes silent).
+    void VoiceGains(uint32_t now) {
+        FVector eye{};
+        bool haveEye = adapter_.CameraLocation(eye);
+        if (!haveEye) if (UObject* own = adapter_.PlayerWillie(0)) haveEye = adapter_.BoneLocation(own, "head", eye);
+        float yaw = 0, pitch = 0;
+        adapter_.ControlRotation(0, yaw, pitch);
+        const uint8_t me = MyEntity();
+        const bool meAlive = VoiceAlive(me);
+        for (uint8_t e = 1; e <= kMaxFighters; ++e) {
+            if (e == me || !voice_.Talking(e, now, 1000)) continue;
+            voice::Gains g{0.f, 0.f};
+            switch (voice::Audible(VoiceAlive(e), VoiceAwake(e), meAlive)) {
+                case voice::Hear::Flat: g = {1.f, 1.f}; break;
+                case voice::Hear::Spatial: {
+                    FVector at{};
+                    if (!VoiceHead(e, at)) break;                    // not placed here: silent, as if out of range
+                    if (!haveEye) { g = {1.f, 1.f}; break; }        // no camera: heard, unplaced
+                    g = voice::Spatialize({float(eye.x), float(eye.y), float(eye.z)}, yaw, {float(at.x), float(at.y), float(at.z)}, VoiceRange());
+                    break;
+                }
+                case voice::Hear::None: break;
+            }
+            voice_.SetGains(e, g);
+        }
+    }
+
+    // With the health line, when anything happened: what was sent, heard, relayed and dropped, and why.
+    void VoiceHealth() {
+        if (!cfg_.voice) return;
+        const game::Voice::Stats s = voice_.TakeStats();
+        const VoiceDrops d = voiceDrops_;
+        voiceDrops_ = VoiceDrops{};
+        const uint32_t relayed = voiceRelayed_;
+        voiceRelayed_ = 0;
+        const uint32_t dropped = d.cut + d.distant + d.deaf + d.rate + d.sender + d.big + d.off + s.late + s.badChunks;
+        if (!s.sent && !s.received && !relayed && !dropped && !s.recording) return;
+        std::string full;
+        for (const FighterEntry& f : info_.fighters) {
+            if (f.entity == 0 || f.entity >= voice::kMaxSpeakers || !voiceState_[f.entity].vitalsAt) continue;
+            char b[48];
+            std::snprintf(b, sizeof b, " e%u=%.0f%s", unsigned(f.entity), double(voiceState_[f.entity].gate.peak()), voiceState_[f.entity].gate.ok() ? "" : "(cut)");
+            full += b;
+        }
+        HSM_LOG("voice: mic %s, sent %u chunks %.1f KB (gate open %u ms), heard %u chunks %.1f KB, relayed %u; dropped: cut off %u, "
+                "out of range %u, not for this listener %u, rate %u, wrong sender %u, too big %u, voice off %u, late %u, undecodable %u; "
+                "mixer dropped %llu samples; output %s; full consciousness%s",
+                s.recording ? "on" : "off", s.sent, s.sentBytes / 1024.0, s.gateOpenMs, s.received, s.receivedBytes / 1024.0, relayed,
+                d.cut, d.distant, d.deaf, d.rate, d.sender, d.big, d.off, s.late, s.badChunks, (unsigned long long)s.mixerDropped,
+                s.device ? "open" : "closed", full.empty() ? " unknown" : full.c_str());
     }
 
     // One log line, after the first second of name tag traces: the cost of the wall test.
@@ -3682,6 +3958,74 @@ private:
         HSM_LOG("client: hello sent to the host%s", hellosSent_++ ? " (no welcome yet; retrying)" : "");
     }
 
+    // ------------------------------------------------------------------ host migration (session/hsm_migration.h)
+    // The lobby's owner changed (Lobby::RefreshMembers): the old host left. The session closes at once (until the next
+    // step this machine may be the lobby owner while its transport is still a client's) and waits for MigrationTick.
+    bool OnLobbyOwnerChanged(steam::SteamId old, steam::SteamId now) {
+        if (!cfg_.hostMigration || SteamServer()) return false;
+        HSM_LOG("session: host migration: the lobby owner changed (%s)", now == steam::MySteamId() ? "now this machine" : "another member");
+        BeginMigration(old);
+        return true;
+    }
+
+    // A client's host went silent or closed its session (HostLossMonitor) in a Steam lobby: wait for Steam to name the
+    // next owner instead of leaving. False: no migration (off, not in a lobby): back to the menu as before.
+    bool MigrateAfterHostLoss() {
+        if (!cfg_.hostMigration || !steamMode() || SteamServer() || !lobby_.InLobby()) return false;
+        if (migration_.Active()) return true;
+        HSM_LOG("client: host lost; host migration: waiting up to %u s for Steam to name a new host", kMigrationOwnerWaitMs / 1000);
+        ui::ShowLine("HSMMod", style::kBone, "The host is gone. Waiting for a new host...");
+        BeginMigration(hostSteam_);
+        return true;
+    }
+
+    void BeginMigration(steam::SteamId oldHost) {
+        if (!migration_.Active()) {
+            migration_.Start(oldHost, NowMs());
+            // The map to open again (the new host) or to wait in (the others): the fight level the old host had open.
+            migrateLevel_ = InFightLevel() ? currentLevel_ : std::string();
+        }
+        ResetNetwork("host migration");
+    }
+
+    void MigrationTick() {
+        if (!migration_.Active()) return;
+        const uint32_t now = NowMs();
+        const steam::SteamId owner = lobby_.InLobby() ? lobby_.owner() : 0;
+        switch (migration_.Tick(owner, steam::MySteamId(), lobby_.InLobby(), cfg_.hostMigration, now)) {
+            case MigrationStep::BecomeHost:
+                HSM_LOG("session: host migration: this machine is the new host%s%s", migrateLevel_.empty() ? "" : "; reopening ",
+                        migrateLevel_.c_str());
+                ui::ShowLine("HSMMod", style::kBone, "The host left. You are the new host.");
+                ResetNetwork("host migration");
+                OnLobbyEntered();                 // as the owner: a host transport, every member allowed, BecomeHost next tick
+                break;
+            case MigrationStep::FollowHost:
+                HSM_LOG("session: host migration: following the new host");
+                ui::ShowLine("HSMMod", style::kBone, "The host left. " + (steam::PersonaName(owner).empty() ? std::string("Another player") : steam::PersonaName(owner)) + " is the new host.");
+                ResetNetwork("host migration");
+                OnLobbyEntered();                 // a client of the new owner: Hello, Welcome (migration_.Welcomed)
+                break;
+            case MigrationStep::GiveUp:
+                HSM_LOG("session: host migration gave up (%s); returning to the main menu",
+                        !cfg_.hostMigration ? "off" : !lobby_.InLobby() ? "left the lobby" : "no new host in time");
+                migrateLevel_.clear();
+                if (lobby_.InLobby() || net_ || InFightLevel()) ReturnToMenuAfterHostLoss();
+                return;
+            default: break;
+        }
+        if (migration_.StartDue(now)) {
+            // Scores start over: the old host's match state left with it. A fight map opens again with the lobby's
+            // settings; the Progression hub through the stock path; anything else stays where it is.
+            const std::string level = std::move(migrateLevel_);
+            migrateLevel_.clear();
+            const MapInfo* map = level.empty() ? nullptr : FindMap(level);
+            if (map && FindMap(kHubLevel) == map) StartProgression();
+            else if (map) StartOnMap(map->path);
+            else if (!level.empty()) HSM_LOG("session: host migration: %s is not a catalog map; staying here", level.c_str());
+        }
+    }
+
     void ReturnToMenuAfterHostLoss() {
         HSM_LOG("client: host lost; returning to the main menu");
         if (steamMode()) lobby_.Leave();
@@ -3720,7 +4064,7 @@ private:
                 } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
             }
         });
-        if (meshOn_ && welcomed_) MeshTick();
+        if ((meshOn_ || peerPingOn_) && welcomed_) MeshTick();
         // Only fights have steady host traffic (snapshots); menus, the Progression hub and loading screens never count
         // as silence.
         if (welcomed_ && FighterLevel()) {
@@ -3729,12 +4073,14 @@ private:
             hostGone = hostGone || a == HostLossAction::ReturnToMenu;
         } else hostLoss_.OnPacket(NowMs());
         if (rejected_) { const RejectReason why = *rejected_; rejected_.reset(); OnRejected(why); return; }
-        if (hostGone) { ReturnToMenuAfterHostLoss(); return; }
+        if (hostGone) { if (!MigrateAfterHostLoss()) ReturnToMenuAfterHostLoss(); return; }
         if (hostUnreachable_) { LeaveUnreachableHost(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
         if (welcomed_ && hostPeer_ && DueAt(NowMs(), nextKeepAlive_)) {   // in every level: the host's silence check (public #9)
-            nextKeepAlive_ = NowMs() + kKeepAliveMs;
-            net_->Send(hostPeer_, kChanUnreliable, EncodePing(NowMs(), false), false);
+            const uint32_t now = NowMs();
+            nextKeepAlive_ = now + kKeepAliveMs;
+            pings_.OnSent(kHostSlot, now);                                   // its Pong is the host row of the ping table
+            net_->Send(hostPeer_, kChanUnreliable, EncodePing(now, false), false);
         }
         if (!welcomed_ || !FighterLevel()) { myWillie_.store(nullptr); return; }
         if (OwnerMode() && !ClientGateOpen()) { myWillie_.store(adapter_.PlayerWillie(0)); return; }
@@ -3969,7 +4315,8 @@ private:
     // Steam client has is a mesh peer the host's PeerMap named. ENet clients have the host alone.
     bool FromHost(const NetEvent& ev) const { return !steamNet_ || ev.steamId == hostSteam_; }
 
-    void RefreshMeshSend() { meshSend_ = meshPeers_.Peers(); }
+    // Pose and Vitals go direct only with the mesh on; with per-player pings alone the peers are only pinged.
+    void RefreshMeshSend() { meshSend_ = meshOn_ ? meshPeers_.Peers() : std::vector<uint32_t>{}; }
 
     // The host's roster of mesh peers: allow the new ones (both ends allow each other, so SteamTransport admits them),
     // close the ones that went, and report what is heard again.
@@ -3982,16 +4329,26 @@ private:
         HSM_LOG("client: mesh: %zu direct peers (%zu new, %zu gone)", meshPeers_.Named(), c.want.size(), c.drop.size());
     }
 
-    // Anything but the host's own traffic: a peer connecting or going, or a stream straight from another client. Only a
-    // Pose or Vitals of the entity that peer's slot owns is used; everything else is dropped and counted.
+    // Anything but the host's own traffic: a peer connecting or going, or a message straight from another client: a ping
+    // (per-player pings), a Pose or Vitals of the entity that peer's slot owns, or (Mesh v2) a direct copy of one of its
+    // blows, cuts, stuck blades, paint, weapon, grab or prop states (MeshDirectType) that passes MeshSenderOk. Everything
+    // else is dropped and counted.
     void MeshEvent(const NetEvent& ev) {
         if (ev.kind == NetEvent::Connected) return;
-        if (ev.kind == NetEvent::Disconnected) { meshPeers_.ForgetPeer(ev.peer); RefreshMeshSend(); return; }
+        if (ev.kind == NetEvent::Disconnected) {
+            if (const uint8_t s = meshPeers_.SlotOfPeer(ev.peer); s < kMaxFighters) pings_.Forget(s);
+            meshPeers_.ForgetPeer(ev.peer); RefreshMeshSend(); return;
+        }
         const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
         const uint8_t slot = meshPeers_.SlotOfPeer(ev.peer);
         MsgType t;
-        if (!meshOn_ || slot == 0xFF || !PeekType(d, n, t) || (t != MsgType::Pose && t != MsgType::Vitals)) { ++meshDropped_; return; }
-        if (t == MsgType::Pose) {
+        if (slot >= kMaxFighters || !PeekType(d, n, t)) { ++meshDropped_; return; }
+        if (t == MsgType::Ping || t == MsgType::Pong) { if (peerPingOn_) MeshPing(ev.peer, slot, d, n); else ++meshDropped_; return; }
+        if (!meshOn_ || (t != MsgType::Pose && t != MsgType::Vitals && !MeshDirectType(t))) { ++meshDropped_; return; }
+        if (!meshBudget_[slot].Allow(t, NowMs())) { BudgetDropped(meshBudget_[slot], t, "client: mesh", slot); return; }
+        if (MeshDirectType(t)) {
+            if (!ApplyEventMsg(t, d, n, slot)) { ++meshDropped_; return; }
+        } else if (t == MsgType::Pose) {
             PoseMsg m; sync::PoseFrame frame;
             if (!Decode(d, n, m, &frame) || !MayStream(slot, m.entity)) { ++meshDropped_; return; }
             standIns_.OnPose(m, frame, ArrivalMs(ev));
@@ -4001,19 +4358,154 @@ private:
             standIns_.OnVitals(v);
             gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
             severs_.OnVitals(v, game::SteadyNowMs());
+            VoiceVitals(v);
         }
         meshHearing_.Note(slot, NowMs());
         ++meshRx_;
     }
 
     // Tells the host which slots arrive directly (held 2 s after the last packet, at most one report a second), so it
-    // relays the others as before.
+    // relays the others as before. Per-player pings: a Ping to every mesh peer every 2 s, the table to the host every 10 s.
     void MeshTick() {
-        uint8_t mask = 0;
-        if (hostPeer_ && meshHearing_.TakeChange(NowMs(), &mask)) {
+        uint16_t mask = 0;
+        if (meshOn_ && hostPeer_ && meshHearing_.TakeChange(NowMs(), &mask)) {
             MeshHeardMsg m; m.mask = mask;
             net_->Send(hostPeer_, kChanReliable, Encode(m), true);
-            HSM_LOG("client: mesh: hearing 0x%02x directly", mask);
+            HSM_LOG("client: mesh: hearing 0x%03x directly", unsigned(mask));
+        }
+        if (!peerPingOn_ || !net_) return;
+        const uint32_t now = NowMs();
+        for (uint8_t s : meshPeers_.Slots()) {
+            const uint32_t p = meshPeers_.PeerOfSlot(s);
+            if (!p || !pings_.Due(s, now)) continue;
+            pings_.OnSent(s, now);
+            net_->Send(p, kChanUnreliable, EncodePing(now, false), false);
+        }
+        if (hostPeer_ && DueAt(now, nextPingTable_)) {
+            nextPingTable_ = now + kPingTableGapMs;
+            const PingTableMsg m = MyPingTable(now);
+            if (!m.entries.empty()) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+        }
+    }
+
+    // A Ping from a mesh peer is answered (at most one Pong a second per peer: a flood gets nothing back); its Pong is
+    // that peer's round trip.
+    void MeshPing(uint32_t peer, uint8_t slot, const uint8_t* d, size_t n) {
+        Ping p; bool pong = false;
+        if (!DecodePing(d, n, p, pong)) { ++meshDropped_; return; }
+        if (pong) { pings_.OnPong(slot, p.timeMs, NowMs()); return; }
+        if (pongs_.Allow(slot, NowMs())) net_->Send(peer, kChanUnreliable, EncodePing(p.timeMs, true), false);
+    }
+
+    // This client's row: the host (its keep-alive Pong) and every mesh peer, with what Steam measures for the same link.
+    PingTableMsg MyPingTable(uint32_t now) {
+        PingTableMsg m;
+        auto add = [&](uint8_t slot, uint32_t peer) {
+            if (!pings_.Pinged(slot)) return;
+            const PingSummary s = pings_.Summary(slot, now);
+            PingTableEntry e; e.slot = slot; e.rttMs = s.medianMs; e.lossPct = s.lossPct;
+            const uint32_t steam = peer ? net_->RoundTripMs(peer) : kPingUnknown;
+            e.steamMs = uint16_t(std::min<uint32_t>(steam, kPingUnknown));
+            m.entries.push_back(e);
+        };
+        add(kHostSlot, hostPeer_);
+        for (uint8_t s : meshPeers_.Slots()) add(s, meshPeers_.PeerOfSlot(s));
+        return m;
+    }
+
+    // Mesh v2: a copy of an event message straight to the mesh peers it concerns (MeshDirectSlots), next to the one to the
+    // host. The host still checks, scores and relays its copy; whichever arrives first is used (MeshDedupe).
+    void MeshCopy(MsgType t, uint8_t victim, const std::vector<uint8_t>& msg, bool reliable) {
+        if (!meshOn_ || !net_) return;
+        for (uint8_t s : MeshDirectSlots(t, victim, meshPeers_.Slots()))
+            if (const uint32_t p = meshPeers_.PeerOfSlot(s)) { net_->Send(p, reliable ? kChanReliable : kChanUnreliable, msg, reliable); ++meshDirectTx_; }
+    }
+
+    // A client's event message, from the host (fromSlot kHostSlot: checked there) or straight from the mesh peer holding
+    // fromSlot (checked here as the host would: MeshSenderOk, the body life, the friendly-fire rule). With the mesh on, the
+    // second copy of anything is dropped (MeshDedupe; grab and prop states keep the newest on their own). False: a direct
+    // copy refused.
+    bool ApplyEventMsg(MsgType t, const uint8_t* d, size_t n, uint8_t fromSlot) {
+        if (!OwnerMode()) return false;
+        const bool direct = fromSlot != kHostSlot;
+        const uint8_t me = world_.myEntity();
+        const double now = game::SteadyNowMs();
+        auto sender = [&](uint8_t actor, uint8_t victim, bool strip) {
+            if (!direct) return true;
+            MeshMsgFacts f; f.actor = actor; f.victim = victim; f.stripRequest = strip;
+            return MeshSenderOk(t, fromSlot, f, me);
+        };
+        auto blowOk = [&](uint8_t a, uint8_t v) { return !direct || (CombatEnabled() && HitAllowed(true, KnownTeam(a), KnownTeam(v), info_.friendlyFire)); };
+        auto first = [&](MeshStream s, uint8_t e, uint32_t id) {
+            if (!meshOn_ || meshDedupe_.Accept(s, e, id)) return true;
+            ++meshDupes_;
+            return false;
+        };
+        switch (t) {
+            case MsgType::HitClaim: {
+                HitClaimMsg m;
+                if (!Decode(d, n, m) || !sender(m.claim.attacker, m.claim.victim, false) || !blowOk(m.claim.attacker, m.claim.victim)) return false;
+                if (m.claim.victim == me && !StaleLife(m.claim.victim, m.claim.victimLife) && first(MeshStream::HitClaim, m.claim.attacker, m.claim.claimId))
+                    claims_.Replay(m.claim, now);
+                return true;
+            }
+            case MsgType::HitFx: {
+                HitFxMsg m;
+                if (!Decode(d, n, m) || !sender(m.claim.attacker, m.claim.victim, false) || !blowOk(m.claim.attacker, m.claim.victim)) return false;
+                if (first(MeshStream::HitFx, m.claim.attacker, m.claim.claimId)) claims_.Effect(m.claim);
+                return true;
+            }
+            case MsgType::SeverClaim: {
+                combat::SeverClaimMsg m;
+                if (!Decode(d, n, m) || !sender(m.claim.attacker, m.claim.victim, false) || !blowOk(m.claim.attacker, m.claim.victim)) return false;
+                if (m.claim.victim == me && StaleLife(m.claim.victim, m.claim.victimLife)) return true;
+                if (!first(MeshStream::SeverClaim, m.claim.attacker, m.claim.claimId)) return true;
+                if (m.claim.victim == me) severs_.Replay(m.claim, now);
+                else severs_.Remember(m.claim, now);
+                return true;
+            }
+            case MsgType::SeverNotice: {
+                combat::SeverNoticeMsg m;
+                if (!Decode(d, n, m) || !sender(m.claim.victim, 0, false)) return false;
+                if (m.claim.victim != me && first(MeshStream::SeverNotice, m.claim.victim, m.claim.claimId)) severs_.Remember(m.claim, now);
+                return true;
+            }
+            case MsgType::StuckBlade: {
+                combat::StuckBladeMsg m;
+                if (!Decode(d, n, m) || !sender(m.attacker, m.victim, false) || (m.stuck && !blowOk(m.attacker, m.victim))) return false;
+                if (m.victim == me && first(m.stuck ? MeshStream::StuckAttach : MeshStream::StuckRelease, m.attacker, m.seq)) severs_.OnStuck(m, now);
+                return true;
+            }
+            case MsgType::GrabState: {
+                GrabStateMsg m;
+                if (!Decode(d, n, m) || !sender(m.grabber, 0, false)) return false;
+                if (m.grabber != me) grabs_.OnGrabState(m, now);
+                return true;
+            }
+            case MsgType::PaintFx: {
+                combat::PaintFxMsg m;
+                if (!Decode(d, n, m)) return false;
+                const bool strip = combat::IsStripRequest(m);
+                if (!sender(m.entity, 0, strip)) return false;
+                if ((m.entity != me) != strip && (strip || first(MeshStream::PaintFx, m.entity, m.seq)) && fx_.Accept(m)) fx_.Apply(m);
+                return true;
+            }
+            case MsgType::Equip: {
+                combat::EquipStateMsg m;
+                if (!Decode(d, n, m) || !sender(m.entity, 0, false)) return false;
+                if (m.entity != me && first(MeshStream::Equip, m.entity, m.seq)) equip_.Apply(m);
+                return true;
+            }
+            case MsgType::PropState: {
+                if (direct) {
+                    PropStateMsg m;
+                    if (!Decode(d, n, m) || m.lessee != fromSlot || !sender(Roster::EntityForSlot(fromSlot), 0, false)) return false;
+                }
+                props_.OnPropState(d, n, fromSlot);   // a direct one must come from the prop's granted streamer
+                return true;
+            }
+            default:
+                return false;
         }
     }
 
@@ -4033,13 +4525,24 @@ private:
                     HSM_LOG("client: host on mod build '%s', ours '%s' - update; the host will not start a match until both match",
                             w.modBuild.c_str(), game::ModBuild().c_str());
                 if (OwnerMode() && !streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
+                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); HSM_LOG("client: host migration done"); }
                 meshOn_ = cfg_.mesh && steamNet_ && OwnerMode() && (w.flags & kWelcomeMesh);
-                if (!meshOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});          // the host stopped offering it
+                peerPingOn_ = cfg_.peerPing && steamNet_ && OwnerMode() && (w.flags & kWelcomePeerPing);
+                if (hostVoice_ != ((w.flags & kWelcomeVoice) != 0) || !voiceWelcomeLogged_) {
+                    voiceWelcomeLogged_ = true;
+                    HSM_LOG("client: proximity voice %s", !(w.flags & kWelcomeVoice) ? "off at the host" : cfg_.voice ? "on" : "off here (voice=0)");
+                }
+                hostVoice_ = (w.flags & kWelcomeVoice) != 0;
+                if (!meshOn_ && !peerPingOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});   // the host stopped offering it
+                RefreshMeshSend();
+                if (meshOn_ || peerPingOn_) HSM_LOG("client: mesh %s, per-player pings %s", meshOn_ ? "on" : "off", peerPingOn_ ? "on" : "off");
                 meshHearing_.Invalidate();                                              // a new host-side mask table: report again
                 UploadLoadout();
                 break;
             }
-            case MsgType::PeerMap: { PeerMapMsg m; if (meshOn_ && Decode(d, n, m)) ApplyPeerMap(m); break; }
+            case MsgType::PeerMap: { PeerMapMsg m; if ((meshOn_ || peerPingOn_) && Decode(d, n, m)) ApplyPeerMap(m); break; }
+            case MsgType::Voice: { VoiceMsg m; if (Decode(d, n, m)) VoiceIn(m); break; }
+            case MsgType::Pong: { Ping p; bool pong = false; if (DecodePing(d, n, p, pong) && pong) pings_.OnPong(kHostSlot, p.timeMs, NowMs()); break; }
             case MsgType::Reject: { Reject r; Decode(d, n, r); rejected_ = r.reason; bodyWork_ = true; break; }   // handled after the poll loop
             case MsgType::Travel: {
                 Travel tr; Decode(d, n, tr);
@@ -4084,6 +4587,7 @@ private:
                     standIns_.Forget(dp.entity); severs_.Forget(dp.entity); gore_.Forget(dp.entity); claims_.Forget(dp.entity); fx_.Forget(dp.entity); equip_.Forget(dp.entity);
                     grabs_.Forget(dp.entity); props_.ForgetEntity(dp.entity);
                 }
+                meshDedupe_.Forget(dp.entity);             // a rejoined machine numbers its claims and fx from 1 again
                 if (world_.OnDespawn(dp.entity)) DestroyPuppet(dp.entity);
                 if (dp.entity == world_.myEntity()) ownDeadPending_ = true;   // a respawn follows
                 break;
@@ -4144,52 +4648,14 @@ private:
                     standIns_.OnVitals(v);
                     gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
                     severs_.OnVitals(v, game::SteadyNowMs());
+                    VoiceVitals(v);
                 }
                 break;
             }
-            case MsgType::HitClaim: {
-                HitClaimMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.claim.victim == world_.myEntity() && !StaleLife(m.claim.victim, m.claim.victimLife)) claims_.Replay(m.claim, game::SteadyNowMs());
+            case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim: case MsgType::SeverNotice: case MsgType::StuckBlade:
+            case MsgType::GrabState: case MsgType::PaintFx: case MsgType::Equip: case MsgType::PropState:
+                ApplyEventMsg(t, d, n, kHostSlot);
                 break;
-            }
-            case MsgType::HitFx: {
-                HitFxMsg m;
-                if (OwnerMode() && Decode(d, n, m)) claims_.Effect(m.claim);
-                break;
-            }
-            case MsgType::SeverClaim: {
-                combat::SeverClaimMsg m;
-                if (!OwnerMode() || !Decode(d, n, m)) break;
-                if (m.claim.victim == world_.myEntity()) { if (!StaleLife(m.claim.victim, m.claim.victimLife)) severs_.Replay(m.claim, game::SteadyNowMs()); }
-                else severs_.Remember(m.claim, game::SteadyNowMs());
-                break;
-            }
-            case MsgType::SeverNotice: {
-                combat::SeverNoticeMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.claim.victim != world_.myEntity()) severs_.Remember(m.claim, game::SteadyNowMs());
-                break;
-            }
-            case MsgType::StuckBlade: {
-                combat::StuckBladeMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.victim == world_.myEntity()) severs_.OnStuck(m, game::SteadyNowMs());
-                break;
-            }
-            case MsgType::GrabState: {
-                GrabStateMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.grabber != world_.myEntity()) grabs_.OnGrabState(m, game::SteadyNowMs());
-                break;
-            }
-            case MsgType::PaintFx: {
-                combat::PaintFxMsg m;
-                if (OwnerMode() && Decode(d, n, m) && (m.entity != world_.myEntity()) != combat::IsStripRequest(m) && fx_.Accept(m)) fx_.Apply(m);
-                break;
-            }
-            case MsgType::Equip: {
-                combat::EquipStateMsg m;
-                if (OwnerMode() && Decode(d, n, m) && m.entity != world_.myEntity()) equip_.Apply(m);
-                break;
-            }
-            case MsgType::PropState: { if (OwnerMode()) props_.OnPropState(d, n, kHostSlot); break; }
             case MsgType::PropLease: { if (OwnerMode()) props_.OnPropLease(d, n, kHostSlot); break; }
             case MsgType::PropCensus: { if (OwnerMode()) props_.OnPropCensus(d, n); break; }
             case MsgType::Event: {
@@ -4229,6 +4695,8 @@ private:
     std::string pendingLevel_;
     // host
     bool hostPending_ = false;
+    HostMigration migration_;      // survives ResetNetwork: it spans the old session and the new one
+    std::string migrateLevel_;     // the fight level open when the old host left
     bool serverReadyLogged_ = false;
     uint32_t serverLobbyAt_ = 0, serverConfigAt_ = 0;   // role=server over Steam: next lobby open try, next settings push
     // role=server
@@ -4311,6 +4779,32 @@ private:
     MeshHearing meshHearing_;
     MeshMasks meshMasks_;
     uint32_t meshRx_ = 0, meshDropped_ = 0, meshRelaySkipped_ = 0;   // per health window
+    // Mesh v2 (client): first copy wins; a budget per mesh peer; direct copies sent and second copies dropped per window.
+    MeshDedupe meshDedupe_;
+    std::array<MsgBudget, kMaxFighters> meshBudget_{};
+    uint32_t meshDirectTx_ = 0, meshDupes_ = 0;
+    // Per-player pings (session/hsm_peer_ping.h). Client: pings_ to the host (keep-alive) and to every mesh peer, pongs_
+    // caps the answers; the table goes to the host every kPingTableGapMs. Host: every client's last table.
+    bool peerPingOn_ = false;
+    // proximity voice
+    struct VoiceState {
+        voice::ConsciousGate gate;
+        uint32_t vitalsAt = 0;          // the last vitals for this entity (0: none yet)
+        bool dead = false;
+        voice::VoiceRate rate;          // host: per sender; client: per speaker as relayed
+    };
+    struct VoiceDrops { uint32_t cut = 0, distant = 0, deaf = 0, rate = 0, sender = 0, big = 0, off = 0; };
+    game::Voice voice_;
+    std::array<VoiceState, voice::kMaxSpeakers> voiceState_{};
+    VoiceDrops voiceDrops_;
+    std::vector<std::vector<uint8_t>> voiceOut_;
+    uint32_t voiceRelayed_ = 0, voiceVitalsAt_ = 0, voiceCutLogs_ = 0;
+    uint16_t voiceSeq_ = 0;
+    bool hostVoice_ = false, voiceConfigured_ = false, voiceSteamTried_ = false, voiceWelcomeLogged_ = false;
+    PeerPings pings_;
+    PongLimiter pongs_;
+    uint32_t nextPingTable_ = 0;
+    std::map<uint8_t, PingTableMsg> pingTables_;
 
     MsgBudget hostBudget_{double(kMaxWillies)};   // the client's budget for what the host sends (M3)
     bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;

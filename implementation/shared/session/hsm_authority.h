@@ -1,5 +1,5 @@
 // Owner authority (protocol rev 9): who simulates which entity, who may stream it, and where the host routes what an
-// owner sends. Fighter entity e (1..kMaxFighters) is owned by the machine holding roster slot e-1 (slot 0 = the
+// owner sends. Fighter entity e (1..kMaxFighters, 9) is owned by the machine holding roster slot e-1 (slot 0 = the
 // host); every other entity (bots, adopted stock NPCs) is owned by the host. A machine only ever streams what it
 // owns, and the host drops anything else, so one player can never move or damage through another's fighter.
 #pragma once
