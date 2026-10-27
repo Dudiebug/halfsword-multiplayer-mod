@@ -25,6 +25,7 @@ struct Widgets {
     UClass* hudClass = nullptr;
     UObject* hud = nullptr; int32_t hudIndex = -1;
     ULONGLONG nextScan = 0;
+    ULONGLONG nextLive = 0;   // when to check that the UI_HUD we sit on is still the one on screen
     bool built = false;
     Kit kit;
     Box column;
@@ -202,6 +203,20 @@ void Draw(const ChatScene& s) {
         w.hud = OnScreen(FindInstances("UI_HUD_C"));
         if (!w.hud) return;
         w.hudIndex = ObjectIndex(w.hud);
+    }
+    // The game swaps UI_HUD on a respawn or a new round: the old one leaves the screen but lives until garbage
+    // collection (about a minute), and our widgets went with it. Move to the one on screen now.
+    if (w.built) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= w.nextLive) {
+            w.nextLive = now + 1000;
+            if (!InViewport(w.hud))
+                if (UObject* on = OnScreen(FindInstances("UI_HUD_C")); on && on != w.hud) {
+                    UClass* cls = w.hudClass; w = Widgets{}; w.hudClass = cls; w.hud = on; w.hudIndex = ObjectIndex(on);
+                    w.nextLive = now + 1000;
+                    HSM_LOG("chat: UI_HUD replaced by the game; moving to the new one");
+                }
+        }
     }
     if (!w.built && !Build()) return;
     w.column.Show(s.visible);

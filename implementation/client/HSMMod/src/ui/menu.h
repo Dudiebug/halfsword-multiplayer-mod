@@ -8,5 +8,6 @@ namespace hsm {
 class Session;
 namespace ui {
 void Tick(Session& session, ue::UObject* worldContext);
+void LeaveMenus();   // fight levels: close the multiplayer page, take a leftover main menu off the screen
 }
 }  // namespace hsm

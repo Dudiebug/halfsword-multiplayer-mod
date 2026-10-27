@@ -760,4 +760,20 @@ void Tick(Session& session, UObject* worldContext) {
     if (now >= g.nextText) { g.nextText = now + 250; UpdateOpenLabel(session); if (g.panelOpen) UpdatePanel(session); }
 }
 
+// Fight levels: no main menu belongs on screen. A client that joined with the multiplayer page open kept the page over
+// the match (test 2026-10-27), so close our page and take any main menu still in the viewport off it.
+void LeaveMenus() {
+    static ULONGLONG next = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now < next) return;
+    next = now + 2000;
+    if (g.panelOpen && StillAlive(g.menu, g.menuIndex, g.menuClass)) { g.panelOpen = false; g.panel.Show(false); }
+    for (const char* name : {"UI_Startup_Menu_C", "UI_MainMenuSNF_C"})
+        for (UObject* o : FindInstances(name))
+            if (InViewport(o)) {
+                Call(o, "RemoveFromParent").invoke();
+                HSM_LOG("ui: %s was still on screen in a fight level; removed", ObjectName(o).c_str());
+            }
+}
+
 }  // namespace hsm::ui

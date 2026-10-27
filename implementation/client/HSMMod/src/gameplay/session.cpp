@@ -403,6 +403,7 @@ public:
         agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
         AutoRun();
         if (!inFight_) ui::Tick(*this, gameMode);   // the main menu exists only in menu levels (its scan walks every object)
+        else if (FighterLevel()) ui::LeaveMenus();
         EnsureLocalFighter();
         test::Tick(adapter_, InFightLevel(), dt);
         ApplyHeldInput();

@@ -23,6 +23,7 @@ struct State {
     UClass* hudClass = nullptr;
     UObject* hud = nullptr; int32_t hudIndex = -1;
     ULONGLONG nextScan = 0;
+    ULONGLONG nextLive = 0;   // when to check that the UI_HUD we sit on is still the one on screen
     bool built = false;
     Kit kit;
     Box top; std::array<Block, kStripBlocks> blocks; Fixed barBox; Bar bar; Panel pill; Text pillText, clock;   // top centre
@@ -357,6 +358,20 @@ void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format form
         g.hud = OnScreen(FindInstances("UI_HUD_C"));
         if (!g.hud) return;
         g.hudIndex = ObjectIndex(g.hud);
+    }
+    // The game swaps UI_HUD on a respawn or a new round: the old one leaves the screen but lives until garbage
+    // collection (about a minute), and our widgets went with it. Move to the one on screen now.
+    if (g.built) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= g.nextLive) {
+            g.nextLive = now + 1000;
+            if (!InViewport(g.hud))
+                if (UObject* on = OnScreen(FindInstances("UI_HUD_C")); on && on != g.hud) {
+                    UClass* cls = g.hudClass; g = State{}; g.hudClass = cls; g.hud = on; g.hudIndex = ObjectIndex(on);
+                    g.nextLive = now + 1000;
+                    HSM_LOG("hud: UI_HUD replaced by the game; moving to the new one");
+                }
+        }
     }
     if (!g.built && !Build()) return;
     ApplyTop(s);
