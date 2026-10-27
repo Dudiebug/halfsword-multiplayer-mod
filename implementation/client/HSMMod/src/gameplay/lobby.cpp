@@ -104,6 +104,7 @@ void Lobby::Tick() {
                 HSM_LOG("lobby: networking session with %s failed (reason %u: %s)", steam::PersonaName(e.user).c_str(), e.a, e.text.c_str());
                 break;
             case steam::Event::LobbyChat:
+                if (e.lobby == lobby_ && state_ == State::InLobby && onChat) onChat(e.user, e.text);
                 break;
         }
     }
@@ -159,6 +160,7 @@ void Lobby::Leave() {
 }
 
 void Lobby::Invite() { if (InLobby()) steam::InviteOverlay(lobby_); }
+bool Lobby::SendChat(const std::string& text) { return InLobby() && !text.empty() && steam::SendLobbyChat(lobby_, text); }
 void Lobby::SetType(steam::LobbyType type) { if (IsHost() && steam::SetLobbyType(lobby_, type)) type_ = type; }
 MatchConfig Lobby::config() const {
     MatchConfig c;
@@ -219,8 +221,12 @@ void Lobby::RefreshMembers() {
         return;
     }
     std::vector<steam::SteamId> ids = steam::LobbyMembers(lobby_);
-    for (const LobbyMember& m : members_)
-        if (std::find(ids.begin(), ids.end(), m.id) == ids.end() && m.id != steam::MySteamId() && onMemberLeft) onMemberLeft(m.id);
+    const bool synced = !members_.empty();   // the first refresh after Enter lists whoever was here: not "joined" lines
+    for (const LobbyMember& m : members_) {
+        if (std::find(ids.begin(), ids.end(), m.id) != ids.end() || m.id == steam::MySteamId()) continue;
+        if (onMemberLeft) onMemberLeft(m.id);
+        if (onPresence) onPresence(m.name, false);
+    }
     std::vector<LobbyMember> next;
     for (steam::SteamId id : ids) {
         if (!id) continue;
@@ -231,7 +237,10 @@ void Lobby::RefreshMembers() {
         m.team = team(IntOr(steam::MemberData(lobby_, id, "hsm_team"), -1));
         m.hostOverride = team(IntOr(steam::LobbyData(lobby_, "hsm_ovr_" + std::to_string(id)), -1));
         bool known = std::any_of(members_.begin(), members_.end(), [&](const LobbyMember& o) { return o.id == id; });
-        if (!known && id && id != steam::MySteamId() && onMemberJoined) onMemberJoined(id);
+        if (!known && id && id != steam::MySteamId()) {
+            if (onMemberJoined) onMemberJoined(id);
+            if (synced && onPresence) onPresence(m.name, true);
+        }
         next.push_back(m);
     }
     members_ = std::move(next);

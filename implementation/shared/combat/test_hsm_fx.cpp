@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
@@ -266,10 +267,81 @@ void TestHitSoundPlan() {
     CHECK(p.blunt == BluntCue::None);
 }
 
+// M1/M2: only the stock naming of a cue or an armour class may travel; a lookup by name is a scan of every loaded object.
+void TestNameAllowlists() {
+    for (const char* ok : {"Pain_Cue", "Pain_Big_Cue", "ScreamLongPain_Cue", "Englishman001_De_Cue", "Cue", "Heavy_exertion_cue", "Pain_Cue_1", "Pain_Cue_23"})
+        CHECK(ValidVoiceCueName(ok));
+    for (const char* bad : {"", "Pain", "Cue1", "Pain_Cue_", "Pain_Cue_x", "Pain-Cue", "Pain Cue", "Pain.Cue", "Pain_Cue\n", "Pa\xC3\xAFn_Cue", "/Game/Sounds/Pain_Cue",
+                            "BP_Armor_Head_C", "pelvis"})
+        CHECK(!ValidVoiceCueName(bad));
+    CHECK(ValidVoiceCueName(std::string(61, 'a') + "Cue") && !ValidVoiceCueName(std::string(62, 'a') + "Cue"));   // 64 bytes at most
+    CHECK(!ValidVoiceCueName(std::string("Pain_Cue\0x", 10)));                                                    // an embedded NUL
+    for (const char* ok : {"BP_Armor_Head_Armet_001_C", "BP_Armor_Body_Doublet_C", "BP_Armor_Modular_Core_Arms_Harness_001_C", "BP_ArmorActor_C"})
+        CHECK(ValidArmorClassName(ok));
+    for (const char* bad : {"", "BP_Armor", "BP_Armor_C", "BP_Armor_Head", "Armor_Head_C", "BP_Weapon_C", "ModularWeaponBP_C", "bp_armor_head_c", "BP_Armor_Head-C",
+                            "BP_Armor_Head C", "BP_Armor_\xC3\xA9_C", "Actor", "BP_Armor_Head_C\n"})
+        CHECK(!ValidArmorClassName(bad));
+    CHECK(ValidArmorClassName("BP_Armor_" + std::string(53, 'a') + "_C") && !ValidArmorClassName("BP_Armor_" + std::string(54, 'a') + "_C"));
+    // Decode refuses them, so the host neither applies nor relays one.
+    { PaintFxMsg m = Voice(); m.bone = "Pain"; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Voice(); m.bone = "SomeAsset"; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Voice(); CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = ArmorOn(); m.bone = "ModularWeaponBP_C"; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = ArmorOn(); CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Armor(); m.bone = "not a cue"; CHECK(Dec(Wire(m))); }   // other kinds name a bone, checked at the MakeName call
+}
+
+// M1: failures are remembered (no second scan), the OLDEST entry goes at capacity, a miss expires, a hit does not.
+void TestNameCache() {
+    NameCache<int> c(3, 1000.0);
+    CHECK(c.Find("a", 0) == nullptr);
+    c.PutMiss("zzz_Cue", 0);
+    const auto* e = c.Find("zzz_Cue", 500);
+    CHECK(e && !e->found);                                   // remembered as unresolvable
+    CHECK(c.Find("zzz_Cue", 999) != nullptr);
+    CHECK(c.Find("zzz_Cue", 1000) == nullptr && c.size() == 0);   // expired: looked up again, once
+    c.Put("hit_Cue", 7, true, 0);
+    e = c.Find("hit_Cue", 1e9);
+    CHECK(e && e->found && e->value == 7);                   // a hit never expires
+    // Eviction order is insertion order, not alphabetical: "zzz" is oldest, "aaa" sorts first.
+    NameCache<int> d(3);
+    d.Put("zzz", 1, true, 0); d.Put("mmm", 2, true, 0); d.Put("aaa", 3, true, 0);
+    d.Put("bbb", 4, true, 0);
+    CHECK(d.size() == 3 && d.Find("zzz", 0) == nullptr);
+    CHECK(d.Find("aaa", 0) && d.Find("mmm", 0) && d.Find("bbb", 0));
+    // Re-putting a key makes it the newest.
+    d.Put("mmm", 9, true, 0);
+    d.Put("ccc", 5, true, 0);
+    CHECK(d.Find("mmm", 0) && d.Find("mmm", 0)->value == 9 && d.Find("aaa", 0) == nullptr && d.size() == 3);
+    // A flood of distinct names never grows past the cap.
+    NameCache<int> f(256);
+    for (int i = 0; i < 100000; ++i) f.PutMiss("n" + std::to_string(i) + "_Cue", double(i));
+    CHECK(f.size() == 256 && f.Find("n99999_Cue", 99999) && f.Find("n0_Cue", 99999) == nullptr);
+    f.Clear();
+    CHECK(f.size() == 0);
+}
+
+// M1: the receive-side limiter takes a per-second count, per (fighter, kind).
+void TestRxLimiter() {
+    FxLimiter rx(kFxMaxRxPerSecond);
+    int ok = 0;
+    for (int i = 0; i < 1000; ++i) ok += rx.Allow(2, FxKind::Voice, 100.0 + i * 0.1);
+    CHECK(ok == kFxMaxRxPerSecond);
+    CHECK(rx.Allow(2, FxKind::Blood, 100.0) && rx.Allow(3, FxKind::Voice, 100.0));      // other kinds and fighters have their own
+    CHECK(rx.Allow(2, FxKind::Voice, 1100.0));                                          // the next window
+    FxLimiter tx;                                                                        // the sender's default is unchanged
+    ok = 0;
+    for (int i = 0; i < 100; ++i) ok += tx.Allow(1, FxKind::Blood, 0.0);
+    CHECK(ok == kFxMaxPerSecond && kFxMaxRxPerSecond >= 2 * kFxMaxPerSecond);
+}
+
 }  // namespace
 
 int main() {
     TestSoundAndArmorKinds();
+    TestNameAllowlists();
+    TestNameCache();
+    TestRxLimiter();
     TestHitSoundPlan();
     TestRoundTrip();
     TestFraming();

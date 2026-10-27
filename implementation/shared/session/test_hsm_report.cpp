@@ -30,8 +30,13 @@ static void TestRedaction() {
     CHECK(out.find("(Dudie)") != std::string::npos);                                 // names stay
     CHECK(RedactHash(id, salt) != RedactHash(id, salt + 1));                        // a new salt per report
     // not a SteamID: other lengths, other prefixes, inside a word
-    for (const char* keep : {"7656119801234567", "765611980123456789", "12345678901234567", "x76561198012345678", "76561198012345678x"})
+    for (const char* keep : {"7656119801234567", "1234567890123456", "1234567890123456789", "x76561198012345678", "76561198012345678x"})
         CHECK(RedactLog(keep, salt) == keep);
+    // R7: a Steam lobby id (18 digits) and any other 17-18 digit id (a group) go too
+    const std::string lobby = RedactLog("lobby 109775241234567890 created, group=12345678901234567.", salt);
+    CHECK(lobby.find("109775241234567890") == std::string::npos && lobby.find("12345678901234567") == std::string::npos);
+    CHECK(lobby.find("steamid:" + RedactHash("109775241234567890", salt)) != std::string::npos);
+    CHECK(lobby.find("created, group=steamid:") != std::string::npos);
 
     const std::string ip = RedactLog("config: role=client host=192.168.1.254 port=27777; net: 10.0.0.5:27777 up", salt);
     CHECK(ip.find("192.168.1.254") == std::string::npos && ip.find("10.0.0.5") == std::string::npos);
@@ -45,6 +50,22 @@ static void TestRedaction() {
     CHECK(RedactLog("Z:/Users/Bob Smith/Documents", salt) == "Z:/Users/<user>/Documents");
     CHECK(RedactLog("Steam Users said hi; home/run", salt) == "Steam Users said hi; home/run");   // no folder after it
     CHECK(RedactLog("", salt).empty());
+
+    // R7: Windows paths in any case, the escaped form of a JSON-ish line, a folder that ends the line or the string
+    CHECK(RedactLog("c:\\users\\Bob\\AppData", salt) == "c:\\users\\<user>\\AppData");
+    CHECK(RedactLog("C:\\USERS\\BOB\\x", salt) == "C:\\USERS\\<user>\\x");
+    CHECK(RedactLog("{\"path\":\"C:\\\\Users\\\\bob\\\\AppData\\\\Local\"}", salt) == "{\"path\":\"C:\\\\Users\\\\<user>\\\\AppData\\\\Local\"}");
+    CHECK(RedactLog("profile C:\\Users\\bob\nnext", salt) == "profile C:\\Users\\<user>\nnext");
+    CHECK(RedactLog("\"C:\\Users\\bob\"", salt) == "\"C:\\Users\\<user>\"");
+    CHECK(RedactLog("C:\\Users\\Public", salt) == "C:\\Users\\<user>");                 // folder names are not told apart
+    CHECK(RedactLog("MyUsers\\bob\\x and Users \\x", salt) == "MyUsers\\bob\\x and Users \\x");
+    // R7: host names after host=; addresses keep their own rule, loopback and an empty value stay
+    const std::string host = RedactLog("config: role=client host=DESKTOP-BOB.example.net port=27777 host=mybox", salt);
+    CHECK(host.find("DESKTOP-BOB") == std::string::npos && host.find("mybox") == std::string::npos);
+    CHECK(host.find("host=host:" + RedactHash("DESKTOP-BOB.example.net", salt) + " port=27777") != std::string::npos);
+    CHECK(RedactLog("HOST=Bob-PC,", salt) == "HOST=host:" + RedactHash("Bob-PC", salt) + ",");
+    CHECK(RedactLog("host=localhost host= port=1 ghost=bob", salt) == "host=localhost host= port=1 ghost=bob");
+    CHECK(RedactLog("host=10.0.0.5:27777", salt) == "host=ip:" + RedactHash("10.0.0.5", salt) + ":27777");
 }
 
 static void TestTail() {
@@ -106,8 +127,104 @@ static void TestOffer() {
     o.Offer("r4", "Ab3_x-9QwertyUiop12", 0); CHECK(!o.Take(kReportOfferMs, id, tok) && !o.Open(0));   // expired: closed
 }
 
+static void TestCrashLine() {
+    CHECK(CrashLineOf("").empty() && CrashLineOf("hsm: server ready\nmatch: live\n").empty());
+    const std::string log = "a\ncrash: fault 0xC0000005 at HalfSwordUE5-Win64-Shipping.exe+0x1A2B reading 0x0 (thread 7); the game may close now\r\n"
+                            "crash: stack code addresses: dwmapi.dll+0x10\n";
+    CHECK(CrashLineOf(log) == "crash: fault 0xC0000005 at HalfSwordUE5-Win64-Shipping.exe+0x1A2B reading 0x0 (thread 7); the game may close now");
+    CHECK(CrashLineOf("crash: fault 1\ncrash: fault 2") == "crash: fault 2");                 // the last one
+    std::string longLine = "crash: fault " + std::string(500, 'x');
+    CHECK(CrashLineOf(longLine).size() == kCrashLineMax);
+    CHECK(CrashLineOf(std::string("crash: fault \x01\x7f\xc3\xa9" "ok")) == "crash: fault ok");   // control and non-ASCII bytes dropped
+    CHECK(CrashReportText("crash: fault 1") == "Crash (sent automatically): crash: fault 1");
+}
+
+static void TestPendingShare() {
+    PendingShare p; std::string id, tok;
+    CHECK(!p.Held(0) && !p.Take(0, id, tok));
+    p.Hold("r1", "Ab3_x-9QwertyUiop12", 1000);
+    CHECK(p.Held(1000 + kPendingShareMs - 1) && !p.Held(1000 + kPendingShareMs));
+    CHECK(p.Take(2000, id, tok) && id == "r1" && tok == "Ab3_x-9QwertyUiop12" && !p.Held(2000) && !p.Take(2001, id, tok));
+    p.Hold("r2", "Ab3_x-9QwertyUiop12", 0xFFFFFF00u);                      // across the 32-bit tick wrap
+    CHECK(p.Take(0x10u, id, tok) && id == "r2");
+    p.Hold("r3", "Ab3_x-9QwertyUiop12", 0); CHECK(!p.Take(kPendingShareMs, id, tok) && !p.Held(0));   // expired: gone
+}
+
+// The outcome line for every way a request can end: "filed" only for a real filing, "may have been filed" once the
+// request was out, "not sent" only when it never got out.
+static void TestOutcomes() {
+    using T = ReportTransport;
+    using O = ReportOutcome;
+    const std::string good = "{\"id\":\"Ab3dEf7hJk\",\"issue\":\"https://github.com/Dudiebug/halfsword-multiplayer-mod/issues/7\",\"token\":\"tok_abcdefghijklmnop-123\"}";
+    auto line = [](ReportJob j, T t, bool sent, unsigned st, const std::string& b) { return ReportOutcomeLine(j, JudgeReportAnswer(j, t, sent, st, b)); };
+    auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
+
+    // 201 with a valid id, token and issue URL: filed, with the link (200 counts too).
+    ReportVerdict v = JudgeReportAnswer(ReportJob::Report, T::Ok, true, 201, good);
+    CHECK(v.outcome == O::Done && v.id == "Ab3dEf7hJk" && v.token == "tok_abcdefghijklmnop-123" && has(v.issue, "/issues/7"));
+    CHECK(ReportOutcomeLine(ReportJob::Report, v) == "Bug report filed: https://github.com/Dudiebug/halfsword-multiplayer-mod/issues/7 Thanks!");
+    CHECK(has(ReportOutcomeLine(ReportJob::Report, v, true), "The other players were asked to add their logs."));
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Ok, true, 200, good).outcome == O::Done);
+    CHECK(has(line(ReportJob::Crash, T::Ok, true, 201, good), "Crash report filed: https://"));
+
+    // 201 with a bad answer: never "filed" (it may have been), and no id or token kept to share.
+    for (const char* bad : {"", "{}", "not json", "{\"id\":\"Ab3dEf7hJk\",\"token\":\"tok_abcdefghijklmnop-123\"}",                  // no issue
+                            "{\"id\":\"Ab3dEf7hJk\",\"issue\":\"https://evil.example/issues/7\",\"token\":\"tok_abcdefghijklmnop-123\"}",
+                            "{\"id\":\"../x\",\"issue\":\"https://github.com/a/b/issues/1\",\"token\":\"tok_abcdefghijklmnop-123\"}",
+                            "{\"id\":\"Ab3dEf7hJk\",\"issue\":\"https://github.com/a/b/issues/1\",\"token\":\"short\"}"}) {
+        ReportVerdict b = JudgeReportAnswer(ReportJob::Report, T::Ok, true, 201, bad);
+        CHECK(b.outcome == O::MaybeDone && b.id.empty() && b.token.empty());
+        const std::string l = ReportOutcomeLine(ReportJob::Report, b);
+        CHECK(!has(l, "report filed") && has(l, "may have been filed") && has(l, "before reporting again"));
+    }
+
+    // Refusals: the relay said no, nothing was filed.
+    CHECK(line(ReportJob::Report, T::Ok, true, 429, "{\"error\":\"too many reports\"}") ==
+          "Bug report not filed: too many reports right now, try again in a few minutes.");
+    CHECK(line(ReportJob::Report, T::Ok, true, 413, "") == "Bug report not filed: the report is too large.");
+    CHECK(line(ReportJob::Report, T::Ok, true, 502, "{\"error\":\"the report could not be filed, try again later\"}") ==
+          "Bug report not filed: the report could not be filed, try again later.");
+    CHECK(line(ReportJob::Report, T::Ok, true, 502, "<html>Bad Gateway</html>") == "Bug report not filed: the report server answered 502.");
+    CHECK(line(ReportJob::Report, T::Ok, true, 400, "{\"error\":\"empty description\"}") == "Bug report not filed: empty description.");
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Ok, true, 503, "").outcome == O::Refused);
+
+    // The request went out and no answer came: it may have been filed (a timeout, a broken connection, a proxy's 504).
+    CHECK(line(ReportJob::Report, T::Timeout, true, 0, "") ==
+          "No answer from the report server: your bug report may have been filed. Check the mod's GitHub issues before reporting again.");
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Other, true, 0, "").outcome == O::MaybeDone);
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Ok, true, 504, "").outcome == O::MaybeDone);
+    CHECK(has(line(ReportJob::Crash, T::Timeout, true, 0, ""), "your crash report may have been filed"));
+
+    // Never got out: not sent.
+    CHECK(line(ReportJob::Report, T::Unreachable, false, 0, "") == "Bug report not sent: cannot reach the report server.");
+    CHECK(line(ReportJob::Report, T::Certificate, false, 0, "") == "Bug report not sent: the report server's certificate is not valid.");
+    CHECK(line(ReportJob::Report, T::Timeout, false, 0, "") == "Bug report not sent: the report server did not answer.");
+    CHECK(line(ReportJob::Report, T::NoConnection, false, 0, "") == "Bug report not sent: no internet connection.");
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Unavailable, false, 0, "").outcome == O::NotSent);
+    // A certificate or name failure cannot have reached the relay, even if WinHTTP reported the send as begun.
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Certificate, true, 0, "").outcome == O::NotSent);
+    CHECK(JudgeReportAnswer(ReportJob::Report, T::Unreachable, true, 0, "").outcome == O::NotSent);
+
+    // /sendlog and help_improve: the log's own wording.
+    CHECK(line(ReportJob::Log, T::Ok, true, 200, "{\"ok\":true}") == "Your log was added to the bug report. Thanks!");
+    CHECK(line(ReportJob::Log, T::Ok, true, 403, "{\"error\":\"bad token\"}") == "Your log was not added: bad token.");
+    CHECK(line(ReportJob::Log, T::Unreachable, false, 0, "") == "Your log was not sent: cannot reach the report server.");
+    CHECK(line(ReportJob::Log, T::Timeout, true, 0, "") == "No answer from the report server: your log may have been added.");
+
+    // No outcome line ever claims success unless it was Done.
+    for (T t : {T::Ok, T::Unavailable, T::NoConnection, T::Timeout, T::Certificate, T::Unreachable, T::Other})
+        for (bool sent : {false, true})
+            for (unsigned st : {0u, 200u, 201u, 204u, 400u, 403u, 404u, 413u, 429u, 500u, 502u, 503u, 504u})
+                for (ReportJob j : {ReportJob::Report, ReportJob::Crash, ReportJob::Log}) {
+                    const ReportVerdict r = JudgeReportAnswer(j, t, sent, st, "{}");
+                    const std::string l = ReportOutcomeLine(j, r);
+                    CHECK(!l.empty());
+                    if (r.outcome != O::Done) CHECK(!has(l, "report filed") && !has(l, "Thanks") && !has(l, "was added to"));
+                }
+}
+
 int main() {
-    TestCommands(); TestRedaction(); TestTail(); TestJson(); TestIdsAndShare(); TestOffer();
+    TestCommands(); TestRedaction(); TestTail(); TestJson(); TestIdsAndShare(); TestOffer(); TestCrashLine(); TestPendingShare(); TestOutcomes();
     if (g_fail) { std::printf("test_hsm_report: %d failures\n", g_fail); return 1; }
     std::printf("test_hsm_report: all passed\n");
     return 0;

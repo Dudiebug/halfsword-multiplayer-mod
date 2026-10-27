@@ -38,6 +38,8 @@ public:
     virtual void Disconnect(uint32_t peer) = 0;
     virtual bool Poll(NetEvent& out) = 0;
     virtual uint32_t RoundTripMs(uint32_t peer) = 0;
+    // The peer's IPv4 address ("a.b.c.d"), for a direct-IP ban; empty where the transport has none (Steam).
+    virtual std::string PeerAddress(uint32_t) { return {}; }
 };
 
 class ENetTransport final : public ITransport {
@@ -51,6 +53,7 @@ public:
     void Disconnect(uint32_t peer) override;
     bool Poll(NetEvent& out) override;
     uint32_t RoundTripMs(uint32_t peer) override;
+    std::string PeerAddress(uint32_t peer) override;
     bool running() const { return running_; }
 
 private:
@@ -67,6 +70,7 @@ private:
     std::deque<NetEvent> inbox_;
     std::deque<Outgoing> outbox_;
     std::vector<uint32_t> rtt_;
+    std::vector<std::string> addr_;        // index = peer id, the address it connected from (under mu_)
     bool isHost_ = false;
 };
 

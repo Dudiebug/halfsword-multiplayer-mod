@@ -3,6 +3,8 @@
 #include "session/hsm_authority.h"
 #include "ue/script_hook.h"
 #include "util/hsm_names.h"
+#include "util/hsm_sanitize.h"
+#include "util/hsm_validate.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -416,7 +418,7 @@ bool Severs::Rebuild(UObject* willie, const SeverClaim& c, Rebuilt& out) {
     UObject* mesh = c.masterMesh.empty() ? nullptr : named(c.masterMesh);
     if (!mesh) mesh = adapter_->Mesh(willie);
     Xform bone;
-    if (!mesh || !BoneXform(mesh, c.frameBone, bone)) {
+    if (!mesh || !PeerBoneOk(c.frameBone, c.attacker) || !BoneXform(mesh, c.frameBone, bone)) {
         ++n_.noBone;
         if (n_.noBone <= 3) HSM_LOG("severs: #%u from e%u names frame bone '%s', which e%u lacks", c.claimId, c.attacker, c.frameBone.c_str(), c.victim);
         return false;
@@ -659,10 +661,12 @@ void Severs::Forget(uint8_t entity) {
 // The first live sticking of each hand of a fighter simulated here whose Hit Actor is a stand-in. Reported when it
 // starts or changes, and freed when the hand has none.
 void Severs::ScanOurBlades(uint8_t entity, UObject* willie) {
+    if (!Alive(willie)) return;
     UObject* right = WeaponOf(willie, StrikeSource::WeaponRight);
     for (StrikeSource source : {StrikeSource::WeaponRight, StrikeSource::WeaponLeft}) {
         UObject* weapon = WeaponOf(willie, source);
         if (source == StrikeSource::WeaponLeft && weapon == right) weapon = nullptr;   // one two-handed weapon
+        if (weapon && !Alive(weapon)) weapon = nullptr;   // dropped and destroyed: its hand has no stuck blade
         UObject* found = nullptr;
         uint8_t victim = 0;
         if (weapon)
@@ -696,8 +700,10 @@ void Severs::SendStuck(uint8_t entity, StrikeSource source, Hand& h, UObject* co
     UObject** comp = Field<UObject*>(constraint, "Component 1 (Weapon)");
     UObject** body = Field<UObject*>(constraint, "Component 2 (Body)");
     const FName* boneName = Field<FName>(constraint, "Bone Name 2");
-    UObject* standIn = standIns_->ActorOf(victim);
+    UObject* standIn = FighterActor(victim);
     UObject* mesh = (body && *body) ? *body : (standIn ? adapter_->Mesh(standIn) : nullptr);
+    if (comp && !Alive(*comp)) comp = nullptr;   // the constraint may name a component the game has since destroyed
+    if (mesh && !Alive(mesh)) mesh = nullptr;
     StuckBladeMsg m;
     m.attacker = entity;
     m.victim = victim;
@@ -757,10 +763,13 @@ void Severs::OnStuck(const StuckBladeMsg& m, double nowMs) {
 // stuck limits, and the blade's collision with my fighter is turned off as the game's own stuck constraint does.
 void Severs::Hold(const StuckBladeMsg& m) {
     UObject* me = env_.ownedActor(m.victim);
+    if (!Alive(me)) me = nullptr;
     UObject* mesh = me ? adapter_->Mesh(me) : nullptr;
     UObject* blade = WeaponPart(m.attacker, m.source, m.weaponComponent);
+    if (!Alive(mesh)) mesh = nullptr;
+    if (!Alive(blade)) blade = nullptr;
     Xform bone;
-    if (!mesh || !blade || !constraintClass_ || !BoneXform(mesh, m.bone, bone)) {
+    if (!mesh || !blade || !constraintClass_ || !PeerBoneOk(m.bone, m.attacker) || !BoneXform(mesh, m.bone, bone)) {
         ++n_.holdFailed;
         if (n_.holdFailed <= 3)
             HSM_LOG("severs: cannot hold the blade of e%u (%s '%s') in bone %s", m.attacker, SourceName(m.source),
@@ -927,8 +936,9 @@ uint32_t Severs::HeldWeapons(uint8_t attacker) const {
 // ---------------------------------------------------------------- lookups
 
 UObject* Severs::FighterActor(uint8_t entity) const {
-    if (UObject* s = standIns_->ActorOf(entity)) return s;
-    return env_.ownedActor ? env_.ownedActor(entity) : nullptr;
+    UObject* s = standIns_->ActorOf(entity);
+    if (!s && env_.ownedActor) s = env_.ownedActor(entity);
+    return Alive(s) ? s : nullptr;
 }
 
 UObject* Severs::WeaponOf(UObject* fighter, StrikeSource source) const {
@@ -940,13 +950,13 @@ UObject* Severs::WeaponOf(UObject* fighter, StrikeSource source) const {
 // The named primitive component of entity's weapon in that hand, else the weapon's root when it is a primitive.
 UObject* Severs::WeaponPart(uint8_t entity, StrikeSource source, const std::string& component) const {
     UObject* weapon = WeaponOf(FighterActor(entity), source);
-    if (!weapon) return nullptr;
+    if (!Alive(weapon)) return nullptr;
     if (!component.empty())
         for (UObject* o : Components(weapon))
             if (o && SameNameAscii(ObjectName(o), component)) return o;
     Call root(weapon, "K2_GetRootComponent");
     UObject* r = root.invoke() ? root.get<UObject*>("ReturnValue") : nullptr;
-    return r && primitive_ && IsA(r, primitive_) ? r : nullptr;
+    return Alive(r) && primitive_ && IsA(r, primitive_) ? r : nullptr;
 }
 
 UObject* Severs::NewBox(UObject* willie, UObject* mesh, const std::string& bone, const Xform& world, const V3& extent) {
@@ -974,6 +984,16 @@ UObject* Severs::NewBox(UObject* willie, UObject* mesh, const std::string& bone,
         .set<bool>("bWeldSimulatedBodies", false)
         .invoke();
     return box;
+}
+
+// M7: the FName pool never shrinks, so a frame or struck bone off the wire is interned (here, in NewBox and in Hold) only
+// when it is a plain bone name (letters, digits, underscore, at most 64). Counted, and logged sparingly.
+bool Severs::PeerBoneOk(const std::string& bone, uint8_t from) {
+    if (util::ValidBoneName(bone)) return true;
+    if (++n_.badBone <= 3 || n_.badBone % 1000 == 0)
+        HSM_LOG("severs: e%u names an invalid bone '%.64s' (%llu so far); dropped", from, util::StripControlChars(bone).c_str(),
+                static_cast<unsigned long long>(n_.badBone));
+    return false;
 }
 
 bool Severs::BoneXform(UObject* mesh, const std::string& bone, Xform& out) const {
@@ -1013,13 +1033,13 @@ std::string Severs::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[768];
+    char line[900];
     std::snprintf(line, sizeof line,
                   "severs: captured %llu (limited %llu friendly %llu invalid %llu) | replayed %llu (refused %llu retried "
                   "%llu lost %llu dupes %llu stale %llu novictim %llu nomarker %llu nobone %llu nobox %llu) delayed %llu "
                   "(lost %llu) | remembered %llu shown %llu late %llu refused %llu noclaim %llu | blocked: on stand-ins "
                   "%llu, on mine %llu | call failed %llu | stuck sent %llu freed %llu bad %llu, held %llu released %llu "
-                  "failed %llu native %llu broken %llu collision kept %llu | noticed %llu (invalid %llu)",
+                  "failed %llu native %llu broken %llu collision kept %llu | noticed %llu (invalid %llu) | bad bone names %llu",
                   d(a.captured, b.captured), d(a.limited, b.limited), d(a.friendly, b.friendly), d(a.invalid, b.invalid),
                   d(a.replayed, b.replayed), d(a.refused, b.refused), d(a.retried, b.retried), d(a.retryLost, b.retryLost),
                   d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.noVictim, b.noVictim), d(a.noMarker, b.noMarker),
@@ -1029,7 +1049,7 @@ std::string Severs::HealthLine() {
                   d(a.blockedOnMine, b.blockedOnMine), d(a.callFailed, b.callFailed), d(a.stuckSent, b.stuckSent), d(a.stuckFreed, b.stuckFreed),
                   d(a.stuckBad, b.stuckBad), d(a.held, b.held), d(a.released, b.released), d(a.holdFailed, b.holdFailed),
                   d(a.alreadyStuck, b.alreadyStuck), d(a.broken, b.broken), d(a.collisionKept, b.collisionKept),
-                  d(a.noticed, b.noticed), d(a.noticeInvalid, b.noticeInvalid));
+                  d(a.noticed, b.noticed), d(a.noticeInvalid, b.noticeInvalid), d(a.badBone, b.badBone));
     reported_ = n_;
     return line;
 }

@@ -29,6 +29,7 @@ constexpr const char* kGameInstanceClass = "GI_Settings_C";
 constexpr const char* kSaveGameClass = "SG_GameProgress_C";
 constexpr const char* kSpawnerClass = "BP_SpawnerPoint_Willies_C";
 constexpr const char* kPassportStruct = "Str_Passport_Character1";
+constexpr const char* kEquipmentStruct = "Str_SubPassport_Equipment";            // the passport's Equipment member (docs/REVERSE_ENGINEERING.md section 8)
 constexpr const char* kPassportFreeMode = "Free Mode Player Character 1";      // GI_Settings, Free Mode
 constexpr const char* kPassportProgression = "Player Character";              // GI_Settings, Progression career fighter
 constexpr const char* kPassportDefault = "Free Mode Player Character 2";      // GI_Settings, stock player-2 slot
@@ -108,6 +109,13 @@ void Adapter::RestoreGameInput() {
     SetBool(ctrl, "bShowMouseCursor", false);
 }
 
+namespace {
+bool InViewportNow(UObject* w) {
+    Call v(w, "IsInViewport");
+    return v.invoke() && v.get<bool>("ReturnValue");
+}
+}  // namespace
+
 // The stock pause menu is UI_Pause_Eng (decomp Willie_BP.cpp:11091). Matched by the substring "UI_Pause" so a different
 // Blueprint suffix still works; the class name found is logged once. A closed menu can linger until garbage collection,
 // so only a widget IsInViewport counts. Esc or a paused game arms a 2 s window of searches, kept up while the menu is open.
@@ -116,9 +124,11 @@ bool Adapter::PauseMenuOpen() {
     if (pauseCheckAt_ && now - pauseCheckAt_ < 100) return pauseOpen_;
     pauseCheckAt_ = now;
     if (pauseOpen_ || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) || GamePaused()) pauseArmedUntil_ = now + 2000;
+    if (pauseOpen_ && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ && InViewportNow(pauseWidget_)) return true;   // still the one
     if (int32_t(pauseArmedUntil_ - now) <= 0 || (pauseScanAt_ && now - pauseScanAt_ < 250)) return pauseOpen_;
     pauseScanAt_ = now;
     bool found = false;
+    pauseWidget_ = nullptr;
     UClass* uw = FindClass("UserWidget");
     for (int32_t i = 0, n = ObjectCount(); i < n && uw && !found; ++i) {
         UObject* o = ObjectAt(i);
@@ -128,10 +138,44 @@ bool Adapter::PauseMenuOpen() {
         Call v(o, "IsInViewport");
         if (!v.invoke() || !v.get<bool>("ReturnValue")) continue;
         found = true;
+        pauseWidget_ = o; pauseWidgetIndex_ = i;
         if (!pauseLogged_) { pauseLogged_ = true; HSM_LOG("adapter: pause menu widget class '%s'", cls.c_str()); }
     }
     pauseOpen_ = found;
     return pauseOpen_;
+}
+
+UObject* Adapter::PauseMenu() { return PauseMenuOpen() && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ ? pauseWidget_ : nullptr; }
+
+// The click handler of the stock Continue button is a Blueprint function bound to its OnClicked, named like
+// "BndEvt__UI_Pause_Eng_<button>_K2Node_ComponentBoundEvent_N_OnButtonClickedEvent__DelegateSignature". The one whose
+// name has Continue (or Resume) and Clicked is run; the names found are logged once so a different build shows what it has.
+bool Adapter::ContinueFromPauseMenu() {
+    UObject* menu = PauseMenu();
+    if (!menu) return true;
+    static bool logged = false;
+    UFunction* handler = nullptr;
+    auto has = [](const std::string& name, const char* word) {
+        std::string a = name, b = word;
+        for (char& c : a) c = char(tolower(static_cast<unsigned char>(c)));
+        for (char& c : b) c = char(tolower(static_cast<unsigned char>(c)));
+        return a.find(b) != std::string::npos;
+    };
+    for (UFunction* f : FunctionsWithPrefix(ClassOf(menu), "BndEvt__")) {
+        const std::string name = ObjectName(reinterpret_cast<UObject*>(f));
+        if (!logged) HSM_LOG("adapter: pause menu handler %s", name.c_str());
+        if (!handler && (has(name, "Continue") || has(name, "Resume")) && has(name, "Click")) handler = f;
+    }
+    if (!logged) { logged = true; HSM_LOG("adapter: pause menu Continue handler %s", handler ? ObjectName(reinterpret_cast<UObject*>(handler)).c_str() : "not found"); }
+    if (handler) Call(menu, handler).invoke();
+    if (!handler || InViewportNow(menu)) {
+        Call(menu, "RemoveFromParent").invoke();
+        if (GamePaused()) SetGamePaused(false);
+        RestoreGameInput();
+        HSM_LOG("adapter: pause menu removed by the mod (%s)", handler ? "Continue left it up" : "no Continue handler");
+    }
+    pauseOpen_ = false; pauseWidget_ = nullptr; pauseCheckAt_ = 0; pauseScanAt_ = 0;
+    return true;
 }
 
 void Adapter::ShowPauseCursor() {
@@ -194,6 +238,18 @@ bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, dou
     return true;
 }
 
+// Where the player's camera is now: the game's own camera, or our follow camera while spectating.
+bool Adapter::CameraLocation(FVector& out) {
+    Call pc(statics_, "GetPlayerCameraManager");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* cm = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!cm) return false;
+    Call loc(cm, "GetCameraLocation");
+    if (!loc.invoke()) return false;
+    out = loc.get<FVector>("ReturnValue");
+    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+}
+
 bool Adapter::LineClear(const FVector& from, const FVector& to, const std::vector<UObject*>& ignore, std::string* hitName) {
     return !TraceLine(from, to, ignore, nullptr, hitName);
 }
@@ -208,14 +264,19 @@ bool Adapter::BoneLocation(UObject* willie, const char* bone, FVector& out) {
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
+static UObject* NavigationSystem() {
+    static UObject* nav = nullptr;
+    if (!nav) if (UObject* cls = FindObject("NavigationSystemV1", "Class")) nav = DefaultObject(reinterpret_cast<UClass*>(cls));
+    return nav;
+}
+
 // A navigable point near `aim` that the navmesh connects to `from` (the host). The Abyss' level script places its
 // enemies with K2_GetRandomLocationInNavigableRadius (decomp Maps/Abyss_Map_Open_EA.cpp:997), which also answers on
 // navmesh islands the fighters cannot walk to: test 2026-10-25, the Yard's ring spawns landed outside its fence. So
 // the points are drawn reachable from `from` within its distance to `aim` plus the tolerance, and the one nearest
 // `aim` is kept if it is within `tolerance` of it.
 bool Adapter::ReachablePointNear(const FVector& from, const FVector& aim, double tolerance, FVector& out) {
-    static UObject* nav = nullptr;
-    if (!nav) if (UObject* cls = FindObject("NavigationSystemV1", "Class")) nav = DefaultObject(reinterpret_cast<UClass*>(cls));
+    UObject* nav = NavigationSystem();
     if (!nav || !world_) return false;
     const double reach = std::hypot(aim.x - from.x, aim.y - from.y) + tolerance;
     double best = tolerance * tolerance;
@@ -422,7 +483,26 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
         if (FProperty* h = FindPropertyPrefix(st, "Height_"); h && PropertySize(h) == sizeof(double)) std::memcpy(&height, from + PropertyOffset(h), sizeof height);
     if (!std::isfinite(height)) height = 0.5;
     if (muscleTier_ >= 0) ApplyMuscle(willie, dst);
+    if (bare_) StripEquipment(willie, dst);
     return true;
+}
+
+// Brawl: empties the maps of the passport's Equipment (armour in slots, weapons in slots, weapons in hands) on the
+// spawned fighter's own copy, so it comes up with no armour and fists in both hands. The copy was made from the blob or
+// the stock slot above; neither (nor the game instance's passport, nor any save) is touched.
+void Adapter::StripEquipment(UObject* willie, FProperty* passport) {
+    UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
+    FProperty* eq = st ? FindPropertyPrefix(st, "Equipment_") : nullptr;
+    UObject* sub = FindObject(kEquipmentStruct, "UserDefinedStruct");
+    int cleared = 0;
+    if (eq && sub) {
+        uint8_t* at = reinterpret_cast<uint8_t*>(willie) + PropertyOffset(passport) + PropertyOffset(eq);
+        for (FProperty* p : StructProperties(sub))
+            if (PropertyType(p) == "MapProperty") { ClearPropertyValue(p, at + PropertyOffset(p)); ++cleared; }
+    }
+    static bool warned = false;
+    if (!cleared && !warned) { warned = true; HSM_LOG("adapter: brawl: the passport's Equipment has no maps to clear; fighters keep their gear"); }
+    HSM_LOG("adapter: %s spawned bare (%d equipment map(s) cleared)", ObjectName(willie).c_str(), cleared);
 }
 
 // The rank's build on the spawned fighter's own copy of the passport (never the save or the generator's). Weight is
@@ -526,9 +606,9 @@ bool Adapter::StillValid(UObject* o, int32_t index) const {
     return !destroyAware_ || (!IsGarbage(o) && !BeingDestroyed(o));
 }
 
-void Adapter::DestroyFighter(UObject* willie, int32_t index) {
-    if (!StillValid(willie, index)) return;
-    const auto t0 = std::chrono::steady_clock::now();
+// What a fighter carries: its held and sheathed weapons, quiver, feet and fists, and every actor attached to it (armour). The
+// weapons are actors of their own and are not owned by the fighter; the list holds no duplicates and may hold other fighters.
+std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
     std::vector<UObject*> carried;
     for (const char* f : {"Weapon R", "Weapon L", "Attached Bolt Quiver"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p) carried.push_back(*p);
@@ -546,6 +626,13 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
             for (int32_t i = 0; i < arr->num; ++i) carried.push_back(arr->data[i]);
     std::sort(carried.begin(), carried.end());
     carried.erase(std::unique(carried.begin(), carried.end()), carried.end());
+    return carried;
+}
+
+void Adapter::DestroyFighter(UObject* willie, int32_t index) {
+    if (!StillValid(willie, index)) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<UObject*> carried = CarriedActors(willie);
     UClass* fighter = FindClass(kWillieClass);
     int destroyed = 0;
     for (UObject* a : carried) {
@@ -589,6 +676,63 @@ std::vector<FVector> Adapter::SpawnCandidates() {
         if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0) out.push_back(v);   // (0,0,0): destroyed, its root gone
     }
     return out;
+}
+
+// An actor of the loaded level a fallback may read: not being destroyed, a finite place (a destroyed one reads (0,0,0)).
+static bool LevelActorAt(UObject* a, FVector& v, Adapter& ad) {
+    if (IsGarbage(a) || Adapter::BeingDestroyed(a)) return false;
+    v = ad.ActorLocation(a);
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0;
+}
+
+// role=server spawn anchor fallbacks (hsm_spawn_anchor.h): the level's PlayerStart actors.
+std::vector<FVector> Adapter::PlayerStarts() {
+    std::vector<FVector> out;
+    for (UObject* a : FindInstances("PlayerStart")) {
+        FVector v;
+        if (LevelActorAt(a, v, *this)) out.push_back(v);
+    }
+    return out;
+}
+
+// A point on the navmesh: the level's origin projected onto it, else the middle of each NavMeshBoundsVolume (the nearest to
+// the origin first) projected. The query box is wide: a map need not have its walkable floor at the origin.
+bool Adapter::NavigablePoint(FVector& out) {
+    UObject* nav = NavigationSystem();
+    if (!nav || !world_) return false;
+    std::vector<FVector> aims{FVector{}};
+    for (UObject* a : FindInstances("NavMeshBoundsVolume")) {
+        FVector v;
+        if (LevelActorAt(a, v, *this)) aims.push_back(v);
+    }
+    std::sort(aims.begin() + 1, aims.end(), [](const FVector& l, const FVector& r) { return std::hypot(l.x, l.y) < std::hypot(r.x, r.y); });
+    if (aims.size() > 9) aims.resize(9);
+    for (const FVector& aim : aims) {
+        Call c(nav, "K2_ProjectPointToNavigation");
+        c.set<UObject*>("WorldContextObject", world_).set("Point", aim).set("QueryExtent", FVector{5000, 5000, 10000})
+         .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
+        if (!c.invoke() || !c.get<bool>("ReturnValue")) continue;
+        const FVector v = c.get<FVector>("ProjectedLocation");
+        if (std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z)) { out = v; return true; }
+    }
+    return false;
+}
+
+// The last resort: the floor a downward trace finds under one of the level's static meshes, those nearest the origin first.
+bool Adapter::StaticMeshFloor(const std::vector<UObject*>& ignore, FVector& out) {
+    std::vector<FVector> at;
+    for (UObject* a : FindInstances("StaticMeshActor")) {
+        FVector v;
+        if (LevelActorAt(a, v, *this)) at.push_back(v);
+    }
+    std::sort(at.begin(), at.end(), [](const FVector& l, const FVector& r) { return std::hypot(l.x, l.y) < std::hypot(r.x, r.y); });
+    if (at.size() > 48) at.resize(48);
+    for (const FVector& v : at)
+        for (double lift : {0.0, 500.0}) {   // a floor slab's origin is at, or up to a few metres under, its top
+            double z;
+            if (FloorZ(FVector{v.x, v.y, v.z + lift}, ignore, z)) { out = FVector{v.x, v.y, z}; return true; }
+        }
+    return false;
 }
 
 void Adapter::Teleport(UObject* actor, const FVector& to) {
@@ -776,7 +920,20 @@ constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_Ne
 bool g_suppressScreens = false;
 bool g_suppressOwnerScreens = false;
 bool g_screenHooks = false;
-std::vector<std::pair<UObject*, int32_t>> g_suppressed;   // widgets whose Construct was skipped; removed next tick
+std::vector<std::pair<UObject*, int32_t>> g_suppressed;
+
+// A pause menu other than `self` is in the viewport (see PauseMenuOpen for the class match).
+bool OtherPauseMenuOnScreen(UObject* self) {
+    UClass* uw = FindClass("UserWidget");
+    for (int32_t i = 0, n = ObjectCount(); i < n && uw; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || o == self || IsDefaultObject(o) || !IsA(o, uw)) continue;
+        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).find("UI_Pause") == std::string::npos) continue;
+        Call v(o, "IsInViewport");
+        if (v.invoke() && v.get<bool>("ReturnValue")) return true;
+    }
+    return false;
+}   // widgets whose Construct was skipped; removed next tick
 bool ClassNamed(UObject* o, const char* name) { return o && SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(o))), name); }
 }  // namespace
 
@@ -1081,6 +1238,14 @@ void Adapter::SuppressStockScreens(bool on, bool ownerMatch) {
             bool played = false;
             if (UObject* gi = GameInstance()) GetBool(gi, "First Start Intro Played", played);
             if (!played) return false;
+            g_suppressed.push_back({obj, ObjectIndex(obj)});
+            return true;
+        }
+        // A second pause menu over the first: Willie's Esc action opens one whenever the world is not paused, and owner
+        // sync keeps it unpaused (session.cpp LiftPauseFromWidgetTick), so each Esc stacked another menu. Only one stays.
+        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(obj))).find("UI_Pause") != std::string::npos && OtherPauseMenuOnScreen(obj)) {
+            static uint32_t dupes = 0;
+            if (++dupes % 50 == 1) HSM_LOG("adapter: a second pause menu was kept off the screen (%u time(s))", dupes);
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;
         }

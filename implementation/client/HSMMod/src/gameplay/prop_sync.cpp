@@ -1,6 +1,7 @@
 #include "gameplay/prop_sync.h"
 #include "gameplay/world_sync.h"
 #include "log.h"
+#include "session/hsm_budget.h"
 #include "sync/hsm_pose_codec.h"
 #include <algorithm>
 #include <chrono>
@@ -804,7 +805,11 @@ void PropSync::Claim(uint64_t propId, ClaimSend what, LeaseLevel level, double n
 }
 
 void PropSync::HostRequest(uint64_t propId, uint8_t slot, LeaseLevel level, double nowMs) {
+    const uint64_t deniedBefore = table_.CapDenied();
     const LeaseResult r = table_.Request(propId, slot, level, nowMs);
+    if (table_.CapDenied() != deniedBefore && MsgBudget::ShouldLog(table_.CapDenied()))   // M4: counted, logged sparingly
+        HSM_LOG("props: slot %u already holds %d leases; the request for %016llx is denied (%llu denied so far)", slot, kMaxLeasesPerSlot,
+                static_cast<unsigned long long>(propId), static_cast<unsigned long long>(table_.CapDenied()));
     if (r.changed) Grant(propId, r.slot, r.level);
 }
 
@@ -863,11 +868,12 @@ void PropSync::NoticeDrop(uint64_t propId, LeaseLevel prevLevel, uint8_t prevSlo
 void PropSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     const LeaseLevel prevLevel = view_.Level(propId);
     const uint8_t prevSlot = view_.Streamer(propId);
+    const bool known = view_.Known(propId);   // before this Grant makes it known: only an id's first Grant can be its drop
     view_.OnGrant(propId, slot, level);
     if (level != LeaseLevel::Free) freeSince_.erase(propId);
     else if (!IsLevelProp(propId)) freeSince_.emplace(propId, SteadyNowMs());   // the first FREE Grant starts the minute
     NoticeDrop(propId, prevLevel, prevSlot, level, level == LeaseLevel::Free ? kHostSlot : slot);
-    if (slot == MySlot() || props_.count(propId) || pending_.count(propId) || !DropSignature(propId, level, slot)) return;
+    if (slot == MySlot() || props_.count(propId) || pending_.count(propId) || !DropSignature(propId, level, slot, known)) return;
     const double now = SteadyNowMs();
     if (auto g = givenUp_.find(propId); g != givenUp_.end()) {
         if (now - g->second < kLooseKeepMs) return;   // given up already: that drop had its window

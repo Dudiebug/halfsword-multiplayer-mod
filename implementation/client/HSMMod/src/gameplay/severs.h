@@ -120,7 +120,7 @@ private:
                  noBone = 0, noBox = 0, delayed = 0, delayedLost = 0, remembered = 0, shown = 0, shownLate = 0,
                  showRefused = 0, noClaim = 0, stuckSent = 0, stuckFreed = 0, stuckBad = 0, held = 0, released = 0,
                  holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0, noticed = 0,
-                 noticeInvalid = 0;
+                 noticeInvalid = 0, badBone = 0;
     };
     enum class Run { Accepted, Refused, InProcess, Failed };
     enum class Read { Ok, NoBoxes, NoBone };
@@ -159,10 +159,14 @@ private:
     ue::UObject* NewBox(ue::UObject* willie, ue::UObject* mesh, const std::string& bone, const combat::Xform& world,
                         const combat::V3& extent);
     bool BoneXform(ue::UObject* mesh, const std::string& bone, combat::Xform& out) const;   // false: no such bone
+    bool PeerBoneOk(const std::string& bone, uint8_t from);   // M7: a bone name off the wire is interned only if ValidBoneName
     bool ComponentXform(ue::UObject* comp, combat::Xform& out) const;
     std::vector<ue::UObject*> Components(ue::UObject* actor) const;   // its PrimitiveComponents
     Ref RefOf(ue::UObject* o) const { return Ref{o, o ? ue::ObjectIndex(o) : -1}; }
     bool Live(const Ref& r) const { return adapter_ && adapter_->StillValid(r.obj, r.index); }
+    // A pointer read from a field or a call this frame, checked before it is called on: a field may still name an object
+    // the game destroyed (garbage until collection), and a stale one is a jump through a bad vtable (T1).
+    bool Alive(ue::UObject* o) const { return o && Live(RefOf(o)); }
 
     bool active_ = false;
     Adapter* adapter_ = nullptr;

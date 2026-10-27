@@ -296,6 +296,8 @@ void FighterRig::RefreshWeapon(int w) {
     wp.rootIndex = ObjectIndex(root);
     wp.base = ObjField(actor, "Root Scene");
     wp.tip = ObjField(actor, "TippyTipScene");
+    if (wp.base) wp.baseIndex = ObjectIndex(wp.base);
+    if (wp.tip) wp.tipIndex = ObjectIndex(wp.tip);
     if (wp.base) wp.baseLoc = PreparedCall(ClassOf(wp.base), "K2_GetComponentLocation", {"ReturnValue"});
     if (wp.tip) wp.tipLoc = PreparedCall(ClassOf(wp.tip), "K2_GetComponentLocation", {"ReturnValue"});
     if (UObject* flail = FlailComponent(actor)) {
@@ -331,8 +333,8 @@ bool FighterRig::ReadWeapon(int w, const V3& hand) {
     wp.pos = ToV3(t.translation);
     wp.rot = ToQ4(t.rotation);
     wp.basePos = wp.tipPos = wp.pos;
-    if (wp.base && wp.baseLoc.invoke(wp.base)) wp.basePos = ToV3(wp.baseLoc.take<FVector>(0));
-    if (wp.tip && wp.tipLoc.invoke(wp.tip)) { wp.tipPos = ToV3(wp.tipLoc.take<FVector>(0)); wp.haveTip = true; }
+    if (Live(wp.base, wp.baseIndex) && wp.baseLoc.invoke(wp.base)) wp.basePos = ToV3(wp.baseLoc.take<FVector>(0));
+    if (Live(wp.tip, wp.tipIndex) && wp.tipLoc.invoke(wp.tip)) { wp.tipPos = ToV3(wp.tipLoc.take<FVector>(0)); wp.haveTip = true; }
     // Held: some point between the root and the tip is within reach of the hand (a polearm is gripped mid-shaft). A
     // dropped weapon still in the field, or one parked at the world origin, is not.
     if (SegmentDistance(hand, wp.pos, wp.tipPos) > kHeldMaxUu) return false;

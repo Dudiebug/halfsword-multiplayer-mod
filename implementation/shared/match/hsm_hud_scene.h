@@ -179,7 +179,7 @@ struct LocalHud {
     BannerShot banner;               // BannerTracker::shot()
     std::vector<FeedItem> feed;      // oldest first
     bool giveUpWait = false;         // G is held with nothing to give up (dead, or waiting for the next round)
-    float giveUp = 0;                // Duel / wave break: how far the G hold is (GiveUpHold::progress), 0 = not held
+    float giveUp = 0;                // how far the G hold is (GiveUpHold::progress), 0 = not held
 };
 
 struct SceneText { bool visible = false; std::string text; Rgba color = style::kBone; float opacity = 1, scale = 1; };
@@ -197,12 +197,15 @@ struct BoardRow {
     bool down = false;               // alive, and the host's draw check has it down (Duel)
 };
 struct Board { bool visible = false; std::string title, footer; std::vector<BoardRow> rows; };
+// The G hold, in the middle of the screen (the top pill was covered by the game's own text in the pre1 test).
+struct HoldView { bool visible = false; std::string text; Rgba color = style::kBloodInk; bool bar = false; float frac = 0; };
 
 struct HudScene {
     bool visible = false;
     std::vector<ScoreBlock> strip;
     bool timeBar = false; float timeFrac = 0; std::string clock;
     SceneText pill, banner, bannerSub;
+    HoldView hold;
     DeadPanel dead;
     std::vector<FeedView> feed;
     Board board;
@@ -298,7 +301,7 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
                       : IsBotFormat(f) ? "WAVE " + std::to_string(ScoreOf(m, kHumanTeam) + 1)
                       : "FIRST TO " + std::to_string(m.scoreLimit);
     bool oneFight = l.oneFight && IsBotFormat(f);               // Progression: back to the Tavern after the results
-    b.title = (oneFight ? std::string("PROGRESSION FIGHT") : Upper(FormatName(f)) + " \xC2\xB7 " + limit)
+    b.title = (oneFight ? std::string("PROGRESSION FIGHT") : Upper(ModeName(f, Gear(m.gear))) + " \xC2\xB7 " + limit)
             + (l.map.empty() ? "" : " \xC2\xB7 " + Upper(l.map));
     if (m.phase == uint8_t(MatchPhase::Results)) b.footer = (oneFight ? "BACK TO THE TAVERN IN " : "REMATCH IN ") + Seconds(m.timeLeftMs);
 
@@ -354,22 +357,24 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
     // A Progression co-op fight has no stock give-up screen in a session: G gives the fight up (Match::GiveUpFight).
+    // Free-for-all, teams and Duel: G ends this life at any time; the last attacker within a minute gets the kill.
     const bool coop = l.oneFight && Format(m.format) == Format::PlayersVsBots && fought && !InWaveBreak(m);
+    const bool pvp = !IsBotFormat(Format(m.format)) && fought && !InRoundGap(m);
     if (const FighterEntry* mine = FighterOf(m, l.me); mine && mine->alive && mine->down && fought && !InRoundGap(m) && !l.dead)
-        s.pill = {true, coop ? "DOWN - GET UP OR HOLD G" : "DOWN - GET UP", style::kBloodInk, 1, 1};
-    if (l.giveUp > 0 && coop)
-        s.pill = {true, "GIVING UP THE FIGHT " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
-    if (l.giveUp > 0 && Format(m.format) == Format::Duel && fought && !InRoundGap(m))
-        s.pill = {true, "GIVING UP " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kBloodInk, 1, 1};
+        s.pill = {true, coop || pvp ? "DOWN - GET UP OR HOLD G" : "DOWN - GET UP", style::kBloodInk, 1, 1};
+    const float held = std::clamp(l.giveUp, 0.f, 1.f);
+    const std::string pct = " " + std::to_string(int(held * 100.f)) + "%";
+    if (l.giveUp > 0 && coop) s.hold = {true, "GIVING UP THE FIGHT" + pct, style::kBloodInk, true, held};
+    if (l.giveUp > 0 && pvp) s.hold = {true, "GIVING UP" + pct, style::kBloodInk, true, held};
     if (l.giveUp > 0 && InWaveBreak(m))          // the same G hold votes to skip the loot break
-        s.pill = {true, "SKIPPING THE BREAK " + std::to_string(int(std::clamp(l.giveUp, 0.f, 1.f) * 100.f)) + "%", style::kOk, 1, 1};
+        s.hold = {true, "SKIPPING THE BREAK" + pct, style::kOk, true, held};
     if (l.giveUpWait && fought)
-        s.pill = {true, m.roundGapLeftMs ? "NOTHING TO GIVE UP - NEXT ROUND IN " + Seconds(m.roundGapLeftMs) : std::string("NOTHING TO GIVE UP - YOU ARE OUT"), style::kIron, 1, 1};
+        s.hold = {true, m.roundGapLeftMs ? "NOTHING TO GIVE UP - NEXT ROUND IN " + Seconds(m.roundGapLeftMs) : std::string("NOTHING TO GIVE UP - YOU ARE OUT"), style::kIron, false, 0};
     if (m.phase == uint8_t(MatchPhase::Countdown)) {
         if (m.timeLeftMs) {                      // the digits, each popping as it appears
             Look look = BannerLook((1000 - m.timeLeftMs % 1000) % 1000);
             s.banner = {true, Seconds(m.timeLeftMs), style::kBone, look.opacity, look.scale};
-            if (Format(m.format) == Format::Duel) s.bannerSub = {true, "HOLD G TO GIVE UP A ROUND", style::kIron, look.opacity, 1};
+            if (!IsBotFormat(Format(m.format))) s.bannerSub = {true, "HOLD G TO GIVE UP - YOUR LAST ATTACKER GETS THE KILL", style::kIron, look.opacity, 1};
             else if (l.oneFight && Format(m.format) == Format::PlayersVsBots)
                 s.bannerSub = {true, "HOLD G TO GIVE UP THE FIGHT", style::kIron, look.opacity, 1};
         }

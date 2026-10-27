@@ -35,6 +35,7 @@ bool ENetTransport::StartCommon(bool host, const std::string& addr, uint16_t por
     h->maximumWaitingData = kMaxWaitingDataBytes;
     peers_.assign(peers + 1, nullptr);
     rtt_.assign(peers + 1, 0);
+    addr_.assign(peers + 1, std::string());
     running_ = true;
     thread_ = std::thread([this] { Loop(); });
     HSM_LOG("net: %s on %s:%u", host ? "hosting" : "connecting", host ? "*" : addr.c_str(), port);
@@ -68,6 +69,10 @@ uint32_t ENetTransport::RoundTripMs(uint32_t peer) {
     std::lock_guard<std::mutex> lock(mu_);
     return peer < rtt_.size() ? rtt_[peer] : 0;
 }
+std::string ENetTransport::PeerAddress(uint32_t peer) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return peer < addr_.size() ? addr_[peer] : std::string();
+}
 
 void ENetTransport::Loop() {
     auto* h = static_cast<ENetHost*>(host_);
@@ -91,6 +96,9 @@ void ENetTransport::Loop() {
                 for (uint32_t i = 1; i < peers_.size(); ++i) if (!peers_[i]) { id = i; break; }
                 if (!id) { enet_peer_disconnect_now(ev.peer, 0); continue; }
                 peers_[id] = ev.peer; ev.peer->data = reinterpret_cast<void*>(uintptr_t(id));
+                char ip[64] = {};
+                if (enet_address_get_host_ip(&ev.peer->address, ip, sizeof ip) != 0) ip[0] = 0;
+                { std::lock_guard<std::mutex> lock(mu_); addr_[id] = ip; }   // before Connected reaches the game thread
                 ne.kind = NetEvent::Connected; ne.peer = id;
             } else if (ev.type == ENET_EVENT_TYPE_DISCONNECT) {
                 uint32_t id = uint32_t(reinterpret_cast<uintptr_t>(ev.peer->data));

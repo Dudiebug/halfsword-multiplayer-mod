@@ -124,6 +124,11 @@ static void TestRoundsText() {
     CHECK(GearLabel(Gear::RandomTier, Format::ThreeTeams) == "Random by tier, new each life");
     CHECK(GearLabel(Gear::Mirror, Format::Zombies) == "Own loadouts" && GearLabel(Gear::RandomTier, Format::PlayersVsBots) == "Own loadouts");
     CHECK(GearLabel(Gear(9), Format::Duel) == "Own loadouts");                  // an unknown setting is Own
+    CHECK(GearLabel(Gear::Fists, Format::FreeForAll) == "Bare fists" && GearLabel(Gear::Fists, Format::Zombies) == "Own loadouts");
+    // Brawl is a free-for-all with bare fists: it has its own name wherever the mode is named.
+    CHECK(ModeName(Format::FreeForAll, Gear::Fists) == "Brawl" && ModeName(uint8_t(Format::FreeForAll), uint8_t(Gear::Fists)) == "Brawl");
+    CHECK(ModeName(Format::FreeForAll, Gear::Own) == "Free-for-all" && ModeName(Format::Duel, Gear::Fists) == "Duel");
+    CHECK(ModeName(uint8_t(Format::TwoTeams), uint8_t(Gear::Mirror)) == "2 teams");
 }
 
 // MatchInfo comes once a second (and at every change); the clocks run on in between so countdowns move every frame.

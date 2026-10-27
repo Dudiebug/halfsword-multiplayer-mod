@@ -19,8 +19,10 @@ namespace hsm {
 // PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with hordes of the game's zombie Willies.
 enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5 };
 constexpr uint8_t kFormatCount = 6;
-enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2 };   // PvP gear: own loadout / random by tier / everyone identical
-constexpr uint8_t kGearCount = 3;
+// PvP gear: own loadout / random by tier / everyone identical / Fists: nobody wears or holds anything (the Brawl card,
+// free-for-all only). Fists is no choice of the Gear row (kGearRowCount): the mode card sets it.
+enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3 };
+constexpr uint8_t kGearCount = 4, kGearRowCount = 3;
 constexpr int8_t kNoTeam = -1;        // free-for-all: everyone on their own
 constexpr int8_t kHumanTeam = 0, kBotTeam = 1;   // players vs bots
 
@@ -33,6 +35,10 @@ struct MatchConfig {
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
 };
+// Brawl: free-for-all where every fighter spawns bare (no armour, no weapons) and fights with fists. A mode card, not a
+// Format: the rules are free-for-all's.
+inline bool IsBrawl(Format f, Gear g) { return f == Format::FreeForAll && g == Gear::Fists; }
+inline bool IsBrawl(const MatchConfig& c) { return IsBrawl(c.format, c.gear); }
 // Equipment Budget per tier, from BP_GameManager.Generate_Random_Characters: random gear is rolled within it.
 inline constexpr int kTierBudget[8] = {0, 15, 50, 100, 250, 444, 666, 888};
 
@@ -47,7 +53,7 @@ inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5
 MatchConfig Sanitize(MatchConfig c);
 
 // Generated gear at a respawn: None keeps the slot's loadout, Each gives every respawning fighter a fresh one, Shared
-// gives them all one fresh loadout. Own gear and the bot formats never regear; Mirror rolls only when everybody is reset
+// gives them all one fresh loadout. Own gear, Brawl and the bot formats never regear; Mirror rolls only when everybody is reset
 // together, so in free-for-all and teams the shared loadout lasts until the rematch.
 enum class Regear : uint8_t { None = 0, Each = 1, Shared = 2 };
 enum class RespawnCause : uint8_t { Individual = 0, RoundReset = 1, WaveCleared = 2, Rematch = 3 };
@@ -112,6 +118,10 @@ public:
     // False, and no effect, outside a fought phase, for an unknown fighter or one already down (it is still marked gone).
     bool Leave(uint8_t entity, uint32_t nowMs);
     void Return(uint8_t entity);                        // a leaver is back: it stays down until the next respawn / round
+    // K1/K2: a human the match counts down in a fought phase (a leaver back within its reservation, or any fighter that fell)
+    // has no body in the round: a rejoiner is not spawned until the match respawns it (Duel and wave formats: the next
+    // round or wave; free-for-all and teams: the respawn delay), and spectates meanwhile. False for a fighter still gone.
+    bool AwaitsRespawn(uint8_t e) const;
     bool Gone(uint8_t e) const { return gone_.count(e) != 0; }
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.

@@ -570,6 +570,38 @@ static void TestDropSignature() {
     CHECK(!DropSignature(0, LeaseLevel::Touch, kHostSlot));
 }
 
+// W5: only an id's first Grant can be its drop. A Touch Grant on an id heard of in this level (the owner stepping on a
+// weapon it dropped a while ago) opens no window, so the weapon in its stand-in's hand is not forced out.
+static void TestDropSignatureFirstGrantOnly() {
+    const uint64_t a = MakeDropPropId(3, 0, 5, 0x77u);
+    PropStateView v;
+    CHECK(!v.Known(a));
+    CHECK(DropSignature(a, LeaseLevel::Touch, 2, v.Known(a)));            // the drop itself: first heard
+    v.OnGrant(a, 2, LeaseLevel::Touch);
+    CHECK(v.Known(a));
+    v.OnGrant(a, kHostSlot, LeaseLevel::Free);                            // it came to rest and was released
+    CHECK(v.Known(a));
+    CHECK(!DropSignature(a, LeaseLevel::Touch, 2, v.Known(a)));           // the owner touches it again: not a drop
+    PropStateMsg s = SomeState(); s.propId = a; s.lessee = kHostSlot; s.senderTimeMs = 5;
+    PropStateView w;
+    CHECK(w.Apply(s) && w.Known(a));                                      // streamed by the host: also heard of
+    w.Clear();
+    CHECK(!w.Known(a) && DropSignature(a, LeaseLevel::Touch, 2, w.Known(a)));   // a new level: ids start over
+    PropStateMsg early = s; early.lessee = 2;
+    PropStateView x;
+    CHECK(!x.Apply(early) && !x.Known(a));                                // a state ahead of its Grant does not make it known
+}
+
+// W6: a client's lease messages count only once it reported Ready for the host's present travel.
+static void TestLeaseSeqCurrent() {
+    CHECK(LeaseSeqCurrent(2, 7, 7));
+    CHECK(!LeaseSeqCurrent(2, 6, 7));                                     // still in the previous level
+    CHECK(!LeaseSeqCurrent(2, 0, 7));                                     // never reported Ready for any travel
+    CHECK(LeaseSeqCurrent(2, 0, 0));                                      // no broadcast travel yet: nothing to compare
+    CHECK(LeaseSeqCurrent(kHostSlot, 0, 7));                              // the host's own slot is always current
+    CHECK(!LeaseSeqCurrent(2, 8, 7));
+}
+
 static void TestResolveDropNow() {
     const uint32_t sword = 0x1234abcd, axe = 0x0badf00d;
     CHECK(!ResolveDropNow(false, 0, sword));                              // no pose from the owner yet: wait
@@ -733,14 +765,59 @@ static void TestLooseTimer() {
     t.Reset();
     CHECK(t.Sweep({5, 6}, 3e9).empty() && t.Sweep({5, 6}, 4e9).empty()); // a new baseline
 }
+// M4: a slot holds at most kMaxLeasesPerSlot leases; the next fresh prop id is denied and counted, nothing is stored for
+// it, other slots and renewals are unaffected, and a release or a lapse makes room again.
+static void TestLeaseCapPerSlot() {
+    LeaseTable t;
+    for (int i = 0; i < kMaxLeasesPerSlot; ++i) CHECK(t.Request(MakeLevelPropId(uint16_t(i)), 2, LeaseLevel::Touch, 0.0).granted);
+    CHECK(t.HeldBy(2) == kMaxLeasesPerSlot && t.CapDenied() == 0);
+    // One more (a fresh id, TOUCH or HOLD): denied, FREE, and no entry left behind.
+    const uint64_t extra = MakeLevelPropId(60000);
+    LeaseResult r = t.Request(extra, 2, LeaseLevel::Touch, 1.0);
+    CHECK(!r.granted && !r.changed && r.slot == kHostSlot && r.level == LeaseLevel::Free);
+    r = t.Request(extra, 2, LeaseLevel::Hold, 1.0);
+    CHECK(!r.granted && t.CapDenied() == 2);
+    uint8_t s; LeaseLevel lv;
+    CHECK(!t.Lessee(extra, s, lv) && t.Streamer(extra) == kHostSlot && t.Grants().size() == size_t(kMaxLeasesPerSlot));
+    // A flood of fresh ids never grows the table past the cap.
+    for (int i = 0; i < 5000; ++i) t.Request(MakeLevelPropId(uint16_t(10000 + i)), 2, LeaseLevel::Hold, 2.0);
+    CHECK(t.HeldBy(2) == kMaxLeasesPerSlot && t.Grants().size() == size_t(kMaxLeasesPerSlot) && t.CapDenied() == 5002);
+    // Renewing or upgrading a lease it already holds is not "one more".
+    r = t.Request(MakeLevelPropId(0), 2, LeaseLevel::Touch, 3.0);
+    CHECK(r.granted && !r.changed);
+    r = t.Request(MakeLevelPropId(0), 2, LeaseLevel::Hold, 3.0);
+    CHECK(r.granted && r.changed && r.level == LeaseLevel::Hold);
+    // Taking another slot's lease by a higher level counts against the taker's cap, and the holder keeps it when denied.
+    r = t.Request(MakeLevelPropId(1), 3, LeaseLevel::Hold, 4.0);   // slot 3 is empty: it takes prop 1 from slot 2
+    CHECK(r.granted && r.slot == 3 && t.HeldBy(2) == kMaxLeasesPerSlot - 1 && t.HeldBy(3) == 1);
+    // Other slots are not affected by slot 2's count.
+    CHECK(t.Request(extra, 4, LeaseLevel::Touch, 4.0).granted);
+    // Release makes room (slot 2 is at cap - 2 now, having lost prop 1 above): it can take two, then it is full again.
+    CHECK(t.Release(MakeLevelPropId(5), 2).granted);
+    CHECK(t.Request(extra + 1, 2, LeaseLevel::Touch, 5.0).granted && t.Request(extra + 2, 2, LeaseLevel::Touch, 5.0).granted);
+    CHECK(!t.Request(extra + 6, 2, LeaseLevel::Touch, 5.0).granted && t.HeldBy(2) == kMaxLeasesPerSlot);
+    // A slot full of leases cannot steal a held-by-someone-else prop by upgrading, and that prop keeps its holder.
+    CHECK(t.Request(extra + 3, 5, LeaseLevel::Touch, 5.0).granted);
+    r = t.Request(extra + 3, 2, LeaseLevel::Hold, 5.0);
+    CHECK(!r.granted && r.slot == 5 && r.level == LeaseLevel::Touch);
+    // A lapse frees the entries too.
+    CHECK(t.Tick(1e6).size() > 0 && t.HeldBy(2) == 0 && t.Request(extra + 4, 2, LeaseLevel::Touch, 1e6).granted);
+    // Slot 0 (the host and its bots) is capped the same way.
+    LeaseTable h;
+    for (int i = 0; i < kMaxLeasesPerSlot; ++i) CHECK(h.Request(MakeLevelPropId(uint16_t(i)), kHostSlot, LeaseLevel::Touch, 0.0).granted);
+    CHECK(!h.Request(MakeLevelPropId(999), kHostSlot, LeaseLevel::Touch, 0.0).granted);
+    // Normal play: a fighter with a weapon in each hand and a dozen touched props is nowhere near the cap.
+    CHECK(kMaxLeasesPerSlot >= 64);
+}
+
 int main() {
-    TestDropIdentity(); TestMintDropPropId(); TestDropEpoch(); TestDropSignature(); TestResolveDropNow(); TestPropStreamDue();
+    TestDropIdentity(); TestMintDropPropId(); TestDropEpoch(); TestDropSignature(); TestDropSignatureFirstGrantOnly(); TestLeaseSeqCurrent(); TestResolveDropNow(); TestPropStreamDue();
     TestDropNoticed(); TestDropNoticedFollowsTheTable(); TestContactClaimant(); TestIslandSource();
     TestPropStateRoundTrip(); TestPropStateRejects();
     TestPropLeaseRoundTrip(); TestPropLeaseRejects(); TestPropIdBoundsOnDecode(); TestRequestFreeIsNoOp();
     TestGrantWhenFree(); TestTouchVsTouchFirstWins(); TestHoldBeatsTouch(); TestHoldVsHoldFirstWins();
     TestRenewAndUpgrade(); TestLapseAtExactly3sBoundary(); TestRelease(); TestEntityLeft();
-    TestHostOwnedBots(); TestDuplicateRequestFromSameSlotIsIdempotent();
+    TestHostOwnedBots(); TestDuplicateRequestFromSameSlotIsIdempotent(); TestLeaseCapPerSlot();
     TestPropStateViewStaleAndDuplicateRejected(); TestPropStateViewWrapAround(); TestPropStateViewFollowsGrants();
     TestLeaseStreamerAndAccepts(); TestGrantsForLateJoiner(); TestLeaseFromPeer();
     TestClaimTouchLifecycle(); TestClaimHoldThrowSettle(); TestClaimContactWindowAndRestReset(); TestPropAtRestAndFreeSchedule();

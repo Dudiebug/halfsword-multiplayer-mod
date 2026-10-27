@@ -185,7 +185,7 @@ static void TestCountdownDigits() {
     LocalHud l = Me(); l.banner = {"FIGHT", "ROUND 1", kBloodInk, kAt};   // the countdown takes the banner
     HudScene s = BuildHudScene(m, l, kAt);
     CHECK(s.banner.visible && s.banner.text == "3" && Near(s.banner.scale, 1.25) && Near(s.banner.opacity, 1));
-    CHECK(Same(s.banner.color, kBone) && !s.bannerSub.visible);
+    CHECK(Same(s.banner.color, kBone) && s.bannerSub.visible);
     m.timeLeftMs = 2900; s = BuildHudScene(m, Me(), kAt);
     CHECK(s.banner.text == "3" && Near(s.banner.scale, 1.15));        // each digit pops as it appears
     m.timeLeftMs = 2400; s = BuildHudScene(m, Me(), kAt);
@@ -204,26 +204,34 @@ static void TestWaveBreakPill() {
     CHECK(BuildHudScene(m, Me(), kAt).pill.text == "NEXT WAVE IN 45");
     LocalHud l = Me(); l.giveUp = 0.5f;
     HudScene s = BuildHudScene(m, l, kAt);
-    CHECK(s.pill.visible && s.pill.text == "SKIPPING THE BREAK 50%" && Same(s.pill.color, kOk));
+    CHECK(s.hold.visible && s.hold.text == "SKIPPING THE BREAK 50%" && Same(s.hold.color, kOk) && s.hold.bar && Near(s.hold.frac, 0.5f));
+    CHECK(s.pill.text == "NEXT WAVE IN 45");                                     // the pill keeps the countdown
     m.roundGapLeftMs = 0;                                                        // fighting: G does nothing here
-    CHECK(BuildHudScene(m, l, kAt).pill.text == BuildHudScene(m, Me(), kAt).pill.text);
+    CHECK(!BuildHudScene(m, l, kAt).hold.visible);
 }
 
-// Hold G to give up: while held in a fought Duel round the pill says so, with how far the hold is.
+// Hold G to give up: while held in a fought round the middle of the screen says so, with a bar for how far the hold
+// is; the top pill keeps the match state (the pre1 test: the pill was covered and the hold could not be seen).
 static void TestGiveUpPill() {
     LocalHud l = Me(); l.giveUp = 0.5f;
     HudScene s = BuildHudScene(Duel(), l, kAt);
-    CHECK(s.pill.visible && s.pill.text == "GIVING UP 50%" && Same(s.pill.color, kBloodInk));
-    l.giveUp = 0.999f; CHECK(BuildHudScene(Duel(), l, kAt).pill.text == "GIVING UP 99%");   // never shows 100 before it fires
-    l.giveUp = 0.004f; CHECK(BuildHudScene(Duel(), l, kAt).pill.text == "GIVING UP 0%");
-    CHECK(BuildHudScene(Duel(), Me(), kAt).pill.text == "ROUND 2");                       // not held
+    CHECK(s.hold.visible && s.hold.text == "GIVING UP 50%" && Same(s.hold.color, kBloodInk) && s.hold.bar && Near(s.hold.frac, 0.5f));
+    CHECK(s.pill.text == "ROUND 2");
+    l.giveUp = 0.999f; CHECK(BuildHudScene(Duel(), l, kAt).hold.text == "GIVING UP 99%");   // never shows 100 before it fires
+    l.giveUp = 0.004f; CHECK(BuildHudScene(Duel(), l, kAt).hold.text == "GIVING UP 0%");
+    CHECK(!BuildHudScene(Duel(), Me(), kAt).hold.visible);                                // not held
     MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::SuddenDeath); l.giveUp = 0.25f;
-    CHECK(BuildHudScene(d, l, kAt).pill.text == "GIVING UP 25%");
+    CHECK(BuildHudScene(d, l, kAt).hold.text == "GIVING UP 25%");
     d = Duel(); d.roundGapLeftMs = 2400; d.roundWinner = 2;
-    CHECK(BuildHudScene(d, l, kAt).pill.text == "NEXT ROUND IN 3");                       // the gap: nothing to give up
+    CHECK(!BuildHudScene(d, l, kAt).hold.visible);                                        // the gap: nothing to give up
+    CHECK(BuildHudScene(d, l, kAt).pill.text == "NEXT ROUND IN 3");
     d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
-    CHECK(BuildHudScene(d, l, kAt).pill.text == "MATCH STARTS IN");
-    CHECK(BuildHudScene(Ffa(), l, kAt).pill.text == "FIRST TO 5");                         // Duel only
+    CHECK(!BuildHudScene(d, l, kAt).hold.visible);
+    CHECK(BuildHudScene(Ffa(), l, kAt).hold.text == "GIVING UP 25%");                     // free-for-all and teams too
+    CHECK(BuildHudScene(Ffa(), l, kAt).pill.text == "FIRST TO 5");
+    LocalHud w = Me(); w.giveUpWait = true;                                               // held while out: said in the middle
+    s = BuildHudScene(Ffa(), w, kAt);
+    CHECK(s.hold.visible && !s.hold.bar && s.hold.text == "NOTHING TO GIVE UP - YOU ARE OUT");
 }
 
 // Item 9c: the host's draw check marks a fighter down; its own pill says so while the round is fought, the board marks
@@ -231,20 +239,20 @@ static void TestGiveUpPill() {
 static void TestDownPill() {
     MatchInfo d = Duel(); d.fighters[0].down = true;
     HudScene s = BuildHudScene(d, Me(), kAt);
-    CHECK(s.pill.visible && s.pill.text == "DOWN - GET UP" && Same(s.pill.color, kBloodInk));
+    CHECK(s.pill.visible && s.pill.text == "DOWN - GET UP OR HOLD G" && Same(s.pill.color, kBloodInk));
     CHECK(BuildHudScene(d, Me(2), kAt).pill.text == "ROUND 2");                          // someone else is down
     LocalHud g = Me(); g.giveUp = 0.5f;
-    CHECK(BuildHudScene(d, g, kAt).pill.text == "GIVING UP 50%");
+    CHECK(BuildHudScene(d, g, kAt).hold.text == "GIVING UP 50%");
     MatchInfo gap = d; gap.roundGapLeftMs = 2400; gap.roundWinner = 2;
     CHECK(BuildHudScene(gap, Me(), kAt).pill.text == "NEXT ROUND IN 3");
     MatchInfo sd = d; sd.phase = uint8_t(MatchPhase::SuddenDeath);
-    CHECK(BuildHudScene(sd, Me(), kAt).pill.text == "DOWN - GET UP");
+    CHECK(BuildHudScene(sd, Me(), kAt).pill.text == "DOWN - GET UP OR HOLD G");
     MatchInfo res = d; res.phase = uint8_t(MatchPhase::Results);
-    CHECK(BuildHudScene(res, Me(), kAt).pill.text != "DOWN - GET UP");
+    CHECK(BuildHudScene(res, Me(), kAt).pill.text.rfind("DOWN", 0) != 0);
     MatchInfo dead = d; dead.fighters[0].alive = false;                                   // dead is not down
-    CHECK(BuildHudScene(dead, Me(), kAt).pill.text != "DOWN - GET UP");
+    CHECK(BuildHudScene(dead, Me(), kAt).pill.text.rfind("DOWN", 0) != 0);
     LocalHud gone = Me(); gone.dead = true; gone.diedAtMs = kAt;                          // ... nor dead here first
-    CHECK(BuildHudScene(d, gone, kAt).pill.text != "DOWN - GET UP");
+    CHECK(BuildHudScene(d, gone, kAt).pill.text.rfind("DOWN", 0) != 0);
     LocalHud tab = Me(); tab.tab = true;
     s = BuildHudScene(d, tab, kAt);
     bool sawDown = false, sawUp = false;
@@ -258,15 +266,17 @@ static void TestDownPill() {
     for (const BoardRow& r : s.board.rows) if (r.name == "Host") CHECK(r.dead && !r.down);
 }
 
-// The countdown before a Duel says how to give up a round, under the digits, in their look.
+// The countdown before a fight between players says how to give up, under the digits, in their look.
 static void TestDuelCountdownHint() {
     MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
     HudScene s = BuildHudScene(d, Me(), kAt);
-    CHECK(s.banner.text == "3" && s.bannerSub.visible && s.bannerSub.text == "HOLD G TO GIVE UP A ROUND");
+    CHECK(s.banner.text == "3" && s.bannerSub.visible && s.bannerSub.text == "HOLD G TO GIVE UP - YOUR LAST ATTACKER GETS THE KILL");
     CHECK(Same(s.bannerSub.color, kIron) && Near(s.bannerSub.opacity, s.banner.opacity) && Near(s.bannerSub.scale, 1));
     d.timeLeftMs = 0; CHECK(!BuildHudScene(d, Me(), kAt).bannerSub.visible);            // no digit, no hint
     MatchInfo f = Ffa(); f.phase = uint8_t(MatchPhase::Countdown); f.timeLeftMs = 3000;
-    CHECK(!BuildHudScene(f, Me(), kAt).bannerSub.visible);                               // Duel only
+    CHECK(BuildHudScene(f, Me(), kAt).bannerSub.visible);                                // free-for-all too
+    f = Survival(); f.phase = uint8_t(MatchPhase::Countdown); f.timeLeftMs = 3000;
+    CHECK(!BuildHudScene(f, Me(), kAt).bannerSub.visible);                               // not against bots
 }
 
 static void TestBannerFromShot() {
@@ -540,6 +550,9 @@ static void TestBoard() {
     HudScene s = BuildHudScene(Ffa(), l, kAt);
     CHECK(s.board.visible && Has(s.board.title, "FREE-FOR-ALL") && Has(s.board.title, "FIRST TO 5") && Has(s.board.title, "YARD"));
     CHECK(s.board.footer.empty());
+    { MatchInfo br = Ffa(); br.gear = uint8_t(Gear::Fists);           // Brawl: the same board under its own name
+      HudScene bs = BuildHudScene(br, l, kAt);
+      CHECK(Has(bs.board.title, "BRAWL") && !Has(bs.board.title, "FREE-FOR-ALL") && Has(bs.board.title, "FIRST TO 5") && bs.board.rows.size() == 3); }
     CHECK(s.board.rows.size() == 3);
     if (s.board.rows.size() == 3) {
         CHECK(s.board.rows[0].name == "Ann" && s.board.rows[0].score == 4 && s.board.rows[0].pingMs == 80 && !s.board.rows[0].local);
@@ -575,6 +588,9 @@ static void TestBoard() {
     LocalHud other = l; other.me = 2; other.host = 2;                  // the badges follow the entities given
     s = BuildHudScene(Ffa(), other, kAt);
     CHECK(s.board.rows.size() == 3 && s.board.rows[0].host && s.board.rows[0].local && !s.board.rows[1].host && !s.board.rows[1].local);
+    other.host = 0;                                                    // a host with no fighter (hosted server): nobody carries the badge
+    s = BuildHudScene(Ffa(), other, kAt);
+    CHECK(s.board.rows.size() == 3 && !s.board.rows[0].host && !s.board.rows[1].host && !s.board.rows[2].host);
     m = Teams(); m.phase = uint8_t(MatchPhase::Results); m.winner = 1; m.timeLeftMs = 9100;
     s = BuildHudScene(m, Me(1), kAt);                                  // results: shown without Tab
     CHECK(s.board.visible && s.board.footer == "REMATCH IN 10");

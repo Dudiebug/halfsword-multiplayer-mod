@@ -46,21 +46,27 @@
 #include "match/hsm_draw.h"
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_input_mode.h"
+#include "match/hsm_lobby_chat.h"
 #include "match/hsm_maps.h"
+#include "match/hsm_occlusion.h"
 #include "match/hsm_match.h"
 #include "match/hsm_respawn_retry.h"
 #include "match/hsm_spectate.h"
 #include "net/report_client.h"
+#include "net/update_check.h"
 #include "net/steam_transport.h"
 #include "net/transport.h"
 #include "session/hsm_authority.h"
+#include "session/hsm_mesh.h"
 #include "session/hsm_autoflow.h"
 #include "session/hsm_blob.h"
+#include "session/hsm_budget.h"
 #include "session/hsm_build.h"
 #include "session/hsm_combat.h"
 #include "session/hsm_gvas.h"
 #include "session/hsm_director.h"
 #include "session/hsm_level_gate.h"
+#include "session/hsm_moderation.h"
 #include "session/hsm_reconnect.h"
 #include "session/hsm_report.h"
 #include "session/hsm_roster.h"
@@ -75,6 +81,7 @@
 #include "ui/chat.h"
 #include "ui/hud.h"
 #include "ui/menu.h"
+#include "ui/pause.h"
 #include "ue/engine.h"
 #include "ue/hook.h"
 #include "ue/script_hook.h"
@@ -85,6 +92,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <unordered_map>
 #include <set>
@@ -219,22 +227,27 @@ public:
             if (strandedInFight) { HSM_LOG("client: lobby gone; returning to the main menu"); game::OpenLevel(lastGameMode_, kMenuLevel, true, ""); }
         };
         lobby_.onMemberJoined = [this](steam::SteamId id) { if (steamNet_ && lobby_.IsHost()) steamNet_->AllowPeer(id); };
-        lobby_.onMemberLeft = [this](steam::SteamId id) { if (steamNet_) steamNet_->DropPeer(id); };
+        lobby_.onMemberLeft = [this](steam::SteamId id) { lobbyGate_.Forget(id); meshPeers_.Forget(id); if (steamNet_) steamNet_->DropPeer(id); };
+        lobby_.onChat = [this](steam::SteamId from, const std::string& text) { OnLobbyChat(from, text); };
+        lobby_.onPresence = [](const std::string& name, bool joined) { ui::ShowLine("HSMMod", style::kBone, (name.empty() ? "?" : name) + (joined ? " joined" : " left")); };
         ui::ChatSetup(cfg_.chatKey, [this](bool on) { adapter_.CaptureInput(on); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
     }
 
     bool Start() {
-        if (cfg_.role == Role::Steam) return true;   // transport is created when a lobby is entered
+        if (steamMode()) return true;   // transport is created when a lobby is entered (role=server over Steam: ServerLobbyTick)
         auto enet = std::make_unique<ENetTransport>();
         bool ok = cfg_.role == Role::Host || cfg_.role == Role::Server ? enet->StartHost(cfg_.port, kMaxFighters - 1, ValidateForHost)
                                           : enet->StartClient(cfg_.hostAddress, cfg_.port, ValidateForClient);
-        if (ok) net_ = std::move(enet);
+        if (ok) { net_ = std::move(enet); ++sessionGen_; }
         if (ok && (cfg_.role == Role::Host || cfg_.role == Role::Server)) hostPending_ = true;
         return ok;
     }
 
     game::Lobby& lobby() override { return lobby_; }
-    bool steamMode() const override { return cfg_.role == Role::Steam; }
+    bool steamMode() const override { return cfg_.role == Role::Steam || SteamServer(); }
+    // role=server with server_transport=steam: the server opens a public Steam lobby itself; players find it in the
+    // lobby browser and Steam relays the traffic (no port forwarding). Needs Steam running and signed in on that machine.
+    bool SteamServer() const { return cfg_.role == Role::Server && cfg_.serverTransport == "steam"; }
     void StartOnMap(const std::string& path) override {
         if (!lastGameMode_ || (net_ && !IsHost())) return;
         if (net_ && !BuildsAllowStart()) return;
@@ -356,6 +369,22 @@ public:
         if (++unpaused_ % 100 == 1) HSM_LOG("session: game paused (pause menu?) during an owner-sync match; unpaused (%u time(s))", unpaused_);
     }
 
+    // The pause menu's REPORT A BUG button (ui/pause.h): in a session fight with reports on. A click closes the menu as its
+    // Continue does and opens the chat with "/bug " typed. Called from the game mode tick and from the widgets' Tick hook (a
+    // paused world stops the first), so it throttles itself.
+    void PauseReportTick() {
+        const uint32_t now = NowMs();
+        if (now - lastPauseButton_ < 30) return;
+        lastPauseButton_ = now;
+        if (!selfTestOk_ || !(lastGameMode_ && ObjectAt(lastGameModeIndex_) == lastGameMode_ && adapter_.World() == lastGameMode_)) return;
+        UObject* menu = adapter_.PauseMenu();
+        if (!menu) { ui::PauseReportTick(nullptr, false); return; }
+        if (!ui::PauseReportTick(menu, report::Enabled() && net_ && InFightLevel())) return;
+        HSM_LOG("session: pause menu REPORT A BUG clicked");
+        adapter_.ContinueFromPauseMenu();
+        ui::ChatOpenWith("/bug ");
+    }
+
     std::string WidgetsJson() {
         std::string j = "{\"ok\":true,\"widgets\":[";
         bool first = true;
@@ -392,6 +421,7 @@ public:
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
+        if (SteamServer()) ServerLobbyTick();
         // Level change first: everything after this point must use the current world, never the old game mode.
         bool levelChanged = gameMode != lastGameMode_;
         if (levelChanged) FlushReflectionCache();     // the old level's classes are gone (again each retry: harmless)
@@ -421,8 +451,12 @@ public:
             adapter_.SetGamePaused(false);
             if (++unpaused_ % 100 == 1) HSM_LOG("session: game was paused during an owner-sync match; unpaused (%u time(s))", unpaused_);
         }
+        PauseReportTick();
         ReportTick();   // before the solo return: reports work in the menus and offline too (R1)
-        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && net_) SendChat(*line);
+        UpdateNoticeTick();
+        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && net_)
+            if (!IsHost() || !ModerationLine(*line, 0, false)) SendChat(*line);
+        if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
         if (!net_) { ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
         if (IsHost()) HostTick(dt); else ClientTick(dt);
         TintTick();
@@ -443,6 +477,12 @@ public:
             if (!typing) pauseMenuWas_ = menu;
         }
         if (net_) SpectateTick();
+        // Once a game run, in the first session fight: how to report a bug (the relay must be set).
+        if (bugHintAt_ && NowMs() >= bugHintAt_) {
+            bugHintAt_ = 0; bugHintShown_ = true;
+            if (report::Enabled())
+                ui::ShowLine("HSMMod", style::kBone, "Found a bug? Open the chat, type /bug and what happened, press Enter. Your log goes with it.");
+        }
         if (net_ && InFightLevel() && NowMs() >= nextHealth_) { nextHealth_ = NowMs() + 5000; LogHealth(); }
         if (info_.phase != chatPhase_) {   // the results: a line being typed is dropped, a new one may be opened
             if (info_.phase == uint8_t(MatchPhase::Results)) ui::ChatDrop("match over");
@@ -487,6 +527,27 @@ public:
         }
     }
 
+    // Mesh: off prints nothing. Host: what each client says it hears directly and how many relays that saved. Client: the
+    // direct peers, streams that arrived and were used, anything else from a non-host peer that was dropped.
+    void LogMeshHealth(const char* who) {
+        if (IsHost() ? !MeshHost() : !meshOn_) return;
+        if (IsHost()) {
+            std::string heard;
+            for (uint8_t l = 1; l < kMaxFighters; ++l) {
+                if (!PeerOfSlot(l)) continue;
+                unsigned mask = 0;
+                for (uint8_t f = 0; f < kMaxFighters; ++f) if (meshMasks_.Hears(l, f)) mask |= 1u << f;
+                char b[32]; std::snprintf(b, sizeof b, " slot%u 0x%02x;", l, mask);
+                heard += b;
+            }
+            HSM_LOG("%s: mesh: hears directly:%s relays skipped %u", who, heard.empty() ? " (no clients)" : heard.c_str(), meshRelaySkipped_);
+        } else {
+            HSM_LOG("%s: mesh: %zu direct peers, %u streams received directly, %u dropped from non-host peers, hearing 0x%02x", who, meshSend_.size(),
+                    meshRx_, meshDropped_, unsigned(meshHearing_.Mask(NowMs())));
+        }
+        meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
+    }
+
     // Owner sync: what this machine streamed, how every stand-in tracks its owner, and every claim's fate.
     void LogOwnerHealth() {
         const char* who = IsHost() ? "host" : "client";
@@ -494,6 +555,7 @@ public:
                 who, static_cast<unsigned long long>(streams_.PosesSent()), static_cast<unsigned long long>(streams_.VitalsSent()),
                 streamsDropped_, claimsRejected_, standIns_.Count(), IsHost() ? "" : (adapter_.PlayerWillie(0) ? ", own fighter ok" : ", own fighter MISSING"));
         streamsDropped_ = claimsRejected_ = 0;
+        LogMeshHealth(who);
         if (staleLife_) { HSM_LOG("%s: %u claims or reports dropped for naming an old body", who, staleLife_); staleLife_ = 0; }
         HSM_LOG("%s: %s", who, FrameAndPingLine().c_str());
         HSM_LOG("%s: %s", who, CensusLine().c_str());
@@ -606,30 +668,34 @@ public:
     }
 
     // ------------------------------------------------------------------ in-game bug reports (net/report_client.h)
-    // "/report <text>", "/bug <text>", "/sendlog" and "/nolog" typed in the chat; true: it was one (never sent as chat).
+    // "/bug <text>" (or "/report <text>"), "/sendlog" and "/nolog" typed in the chat; true: it was one (never sent as chat).
     bool ReportCommandLine(const std::string& line) {
         const ReportCommand cmd = ParseReportCommand(line);
         if (cmd.kind == ReportCommandKind::None) return false;
         auto say = [](const std::string& msg) { ui::ShowLine("HSMMod", style::kBone, msg); };
         const uint32_t now = NowMs();
         if (!report::Enabled()) { say("Bug reports are off (reports= and report_url= in HSMMod.ini)."); return true; }
-        if (report::Busy()) { say("Still sending the last report..."); return true; }
-        if (cmd.kind == ReportCommandKind::NoLog) {
+        if (cmd.kind == ReportCommandKind::NoLog) {          // answers an offer, so it works while a send is busy too (R10)
             if (reportOffer_.Open(now)) say("OK, your log stays here.");
             reportOffer_.Decline();
-        } else if (cmd.kind == ReportCommandKind::SendLog) {
+            autoAttachDue_ = false;
+            return true;
+        }
+        if (report::Busy()) { say("Still sending the last report..."); return true; }
+        if (cmd.kind == ReportCommandKind::SendLog) {
             std::string id, token;
             if (!reportOffer_.Take(now, id, token)) say("No bug report is waiting for your log.");
             else if (report::Attach(id, token, ReportFactsNow())) say("Sending your HSMMod log (Steam IDs, IPs and your user name removed)...");
+            else say("Your log was not sent: the request could not be started.");
         } else if (cmd.text.empty()) {
-            say("Type /report and what went wrong, e.g. /report my sword vanished after respawn");
+            say("Type /bug and what went wrong, e.g. /bug my sword vanished after respawn");
         } else {
             say(SubmitReport(cmd.text));
         }
         return true;
     }
 
-    // The menu's Report button and /report: the one place the Enabled/Busy/cooldown checks live. Returns what to tell
+    // The menu's Report button and /bug: the one place the Enabled/Busy/cooldown checks live. Returns what to tell
     // the player (also when it was refused).
     std::string SubmitReport(const std::string& text) override {
         const uint32_t now = NowMs();
@@ -638,30 +704,470 @@ public:
         if (text.empty()) return "Type what went wrong first.";
         if (reportedOnce_ && now - lastReportAt_ < kReportCooldownMs)
             return "Please wait " + std::to_string((kReportCooldownMs - (now - lastReportAt_)) / 1000 + 1) + " s before another report.";
-        if (!report::Submit(text, ReportFactsNow())) return "The bug report could not be sent.";
-        reportedOnce_ = true; lastReportAt_ = now;
-        return "Sending your bug report: the text becomes a public GitHub issue, your log (Steam IDs, IPs and user name removed) stays private...";
+        if (!report::Submit(text, ReportFactsNow(), ReportJob::Report)) return "Bug report not sent: the request could not be started.";
+        reportSession_ = sessionGen_; reportIsManual_ = true;   // the cooldown starts when the relay answers (ReportTick)
+        return "Sending your bug report... The text becomes a public GitHub issue; your log (Steam IDs, IPs and user name removed) stays private.";
     }
 
-    // The relay's answers, on the game thread. A filed report is shared with the session so the others may add logs.
-    void ReportTick() {
-        while (std::optional<report::Result> r = report::Poll()) {
-            auto say = [](const std::string& msg) { ui::ShowLine("HSMMod", style::kBone, msg); };
-            if (r->kind == report::Result::Kind::Failed) { say("Bug report not sent: " + r->error); continue; }
-            if (r->kind == report::Result::Kind::Attached) { say("Your log was added to the bug report. Thanks!"); continue; }
-            say(r->issue.empty() ? std::string("Bug report filed. Thanks!") : "Bug report filed: " + r->issue);
-            if (!net_) continue;
-            ReportShareMsg m; m.id = r->id; m.token = r->token;
-            if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
-            else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true);
-            if (IsHost() ? !peers_.empty() : bool(hostPeer_)) say("The other players were asked to add their logs.");
+    std::string ReportStatus() const override { return reportStatus_; }
+    uint32_t ReportStatusSeq() const override { return reportStatusSeq_; }
+
+    // The lobby chat box (menu.cpp). The text goes out as a Steam lobby chat message: the session transport carries slots
+    // and no names before a match, and only to members the host has welcomed. Commands run here, as in the match chat.
+    void LobbyChatLine(const std::string& typed) override {
+        const std::string line = SanitizeChat(typed);
+        if (line.empty() || ReportCommandLine(line)) return;
+        if (ParseModCommand(line).kind != ModCommandKind::None) {   // kick, ban, vote: the session host runs them
+            if (net_ && IsHost()) ModerationLine(line, 0, false);
+            else if (net_ && hostPeer_) SendChat(line);
+            else ui::ShowLine("HSMMod", style::kBone, "Kick, ban and vote commands work once you are connected to the host.");
+            return;
         }
+        if (!lobby_.InLobby()) { ui::ShowLine("HSMMod", style::kBone, "Join a lobby to chat."); return; }
+        if (!lobbyChatOut_.Allow(NowMs())) { ui::ShowLine("HSMMod", style::kBone, "Slow down."); return; }
+        if (!lobby_.SendChat(line)) ui::ShowLine("HSMMod", style::kBone, "The chat line could not be sent.");
+    }
+
+    // A line from a member (ours comes back the same way, and is limited when it is sent). Shown in the chat history,
+    // which the multiplayer page and the match chat share.
+    void OnLobbyChat(steam::SteamId from, const std::string& text) {
+        const bool mine = from == steam::MySteamId();
+        if (!mine && !lobbyGate_.Allow(from, NowMs())) return;
+        std::string name;
+        Rgba ink = style::kIron;
+        for (const game::LobbyMember& m : lobby_.members())
+            if (m.id == from) { name = m.name; ink = LobbyChatInk(lobby_.config().format, m.team, m.hostOverride); }
+        if (name.empty()) name = steam::PersonaName(from);
+        ui::ShowLine(name.empty() ? "?" : name, ink, text);
+    }
+
+    // ------------------------------------------------------------------ kick, ban, votekick (session/hsm_moderation.h)
+    // Runs on the host. `from`: the client peer that typed the line, 0 for this machine (the player host's chat, or the
+    // role=server console). true: it was a moderation command (answered; never shown as chat).
+    bool ModerationLine(const std::string& line, uint32_t from, bool console) {
+        const ModCommand cmd = ParseModCommand(line, console);
+        if (cmd.kind == ModCommandKind::None) return false;
+        if (from && !peers_.count(from)) return true;
+        if (cmd.kind == ModCommandKind::Say) { if (net_) ServerSay(cmd.target); else Reply(from, "Nobody is connected."); return true; }
+        if (cmd.kind == ModCommandKind::Players) { ListPlayers(from); return true; }
+        if (cmd.kind == ModCommandKind::VoteKick || cmd.kind == ModCommandKind::Yes || cmd.kind == ModCommandKind::No) { VoteCommand(cmd, from); return true; }
+        if (!IsAdmin(from)) {
+            Reply(from, IsServer() ? (cfg_.serverVoteKick ? "Only the server's admins can do that. /votekick <name> starts a vote."
+                                                          : "Only the server's admins can do that.")
+                                   : "Only the host can kick or ban.");
+            return true;
+        }
+        LoadBans();
+        if (cmd.kind == ModCommandKind::Bans) { ListBans(from); return true; }
+        if (cmd.kind == ModCommandKind::Unban) {
+            const std::string key = bans_.Resolve(cmd.target);
+            const BanEntry* b = key.empty() ? nullptr : bans_.Find(key, UnixNow());
+            if (!b || b->kick) { Reply(from, "No ban matches '" + cmd.target + "'. /bans lists them."); return true; }
+            const std::string who = b->name.empty() ? key : b->name;
+            bans_.Remove(key);
+            SaveBans();
+            HSM_LOG("moderation: %s lifted the ban on %s", IssuerName(from).c_str(), key.c_str());
+            Reply(from, who + " is unbanned.");
+            return true;
+        }
+        uint32_t peer = 0;
+        if (!net_ || !FindPeerTarget(cmd.target, from, peer)) return true;   // answered
+        if (peer == from) { Reply(from, "You can't kick or ban yourself."); return true; }
+        const std::string name = NameOfSlot(peers_.at(peer).slot);
+        const std::string key = BanKeyOf(peer);
+        const std::string by = from || console || IsServer() ? " by " + IssuerName(from) : std::string();
+        if (cmd.kind == ModCommandKind::Kick) {
+            HSM_LOG("moderation: %s kicked slot %u (%s)", IssuerName(from).c_str(), peers_.at(peer).slot, key.c_str());
+            ServerSay(name + " was kicked" + by + ".");
+            DropMember(peer, RejectReason::Kicked);
+        } else {
+            if (key.empty()) { Reply(from, "Can't ban " + name + ": no Steam ID or address is known. /kick works."); return true; }
+            if (!bans_.Add(key, name, cmd.seconds ? UnixNow() + cmd.seconds : 0, false)) { Reply(from, "The ban list is full (HSMMod.bans)."); return true; }
+            SaveBans();
+            HSM_LOG("moderation: %s banned slot %u (%s) %s", IssuerName(from).c_str(), peers_.at(peer).slot, key.c_str(), DurationText(cmd.seconds).c_str());
+            ServerSay(name + " was banned " + DurationText(cmd.seconds) + by + ".");
+            DropMember(peer, RejectReason::Banned);
+        }
+        return true;
+    }
+
+    // /votekick, /yes, /no: role=server only (a player host kicks directly).
+    void VoteCommand(const ModCommand& cmd, uint32_t from) {
+        if (!IsServer()) { Reply(from, "Votes are for servers; the host can /kick."); return; }
+        if (!cfg_.serverVoteKick) { Reply(from, "Votekick is off on this server (server_votekick=0)."); return; }
+        if (!from) { Reply(from, "The console kicks directly: kick <name>."); return; }
+        const uint64_t me = peers_.at(from).key;
+        if (cmd.kind != ModCommandKind::VoteKick) {
+            const bool yes = cmd.kind == ModCommandKind::Yes;
+            if (!vote_.Active()) { Reply(from, "No vote is running."); return; }
+            if (!vote_.Cast(me, yes)) { Reply(from, "You can't vote on this one."); return; }
+            ServerSay(NameOfSlot(peers_.at(from).slot) + " voted " + (yes ? "yes" : "no") + " (" + std::to_string(vote_.Yes()) + " of " +
+                      std::to_string(vote_.Needed()) + " yes needed).");
+            return;
+        }
+        uint32_t peer = 0;
+        if (!FindPeerTarget(cmd.target, from, peer)) return;
+        if (peer == from) { Reply(from, "You can't vote yourself out."); return; }
+        if (IsAdmin(peer)) { Reply(from, "Admins can't be voted out."); return; }
+        std::vector<uint64_t> players;
+        for (const auto& [pp, q] : peers_) players.push_back(q.key);
+        const std::string target = NameOfSlot(peers_.at(peer).slot);
+        switch (vote_.Begin(me, peers_.at(peer).key, players, NowMs())) {
+            case VoteKick::Start::Ok:
+                voteTargetName_ = target;
+                HSM_LOG("moderation: slot %u started a vote to kick slot %u", peers_.at(from).slot, peers_.at(peer).slot);
+                ServerSay(NameOfSlot(peers_.at(from).slot) + " votes to kick " + target + ": type /yes or /no (" + std::to_string(vote_.Needed()) +
+                          " yes needed, " + std::to_string(kVoteKickMs / 1000) + " s).");
+                break;
+            case VoteKick::Start::Running: Reply(from, "A vote is already running: /yes or /no."); break;
+            case VoteKick::Start::Cooldown: Reply(from, "You started a vote recently; wait a couple of minutes."); break;
+            case VoteKick::Start::TooFew: Reply(from, "A vote needs at least 3 players."); break;
+            case VoteKick::Start::Self: Reply(from, "You can't vote yourself out."); break;
+        }
+    }
+
+    // Each host tick: rejected peers are dropped after their Reject had time to arrive, the vote is decided, and expired
+    // bans leave the file.
+    void ModerationTick() {
+        const uint32_t now = NowMs();
+        for (size_t i = 0; i < pendingDrops_.size();) {
+            if (!DueAt(now, pendingDrops_[i].second)) { ++i; continue; }
+            net_->Disconnect(pendingDrops_[i].first);
+            pendingDrops_.erase(pendingDrops_.begin() + long(i));
+        }
+        const VoteKick::Outcome o = vote_.Tick(now);
+        if (o == VoteKick::Outcome::Passed) {
+            uint32_t peer = 0;
+            for (const auto& [pp, q] : peers_) if (q.key == vote_.target()) peer = pp;
+            if (peer) {
+                LoadBans();
+                const std::string key = BanKeyOf(peer);
+                if (!key.empty() && bans_.Add(key, voteTargetName_, UnixNow() + kVoteBanSeconds, false)) SaveBans();
+                HSM_LOG("moderation: the vote passed; slot %u is out %s (%s)", peers_.at(peer).slot, DurationText(kVoteBanSeconds).c_str(), key.c_str());
+                ServerSay("Vote passed: " + voteTargetName_ + " is kicked " + DurationText(kVoteBanSeconds) + ".");
+                DropMember(peer, RejectReason::Kicked);
+            }
+        } else if (o == VoteKick::Outcome::Failed) {
+            ServerSay("Vote failed: " + voteTargetName_ + " stays.");
+        } else if (o == VoteKick::Outcome::Cancelled) {
+            ServerSay("The vote to kick " + voteTargetName_ + " ended (a player left).");
+        }
+        if (DueAt(now, nextBanPrune_)) {
+            nextBanPrune_ = now + 60000;
+            if (bansLoaded_ && bans_.Prune(UnixNow())) SaveBans();
+        }
+    }
+
+    // role=server: admin commands written to HSMMod.cmd (the Pelican egg forwards its console there), read each second.
+    // The file is renamed before it is read, so a line appended meanwhile lands in a fresh file for the next round.
+    void ConsoleTick() {
+        const uint32_t now = NowMs();
+        if (!DueAt(now, nextConsolePoll_)) return;
+        nextConsolePoll_ = now + 1000;
+        const std::wstring path = InstanceFilePath(L"HSMMod", L".cmd"), work = path + L".work";
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+        if (!MoveFileExW(path.c_str(), work.c_str(), MOVEFILE_REPLACE_EXISTING)) return;
+        std::string text;
+        if (FILE* f = _wfopen(work.c_str(), L"rb")) {
+            text.resize(16384);
+            text.resize(std::fread(text.data(), 1, text.size(), f));
+            std::fclose(f);
+        }
+        DeleteFileW(work.c_str());
+        size_t pos = 0;
+        for (int lines = 0; pos < text.size() && lines < 32; ++lines) {
+            size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = SanitizeChat(text.substr(pos, end - pos));
+            pos = end + 1;
+            if (line.empty()) continue;
+            HSM_LOG("console: > %s", line.c_str());
+            if (!ModerationLine(line, 0, true)) HSM_LOG("console: unknown command; try players, kick <name>, ban <name> [30m|2h|7d|perm], unban <name>, bans, say <text>");
+        }
+    }
+
+    bool IsAdmin(uint32_t from) {
+        if (!from) return true;                        // the player host, or the server console
+        if (!IsServer()) return false;
+        auto it = peers_.find(from);
+        if (it == peers_.end() || (it->second.key >> 63)) return false;   // direct-IP players have no Steam ID to check
+        if (!adminsParsed_) { admins_ = ParseAdminList(cfg_.serverAdmins); adminsParsed_ = true; }
+        return std::find(admins_.begin(), admins_.end(), it->second.key) != admins_.end();
+    }
+
+    std::string IssuerName(uint32_t from) const {
+        if (from) { auto it = peers_.find(from); return it == peers_.end() ? std::string("?") : NameOfSlot(it->second.slot); }
+        return IsServer() ? std::string("the server") : MyName();
+    }
+
+    // What a ban names: the Steam ID, else the direct-IP address; empty when neither is known.
+    std::string BanKeyOf(uint32_t peer) {
+        auto it = peers_.find(peer);
+        if (it == peers_.end()) return {};
+        if (!(it->second.key >> 63)) return SteamBanKey(it->second.key);
+        const std::string addr = net_ ? net_->PeerAddress(peer) : std::string();
+        return ValidIpv4(addr) ? IpBanKey(addr) : std::string();
+    }
+
+    // "#slot" or a name; false (and the issuer told why) when no single connected player matches.
+    bool FindPeerTarget(const std::string& query, uint32_t from, uint32_t& peer) {
+        std::vector<ModPlayer> players;
+        for (const auto& [pp, q] : peers_) players.push_back({q.slot, NameOfSlot(q.slot)});
+        uint8_t slot = 0;
+        const TargetMatch m = FindTarget(query, players, slot);
+        if (m == TargetMatch::NoMatch) { Reply(from, "No player matches '" + query + "'. /players lists them."); return false; }
+        if (m == TargetMatch::Ambiguous) { Reply(from, "More than one player matches '" + query + "'; use their #number (/players)."); return false; }
+        for (const auto& [pp, q] : peers_) if (q.slot == slot) { peer = pp; return true; }
+        return false;
+    }
+
+    void ListPlayers(uint32_t from) {
+        if (!net_ || !IsHost()) { Reply(from, "Not hosting a session."); return; }
+        if (!IsServer()) Reply(from, "#0 " + MyName() + " (host)");
+        if (peers_.empty()) { Reply(from, "No players connected."); return; }
+        for (const auto& [pp, q] : peers_) {
+            std::string line = "#" + std::to_string(q.slot) + " " + NameOfSlot(q.slot) + " (" + std::to_string(net_->RoundTripMs(pp)) + " ms)";
+            if (!from) line += " " + BanKeyOf(pp);       // this machine only: the ID or address to ban
+            Reply(from, line);
+        }
+    }
+
+    void ListBans(uint32_t from) {
+        const int64_t now = UnixNow();
+        if (bans_.Prune(now)) SaveBans();
+        const std::vector<const BanEntry*> b = bans_.Bans();
+        if (b.empty()) { Reply(from, "No bans."); return; }
+        const size_t shown = std::min<size_t>(b.size(), 8);
+        for (size_t i = 0; i < shown; ++i) {
+            const std::string left = b[i]->until ? DurationText(b[i]->until - now).replace(0, 4, "") + " left" : std::string("permanent");
+            Reply(from, "#" + std::to_string(i + 1) + " " + (b[i]->name.empty() ? std::string("?") : b[i]->name) + " " + b[i]->key + ", " + left);
+        }
+        if (b.size() > shown) Reply(from, "... and " + std::to_string(b.size() - shown) + " more (HSMMod.bans). /unban #n or a name.");
+        else Reply(from, "/unban #n or a name lifts one.");
+    }
+
+    // An answer to whoever typed the command: a client gets a SERVER chat line only it sees, this machine its chat/log.
+    void Reply(uint32_t to, const std::string& text) {
+        if (!to) { HSM_LOG("moderation: %s", text.c_str()); ui::ShowLine("HSMMod", style::kBone, text); return; }
+        if (!net_) return;
+        ChatLine c; c.fromSlot = kChatSystemSlot; c.text = text;
+        net_->Send(to, kChanReliable, Encode(c), true);
+    }
+
+    // A SERVER line everyone in the session sees.
+    void ServerSay(const std::string& text) {
+        HSM_LOG("moderation: says: %s", text.c_str());
+        ui::ShowLine("SERVER", style::kBone, SanitizeChat(text));
+        if (!net_) return;
+        ChatLine c; c.fromSlot = kChatSystemSlot; c.text = text;
+        net_->Broadcast(kChanReliable, Encode(c), true);
+    }
+
+    // Kicked or banned: the client is told why, leaves the roster now, and its connection closes a moment later.
+    void DropMember(uint32_t peer, RejectReason why) {
+        auto it = peers_.find(peer);
+        if (it == peers_.end()) return;
+        const uint8_t slot = it->second.slot;
+        const uint64_t key = it->second.key;
+        vote_.Left(key);
+        RejectPeer(peer, why);
+        peerSilence_.Forget(peer);
+        peers_.erase(it);
+        MeshRosterChanged(slot);
+        if (OwnerMode()) props_.SlotLeft(slot);
+        RemoveMember(slot, key);                       // no rejoin reservation for a kicked player
+    }
+
+    // Reject first; the disconnect follows kRejectLingerMs later so the Reject is not lost with the closed session.
+    void RejectPeer(uint32_t peer, RejectReason why) {
+        Reject r; r.reason = why;
+        net_->Send(peer, kChanReliable, Encode(r), true);
+        for (const auto& d : pendingDrops_) if (d.first == peer) return;
+        pendingDrops_.push_back({peer, NowMs() + kRejectLingerMs});
+    }
+
+    // A banned (or just kicked) Steam ID or address; null when this peer may join.
+    const BanEntry* BannedEntry(const NetEvent& ev) {
+        LoadBans();
+        if (ev.steamId) return bans_.Find(SteamBanKey(ev.steamId), UnixNow());
+        const std::string addr = net_->PeerAddress(ev.peer);
+        return ValidIpv4(addr) ? bans_.Find(IpBanKey(addr), UnixNow()) : nullptr;
+    }
+
+    static int64_t UnixNow() { return int64_t(std::time(nullptr)); }
+
+    void LoadBans() {
+        if (bansLoaded_) return;
+        bansLoaded_ = true;
+        std::string text;
+        if (FILE* f = _wfopen(InstanceFilePath(L"HSMMod", L".bans").c_str(), L"rb")) {
+            text.resize(256u << 10);
+            text.resize(std::fread(text.data(), 1, text.size(), f));
+            std::fclose(f);
+        }
+        const size_t n = bans_.Parse(text, UnixNow());
+        if (n) HSM_LOG("moderation: %zu ban(s) loaded from HSMMod.bans", n);
+    }
+
+    void SaveBans() {
+        const std::wstring path = InstanceFilePath(L"HSMMod", L".bans"), tmp = path + L".tmp";
+        const std::string text = bans_.Serialize();
+        FILE* f = _wfopen(tmp.c_str(), L"wb");
+        if (!f) { HSM_LOG("moderation: could not write HSMMod.bans"); return; }
+        const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+        std::fclose(f);
+        if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) HSM_LOG("moderation: could not write HSMMod.bans");
+    }
+
+    // A client the host refused (full, other version, kicked, banned): back to the menu, out of the Steam lobby, told why.
+    // Without this the client sat in the lobby waiting for a Welcome that never came (N2).
+    void OnRejected(RejectReason why) {
+        const char* msg = "The host refused the connection.";
+        switch (why) {
+            case RejectReason::BadRevision: msg = "The host runs another HSMMod version; everyone needs the same one."; break;
+            case RejectReason::BuildMismatch: msg = "The host runs another build of Half Sword; everyone needs the same one."; break;
+            case RejectReason::Full: msg = "The session is full."; break;
+            case RejectReason::Malformed: break;
+            case RejectReason::Kicked: msg = "The host kicked you from the lobby. You can join again."; break;
+            case RejectReason::Banned: msg = "You are banned from this lobby (by the host, an admin or a vote)."; break;
+        }
+        HSM_LOG("client: rejected by the host (reason %d); leaving", int(why));
+        const bool fight = InFightLevel();
+        welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
+        if (steamMode()) lobby_.Leave();
+        ResetNetwork("rejected by the host");
+        ui::ShowLine("HSMMod", style::kBone, msg);
+        notice_ = msg;                                 // shown on the multiplayer page, which opens for it (menu.cpp)
+        if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
+    }
+
+    std::string TakeNotice() override { std::string n; n.swap(notice_); return n; }
+
+    bool HelpImprove() const override { return cfg_.helpImprove; }
+    void SetHelpImprove(bool on) override {
+        cfg_.helpImprove = on;
+        HSM_LOG("report: help improve the mod: %s", on ? "on" : "off");
+        if (!SaveHelpImprove(on)) HSM_LOG("report: could not write help_improve=%d to HSMMod.ini", on ? 1 : 0);
+    }
+
+    // The relay's answers, on the game thread. Each request ends in exactly one outcome line (ReportOutcomeLine), shown
+    // where the player can see it. A filed report is shared with the session so the others may add logs.
+    void ReportTick() {
+        CrashReportAtStart();
+        const uint32_t now = NowMs();
+        while (std::optional<report::Result> r = report::Poll()) {
+            const ReportVerdict& v = r->verdict;
+            const bool filing = r->job != ReportJob::Log;
+            const bool manual = filing && reportIsManual_;
+            const bool sameSession = reportSession_ == sessionGen_;   // a late answer is not shared into another session (R2)
+            if (filing) reportIsManual_ = false;
+            // The cooldown counts reports the relay may have filed: a lost answer is no reason to send it again (R10).
+            if (manual && v.outcome != ReportOutcome::NotSent && v.outcome != ReportOutcome::Refused) { reportedOnce_ = true; lastReportAt_ = now; }
+            bool shared = false;
+            if (filing && v.outcome == ReportOutcome::Done) {
+                if (r->job == ReportJob::Report && !sameSession) HSM_LOG("report: %s was filed in an earlier session; not shared with this one", v.id.c_str());
+                else if (ShareReport(v.id, v.token)) shared = true;
+                else if (r->job == ReportJob::Crash) pendingShare_.Hold(v.id, v.token, now);   // filed in the menu: the next session gets it
+            }
+            ReportOutcomeToPlayer(ReportOutcomeLine(r->job, v, shared));
+        }
+        ReportOutcomeFlush();
+        if (!report::Busy() && SessionUp()) {              // a crash report filed before this session: shared once
+            std::string id, token;
+            if (pendingShare_.Take(now, id, token) && ShareReport(id, token))
+                HSM_LOG("report: shared the crash report %s with this session", id.c_str());
+        }
+        if (autoAttachDue_ && !report::Busy()) {           // help_improve: an offer that came while a send was busy
+            autoAttachDue_ = false;
+            if (reportOffer_.Open(now)) AutoAttach();
+        }
+    }
+
+    // The outcome line goes to the chat history once the player can see it: the match chat is up, or the multiplayer page
+    // is open (its lobby chat box, or the note under REPORT A BUG outside a lobby). Until then it waits, so an answer
+    // that comes back during a level change or with the pause menu up is not missed. The log says what the player saw.
+    void ReportOutcomeToPlayer(const std::string& line) {
+        if (line.empty()) return;
+        reportHeld_.push_back(line);
+        while (reportHeld_.size() > 4) reportHeld_.pop_front();
+        if (!ReportOutcomeVisible()) HSM_LOG("report: outcome held until the chat or the multiplayer page is on screen: %s", line.c_str());
+    }
+
+    static bool ReportOutcomeVisible() { return ui::ChatHudShown() || ui::PanelOpen(); }
+
+    void ReportOutcomeFlush() {
+        if (reportHeld_.empty() || !ReportOutcomeVisible()) return;
+        for (const std::string& line : reportHeld_) {
+            HSM_LOG("report: told the player: %s", line.c_str());
+            ui::ShowLine("HSMMod", style::kBone, line);
+            reportStatus_ = line; ++reportStatusSeq_;
+        }
+        reportHeld_.clear();
+    }
+
+    bool SessionUp() const { return net_ && (IsHost() ? !peers_.empty() : bool(hostPeer_)); }
+
+    // A filed report's id and token to everyone else in the session (the host relays a client's). false: nobody to tell.
+    bool ShareReport(const std::string& id, const std::string& token) {
+        if (!SessionUp()) return false;
+        ReportShareMsg m; m.id = id; m.token = token;
+        if (IsHost()) net_->Broadcast(kChanReliable, Encode(m), true);
+        else net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+        return true;
+    }
+
+    // help_improve: the last session's log ends in a crash (crash_log.cpp): report it once, at the first tick of this one.
+    // The report's text is the crash line only; both logs go to the relay redacted as for /report.
+    void CrashReportAtStart() {
+        if (crashChecked_) return;
+        crashChecked_ = true;
+        std::string tail;
+        if (FILE* f = _wfopen(InstanceFilePath(L"HSMMod", L".prev.log").c_str(), L"rb")) {
+            if (std::fseek(f, 0, SEEK_END) == 0) {
+                const long size = std::ftell(f);
+                const long from = size > long(kCrashTailBytes) ? size - long(kCrashTailBytes) : 0;
+                if (size > 0 && std::fseek(f, from, SEEK_SET) == 0) {
+                    tail.resize(size_t(size - from));
+                    tail.resize(std::fread(tail.data(), 1, tail.size(), f));
+                }
+            }
+            std::fclose(f);
+        }
+        const std::string line = CrashLineOf(tail);
+        if (line.empty()) return;
+        if (!cfg_.helpImprove) { HSM_LOG("report: the last session crashed (%s); help_improve is off, nothing sent", line.c_str()); return; }
+        if (!report::Enabled() || report::Busy()) { HSM_LOG("report: the last session crashed; reports are off or busy, not sent"); return; }
+        if (!report::Submit(CrashReportText(line), ReportFactsNow(), ReportJob::Crash)) { HSM_LOG("report: the crash report could not be started"); return; }
+        HSM_LOG("report: the last session crashed; sending a crash report (help_improve is on): %s", line.c_str());
+    }
+
+    // help_improve: this player's log joins the open offer without /sendlog.
+    void AutoAttach() {
+        std::string id, token;
+        if (!reportOffer_.Take(NowMs(), id, token)) return;
+        if (!report::Attach(id, token, ReportFactsNow())) { HSM_LOG("report: could not add the log to report %s", id.c_str()); return; }
+        HSM_LOG("report: help_improve is on; sending this log to report %s", id.c_str());
+        ui::ShowLine("HSMMod", style::kBone, "Help improve the mod is on: sending your HSMMod log too (Steam IDs, IPs and your user name removed).");
+    }
+
+    // A newer HSMMod release (net/update_check.h), said once in the chat a few seconds into the first fight level, when the HUD is up.
+    void UpdateNoticeTick() {
+        if (!FighterLevel() || NowMs() - levelLoadedAt_ < 4000) return;
+        const std::string notice = update::TakeChatNotice();
+        if (!notice.empty()) ui::ShowLine("HSMMod", style::kBone, notice);
     }
 
     // Another player's report: this player may add their own log with /sendlog (nothing is sent otherwise).
     void OfferLog(const ReportShareMsg& m) {
         if (!report::Enabled()) return;
         reportOffer_.Offer(m.id, m.token, NowMs());
+        if (cfg_.helpImprove) {                            // opted in: no question, the log goes along
+            HSM_LOG("report: %s filed report %s; help_improve is on", NameOfSlot(m.fromSlot).c_str(), m.id.c_str());
+            ui::ShowLine("HSMMod", style::kBone, NameOfSlot(m.fromSlot) + " filed a bug report.");
+            if (report::Busy()) autoAttachDue_ = true;
+            else AutoAttach();
+            return;
+        }
         HSM_LOG("report: %s filed report %s; offered /sendlog", NameOfSlot(m.fromSlot).c_str(), m.id.c_str());
         ui::ShowLine("HSMMod", style::kBone, NameOfSlot(m.fromSlot) + " filed a bug report. Type /sendlog to add your log, or /nolog.");
     }
@@ -676,7 +1182,7 @@ public:
         f.transport = !net_ ? "none" : steamMode() ? "steam" : "direct ip";
         f.syncMode = OwnerMode() ? "owner" : "host";
         f.level = currentLevel_ + (progressionHub_ ? " (progression hub)" : "");
-        f.matchFormat = FormatName(Format(info_.format));
+        f.matchFormat = ModeName(info_.format, info_.gear);
         f.matchPhase = info_.phase < std::size(kPhases) ? kPhases[info_.phase] : "?";
         f.players = !net_ ? 1 : IsHost() ? int(ConnectedSlots().size()) : int(info_.fighters.size());   // a client knows the fighters
         f.os = report::OsName();
@@ -705,6 +1211,9 @@ private:
     // either iterates roster_ (which does not hold it) or checks localFighter_.
     bool IsServer() const { return cfg_.role == Role::Server; }
     uint8_t HostEntity() const { return localFighter_ ? uint8_t(1) : uint8_t(0); }
+    // Client: the host's Welcome said it plays no fighter (kWelcomeNoHostFighter), so its entity is never one to spectate,
+    // list or wait for, whatever a roster says.
+    bool NoSuchFighter(uint8_t e) const { return !hostHasFighter_ && e == Roster::EntityForSlot(kHostSlot); }
     bool OwnerMode() const { return syncMode_ == SyncMode::Owner; }
     int SnapshotHz() const { return std::max(cfg_.snapshotHz, 60); }   // older ini files say 30
     bool InFightLevel() const { return !currentLevel_.empty() && !IsMenuLevel(currentLevel_); }
@@ -901,18 +1410,22 @@ private:
 
     // ------------------------------------------------------------------ lobby / transport lifecycle
     void OnLobbyEntered() {
+        ui::ChatClearLines();   // the last lobby's chat is not this one's
+        lobbyGate_.Clear();
         auto st = std::make_unique<SteamTransport>(lobby_.IsHost() ? ValidateForHost : ValidateForClient);
         steamNet_ = st.get();
         net_ = std::move(st);
+        ++sessionGen_;
         if (lobby_.IsHost()) {
             for (const game::LobbyMember& m : lobby_.members()) if (m.id != steam::MySteamId()) steamNet_->AllowPeer(m.id);
             hostPending_ = true;
-        } else steamNet_->AllowPeer(lobby_.owner());
+        } else { hostSteam_ = lobby_.owner(); steamNet_->AllowPeer(hostSteam_); }
     }
 
     void ResetNetwork(const char* why) {
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
         steamNet_ = nullptr; net_.reset();
+        ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
         claims_.Stop();                              // the hooks go before any fighter does
         fx_.Stop();                                  // with its paint boxes on the stand-ins
         equip_.Stop();
@@ -923,7 +1436,7 @@ private:
         gore_.Stop();
         // host
         for (uint8_t slot = 1; slot < kMaxFighters; ++slot) DespawnFighter(slot);
-        roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); blobVersion_.fill(0); hostExport_.clear();
+        roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); helloWatch_.Clear(); blobVersion_.fill(0); hostExport_.clear();
         picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
         bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; feed_.clear(); banner_.Reset(); tints_.clear();
@@ -936,6 +1449,8 @@ private:
         }
         puppets_.clear(); world_ = ClientWorld{}; clientBlobs_.Clear(); clientAssembler_ = BlobAssembler{}; lastUpload_.clear();
         hostPeer_ = 0; welcomed_ = false; haveSnapshot_ = false; snappedOwn_ = false; hellosSent_ = 0;
+        hostSteam_ = 0; meshOn_ = false; meshPeers_.Clear(); meshHearing_.Clear(); meshMasks_.Clear(); peerMapDirty_ = false;
+        meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
         reservations_.Clear(); jitter_.clear(); placed_.clear();
         RestoreFoes();
         myWillie_.store(nullptr);                    // the permanent input hooks must stop swallowing this pawn's look
@@ -945,6 +1460,7 @@ private:
         standIns_.Clear(); grabs_.Clear(); streams_.Clear(); lives_.clear(); respawnQueue_.clear();
         syncMode_ = SyncMode::Host; ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
         lifeBook_.Clear(); clientLife_.fill(0); staleLife_ = 0;
+        vote_.Clear(); pendingDrops_.clear(); rejected_.reset(); hostUnreachable_ = hostWasThere_ = false;
     }
 
     // ------------------------------------------------------------------ travel / levels
@@ -969,7 +1485,9 @@ private:
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
             fightSettings_ = t.settings;
             if (net_) net_->Broadcast(kChanReliable, Encode(t), true);
-            lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1), "");
+            const MatchConfig shown = lobby_.config();
+            lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1),
+                                  lobby_.Progression() ? "" : ModeName(shown.format, shown.gear));
             HSM_LOG("host: travel #%u to %s (%zu settings) sent to lobby", t.seq, level.c_str(), t.settings.size());
             return true;
         }
@@ -983,6 +1501,7 @@ private:
         progressionHub_ = InFightLevel() && currentLevel_.find("Hub") != std::string::npos && !adapter_.FreeModeActive();
         if (progressionHub_) HSM_LOG("session: %s is the Progression hub; no fighters, the game keeps its own input", currentLevel_.c_str());
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
+        levelLoadedAt_ = NowMs();
         ui::ChatDrop("level change");   // the new level's controller starts with the game's input
         agent::VmHookFlush();
         mirror_.OnLevel();
@@ -1000,8 +1519,10 @@ private:
         oneFight_ = InFightLevel() && !adapter_.FreeModeActive();   // a client has the host's GI settings (Travel) by now
         // Fighters are built for the lobby's tier (both sides read it from the Steam lobby); MatchInfo keeps it current.
         adapter_.SetMuscleTier(steamMode() && lobby_.InLobby() && MatchLevel() ? int(lobby_.config().tier) : -1);
+        adapter_.SetBare(steamMode() && lobby_.InLobby() && MatchLevel() && !lobby_.Progression() && IsBrawl(lobby_.config()));   // Brawl: no gear on any body
         if (!InFightLevel()) RestoreFoes();
         inputFixAt_ = net_ && FighterLevel() ? NowMs() + 1500 : 0;
+        if (net_ && MatchLevel() && !bugHintShown_ && !bugHintAt_) bugHintAt_ = NowMs() + 8000;   // once the fight is under way
         probeSince_ = FighterLevel() ? std::max(NowMs(), 1u) : 0;
         severedSent_.clear(); worldTracker_ = WorldTracker{}; worldView_ = WorldView{}; jitter_.clear(); placed_.clear();
         hitKind_.clear(); fighterOfFrame_.clear(); otherActorOffset_.clear();   // the old level's classes and functions are gone
@@ -1009,7 +1530,7 @@ private:
         // Host side: every actor of the old level is gone.
         for (Fighter& f : fighters_) { f.actor.Clear(); f.input.ReleaseAll(); f.wasDead = false; }
         director_.OnLevel(FighterLevel(), NowMs(), travelSeq_);
-        serverTravelling_ = false; serverAnchor_.reset(); serverPawnSeenAt_ = serverStripAt_ = 0; serverStripped_ = 0; serverLevelAt_ = NowMs();
+        serverTravelling_ = false; serverAnchor_.reset(); serverPawnSeenAt_ = serverStripAt_ = 0; serverStripped_ = 0; anchorSearch_.OnLevel(NowMs());
         if (net_ && !IsHost()) hostLoss_.Reset(NowMs());   // the load itself froze the loop: that silence is not the host's (N1)
         bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; feed_.clear(); banner_.Reset();
         tints_.clear();
@@ -1034,7 +1555,7 @@ private:
 
     // ------------------------------------------------------------------ host
     struct Fighter { ActorRef actor; InputApplier input; bool wasDead = false; uint32_t inputsRx = 0, lastInputAt = 0; };
-    struct Peer { uint8_t slot = 0; uint64_t key = 0; BlobAssembler blobs; uint32_t helloAt = 0; ChatRateLimiter chat; std::string name, modBuild;
+    struct Peer { uint8_t slot = 0; uint64_t key = 0; BlobAssembler blobs; uint32_t helloAt = 0; ChatRateLimiter chat; MsgBudget budget; std::string name, modBuild;
                    uint32_t reportShareAt = 0; bool reportShared = false; };
     static constexpr uint32_t kHelloRepeatMs = 5000;
 
@@ -1203,11 +1724,15 @@ private:
         Timed(kPumpNet, [&] {
             NetEvent ev;
             while (net_->Poll(ev)) {
-                if (ev.kind == NetEvent::Connected) HSM_LOG("host: peer %u connected", ev.peer);
-                else if (ev.kind == NetEvent::Disconnected) OnClientLeft(ev.peer);
-                else HostReceive(ev);
+                if (ev.kind == NetEvent::Connected) { HSM_LOG("host: peer %u connected", ev.peer); helloWatch_.Connected(ev.peer, NowMs()); }
+                else if (ev.kind == NetEvent::Disconnected) {
+                    helloWatch_.Forget(ev.peer);
+                    std::erase_if(pendingDrops_, [&](const auto& d) { return d.first == ev.peer; });   // ENet reuses the id
+                    OnClientLeft(ev.peer);
+                } else HostReceive(ev);
             }
         });
+        if (peerMapDirty_) SendPeerMap();
         // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (ENet times its own peers out) (N6).
         for (uint32_t peer : peerSilence_.Expired(NowMs())) {
             auto it = peers_.find(peer);
@@ -1216,10 +1741,17 @@ private:
             net_->Disconnect(peer);
             OnClientLeft(peer);
         }
+        // M5: a peer that connected and sent no Hello holds a slot for nothing.
+        for (uint32_t peer : helloWatch_.Expired(NowMs())) {
+            if (peers_.count(peer)) continue;
+            HSM_LOG("host: peer %u sent no Hello within %u s of connecting; dropping it", peer, HelloWatch::kHelloMs / 1000);
+            net_->Disconnect(peer);
+        }
         for (uint8_t slot : reservations_.Expire(NowMs())) {
             bool back = std::any_of(peers_.begin(), peers_.end(), [&](const auto& kv) { return kv.second.slot == slot; });
             if (const RosterMember* m = roster_.BySlot(slot); m && !back) { HSM_LOG("host: slot %u did not rejoin in time", slot); RemoveMember(slot, m->key); }
         }
+        ModerationTick();
         if (IsServer()) { ServerFlowTick(); ServerAnchorTick(); }
         if (director_.fight()) SpawnDue();
         if (!OwnerMode()) for (uint8_t slot = 1; slot < kMaxFighters; ++slot) DriveRemoteFighter(slot, dt);
@@ -1339,8 +1871,35 @@ private:
             severs_.OnVitals(v, game::SteadyNowMs());
             NoteVitals(v);
         }
-        for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
-            if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanUnreliable, ev.data, false);
+        // A client that hears this sender directly (its MeshHeard mask) is skipped; with mesh off every mask is 0 and all get it.
+        const std::vector<uint8_t> all = ConnectedSlots();
+        const std::vector<uint8_t> to = RelayTargets(peer.slot, all, meshMasks_);
+        meshRelaySkipped_ += uint32_t(RelayTargets(peer.slot, all).size() - to.size());
+        for (uint8_t slot : to)
+            if (std::optional<uint32_t> p = PeerOfSlot(slot)) net_->Send(*p, kChanUnreliable, ev.data, false);
+    }
+
+    // ------------------------------------------------------------------ mesh (host side)
+    // Offered only on a Steam lobby with owner sync; ENet (direct IP) stays a star.
+    bool MeshHost() const { return cfg_.mesh && steamNet_ && OwnerMode(); }
+
+    // A client joined, left or was dropped: its own report is void, nobody hears it any more, and the clients get a new map.
+    void MeshRosterChanged(uint8_t slot) {
+        if (!MeshHost()) return;
+        meshMasks_.Reset(slot);
+        peerMapDirty_ = true;
+    }
+
+    // Every joined Steam client's slot and SteamID, to every joined client (each skips its own entry).
+    void SendPeerMap() {
+        peerMapDirty_ = false;
+        if (!MeshHost()) return;
+        std::vector<PeerMapEntry> all;
+        for (const auto& [peer, p] : peers_) if (!(p.key >> 63)) all.push_back({p.slot, p.key});
+        const PeerMapMsg m = MakePeerMap(all);
+        const std::vector<uint8_t> msg = Encode(m);
+        for (const auto& [peer, p] : peers_) net_->Send(peer, kChanReliable, msg, true);
+        HSM_LOG("host: mesh: peer map of %zu sent to %zu clients", m.peers.size(), peers_.size());
     }
 
     // The life of a client-owned fighter as its owner's vitals tell it: the host's fallback when a DeathReport is missing.
@@ -1472,25 +2031,48 @@ private:
         return true;
     }
 
-    // role=server: capture the stock pawn's place the first tick it exists in a fighter level; without a pawn 8 s after
-    // the level loaded, the level's spawners decide (ChooseAnchor); then strip the pawn so no fighter stands in the arena.
+    // role=server: capture the stock pawn's place the first tick it exists in a fighter level. Without one, from 3 s after the
+    // level loaded the sources of hsm_spawn_anchor.h decide (spawners, PlayerStart, navmesh, a traced floor; the origin after
+    // 20 s), a pass a second; the source used is logged once. Then the pawn is stripped so no fighter stands in the arena.
     void ServerAnchorTick() {
         if (!IsServer() || !FighterLevel()) return;
         const uint32_t now = NowMs();
         UObject* pawn = adapter_.PlayerWillie(0);
+        if (pawn && !serverPawnSeenAt_) serverPawnSeenAt_ = now ? now : 1;   // also one that turns up after another source anchored
         if (!serverAnchor_ && pawn) {
             const FVector v = adapter_.ActorLocation(pawn);
-            serverAnchor_ = v; serverAnchorKind_ = AnchorKind::StockPawn; serverPawnSeenAt_ = now ? now : 1;
+            serverAnchor_ = v; serverAnchorKind_ = AnchorKind::StockPawn;
             HSM_LOG("server: spawn anchor %.0f %.0f %.0f from the stock pawn in %s", v.x, v.y, v.z, currentLevel_.c_str());
         }
-        if (!serverAnchor_ && now - serverLevelAt_ >= 8000) {
-            std::vector<Point3> none;
-            const SpawnAnchor a = ChooseAnchor(std::nullopt, none, SpawnerPoints(SpawnIgnore()));
-            serverLevelAt_ = now;   // retry spacing
+        if (!serverAnchor_ && anchorSearch_.Due(now)) {
+            anchorSearch_.Passed(now);
+            const std::vector<UObject*>& ignore = SpawnIgnore();
+            AnchorSources src;
+            src.spawners = [&] { return SpawnerPoints(ignore); };
+            src.playerStarts = [&] {
+                std::vector<Point3> out;
+                for (const FVector& v : adapter_.PlayerStarts()) out.push_back({v.x, v.y, v.z});
+                return out;
+            };
+            src.navmesh = [&]() -> std::optional<Point3> {
+                FVector v;
+                if (adapter_.NavigablePoint(v)) return Point3{v.x, v.y, v.z};
+                return std::nullopt;
+            };
+            src.floor = [&]() -> std::optional<Point3> {
+                FVector v;
+                if (adapter_.StaticMeshFloor(ignore, v)) return Point3{v.x, v.y, v.z};
+                return std::nullopt;
+            };
+            const SpawnAnchor a = SearchAnchor(src, anchorSearch_.GiveUp(now));
             if (a.kind != AnchorKind::None) {
+                static const char* const kSource[] = {"the stock pawn", "a level spawner", "a PlayerStart", "a navmesh point", "a traced floor",
+                                                      "the level origin (nothing else answered in time)"};
                 serverAnchor_ = FVector{a.pos.x, a.pos.y, a.pos.z}; serverAnchorKind_ = a.kind;
-                HSM_LOG("server: spawn anchor %.0f %.0f %.0f from a level spawner in %s (no stock pawn)", a.pos.x, a.pos.y, a.pos.z, currentLevel_.c_str());
-            } else HSM_LOG("server: no stock pawn and no spawners in %s; waiting for an anchor", currentLevel_.c_str());
+                HSM_LOG("server: spawn anchor %.0f %.0f %.0f from %s in %s (no stock pawn; pass %u)", a.pos.x, a.pos.y, a.pos.z,
+                        kSource[size_t(a.kind)], currentLevel_.c_str(), anchorSearch_.passes());
+                if (a.kind == AnchorKind::Origin) HSM_LOG("server: WARNING %s has no pawn, spawner, PlayerStart, navmesh or static mesh floor; fighters are placed around the origin", currentLevel_.c_str());
+            } else if (anchorSearch_.passes() == 1) HSM_LOG("server: no stock pawn and no spawner, PlayerStart, navmesh point or floor yet in %s; trying again each second", currentLevel_.c_str());
         }
         // The stock pawn goes 3 s after it was seen (the level start-up cleanup is over), once per second, at most 5 times.
         if (pawn && serverPawnSeenAt_ && now - serverPawnSeenAt_ >= 3000 && now - serverStripAt_ >= 1000 && serverStripped_ < 5) {
@@ -1674,6 +2256,9 @@ private:
         if (localFighter_ && !host) return;             // the stock spawner has not placed the host yet
         if (!localFighter_) { FVector ap; AnchorKind ak; if (!HostAnchor(ap, ak)) return; }   // role=server: wait for the anchor
         for (uint8_t slot : due) {
+            // K1/K2: a rejoiner the match counts down gets its body from the match's respawn (RespawnEntity), not at once:
+            // it was invulnerable (hits on a fighter the match counts dead are ignored) for the rest of the round.
+            if (slot != 0 && match_.AwaitsRespawn(Roster::EntityForSlot(slot))) continue;
             Spawn sp; sp.entity = Roster::EntityForSlot(slot); sp.ownerSlot = slot; sp.kind = EntityKind::Fighter;
             sp.team = TeamOfSlot(slot); sp.life = lifeBook_.Bump(sp.entity);
             FVector at; double yaw = 0;
@@ -1750,6 +2335,15 @@ private:
         }
     }
 
+    // M3: a message over its class's budget was dropped; the first few of a class (then every 2000th) are logged.
+    void BudgetDropped(const MsgBudget& b, MsgType t, const char* who, unsigned slot) {
+        const BudgetClass c = BudgetClassOf(t);
+        ++streamsDropped_;
+        if (MsgBudget::ShouldLog(b.Dropped(c)))
+            HSM_LOG("%s: %s traffic from slot %u is over its budget; %llu %s messages dropped so far", who, MsgBudget::ClassName(c), slot,
+                    static_cast<unsigned long long>(b.Dropped(c)), MsgBudget::ClassName(c));
+    }
+
     void HostReceive(const NetEvent& ev) {
         peerSilence_.Seen(ev.peer, NowMs());
         const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
@@ -1764,6 +2358,7 @@ private:
         auto it = peers_.find(ev.peer);
         if (it == peers_.end()) return;                // nothing but Hello/Ping before Welcome
         Peer& peer = it->second;
+        if (!peer.budget.Allow(t, NowMs())) { BudgetDropped(peer.budget, t, "host", peer.slot); return; }   // M3: a flood ends here, unrelayed
         if (OwnerMode() && (t == MsgType::Pose || t == MsgType::Vitals)) {
             HostOwnerStream(ev, peer, t);
         } else if (OwnerMode() && t == MsgType::HitClaim) {
@@ -1781,7 +2376,7 @@ private:
             RouteHostStuck(peer.slot, m);
         } else if (OwnerMode() && t == MsgType::PaintFx) {
             combat::PaintFxMsg m;
-            if (!Decode(d, n, m)) { ++streamsDropped_; return; }
+            if (!Decode(d, n, m) || !fx_.Accept(m)) { ++streamsDropped_; return; }   // names and rate (M1, M2, M7): before it is applied or relayed
             if (combat::IsStripRequest(m)) {
                 // A strip of a fighter the sender does not own goes to that fighter's owner alone, who checks it is fallen.
                 const uint8_t owner = OwnerSlotOf(m.entity);
@@ -1811,7 +2406,12 @@ private:
                 for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                     if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanUnreliable, ev.data, false);
         } else if (OwnerMode() && t == MsgType::PropLease) {
-            props_.OnPropLease(d, n, peer.slot);          // LeaseFromPeerOk inside; Grants go out reliable to everyone
+            // A client that has not reported Ready for this travel is still in the previous level: what it asked for there
+            // is not granted here (W6; LeaseSeqCurrent).
+            if (LeaseSeqCurrent(peer.slot, director_.ReadySeq(peer.slot), travelSeq_))
+                props_.OnPropLease(d, n, peer.slot);      // LeaseFromPeerOk inside; Grants go out reliable to everyone
+            else
+                ++streamsDropped_;
         } else if (OwnerMode() && t == MsgType::DeathReport) {
             DeathReport r; Decode(d, n, r);
             if (MayStream(peer.slot, r.victim) && StaleLife(r.victim, r.victimLife)) return;   // F3: a late report must not kill the next body
@@ -1823,6 +2423,11 @@ private:
             GiveUpMsg g;
             if (!Decode(d, n, g) || !MayStream(peer.slot, g.entity)) { ++streamsDropped_; return; }
             HandleGiveUp(g.entity, NowMs());
+        } else if (t == MsgType::MeshHeard) {
+            MeshHeardMsg m;
+            if (!MeshHost() || !Decode(d, n, m)) return;   // 0.6.5 behaviour: the host relays everything
+            meshMasks_.Set(peer.slot, m.mask);
+            HSM_LOG("host: mesh: slot %u hears 0x%02x directly", peer.slot, m.mask);
         } else if (t == MsgType::Input) {
             if (OwnerMode()) return;                    // every owner plays its own fighter
             InputFrame f; Decode(d, n, f);
@@ -1842,6 +2447,7 @@ private:
         } else if (t == MsgType::Chat) {
             ChatLine c; Decode(d, n, c);
             if (!peer.chat.Allow(NowMs())) return;
+            if (ModerationLine(c.text, ev.peer, false)) return;   // /kick, /ban, /votekick, /yes...: answered, not chat
             c.fromSlot = peer.slot;
             net_->Broadcast(kChanReliable, Encode(c), true);
             ui::ShowLine(NameOfSlot(peer.slot), ChatNameInk(info_, Roster::EntityForSlot(peer.slot)), c.text);
@@ -1872,6 +2478,7 @@ private:
     }
 
     void OnHello(const NetEvent& ev) {
+        helloWatch_.Hello(ev.peer);
         Hello h;
         if (!Decode(ev.data.data(), ev.data.size(), h)) {        // another revision: only its header revision is readable
             h = Hello{}; h.revision = ev.data.size() > 2 ? ev.data[2] : 0;
@@ -1888,6 +2495,7 @@ private:
         uint64_t key = ev.steamId ? ev.steamId : (uint64_t(1) << 63) | ev.peer;
         if (h.revision != kProtocolRevision) r.reason = RejectReason::BadRevision;
         else if (h.buildKey != BuildKey()) r.reason = RejectReason::BuildMismatch;
+        else if (const BanEntry* b = BannedEntry(ev)) r.reason = b->kick ? RejectReason::Kicked : RejectReason::Banned;
         else if (!(slot = roster_.Add(key, h.name))) r.reason = RejectReason::Full;
         if (slot && reservations_.Claim(key, NowMs())) {        // rejoin: score kept, fighter respawns fresh
             HSM_LOG("host: slot %u rejoined within its reservation", *slot);
@@ -1905,14 +2513,14 @@ private:
         if (!slot) {
             HSM_LOG("host: rejecting peer %u (reason %d; its revision %u build %016llx, ours %u build %016llx)", ev.peer, int(r.reason),
                     h.revision, (unsigned long long)h.buildKey, kProtocolRevision, (unsigned long long)BuildKey());
-            net_->Send(ev.peer, kChanReliable, Encode(r), true);
-            net_->Disconnect(ev.peer);
+            RejectPeer(ev.peer, r.reason);
             return;
         }
         // A reconnect can arrive before the old connection's Disconnected: forget the stale peer so its late
         // disconnect does not remove the member's fighter.
         std::erase_if(peers_, [&](const auto& kv) { return kv.first != ev.peer && kv.second.key == key; });
         Peer& p = peers_[ev.peer]; p = Peer{}; p.slot = *slot; p.key = key; p.helloAt = NowMs(); p.name = util::StripControlChars(h.name); p.modBuild = h.modBuild;
+        MeshRosterChanged(*slot);
         if (h.modBuild != game::ModBuild())
             HSM_LOG("host: slot %u (%s) runs mod build '%s', ours '%s'", *slot, h.name.c_str(), h.modBuild.c_str(), game::ModBuild().c_str());
         fighters_[*slot].input.ReleaseAll();
@@ -1921,6 +2529,7 @@ private:
         Welcome w; w.sessionId = sessionId_; w.slot = *slot; w.entity = Roster::EntityForSlot(*slot);
         w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(syncMode_); w.modBuild = game::ModBuild();
         if (IsServer()) w.flags |= kWelcomeNoHostFighter;   // role=server: no host fighter to spectate or score
+        if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
         net_->Send(ev.peer, kChanReliable, Encode(w), true);
         SendAllBlobs(ev.peer);
         if (InFightLevel()) {                          // late joiner: follow the host into the running level
@@ -1940,7 +2549,9 @@ private:
         if (it == peers_.end()) return;
         uint8_t slot = it->second.slot;
         uint64_t key = it->second.key;
+        vote_.Left(key);
         peers_.erase(it);
+        MeshRosterChanged(slot);
         if (OwnerMode()) props_.SlotLeft(slot);
         bool steamKey = !(key >> 63);
         if (match_.phase() != MatchPhase::Idle && steamKey && reservations_.Reserve(key, slot, NowMs())) {
@@ -2169,7 +2780,7 @@ private:
 
     // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
     MatchConfig StartConfig() {
-        MatchConfig cfg = steamMode() ? lobby_.config() : IsServer() ? ServerMatchConfig() : MatchConfig{};
+        MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? lobby_.config() : MatchConfig{};
         if (!adapter_.FreeModeActive()) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
         if (cfg.format == Format::Duel) cfg.friendlyFire = true;   // two fighters, no teams: every hit counts
         return cfg;
@@ -2191,7 +2802,8 @@ private:
         match_.Start(cfg, list, NowMs());
         kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression; looted_.clear();
         respawnQueue_.clear();
-        Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own and bot formats
+        Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own, Brawl and bot formats
+        adapter_.SetBare(IsBrawl(match_.config()));      // every body from the match start on (RespawnAll below) comes up bare
         progression_ = progression; oneFight_ = progression;
         sidesValid_ = false;
         HSM_LOG("host: match started (format %d, limit %u, time %us, friendly fire %s)%s", int(cfg.format), cfg.scoreLimit, cfg.timeLimitS,
@@ -2202,12 +2814,25 @@ private:
         RespawnAll();   // team sides / generated loadouts take effect; F2: and everyone starts alive in the arena's start spots, own gear too
     }
 
-    // role=server: the lobby-less loop (session/hsm_autoflow.h). Announcements are chat lines from slot 0, which the
-    // clients show as Player 1; the text carries [Server] so they read as the server's.
-    void ServerSay(const std::string& text) {
-        ChatLine c; c.fromSlot = 0; c.text = SanitizeChat("[Server] " + text);
-        if (!c.text.empty() && net_) net_->Broadcast(kChanReliable, Encode(c), true);
+    // role=server: the lobby-less loop (session/hsm_autoflow.h). Announcements are SERVER chat lines (ServerSay).
+    // Keeps the public lobby up: opens it once Steam is ready, reopens it if it is lost, and publishes the server's
+    // match settings so the lobby browser and the members' lobby page show them.
+    void ServerLobbyTick() {
+        const uint32_t now = NowMs();
+        if (lobby_.state() == game::Lobby::State::Idle && DueAt(now, serverLobbyAt_)) {
+            serverLobbyAt_ = now + 15000;
+            HSM_LOG("server: opening a public Steam lobby");
+            lobby_.Host(steam::LobbyType::Public);
+        }
+        if (lobby_.IsHost() && DueAt(now, serverConfigAt_)) {
+            serverConfigAt_ = now + 5000;
+            lobby_.SetConfig(ServerMatchConfig());
+            // The browser shows the server's name (name= in HSMMod.ini) instead of "<account>'s fight".
+            const std::string shown = cfg_.playerName.empty() || cfg_.playerName == "Player" ? MyName() + " (server)" : cfg_.playerName;
+            if (steam::LobbyData(lobby_.id(), "name") != shown) steam::SetLobbyData(lobby_.id(), "name", shown);
+        }
     }
+
     void ServerFlowTick() {
         if (!flow_) {
             std::vector<std::string> unknown;
@@ -2255,6 +2880,7 @@ private:
         }
         if (DueAt(now, nextScan_)) { nextScan_ = now + kScanIntervalMs; ScanStockWillies(); }
         DetectDeaths(now);
+        GiveUpFallbackTick(now);
         Match::Events ev = match_.Tick(now);
         if (ev.live || ev.ended || ev.rematch || ev.waveStarted || ev.waveCleared || ev.roundReset) infoDirty_ = true;
         if (ev.waveStarted) HSM_LOG("host: wave %d starts (%d bots)", match_.wave() + 1, match_.botsLeft());
@@ -2436,19 +3062,32 @@ private:
             infoDirty_ = true;
             return;
         }
-        if (match_.config().format != Format::Duel) {      // free-for-all / teams: the downed fighter's own death follows
-            if (RespawnQueued(e) || !match_.Alive(e)) { HSM_LOG("match: #%u held G, but it is dead or waiting to respawn", e); return; }
-            gaveUp_[e] = now;                              // HandleDeath scores that death as a give-up (flag 8)
-            HSM_LOG("match: #%u gives up (downed)", e);
-            return;
+        // Free-for-all, teams and Duel: G ends the fighter's life (its owner calls Death right after sending this). The
+        // death that follows within kGaveUpWindowMs is scored as a give-up: the last attacker within a minute gets the
+        // kill (in a Duel the round too), nobody otherwise. GiveUpFallbackTick ends it here if no death arrives.
+        if (RespawnQueued(e) || !match_.Alive(e)) { HSM_LOG("match: #%u held G, but it is dead or waiting to respawn", e); return; }   // F6
+        if (match_.config().format == Format::Duel && !match_.RoundInPlay()) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
+        gaveUp_[e] = now;                                  // HandleDeath scores that death as a give-up (flag 8)
+        HSM_LOG("match: #%u gives up (last attacker #%u)", e, kills_.KillerOf(e, now));
+    }
+
+    // A give-up whose death never came (the game's Death call did nothing, or the owner's report was lost): the host
+    // scores it anyway once the window has passed, so G always ends the fight for that fighter.
+    void GiveUpFallbackTick(uint32_t now) {
+        for (auto it = gaveUp_.begin(); it != gaveUp_.end();) {
+            const uint8_t e = it->first;
+            if (GaveUpDeath(it->second, now)) { ++it; continue; }
+            it = gaveUp_.erase(it);
+            if (!match_.Alive(e) || RespawnQueued(e)) continue;
+            HSM_LOG("match: #%u gave up but no death followed in %u ms; scoring it now", e, unsigned(kGaveUpWindowMs));
+            uint8_t killer = kills_.KillerOf(e, now);
+            if (killer == e) killer = 0;
+            match_.OnDeath(e, killer, now);
+            Kill k; k.killer = killer; k.victim = e; k.flags = 8;
+            net_->Broadcast(kChanReliable, Encode(k), true);
+            PushFeed(k);
+            infoDirty_ = true;
         }
-        if (RespawnQueued(e)) { HSM_LOG("match: #%u held G, but the new round has not reached it yet", e); return; }   // F6
-        if (!match_.Forfeit(e, now)) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
-        HSM_LOG("match: #%u gave up the round", e);
-        Kill k; k.victim = e; k.flags = 8;
-        net_->Broadcast(kChanReliable, Encode(k), true);
-        PushFeed(k);
-        infoDirty_ = true;
     }
 
     // Duel's new round, and free-for-all and teams' rematch, start without the weapons and armour pieces dropped before
@@ -2507,22 +3146,17 @@ private:
         const bool fought = mi.phase == uint8_t(MatchPhase::Live) || mi.phase == uint8_t(MatchPhase::SuddenDeath);
         UObject* own = adapter_.PlayerWillie(0);
         const bool duelFmt = mi.format == uint8_t(Format::Duel) && fought;
-        const bool duel = duelFmt && !InRoundGap(mi) && own && !adapter_.IsDead(own) && EntityAlive(MyEntity());
+        const bool alive = own && !adapter_.IsDead(own) && EntityAlive(MyEntity());
+        // Free-for-all, teams and Duel: G ends this life at any time, downed or not (the game's knocked-down flags were
+        // missed in the pre1 test); the death path credits the last attacker.
+        const bool pvp = fought && !IsBotFormat(Format(mi.format)) && !(duelFmt && InRoundGap(mi)) && alive;
         const bool skip = InWaveBreak(mi);
         // Progression co-op: the stock give-up screen is suppressed, so a downed player gives up with G instead.
-        const bool coop = oneFight_ && mi.format == uint8_t(Format::PlayersVsBots) && fought && !skip && own &&
-                          !adapter_.IsDead(own) && EntityAlive(MyEntity());
-        // P5: free-for-all and teams, alive but downed (fallen or knocked out): G ends the life (TriggerDeath below).
-        bool ffa = false;
-        if (fought && !IsBotFormat(Format(mi.format)) && mi.format != uint8_t(Format::Duel) && own && !adapter_.IsDead(own) &&
-            EntityAlive(MyEntity())) {
-            VitalsMsg v;
-            ffa = adapter_.ReadVitals(own, MyEntity(), v) && (v.flags & (2 | 4)) != 0;
-        }
+        const bool coop = oneFight_ && mi.format == uint8_t(Format::PlayersVsBots) && fought && !skip && alive;
         // F6: G while out of the fight (queued for the next round / dead) used to be dropped silently.
-        const bool waiting = fought && !skip && !duel && !coop && !ffa &&
+        const bool waiting = fought && !skip && !pvp && !coop &&
                              (duelFmt ? InRoundGap(mi) : (!own || adapter_.IsDead(own) || ownDeadPending_));
-        if (MatchLevel() && (duel || skip || coop || ffa || waiting) && !ui::Typing()) {
+        if (MatchLevel() && (pvp || skip || coop || waiting) && !ui::Typing()) {
             if (GetAsyncKeyState('G') & 0x8000) {   // the key first: asking whose window is in front is the dearer call
                 DWORD pid = 0;
                 if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
@@ -2539,10 +3173,10 @@ private:
         if (!giveUp_.Update(down, now)) return;
         const uint8_t me = MyEntity();
         HSM_LOG("match: G held %u ms: %s (#%u)", unsigned(GiveUpHold::kHoldMs),
-                skip ? "voting to skip the break" : coop ? "giving up the fight" : ffa ? "giving up (downed)" : "giving up the round", me);
+                skip ? "voting to skip the break" : coop ? "giving up the fight" : "giving up", me);
         if (IsHost()) HandleGiveUp(me, now);
         else if (hostPeer_) { GiveUpMsg g; g.entity = me; net_->Send(hostPeer_, kChanReliable, Encode(g), true); }
-        if (ffa && own) adapter_.TriggerDeath(own);        // the normal death path: ReportOwnDeath / DetectDeaths credit the attacker
+        if (pvp && own) adapter_.TriggerDeath(own);        // the normal death path: ReportOwnDeath / DetectDeaths credit the attacker
     }
 
     // Team side point for a (re)spawn, farthest from living enemies; each entity has its own spread slot around it
@@ -2843,6 +3477,7 @@ private:
         if (!dead && !ownDeadPending_) ownDiedAt_ = 0;
         LocalHud l;
         l.me = MyEntity();
+        l.host = hostHasFighter_ ? Roster::EntityForSlot(kHostSlot) : uint8_t(0);   // no HOST badge when the host has no fighter
         l.infoAtMs = infoAt_;            // MatchInfo comes once a second; the scene runs its clocks on between
         l.dead = ownDiedAt_ != 0; l.diedAtMs = ownDiedAt_;
         l.tab = ui::HudTabHeld();
@@ -2860,16 +3495,44 @@ private:
         std::vector<NameTagSrc> out;
         if (!cfg_.nameTags || !hud.visible || !MatchLevel()) return out;
         const uint8_t me = MyEntity();
+        const uint32_t now = NowMs();
+        tagSight_.Begin(now);
+        FVector eye; int eyeKnown = -1;   // the camera, asked for once a frame and only when a trace is due
         for (const FighterEntry& f : info_.fighters) {
             if (f.entity == me || !f.alive || f.name.empty() || out.size() >= 16) continue;
             UObject* actor = IsHost() ? EntityActor(f.entity) : ClientActor(f.entity);
             FVector head;
             if (!actor || !adapter_.BoneLocation(actor, "head", head)) continue;
+            if (tagSight_.Due(f.entity)) {
+                if (eyeKnown < 0) eyeKnown = adapter_.CameraLocation(eye) ? 1 : 0;
+                // Our own body and the target's, with their weapons and armour, must not hide the tag. No camera: shown.
+                bool clear = true;
+                if (eyeKnown) {
+                    std::vector<UObject*> skip = adapter_.CarriedActors(actor);
+                    skip.push_back(actor);
+                    if (UObject* own = adapter_.PlayerWillie(0)) { for (UObject* c : adapter_.CarriedActors(own)) skip.push_back(c); skip.push_back(own); }
+                    clear = adapter_.LineClear(eye, {head.x, head.y, head.z + 10.0}, skip);
+                }
+                tagSight_.Report(f.entity, clear);
+                CountTagTrace(now);
+            }
             NameTagSrc t;
             t.name = f.name; t.wx = head.x; t.wy = head.y; t.wz = head.z + 25.0; t.team = f.team; t.alive = f.alive;
+            t.seen = tagSight_.Seen(f.entity);
             out.push_back(std::move(t));
         }
         return out;
+    }
+
+    // One log line, after the first second of name tag traces: the cost of the wall test.
+    void CountTagTrace(uint32_t now) {
+        if (tagTraceLogged_) return;
+        if (!tagTraces_) tagTraceSince_ = now;
+        ++tagTraces_;
+        if (now - tagTraceSince_ < 1000) return;
+        tagTraceLogged_ = true;
+        HSM_LOG("tags: wall test does %.1f traces/s for %zu fighter(s) (at most %d a frame, %u ms apart per fighter)",
+                tagTraces_ * 1000.0 / double(now - tagTraceSince_), tagSight_.Tracked(), kOcclusionPerFrame, kOcclusionIntervalMs);
     }
 
     // Dead and waiting: watch living fighters (teammates first); Left/Right arrows cycle.
@@ -2877,11 +3540,11 @@ private:
         UObject* own = adapter_.PlayerWillie(0);
         // ownDeadPending_ also marks "my fighter has not arrived yet" at a level start: only a death counts (V3).
         bool watching = MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle) && info_.phase != uint8_t(MatchPhase::Results)
-                        && (!own || adapter_.IsDead(own) || (ownDeadPending_ && ownDiedAt_ != 0));
+                        && (!own || adapter_.IsDead(own) || (ownDeadPending_ && (ownDiedAt_ != 0 || HostCountsMeDown())));
         if (!watching) {
             if (spectating_) {
                 // A failed reset keeps the state so the next tick tries again (V4).
-                if (game::ResetViewToPawn(adapter_) || !own) { spectating_ = 0; spectateActor_ = nullptr; spectateIndex_ = -1; }
+                if (game::ResetViewToPawn(adapter_) || !own) { spectating_ = 0; spectateActor_ = nullptr; spectateIndex_ = -1; game::EndFollowCamera(adapter_); }
             }
             return;
         }
@@ -2890,6 +3553,7 @@ private:
         std::vector<SpectateCycler::Candidate> cands;
         for (const FighterEntry& f : info_.fighters) {
             if (f.entity == me) { myTeam = f.team; continue; }
+            if (NoSuchFighter(f.entity)) continue;   // the host has none to watch
             cands.push_back({f.entity, f.team, EntityAlive(f.entity)});
         }
         spectate_.Refresh(me, myTeam, cands);
@@ -2907,11 +3571,23 @@ private:
         std::optional<uint8_t> target = spectate_.Target();
         UObject* actor = target ? (IsHost() ? EntityActor(*target) : ClientActor(*target)) : nullptr;
         const uint32_t now = NowMs();
-        // Re-applied on a new actor and every 500 ms: the game resets the camera on its own events (V2).
-        if (actor && ShouldApplyView(actor != spectateActor_ ? -1 : int(*target), int(spectating_), spectateApplyAt_, now)
-            && game::SetViewTarget(adapter_, actor, actor != spectateActor_ ? 0.4f : 0.0f)) {
+        // Our follow camera, moved every frame, is the view target: re-applied on a new fighter and every 500 ms, since
+        // the game resets the camera on its own events (V2).
+        const bool fresh = actor != spectateActor_;
+        UObject* cam = actor ? game::FollowCamera(adapter_, actor, fresh, float(uint32_t(now - spectateMovedAt_)) / 1000.0f) : nullptr;
+        spectateMovedAt_ = now;
+        if (cam && ShouldApplyView(fresh ? -1 : int(*target), int(spectating_), spectateApplyAt_, now)
+            && game::SetViewTarget(adapter_, cam, 0.0f)) {
             spectating_ = *target; spectateActor_ = actor; spectateIndex_ = ObjectIndex(actor); spectateApplyAt_ = now;
         }
+    }
+
+    // K1/K2: a rejoiner the host holds down until the next round has no fighter announced yet (ownDeadPending_ stays set) and
+    // is listed dead: it watches the others meanwhile.
+    bool HostCountsMeDown() const {
+        if (IsHost() || !world_.myEntity()) return false;
+        for (const FighterEntry& f : info_.fighters) if (f.entity == world_.myEntity()) return !f.alive;
+        return false;
     }
 
     bool EntityAlive(uint8_t e) {
@@ -2929,7 +3605,7 @@ private:
         ownRespawn_.Begin();
         placed_.erase(world_.myEntity());
         const std::vector<uint8_t>* assigned = sp.blobId ? clientBlobs_.Get(sp.blobId) : nullptr;   // e.g. generated gear
-        bool generated = info_.gear != uint8_t(Gear::Own);   // own gear: the Spawn names this client's upload, never relayed back
+        bool generated = info_.gear != uint8_t(Gear::Own) && info_.gear != uint8_t(Gear::Fists);   // own gear (and Brawl, stripped at the spawn): the Spawn names this client's upload, never relayed back
         if (generated && sp.blobId && !assigned)
             HSM_LOG("client: own Spawn names loadout %08x, which has not arrived; respawning in the uploaded loadout", sp.blobId);
         if (!retry && generated && assigned && ownBlob_ && sp.blobId != ownBlob_) NewGearNotice(info_.tier);
@@ -2989,22 +3665,38 @@ private:
         game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
+    // N3: a direct-IP client whose host closed, timed out or never answered, outside a fight level: leave the session
+    // (the netcode, the "joined" state) and say why on the multiplayer page.
+    void LeaveUnreachableHost() {
+        const char* msg = hostWasThere_ ? "The host is gone. You left the session." : "Could not reach the host.";
+        HSM_LOG("client: %s", msg);
+        hostUnreachable_ = hostWasThere_ = false;
+        ResetNetwork("host gone");
+        ui::ShowLine("HSMMod", style::kBone, msg);
+        notice_ = msg;
+    }
+
     void ClientTick(float dt) {
         bool hostGone = false;
         bodyWork_ = false;
         Timed(kPumpNet, [&] {
             NetEvent ev;
             while (!bodyWork_ && net_->Poll(ev)) {   // the rest of the queue waits for the next frame (bodyWork_)
+                if (!FromHost(ev)) { MeshEvent(ev); continue; }   // another client's session or stream, never the host's
                 if (ev.kind == NetEvent::Connected) {
                     hostPeer_ = ev.peer;
+                    hostBudget_ = MsgBudget{double(kMaxWillies)};   // what the host sends one client carries every fighter's streams
                     SendHello();
                 } else if (ev.kind == NetEvent::Disconnected) {
                     HSM_LOG("client: disconnected from host");
-                    if (welcomed_ && InFightLevel()) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
+                    const DisconnectAction act = ClientDisconnectAction(steamMode(), welcomed_, InFightLevel());
+                    if (act == DisconnectAction::HostLossMonitor) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
+                    else if (act == DisconnectAction::Leave) { hostUnreachable_ = true; hostWasThere_ = welcomed_; }
                     welcomed_ = false; hostPeer_ = 0;
                 } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
             }
         });
+        if (meshOn_ && welcomed_) MeshTick();
         // Only fights have steady host traffic (snapshots); menus, the Progression hub and loading screens never count
         // as silence.
         if (welcomed_ && FighterLevel()) {
@@ -3012,7 +3704,9 @@ private:
             if (a == HostLossAction::ShowReconnecting) HSM_LOG("client: host silent; waiting for it to come back");
             hostGone = hostGone || a == HostLossAction::ReturnToMenu;
         } else hostLoss_.OnPacket(NowMs());
+        if (rejected_) { const RejectReason why = *rejected_; rejected_.reset(); OnRejected(why); return; }
         if (hostGone) { ReturnToMenuAfterHostLoss(); return; }
+        if (hostUnreachable_) { LeaveUnreachableHost(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
         if (!welcomed_ || !FighterLevel()) { myWillie_.store(nullptr); return; }
         if (OwnerMode() && !ClientGateOpen()) { myWillie_.store(adapter_.PlayerWillie(0)); return; }
@@ -3121,7 +3815,10 @@ private:
         std::vector<std::pair<uint8_t, UObject*>> owned;
         if (me && mine && snappedOwn_) owned.push_back({mine, me});
         Timed(kPumpStreams, [&] {
-            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false); });
+            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) {
+                if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false);
+                for (uint32_t p : meshSend_) net_->Send(p, kChanUnreliable, b, false);   // Pose and Vitals also go straight to the other clients
+            });
             ReportOwnDeath(me, now);
         });
         Timed(kPumpServo, [&] { standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned)); });
@@ -3238,23 +3935,83 @@ private:
         HSM_LOG("client: loadout sent (%zu bytes, %zu chunks)", bytes.size(), chunks.size());
     }
 
+    // ------------------------------------------------------------------ mesh (client side)
+    // Whether an event is the host's session or stream. Only the lobby owner's Steam ID is the host; every other peer a
+    // Steam client has is a mesh peer the host's PeerMap named. ENet clients have the host alone.
+    bool FromHost(const NetEvent& ev) const { return !steamNet_ || ev.steamId == hostSteam_; }
+
+    void RefreshMeshSend() { meshSend_ = meshPeers_.Peers(); }
+
+    // The host's roster of mesh peers: allow the new ones (both ends allow each other, so SteamTransport admits them),
+    // close the ones that went, and report what is heard again.
+    void ApplyPeerMap(const PeerMapMsg& m) {
+        const MeshPeers::Change c = meshPeers_.Apply(m, mySlot_, steam::MySteamId(), hostSteam_);
+        for (uint64_t id : c.drop) steamNet_->DropPeer(id);
+        for (uint64_t id : c.want) meshPeers_.Bind(id, steamNet_->AllowPeer(id));
+        RefreshMeshSend();
+        meshHearing_.Invalidate();
+        HSM_LOG("client: mesh: %zu direct peers (%zu new, %zu gone)", meshPeers_.Named(), c.want.size(), c.drop.size());
+    }
+
+    // Anything but the host's own traffic: a peer connecting or going, or a stream straight from another client. Only a
+    // Pose or Vitals of the entity that peer's slot owns is used; everything else is dropped and counted.
+    void MeshEvent(const NetEvent& ev) {
+        if (ev.kind == NetEvent::Connected) return;
+        if (ev.kind == NetEvent::Disconnected) { meshPeers_.ForgetPeer(ev.peer); RefreshMeshSend(); return; }
+        const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
+        const uint8_t slot = meshPeers_.SlotOfPeer(ev.peer);
+        MsgType t;
+        if (!meshOn_ || slot == 0xFF || !PeekType(d, n, t) || (t != MsgType::Pose && t != MsgType::Vitals)) { ++meshDropped_; return; }
+        if (t == MsgType::Pose) {
+            PoseMsg m; sync::PoseFrame frame;
+            if (!Decode(d, n, m, &frame) || !MayStream(slot, m.entity)) { ++meshDropped_; return; }
+            standIns_.OnPose(m, frame, ArrivalMs(ev));
+        } else {
+            VitalsMsg v;
+            if (!Decode(d, n, v) || !MayStream(slot, v.entity)) { ++meshDropped_; return; }
+            standIns_.OnVitals(v);
+            gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
+            severs_.OnVitals(v, game::SteadyNowMs());
+        }
+        meshHearing_.Note(slot, NowMs());
+        ++meshRx_;
+    }
+
+    // Tells the host which slots arrive directly (held 2 s after the last packet, at most one report a second), so it
+    // relays the others as before.
+    void MeshTick() {
+        uint8_t mask = 0;
+        if (hostPeer_ && meshHearing_.TakeChange(NowMs(), &mask)) {
+            MeshHeardMsg m; m.mask = mask;
+            net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+            HSM_LOG("client: mesh: hearing 0x%02x directly", mask);
+        }
+    }
+
     void ClientReceive(const NetEvent& ev) {
         const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
         MsgType t; PeekType(d, n, t);
+        if (!hostBudget_.Allow(t, NowMs())) { BudgetDropped(hostBudget_, t, "client", kHostSlot); return; }   // M3: a hostile host's flood
         switch (t) {
             case MsgType::Welcome: {
                 Welcome w; Decode(d, n, w);
                 welcomed_ = true; mySlot_ = w.slot; world_.SetMyEntity(w.entity); snapshotHz_ = w.snapshotHz; jitter_.clear();
                 syncMode_ = SyncMode(w.syncMode);
+                hostHasFighter_ = !(w.flags & kWelcomeNoHostFighter);
+                if (!hostHasFighter_) HSM_LOG("client: the host plays no fighter of its own (hosted server): nothing to watch, score or wait for from it");
                 HSM_LOG("client: joined session %u as slot %u (entity %u), %s sync", w.sessionId, w.slot, w.entity, OwnerMode() ? "owner" : "host");
                 if (w.modBuild != game::ModBuild())
                     HSM_LOG("client: host on mod build '%s', ours '%s' - update; the host will not start a match until both match",
                             w.modBuild.c_str(), game::ModBuild().c_str());
                 if (OwnerMode() && !streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
+                meshOn_ = cfg_.mesh && steamNet_ && OwnerMode() && (w.flags & kWelcomeMesh);
+                if (!meshOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});          // the host stopped offering it
+                meshHearing_.Invalidate();                                              // a new host-side mask table: report again
                 UploadLoadout();
                 break;
             }
-            case MsgType::Reject: { Reject r; Decode(d, n, r); HSM_LOG("client: rejected by host (reason %d)", int(r.reason)); break; }
+            case MsgType::PeerMap: { PeerMapMsg m; if (meshOn_ && Decode(d, n, m)) ApplyPeerMap(m); break; }
+            case MsgType::Reject: { Reject r; Decode(d, n, r); rejected_ = r.reason; bodyWork_ = true; break; }   // handled after the poll loop
             case MsgType::Travel: {
                 Travel tr; Decode(d, n, tr);
                 if (!TravelAllowed(tr.level, tr.options)) {   // H2: only catalog/menu levels, no options
@@ -3304,7 +4061,7 @@ private:
             }
             case MsgType::MatchInfo: {
                 MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
-                if (MatchLevel()) adapter_.SetMuscleTier(info_.tier);
+                if (MatchLevel()) { adapter_.SetMuscleTier(info_.tier); adapter_.SetBare(IsBrawl(Format(info_.format), Gear(info_.gear))); }
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
                 if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) {   // F5: after the own body's armour is on
                     dropClearPending_ = true; dropClearDue_ = NowMs() + kDropClearDelayMs; dropClearGiveUp_ = NowMs() + kDropClearGiveUpMs;
@@ -3314,7 +4071,8 @@ private:
             case MsgType::Kill: { Kill k; Decode(d, n, k); PushFeed(k); break; }
             case MsgType::Chat: {
                 ChatLine c; Decode(d, n, c);
-                ui::ShowLine(NameOfSlot(c.fromSlot), ChatNameInk(info_, Roster::EntityForSlot(c.fromSlot)), c.text);
+                if (c.fromSlot == kChatSystemSlot) ui::ShowLine("SERVER", style::kBone, c.text);
+                else ui::ShowLine(NameOfSlot(c.fromSlot), ChatNameInk(info_, Roster::EntityForSlot(c.fromSlot)), c.text);
                 break;
             }
             case MsgType::ReportShare: { ReportShareMsg m; Decode(d, n, m); if (m.fromSlot != mySlot_) OfferLog(m); break; }
@@ -3394,7 +4152,7 @@ private:
             }
             case MsgType::PaintFx: {
                 combat::PaintFxMsg m;
-                if (OwnerMode() && Decode(d, n, m) && (m.entity != world_.myEntity()) != combat::IsStripRequest(m)) fx_.Apply(m);
+                if (OwnerMode() && Decode(d, n, m) && (m.entity != world_.myEntity()) != combat::IsStripRequest(m) && fx_.Accept(m)) fx_.Apply(m);
                 break;
             }
             case MsgType::Equip: {
@@ -3443,12 +4201,14 @@ private:
     // host
     bool hostPending_ = false;
     bool serverReadyLogged_ = false;
+    uint32_t serverLobbyAt_ = 0, serverConfigAt_ = 0;   // role=server over Steam: next lobby open try, next settings push
     // role=server
     std::unique_ptr<AutoFlow> flow_;
     bool serverTravelling_ = false;                  // a map change is under way: no match starts on the old level
     std::optional<FVector> serverAnchor_;
     AnchorKind serverAnchorKind_ = AnchorKind::None;
-    uint32_t serverPawnSeenAt_ = 0, serverStripAt_ = 0, serverLevelAt_ = 0;
+    uint32_t serverPawnSeenAt_ = 0, serverStripAt_ = 0;
+    AnchorSearch anchorSearch_;
     int serverStripped_ = 0;
     Roster roster_;
     HostDirector director_;
@@ -3497,7 +4257,7 @@ private:
     std::deque<uint8_t> respawnQueue_;   // host, owner sync: entities whose respawn waits for its tick (RespawnQueued)
     uint32_t ownDiedAt_ = 0;
     GiveUpHold giveUp_;
-    std::unordered_map<uint8_t, uint32_t> gaveUp_;   // host: entity -> when it held G while downed (FFA / teams give-up)
+    std::unordered_map<uint8_t, uint32_t> gaveUp_;   // host: entity -> when it held G (free-for-all, teams, Duel)
     bool giveUpWait_ = false;                        // G is held but there is nothing to give up yet (queued for respawn / round gap)
     DropClearWatch dropWatch_;                       // Duel round / rematch: the drops are cleared (DropClearFor)
     LooseTimer looseTimer_;                          // loose armour pieces here (DropsTick)
@@ -3512,13 +4272,47 @@ private:
     uint8_t chatPhase_ = 0;   // the match phase the chat last saw (MatchPhase)
     // client
     uint32_t hostPeer_ = 0, uploadId_ = 0;
+    // Mesh (session/hsm_mesh.h). Client: hostSteam_ is the lobby owner (the only host peer); meshPeers_ the other clients the
+    // PeerMap named; meshSend_ their transport peers; meshHearing_ which of them arrive directly. Host: meshMasks_ per
+    // client, and the PeerMap goes out when the roster changed.
+    uint64_t hostSteam_ = 0;
+    bool meshOn_ = false, peerMapDirty_ = false;
+    MeshPeers meshPeers_;
+    std::vector<uint32_t> meshSend_;
+    MeshHearing meshHearing_;
+    MeshMasks meshMasks_;
+    uint32_t meshRx_ = 0, meshDropped_ = 0, meshRelaySkipped_ = 0;   // per health window
+
+    MsgBudget hostBudget_{double(kMaxWillies)};   // the client's budget for what the host sends (M3)
     bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;
+    bool hostHasFighter_ = true;   // client: false when the Welcome carried kWelcomeNoHostFighter
     // A fighter was destroyed or spawned this tick (about 60 ms each): the next one waits for the next frame. A Duel
     // round reset did four in one tick (two-player logs 8 and 9: 250 ms).
     bool bodyWork_ = false;
     uint8_t mySlot_ = 0;
     ReportOffer reportOffer_;                     // another player's report this player may add a log to
+    BanList bans_;                                // HSMMod.bans plus the short blocks of kicked players (host)
+    bool bansLoaded_ = false, adminsParsed_ = false;
+    std::vector<uint64_t> admins_;                // server_admins= (role=server)
+    VoteKick vote_;
+    std::string voteTargetName_;
+    std::vector<std::pair<uint32_t, uint32_t>> pendingDrops_;   // rejected peer, when its connection closes
+    static constexpr uint32_t kRejectLingerMs = 1000;
+    uint32_t nextConsolePoll_ = 0, nextBanPrune_ = 0;
+    std::optional<RejectReason> rejected_;
+    uint32_t bugHintAt_ = 0;   // when to show the /bug hint (0: not due)
+    bool bugHintShown_ = false;
+    std::string notice_;   // why the host turned this player away, for the multiplayer page (TakeNotice)        // client: the host's Reject, acted on after the poll loop
+    PendingShare pendingShare_;                   // a crash report filed before any session: shared with the next one
+    static constexpr size_t kCrashTailBytes = 256u << 10;   // how much of HSMMod.prev.log is read for a crash line
+    bool crashChecked_ = false, autoAttachDue_ = false;
+    std::deque<std::string> reportHeld_;          // outcome lines waiting for the chat or the multiplayer page (ReportOutcomeToPlayer)
+    std::string reportStatus_; uint32_t reportStatusSeq_ = 0;   // the last outcome told, for the menu's note
     uint32_t lastReportAt_ = 0; bool reportedOnce_ = false;
+    uint32_t sessionGen_ = 0;                     // counts sessions (bumped when one starts and when it ends)
+    uint32_t reportSession_ = 0; bool reportIsManual_ = false;   // the session the report in flight was filed in; typed by the player
+    LobbyChatGate lobbyGate_;        // incoming lobby chat, a limit per sender
+    ChatRateLimiter lobbyChatOut_;   // our own lines from the lobby chat box
     ClientWorld world_;
     BlobStore clientBlobs_;
     BlobAssembler clientAssembler_;
@@ -3528,6 +4322,7 @@ private:
     uint32_t nextGateProbe_ = 0;
     bool managerProbed_ = false;   // this level's manager seen by ClientGateOpen (its Level Load Delay logged)
     bool pauseLiftArmed_ = false;                    // LiftPauseFromWidgetTick: set per tick, cleared on travel
+    uint32_t lastPauseButton_ = 0;                   // PauseReportTick's throttle (ms)
     bool stockFlowGuard_ = false;                    // GuardStockFlow's hooks block while set (per tick)
     uint32_t stockFlowBlocked_ = 0, unpaused_ = 0;
     RecreateLimiter recreate_;                   // owner sync: lost stand-ins, both sides
@@ -3550,7 +4345,9 @@ private:
     SpawnIgnoreState spawnIgnoreState_ = SpawnIgnoreState::Outside;
     bool inFight_ = false;          // InFightLevel() cached per tick for the hit hook
     HostLossMonitor hostLoss_{0};
+    bool hostUnreachable_ = false, hostWasThere_ = false;   // N3: a direct-IP host that is gone outside a fight level
     PeerSilenceMonitor peerSilence_;
+    HelloWatch helloWatch_;
     ReservationTable reservations_;
     SeveredMasks severedSent_;
     WorldTracker worldTracker_;
@@ -3560,6 +4357,7 @@ private:
     bool groundValid_ = false, foesStopped_ = false;
     int savedFoes_ = -1;
     uint32_t probeSince_ = 0;   // InputProbeTick: when the fight level loaded, 0 once logged
+    uint32_t levelLoadedAt_ = 0;
     uint32_t inputFixAt_ = 0, nextHealth_ = 0, snapsRx_ = 0, nextHello_ = 0, hellosSent_ = 0;
     bool inputFixRepeat_ = false, pauseMenuWas_ = false;
     std::map<uint8_t, JitterBuffer<32>> jitter_;
@@ -3568,8 +4366,10 @@ private:
     uint8_t spectating_ = 0;
     UObject* spectateActor_ = nullptr;
     int32_t spectateIndex_ = -1;
-    uint32_t spectateApplyAt_ = 0;
+    uint32_t spectateApplyAt_ = 0, spectateMovedAt_ = 0;
     bool spectateKeyDown_ = false;
+    OcclusionTracker tagSight_;                  // name tags: which heads the camera sees (hsm_occlusion.h)
+    uint32_t tagTraces_ = 0, tagTraceSince_ = 0; bool tagTraceLogged_ = false;
     // agent bridge / auto-run
     std::array<Held, kAxisCount> held_{};
     bool quitRequested_ = false, automated_ = false;
@@ -3615,6 +4415,7 @@ bool StartMod(const Config& cfg) {
     game::SetStandInGripLock(cfg.standInGripLock);
     game::SetAllowBuildMismatch(cfg.allowBuildMismatch);
     report::Configure(cfg.reports, cfg.reportUrl);
+    update::Start(cfg.updateCheck);   // a worker thread; the menu page and UpdateNoticeTick show the result
     g_session = std::make_unique<SessionImpl>(cfg);
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));
@@ -3622,6 +4423,7 @@ bool StartMod(const Config& cfg) {
     // Widgets keep ticking while the game is paused: let them pump the agent bridge too, and lift a match's pause.
     HookFunctionsMatching([](const std::string& n) { return n == "Tick"; }, [](UObject*, UFunction*, void*) {
         g_session->LiftPauseFromWidgetTick();
+        g_session->PauseReportTick();
         g_session->PumpAgentEarly();
         return false;
     });

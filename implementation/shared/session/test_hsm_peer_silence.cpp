@@ -29,6 +29,12 @@ int main() {
     CHECK(d.Due(170) == std::vector<uint8_t>({0, 1}));
     d.OnLevel(true, 200, 8); d.OnReady(1, 8, 210);      // the unchecked form (current seq 0) as before
     CHECK(d.Due(220) == std::vector<uint8_t>({0, 1}));
+    CHECK(d.ReadySeq(1) == 8 && d.ReadySeq(0) == 0 && d.ReadySeq(9) == 0);    // what the lease gate compares (W6)
+    d.OnLevel(true, 300, 9);
+    d.OnReady(1, 8, 310, 9);                                                  // a late Ready from travel #8: noted, not current
+    CHECK(d.ReadySeq(1) == 8);
+    d.OnReady(1, 9, 320, 9);
+    CHECK(d.ReadySeq(1) == 9);
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("hsm_peer_silence ok");
     return 0;

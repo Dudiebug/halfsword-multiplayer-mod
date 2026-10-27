@@ -58,6 +58,7 @@ void FlushReflectionCache();
 struct ReflectionCacheStats { uint64_t hits = 0, misses = 0, dropped = 0; size_t structs = 0; };
 ReflectionCacheStats GetReflectionCacheStats();
 FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix); // user-defined struct members carry _N_GUID suffixes
+std::vector<FProperty*> StructProperties(const void* ustruct);                  // the struct's own members (not its supers'), in declaration order
 // Native script structs (USTRUCTs such as SlateFontInfo) by name, and their members (super structs' included), so a
 // struct's layout is read from the running build rather than hard-coded. tools/check_reflection.py checks every
 // struct and member name the mod passes to them.
@@ -79,7 +80,8 @@ bool IsScriptFunction(const UFunction* f);          // Func is this build's Proc
 void* ScriptExecutorAddress();
 
 // Calling and field access -----------------------------------------------------
-void ProcessEvent(UObject* obj, UFunction* fn, void* params);
+// False (nothing called) when obj is not an object any more: a pointer kept past its object's life.
+bool ProcessEvent(UObject* obj, UFunction* fn, void* params);
 
 // Typed member access by reflected property name. Returns nullptr when the property is missing.
 void* FieldPtr(UObject* obj, const std::string& property);

@@ -14,6 +14,7 @@ namespace {
 
 constexpr ULONGLONG kScanEveryMs = 1000;
 constexpr uint32_t kRepeatDelayMs = 400, kRepeatEveryMs = 60;
+constexpr uint32_t kPendingMs = 5000;                          // how long ChatOpenWith waits for the chat to be openable
 constexpr int kZOrder = 60;
 constexpr float kWidth = 620;                                  // the panel's width: longer lines wrap
 constexpr Rgba kInputBack{0.02f, 0.017f, 0.014f, 0.92f};
@@ -48,6 +49,9 @@ struct Data {
     bool hudShown = false; uint32_t hudAt = 0;   // the match HUD's last state, and when it came up (the idle hint)
     uint32_t typingAt = 0;                  // the caret's phase: when the line opened or was last typed into
     bool refused = false; uint32_t refusedAt = 0;   // the last Enter was refused by the rate limiter ("slow down")
+    bool lobbyTyping = false;               // the multiplayer page's chat box has the keyboard
+    uint32_t added = 0;                     // lines ever shown
+    bool pending = false; std::string pendingText; uint32_t pendingAt = 0;   // ChatOpenWith: open with this typed, when possible
 } d;
 
 uint32_t NowMs() { return uint32_t(GetTickCount64()); }   // wrap-safe for elapsed-time math
@@ -189,6 +193,16 @@ void Poll(uint32_t now) {
     }
 }
 
+// ChatOpenWith's request, once the chat can open (the key press would be refused the same way).
+void OpenPending(uint32_t now) {
+    if (uint32_t(now - d.pendingAt) > kPendingMs) { d.pending = false; HSM_LOG("chat: could not open with text; gave up"); return; }
+    if (d.session.typing()) { d.pending = false; return; }
+    if (d.paused && d.paused()) return;
+    d.pending = false;
+    Feed(hsm::ChatEvent::OpenKey, now, std::string(), "text prefilled");
+    if (d.session.typing()) Feed(hsm::ChatEvent::Char, now, d.pendingText);
+}
+
 void Draw(const ChatScene& s) {
     if (!w.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once per kScanEveryMs
         const ULONGLONG now = GetTickCount64();
@@ -271,8 +285,10 @@ void ChatTick(const HudScene& m) {
         d.swallowVk = 0;
         if (d.session.typing()) Feed(!Foreground() ? hsm::ChatEvent::FocusLost : hsm::ChatEvent::HudHidden, now);
     } else {
+        if (d.pending) OpenPending(now);
         Poll(now);
     }
+    if (d.pending && uint32_t(now - d.pendingAt) > kPendingMs) d.pending = false;   // the HUD never came up
     ChatLocal c;
     c.hud = m.visible; c.hudAtMs = d.hudAt; c.key = d.session.key();
     c.lines.assign(d.lines.begin(), d.lines.end());
@@ -292,10 +308,22 @@ void ShowLine(const std::string& name, Rgba ink, const std::string& text) {
     std::string clean = hsm::SanitizeChat(text);
     if (clean.empty()) return;
     d.lines.push_back(ChatEntry{hsm::SanitizeChat(name), ink, clean, NowMs()});
+    ++d.added;
     while (d.lines.size() > hsm::kChatLogLines) d.lines.pop_front();
 }
 
-bool Typing() { return d.session.typing(); }
+void ChatOpenWith(const std::string& text) {
+    if (d.session.typing()) return;
+    d.pending = true; d.pendingText = text; d.pendingAt = NowMs();
+}
+
+bool Typing() { return d.session.typing() || d.lobbyTyping; }
+
+bool ChatHudShown() { return d.hudShown; }
+void SetLobbyTyping(bool on) { d.lobbyTyping = on; }
+std::vector<ChatEntry> ChatHistory() { return std::vector<ChatEntry>(d.lines.begin(), d.lines.end()); }
+uint32_t ChatLinesAdded() { return d.added; }
+void ChatClearLines() { d.lines.clear(); }
 
 void ChatDrop(const char* why) {
     if (!d.session.typing()) return;

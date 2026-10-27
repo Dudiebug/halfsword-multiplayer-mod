@@ -210,7 +210,56 @@ static void TestMonitorWrap() {
     CHECK(m.Tick(uint32_t(t0 + HostLossMonitor::kLostMs)) == HostLossAction::ReturnToMenu);
 }
 
+// N3: an ENet client whose host ends the connection outside a fight level leaves; a Steam client leaves it to the lobby.
+static void TestClientDisconnectAction() {
+    CHECK(ClientDisconnectAction(false, true, true) == DisconnectAction::HostLossMonitor);    // in a fight: the monitor
+    CHECK(ClientDisconnectAction(true, true, true) == DisconnectAction::HostLossMonitor);
+    CHECK(ClientDisconnectAction(false, true, false) == DisconnectAction::Leave);             // welcomed, in the menu
+    CHECK(ClientDisconnectAction(false, false, false) == DisconnectAction::Leave);            // the connect timed out
+    CHECK(ClientDisconnectAction(false, false, true) == DisconnectAction::Leave);             // not welcomed in a map
+    CHECK(ClientDisconnectAction(true, true, false) == DisconnectAction::Ignore);
+    CHECK(ClientDisconnectAction(true, false, false) == DisconnectAction::Ignore);
+}
+
+// M5: a connected peer with no Hello within kHelloMs is reported once; a Hello or a disconnect ends the watch.
+static void TestHelloWatch() {
+    HelloWatch w;
+    w.Connected(1, 1000); w.Connected(2, 1000); w.Connected(3, 1000);
+    w.Hello(2);                                                                  // peer 2 spoke
+    w.Forget(3);                                                                 // peer 3 left
+    CHECK(w.Expired(1000 + HelloWatch::kHelloMs - 1).empty());
+    const auto e = w.Expired(1000 + HelloWatch::kHelloMs);
+    CHECK(e.size() == 1 && e[0] == 1);
+    CHECK(w.Expired(1000 + 10 * HelloWatch::kHelloMs).empty() && w.size() == 0);   // reported once
+    HelloWatch r;
+    r.Connected(4, 0xFFFFFF00u);                                                 // clock wrap
+    CHECK(r.Expired(0x100u).empty());
+    CHECK(r.Expired(0xFFFFFF00u + HelloWatch::kHelloMs).size() == 1);
+    r.Connected(5, 10); r.Connected(5, 9000);                                    // a reused id starts afresh
+    CHECK(r.Expired(9000 + HelloWatch::kHelloMs - 1).empty());
+    r.Clear(); CHECK(r.size() == 0);
+}
+
+// N6: a peer silent for 15 s is reported once; a packet resets its clock; a forgotten peer is never reported.
+static void TestPeerSilence() {
+    PeerSilenceMonitor m;
+    m.Seen(1, 1000); m.Seen(2, 1000); m.Seen(3, 1000);
+    m.Seen(2, 5000);                                                             // peer 2 spoke again
+    m.Forget(3);                                                                 // peer 3 left
+    CHECK(m.Expired(1000 + PeerSilenceMonitor::kSilentMs - 1).empty());
+    const auto e = m.Expired(1000 + PeerSilenceMonitor::kSilentMs);
+    CHECK(e.size() == 1 && e[0] == 1);
+    CHECK(m.Expired(5000 + PeerSilenceMonitor::kSilentMs - 1).empty());
+    const auto e2 = m.Expired(5000 + PeerSilenceMonitor::kSilentMs);
+    CHECK(e2.size() == 1 && e2[0] == 2);
+    CHECK(m.Expired(1000 + 10 * PeerSilenceMonitor::kSilentMs).empty());          // reported once
+    m.Seen(4, 0xFFFFFF00u);                                                      // clock wrap
+    CHECK(m.Expired(0x100u).empty() && m.Expired(0xFFFFFF00u + PeerSilenceMonitor::kSilentMs).size() == 1);
+    m.Seen(5, 10); m.Clear(); CHECK(m.Expired(10 + 10 * PeerSilenceMonitor::kSilentMs).empty());
+}
+
 int main() {
+    TestClientDisconnectAction(); TestHelloWatch(); TestPeerSilence();
     TestClaimBeforeExpiryAndDoubleClaim(); TestClaimAfterExpiry(); TestWrongKey(); TestExpiryList();
     TestRefreshAndSameKeyRules(); TestRejections(); TestCap(); TestLapsedEvictedByReserve(); TestWrapAround();
     TestResendOrder(); TestMonitorSilenceToLostThenMenu(); TestMonitorPacketRecovers(); TestMonitorLateTickGoesToMenu();

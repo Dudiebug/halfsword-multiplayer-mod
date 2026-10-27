@@ -10,13 +10,14 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.scoreLimit = std::clamp<uint16_t>(c.scoreLimit, 1, 100);
     c.timeLimitS = std::min<uint16_t>(c.timeLimitS, 3600);
     c.respawnDelayS = std::min<uint16_t>(c.respawnDelayS, 60);
-    if (uint8_t(c.gear) >= kGearCount) c.gear = Gear::Own;
+    if (uint8_t(c.gear) >= kGearCount || (c.gear == Gear::Fists && c.format != Format::FreeForAll)) c.gear = Gear::Own;
     c.tier = std::min<uint8_t>(c.tier, 7);
+    if (c.gear == Gear::Fists) c.tier = 0;                              // Brawl is tier 0: the lowest build, no gear budget
     return c;
 }
 
 inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
-    if (IsBotFormat(c.format)) return Regear::None;                     // gear is a PvP option
+    if (IsBotFormat(c.format) || c.gear == Gear::Fists) return Regear::None;   // gear is a PvP option; Brawl strips at the spawn instead
     if (c.gear == Gear::RandomTier) return Regear::Each;
     if (c.gear == Gear::Mirror && (cause == RespawnCause::RoundReset || cause == RespawnCause::Rematch)) return Regear::Shared;
     return Regear::None;
@@ -86,6 +87,10 @@ inline bool Match::Leave(uint8_t entity, uint32_t nowMs) {
     return wasAlive;
 }
 inline void Match::Return(uint8_t entity) { gone_.erase(entity); }
+inline bool Match::AwaitsRespawn(uint8_t e) const {
+    auto it = fighters_.find(e);
+    return it != fighters_.end() && it->second.human && !it->second.alive && !gone_.count(e) && CombatPhase(phase_);
+}
 
 inline int Match::ScoreKeyOf(uint8_t entity) const { return cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel ? int(entity) : int(TeamOf(entity)); }
 

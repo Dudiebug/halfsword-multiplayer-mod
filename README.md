@@ -3,9 +3,8 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build (v0.7.0-pre2) passes every offline check (unit tests under ASan/UBSan
-> and protocol fuzzing). Its new features have not been play-tested yet; each pre-release fixes what the last test
-> found. Expect bugs. Everyone in a session needs the same version (0.7.0 does not connect to 0.6.x).
+> **Status: pre-release.** The current build is v0.7.0-pre3. Expect rough edges, and please report what you find
+> with `/bug` in the game. Everyone in a session needs the same version (0.7.0-pre3 connects only to 0.7.0-pre3).
 
 ## What it does
 
@@ -19,25 +18,52 @@ No game files are changed; delete the DLL to go back to vanilla.
 - **Gore, grabs, dropped weapons and level props** are synced: severed limbs, stuck blades, dislocations, grabbing
   and carrying another player (alive or down), loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
   props, which the host names for everyone.
-- Match modes, scores, chat and spectating.
-- **Name tags** over other fighters (team colours in team modes; `name_tags=0` turns them off), and **give up while
-  downed** in FFA and team matches (hold G): the last player who hit you in the past 60 s gets the kill.
-- **Crash notes:** if the game crashes, the last lines of `HSMMod.log` name the fault. Please attach the log and the
-  newest folder under `%LOCALAPPDATA%\HalfSwordUE5\Saved\Crashes\` to an issue.
-- **In-game bug reports:** type `/report <what went wrong>` in the chat (or use REPORT A BUG on the multiplayer
-  page) to open an issue here with your mod log attached privately. Other players in the session are asked whether
-  to add theirs (`/sendlog` or `/nolog`). **The report server is not online yet**, so reports currently fail; open an
-  issue on GitHub instead.
+- Match modes, scores, chat and spectating with a follow camera behind the fighter you watch. **Brawl** is free-for-all with bare fists: everyone spawns naked with no
+  weapons, and your own gear is untouched afterwards.
+- **Name tags** over other fighters, hidden behind walls (team colours in team modes; `name_tags=0` turns them off), and **hold G to give
+  up** in FFA, team matches and Duel: you die and the last player who hit you in the past 60 s gets the kill.
+- **Crash notes:** if the game crashes, the last lines of `HSMMod.log` name the fault, and `HSMMod.crash.dmp` (a small
+  crash dump, next to the log in the game's `Binaries\Win64` folder) is written. Please attach both and the newest
+  folder under `%LOCALAPPDATA%\HalfSwordUE5\Saved\Crashes\` to an issue.
+- **Kick and ban:** the host types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat (`/players` lists
+  everyone, `/bans` and `/unban` manage bans). On a hosted server players can `/votekick <name>`.
+- **In-game bug reports:** found a bug? Open the chat and type `/bug <what went wrong>` (or use REPORT A BUG on the
+  multiplayer page, or on the pause menu in a session fight, which opens the chat with `/bug ` typed) to open an issue
+  here with your mod log attached privately. You see "Sending...", then the issue link once it is filed, or a short
+  reason if it was not. Other players in the session are asked whether to add theirs (`/sendlog` or `/nolog`).
+- **Direct client-to-client movement (experimental):** `mesh=1` under `[net]` in `HSMMod.ini`, on the host and the
+  clients, lets players in a Steam lobby send their movement straight to each other instead of through the host. It is
+  off by default; the host relays again by itself if a direct path fails.
+- **Hosting without playing (experimental):** `role=server` runs matches and rotates maps with no fighter of its own;
+  players spawn at the map's start points. It runs a normal copy of the game.
+
+## Known limitations
+
+- **Time of day follows the map.** You cannot pick day or night in a lobby yet; a lobby setting is planned.
+- **Brawl:** weapons on the level's own racks and floors can still be picked up.
+- **Direct-IP sessions have no lobby**, so they play Free-for-all with default settings.
+- Loadouts with no fabric armour show no team colour.
 
 ## Bug reports and privacy
 
-`/report` sends your text, the mod and game version, the match setup and your OS version to the report server, which
+`/bug` sends your text, the mod and game version, the match setup and your OS version to the report server, which
 opens a public issue in this repository with those details. The end of your `HSMMod.log` goes along but is stored
 privately with the maintainers, never on the issue. Before it leaves your PC, Steam IDs and IP addresses in the log
 are replaced with one-off hashes and your Windows user name is removed from file paths. Player names stay in the log.
 
-The mod makes no web request unless you type `/report` or `/sendlog`. Set `reports=off` under `[net]` in
-`HSMMod.ini` to turn the commands off.
+Apart from the update check below, the mod makes no web request unless you type `/bug` or `/sendlog`, or turn
+on **HELP IMPROVE THE MOD** on the multiplayer page (`help_improve=1`, off by default). With it on, your log (redacted
+the same way) also goes to the report server by itself when someone in your lobby files a report, and if your game
+crashed, the next start files a crash report: its public text is the crash line only (error code and code offset),
+your logs stay private. Set `reports=off` under `[net]` in `HSMMod.ini` to turn all of it off.
+
+## Update check
+
+Each time the game starts, the mod makes one HTTPS request to `api.github.com` to read this repository's list of
+releases, and tells you (in `HSMMod.log`, on the multiplayer page and once in the chat of your first fight) if a newer
+release exists. The request carries only a `User-Agent: HSMMod/<version>` header, no IDs and no names, and nothing is
+downloaded or installed. If you run a prerelease you are told about prereleases and full releases, otherwise only
+about full releases. Set `update_check=0` under `[net]` in `HSMMod.ini` to turn it off.
 
 ## Install
 

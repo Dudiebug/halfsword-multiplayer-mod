@@ -82,7 +82,9 @@ private:
         ue::UObject* root = nullptr;           // the actor's root component: the simulating body
         int32_t rootIndex = -1;
         ue::UObject* base = nullptr;           // "Root Scene"
+        int32_t baseIndex = -1;
         ue::UObject* tip = nullptr;            // "TippyTipScene"
+        int32_t tipIndex = -1;
         bool fists = false;
         bool comMeasured = false;
         int comTries = 0;

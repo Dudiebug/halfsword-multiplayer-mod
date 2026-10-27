@@ -1,9 +1,9 @@
 #include "net/report_client.h"
+#include "net/http_client.h"
 #include "gameplay/lobby.h"
 #include "log.h"
 #include "paths.h"
 #include <windows.h>
-#include <winhttp.h>
 #include <atomic>
 #include <cstdlib>
 #include <deque>
@@ -14,53 +14,14 @@
 
 namespace hsm::report {
 namespace {
-// Kept off the import table (tools/check_dll.py): resolved from System32's winhttp.dll on the first request.
-struct WinHttp {
-    decltype(&WinHttpOpen) Open = nullptr;
-    decltype(&WinHttpSetTimeouts) SetTimeouts = nullptr;
-    decltype(&WinHttpConnect) Connect = nullptr;
-    decltype(&WinHttpOpenRequest) OpenRequest = nullptr;
-    decltype(&WinHttpAddRequestHeaders) AddRequestHeaders = nullptr;
-    decltype(&WinHttpSendRequest) SendRequest = nullptr;
-    decltype(&WinHttpReceiveResponse) ReceiveResponse = nullptr;
-    decltype(&WinHttpQueryHeaders) QueryHeaders = nullptr;
-    decltype(&WinHttpReadData) ReadData = nullptr;
-    decltype(&WinHttpCloseHandle) CloseHandle = nullptr;
-    bool ok = false;
-};
-
 std::mutex g_mu;
 std::deque<Result> g_results;
 std::atomic<bool> g_busy{false};
 bool g_enabled = false;
 bool g_secure = true;
 std::wstring g_host, g_base;   // base: "" or "/path" without a trailing slash
-INTERNET_PORT g_port = 443;
-
-const WinHttp& Api() {
-    static WinHttp api = [] {
-        WinHttp a;
-        wchar_t dir[MAX_PATH];
-        UINT n = GetSystemDirectoryW(dir, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH) return a;
-        HMODULE m = LoadLibraryW((std::wstring(dir, n) + L"\\winhttp.dll").c_str());
-        if (!m) return a;
-        auto get = [m](auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(reinterpret_cast<void*>(GetProcAddress(m, name))); return fn != nullptr; };
-        a.ok = get(a.Open, "WinHttpOpen") && get(a.SetTimeouts, "WinHttpSetTimeouts") && get(a.Connect, "WinHttpConnect") &&
-               get(a.OpenRequest, "WinHttpOpenRequest") && get(a.AddRequestHeaders, "WinHttpAddRequestHeaders") &&
-               get(a.SendRequest, "WinHttpSendRequest") && get(a.ReceiveResponse, "WinHttpReceiveResponse") &&
-               get(a.QueryHeaders, "WinHttpQueryHeaders") && get(a.ReadData, "WinHttpReadData") && get(a.CloseHandle, "WinHttpCloseHandle");
-        return a;
-    }();
-    return api;
-}
-
-std::wstring Wide(const std::string& s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
-    std::wstring w(size_t(n > 0 ? n : 0), L'\0');
-    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
-    return w;
-}
+uint16_t g_port = 443;
+constexpr unsigned kReportTimeoutMs = 120000;   // the relay answers once the issue exists; GitHub itself can take a while
 
 // The end of one log file (shared with the logger, which keeps HSMMod.log open), cut and redacted.
 std::optional<ReportLog> ReadLog(const wchar_t* ext, const char* name, uint64_t salt) {
@@ -92,65 +53,74 @@ std::vector<ReportLog> ReadLogs() {
     return logs;
 }
 
-struct Response { DWORD status = 0; std::string body; std::string error; };
+struct Response { ReportTransport transport = ReportTransport::Ok; bool sent = false; unsigned status = 0; unsigned winError = 0; std::string body; };
 
 Response Post(const std::wstring& path, const std::string& body) {
+    using Fail = net::HttpResponse::Fail;
+    net::HttpRequest req;
+    req.method = L"POST"; req.host = g_host; req.path = path; req.port = g_port; req.secure = g_secure;
+    req.headers = L"Content-Type: application/json";
+    req.agent = L"HSMMod/" + net::Wide(game::ModBuild());
+    req.body = body;
+    req.timeoutMs = kReportTimeoutMs;
+    net::HttpResponse h = net::Http(req);
     Response r;
-    const WinHttp& h = Api();
-    if (!h.ok) { r.error = "WinHTTP is unavailable"; return r; }
-    const std::wstring agent = L"HSMMod/" + Wide(game::ModBuild());
-    // Automatic proxy (Windows 8.1+), else the system default.
-    HINTERNET s = h.Open(agent.c_str(), 4 /* WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY */, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!s) s = h.Open(agent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!s) { r.error = "no connection"; return r; }
-    h.SetTimeouts(s, 10000, 10000, 60000, 30000);
-    HINTERNET c = h.Connect(s, g_host.c_str(), g_port, 0);
-    HINTERNET q = c ? h.OpenRequest(c, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                    g_secure ? WINHTTP_FLAG_SECURE : 0)
-                    : nullptr;
-    // Certificate checks stay on (WinHTTP's default): a relay without a valid certificate gets nothing.
-    if (q && h.AddRequestHeaders(q, L"Content-Type: application/json", DWORD(-1), WINHTTP_ADDREQ_FLAG_ADD) &&
-        h.SendRequest(q, WINHTTP_NO_ADDITIONAL_HEADERS, 0, const_cast<char*>(body.data()), DWORD(body.size()), DWORD(body.size()), 0) &&
-        h.ReceiveResponse(q, nullptr)) {
-        DWORD len = sizeof r.status;
-        h.QueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &r.status, &len, WINHTTP_NO_HEADER_INDEX);
-        char buf[4096];
-        DWORD got = 0;
-        while (r.body.size() < 65536 && h.ReadData(q, buf, sizeof buf, &got) && got) r.body.append(buf, got);
-    } else {
-        DWORD e = GetLastError();
-        r.error = e == ERROR_WINHTTP_TIMEOUT ? "the report server did not answer"
-                : e == ERROR_WINHTTP_SECURE_FAILURE ? "the report server's certificate is not valid"
-                : e == ERROR_WINHTTP_NAME_NOT_RESOLVED || e == ERROR_WINHTTP_CANNOT_CONNECT ? "cannot reach the report server"
-                : "request failed (" + std::to_string(e) + ")";
+    r.status = h.status; r.body = std::move(h.body); r.sent = h.sent; r.winError = h.winError;
+    switch (h.fail) {
+        case Fail::None: r.transport = ReportTransport::Ok; break;
+        case Fail::Unavailable: r.transport = ReportTransport::Unavailable; break;
+        case Fail::NoConnection: r.transport = ReportTransport::NoConnection; break;
+        case Fail::Timeout: r.transport = ReportTransport::Timeout; break;
+        case Fail::Certificate: r.transport = ReportTransport::Certificate; break;
+        case Fail::Unreachable: r.transport = ReportTransport::Unreachable; break;
+        case Fail::Other: r.transport = ReportTransport::Other; break;
     }
-    if (q) h.CloseHandle(q);
-    if (c) h.CloseHandle(c);
-    h.CloseHandle(s);
     return r;
 }
 
-// A short reason from a non-2xx answer: the relay's "error" field (printable ASCII only), else the status.
-std::string ErrorOf(const Response& r) {
-    if (!r.error.empty()) return r.error;
-    if (r.status == 429) return "too many reports right now, try again later";
-    std::string e = JsonStringField(r.body, "error");
-    std::string clean;
-    for (char ch : e) if (ch >= 0x20 && ch < 0x7F && clean.size() < 80) clean.push_back(ch);
-    return clean.empty() ? "the report server answered " + std::to_string(r.status) : clean;
+const char* OutcomeName(ReportOutcome o) {
+    return o == ReportOutcome::Done ? "done" : o == ReportOutcome::MaybeDone ? "maybe done (no usable answer after sending)"
+         : o == ReportOutcome::NotSent ? "not sent" : "refused";
 }
 
+// The judged answer, with one log line of what came back (the player's own line is logged by the session).
+Result Judge(ReportJob job, const char* what, const Response& r) {
+    Result res;
+    res.job = job;
+    res.verdict = JudgeReportAnswer(job, r.transport, r.sent, r.status, r.body);
+    HSM_LOG("report: %s -> status %u, transport %d (winerror %u), sent %d: %s%s%s", what, r.status, int(r.transport), r.winError, r.sent ? 1 : 0,
+            OutcomeName(res.verdict.outcome), res.verdict.reason.empty() ? "" : ", ", res.verdict.reason.c_str());
+    return res;
+}
+
+// Queues the result and frees the worker slot; the slot is freed even when queueing throws.
 void Finish(Result res) {
-    std::lock_guard<std::mutex> lock(g_mu);
-    g_results.push_back(std::move(res));
+    try {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_results.push_back(std::move(res));
+    } catch (...) {}
     g_busy = false;
 }
 
-bool Start(std::function<void()> work) {
+// Runs `work` (it returns the Result) on a detached thread. Whatever it throws becomes a failed Result, and g_busy is
+// always reset, so one bad report cannot block every later one (R8).
+bool Start(ReportJob job, std::function<Result()> work) {
     if (!g_enabled) return false;
     bool expected = false;
     if (!g_busy.compare_exchange_strong(expected, true)) return false;
-    std::thread(std::move(work)).detach();
+    try {
+        std::thread([job, work = std::move(work)] {
+            Result res;
+            res.job = job;
+            try { res = work(); }
+            catch (const std::exception& e) { res.verdict = ReportVerdict{}; res.verdict.reason = "the report failed on this PC"; HSM_LOG("report: worker threw: %s", e.what()); }
+            catch (...) { res.verdict = ReportVerdict{}; res.verdict.reason = "the report failed on this PC"; HSM_LOG("report: worker threw"); }
+            Finish(std::move(res));
+        }).detach();
+    } catch (...) {   // no thread could be started
+        g_busy = false;
+        return false;
+    }
     return true;
 }
 }  // namespace
@@ -160,7 +130,7 @@ void Configure(bool enabled, const std::string& url) {
     if (!enabled) { HSM_LOG("report: in-game bug reports off"); return; }
     std::string rest;
     if (url.rfind("https://", 0) == 0) { g_secure = true; g_port = 443; rest = url.substr(8); }
-    else if (url.rfind("http://127.0.0.1", 0) == 0) { g_secure = false; g_port = 80; rest = url.substr(7); }   // a local relay, for testing
+    else if (url.rfind("http://127.0.0.1", 0) == 0 && (url.size() == 16 || url[16] == '/' || url[16] == ':')) { g_secure = false; g_port = 80; rest = url.substr(7); }   // a local relay, for testing: exactly 127.0.0.1, not 127.0.0.1.evil.example (R6)
     else { HSM_LOG("report: report_url must be https://...; bug reports off"); return; }
     size_t slash = rest.find('/');
     std::string host = rest.substr(0, slash), base = slash == std::string::npos ? "" : rest.substr(slash);
@@ -168,46 +138,33 @@ void Configure(bool enabled, const std::string& url) {
     if (size_t colon = host.find(':'); colon != std::string::npos) {
         int p = std::atoi(host.c_str() + colon + 1);
         if (p <= 0 || p > 65535) { HSM_LOG("report: bad port in report_url; bug reports off"); return; }
-        g_port = INTERNET_PORT(p); host.resize(colon);
+        g_port = uint16_t(p); host.resize(colon);
     }
     for (char ch : host + base)
         if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '/' || ch == '_')) {
             HSM_LOG("report: bad report_url; bug reports off"); return;
         }
     if (host.empty()) { HSM_LOG("report: bad report_url; bug reports off"); return; }
-    g_host = Wide(host); g_base = Wide(base); g_enabled = true;
-    HSM_LOG("report: in-game bug reports go to %s (only on /report or /sendlog)", url.c_str());
+    g_host = net::Wide(host); g_base = net::Wide(base); g_enabled = true;
+    HSM_LOG("report: in-game bug reports go to %s (only on /bug or /sendlog)", url.c_str());
 }
 
 bool Enabled() { return g_enabled; }
 bool Busy() { return g_busy; }
 
-bool Submit(const std::string& description, const ReportFacts& facts) {
-    return Start([description, facts] {
-        Response r = Post(g_base + L"/v1/reports", ReportJson(description, facts, ReadLogs()));
-        Result res;
-        if (r.status == 200 || r.status == 201) {
-            res.id = JsonStringField(r.body, "id"); res.token = JsonStringField(r.body, "token"); res.issue = JsonStringField(r.body, "issue");
-            if (ValidReportId(res.id) && ValidReportToken(res.token)) {
-                res.kind = Result::Kind::Filed;
-                if (!ValidIssueUrl(res.issue)) res.issue.clear();
-            } else res.error = "the report server's answer was not understood";
-        } else res.error = ErrorOf(r);
-        HSM_LOG("report: submit -> %lu %s", r.status, res.kind == Result::Kind::Filed ? res.id.c_str() : res.error.c_str());
-        Finish(std::move(res));
+bool Submit(const std::string& description, const ReportFacts& facts, ReportJob job) {
+    return Start(job, [description, facts, job]() -> Result {
+        Result res = Judge(job, job == ReportJob::Crash ? "crash report" : "submit", Post(g_base + L"/v1/reports", ReportJson(description, facts, ReadLogs())));
+        if (res.verdict.outcome == ReportOutcome::Done) HSM_LOG("report: filed as %s", res.verdict.id.c_str());
+        return res;
     });
 }
 
 bool Attach(const std::string& id, const std::string& token, const ReportFacts& facts) {
     if (!ValidReportId(id) || !ValidReportToken(token)) return false;
-    return Start([id, token, facts] {
-        Response r = Post(g_base + L"/v1/reports/" + Wide(id) + L"/logs", AttachJson(token, facts, ReadLogs()));
-        Result res;
-        res.id = id;
-        if (r.status == 200 || r.status == 201) res.kind = Result::Kind::Attached;
-        else res.error = ErrorOf(r);
-        HSM_LOG("report: attach to %s -> %lu %s", id.c_str(), r.status, res.error.c_str());
-        Finish(std::move(res));
+    return Start(ReportJob::Log, [id, token, facts]() -> Result {
+        const std::string what = "attach to " + id;
+        return Judge(ReportJob::Log, what.c_str(), Post(g_base + L"/v1/reports/" + net::Wide(id) + L"/logs", AttachJson(token, facts, ReadLogs())));
     });
 }
 

@@ -1,5 +1,6 @@
 #include "config.h"
 #include "session/hsm_cmdline.h"
+#include "util/hsm_ini.h"
 #include "log.h"
 #include "paths.h"
 #include <windows.h>
@@ -30,21 +31,28 @@ constexpr char kDefaultIni[] =
     "allow_build_mismatch=0\n"
     "; 1: show the other fighters' names over their heads in a match; 0: off\n"
     "name_tags=1\n"
-    "; in-game bug reports: type /report <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
+    "; in-game bug reports: type /bug <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
     "; (Steam IDs, IP addresses and your Windows user name are removed first). Nothing is sent unless you type it.\n"
     "reports=on\n"
-    "report_url=https://reports.dutybug.net\n"
+    "report_url=https://reports.dudiebug.net\n"
+    "; 1: also send your HSMMod log (Steam IDs, IPs and your user name removed) when someone in your lobby files a bug report\n"
+    "; or a crash is reported. The MULTIPLAYER page has the same switch. 0: off (default)\n"
+    "help_improve=0\n"
     "; role=server (a hosted retail instance with no fighter of its own that starts matches by itself):\n"
     "; server_transport=direct|steam (steam is experimental), server_format=ffa|duel|teams|survival|zombies,\n"
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
     "; server_countdown_s=30, server_min_players=2 (1..5)\n"
+    "; server_admins=Steam IDs (comma list) allowed to /kick, /ban and /unban from the chat; server_votekick=1 lets players\n"
+    "; vote a player out (15 min ban). The console takes kick, ban, unban, bans, players and say (HSMMod.cmd)\n"
     "server_transport=direct\n"
     "server_format=ffa\n"
     "server_maps=all\n"
     "server_score_limit=0\n"
     "server_time_limit_s=0\n"
     "server_countdown_s=30\n"
-    "server_min_players=2\n";
+    "server_min_players=2\n"
+    "server_admins=\n"
+    "server_votekick=1\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -65,6 +73,26 @@ static Role ParseRole(const std::string& r) {
     return r == "host" ? Role::Host : r == "client" ? Role::Client : r == "off" ? Role::Off : r == "server" ? Role::Server : Role::Steam;
 }
 
+// Reads the whole ini, sets the key in the text, writes a sibling file and moves it over the ini (a crash in between
+// leaves the old file whole). A UTF-16 ini (a Notepad "Unicode" save) is left alone: GetPrivateProfileString reads it,
+// this rewrite would not.
+bool SaveHelpImprove(bool on) {
+    const std::wstring ini = ModFilePath(L"HSMMod.ini"), tmp = ini + L".tmp";
+    std::string text;
+    if (FILE* f = _wfopen(ini.c_str(), L"rb")) {
+        char buf[4096];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        std::fclose(f);
+    }
+    if (text.size() >= 2 && (text.compare(0, 2, "\xFF\xFE") == 0 || text.compare(0, 2, "\xFE\xFF") == 0)) return false;
+    const std::string next = util::SetIniValue(text, "net", "help_improve", on ? "1" : "0");
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return false;
+    const bool wrote = std::fwrite(next.data(), 1, next.size(), f) == next.size();
+    if (std::fclose(f) != 0 || !wrote || !MoveFileExW(tmp.c_str(), ini.c_str(), MOVEFILE_REPLACE_EXISTING)) { DeleteFileW(tmp.c_str()); return false; }
+    return true;
+}
+
 Config LoadConfig() {
     std::wstring ini = ModFilePath(L"HSMMod.ini");
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -79,13 +107,17 @@ Config LoadConfig() {
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
     c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
+    c.mesh = ReadString(ini, L"mesh", "0") == "1";
     const std::string chatKey = ReadString(ini, L"chat_key", "enter");
     if (!ParseChatKey(chatKey, c.chatKey)) HSM_LOG("config: chat_key=%s is not enter, t, y or u; using enter", chatKey.c_str());
     c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
     c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
     c.nameTags = ReadString(ini, L"name_tags", "1") != "0";
     c.reports = ReadString(ini, L"reports", "on") != "off";
-    c.reportUrl = ReadString(ini, L"report_url", "https://reports.dutybug.net");
+    c.reportUrl = ReadString(ini, L"report_url", "https://reports.dudiebug.net");
+    if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
+    c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
+    c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
     c.serverTransport = ReadString(ini, L"server_transport", "direct") == "steam" ? "steam" : "direct";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
     c.serverMaps = ReadString(ini, L"server_maps", "all");
@@ -93,6 +125,8 @@ Config LoadConfig() {
     c.serverTimeLimitS = Clamp(std::atoi(ReadString(ini, L"server_time_limit_s", "0").c_str()), 0, 3600);
     c.serverCountdownS = Clamp(std::atoi(ReadString(ini, L"server_countdown_s", "30").c_str()), 0, 600);
     c.serverMinPlayers = Clamp(std::atoi(ReadString(ini, L"server_min_players", "2").c_str()), 1, 5);
+    c.serverAdmins = ReadString(ini, L"server_admins", "");
+    c.serverVoteKick = ReadString(ini, L"server_votekick", "1") != "0";
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags
@@ -109,10 +143,13 @@ Config LoadConfig() {
     HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
             c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
-    HSM_LOG("config: reports=%s name_tags=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0);
+    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
+            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0);
     if (c.role == Role::Server)
         HSM_LOG("config: server transport=%s format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d", c.serverTransport.c_str(),
                 c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers);
+    if (c.role == Role::Server)
+        HSM_LOG("config: server votekick=%d admins=%s", c.serverVoteKick ? 1 : 0, c.serverAdmins.empty() ? "none (console only)" : "set");
     return c;
 }
 }  // namespace hsm

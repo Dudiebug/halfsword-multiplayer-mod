@@ -1,4 +1,4 @@
-// The lobby's Progression card (the stock hub, Free Mode off): a 7th mode card; chosen, it replaces the settings and maps.
+// The lobby's Progression card (the stock hub, Free Mode off): the last mode card, after Brawl; chosen, it replaces the settings and maps.
 #include "match/hsm_lobby_scene.h"
 #include <cstdio>
 
@@ -20,7 +20,7 @@ static LobbyLocal Lobby(bool host, bool progression) {
 
 int main() {
     LobbyScene off = BuildLobbyScene(Lobby(true, false));
-    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == size_t(kFormatCount) + 1);
+    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == size_t(kFormatCount) + 2);   // the formats, Brawl, Progression
     CHECK(off.modes.back().progression && !off.modes.back().selected && off.modes.back().enabled);
     CHECK(!off.settings.empty() && !off.maps.empty());
     size_t selected = 0;

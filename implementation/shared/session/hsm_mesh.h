@@ -3,7 +3,9 @@
 // is the 0.6.5 behaviour (the host relays everything), so a lost report or a dead direct path only costs bandwidth.
 #pragma once
 #include "session/hsm_authority.h"
+#include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace hsm {
 
@@ -27,6 +29,8 @@ public:
         lastSent_ = m; lastSentAt_ = nowMs; sentAny_ = true; *mask = m;
         return true;
     }
+    // The host's table for this client is new (a Welcome, a PeerMap): the next TakeChange reports the mask again.
+    void Invalidate() { lastSent_ = 0xFF; sentAny_ = false; }
     void Clear() { *this = MeshHearing{}; }
 private:
     uint32_t at_[kMaxFighters] = {};
@@ -62,5 +66,72 @@ inline std::vector<uint8_t> RelayTargets(uint8_t fromSlot, const std::vector<uin
         if (!masks.Hears(s, fromSlot)) out.push_back(s);
     return out;
 }
+
+// Host side: the PeerMap for the clients. all = every joined client's (slot, SteamID); entries that cannot be a mesh peer
+// (the host slot, a slot past the roster, no SteamID, a slot named twice) are left out, the rest go out in slot order.
+inline PeerMapMsg MakePeerMap(const std::vector<PeerMapEntry>& all) {
+    PeerMapMsg m;
+    for (const PeerMapEntry& e : all) {
+        if (e.slot == kHostSlot || e.slot >= kMaxPeerMap || e.steamId == 0 || m.peers.size() >= kMaxPeerMap) continue;
+        const bool dup = std::any_of(m.peers.begin(), m.peers.end(), [&](const PeerMapEntry& x) { return x.slot == e.slot || x.steamId == e.steamId; });
+        if (!dup) m.peers.push_back(e);
+    }
+    std::sort(m.peers.begin(), m.peers.end(), [](const PeerMapEntry& a, const PeerMapEntry& b) { return a.slot < b.slot; });
+    return m;
+}
+
+// Client side: the other clients this machine exchanges Pose and Vitals with, as the host's last PeerMap named them, and
+// which transport peer each one is. The host is never in it (it has its own peer), and neither is this machine.
+class MeshPeers {
+public:
+    struct Change {
+        std::vector<uint64_t> want;   // everyone the map names for this machine: allow each one (allowing twice is harmless)
+        std::vector<uint64_t> drop;   // named before, not now: close their sessions
+    };
+    Change Apply(const PeerMapMsg& m, uint8_t mySlot, uint64_t mySteam, uint64_t hostSteam) {
+        Change c;
+        std::vector<PeerMapEntry> next;
+        for (const PeerMapEntry& e : m.peers) {
+            if (e.slot == mySlot || e.slot == kHostSlot || e.slot >= kMaxPeerMap || !e.steamId || e.steamId == mySteam || e.steamId == hostSteam) continue;
+            if (std::any_of(next.begin(), next.end(), [&](const PeerMapEntry& x) { return x.slot == e.slot || x.steamId == e.steamId; })) continue;
+            next.push_back(e); c.want.push_back(e.steamId);
+        }
+        for (const PeerMapEntry& o : map_)
+            if (std::none_of(next.begin(), next.end(), [&](const PeerMapEntry& x) { return x.steamId == o.steamId; })) c.drop.push_back(o.steamId);
+        map_ = std::move(next);
+        std::erase_if(bound_, [&](const Link& b) { return !Has(b.steam); });
+        return c;
+    }
+    // The transport's peer id for a SteamID Apply named (after AllowPeer).
+    void Bind(uint64_t steamId, uint32_t peer) {
+        if (!peer || !Has(steamId)) return;
+        for (Link& b : bound_) if (b.steam == steamId) { b.peer = peer; return; }
+        bound_.push_back({steamId, peer});
+    }
+    // The transport closed this peer (its Disconnected event): it names nobody any more, but the map still lists the member.
+    void ForgetPeer(uint32_t peer) { std::erase_if(bound_, [&](const Link& b) { return b.peer == peer; }); }
+    // A lobby member left: the transport closed that session, so a later map has to open it again.
+    void Forget(uint64_t steamId) { std::erase_if(bound_, [&](const Link& b) { return b.steam == steamId; }); }
+    // The slot a named mesh peer holds; 0xFF for any other peer, the host included.
+    uint8_t SlotOfPeer(uint32_t peer) const {
+        for (const Link& b : bound_)
+            if (b.peer == peer)
+                for (const PeerMapEntry& e : map_) if (e.steamId == b.steam) return e.slot;
+        return 0xFF;
+    }
+    bool Has(uint64_t steamId) const { return std::any_of(map_.begin(), map_.end(), [&](const PeerMapEntry& x) { return x.steamId == steamId; }); }
+    bool IsBound(uint64_t steamId) const { return std::any_of(bound_.begin(), bound_.end(), [&](const Link& b) { return b.steam == steamId; }); }
+    size_t Named() const { return map_.size(); }
+    std::vector<uint32_t> Peers() const {
+        std::vector<uint32_t> out;
+        for (const Link& b : bound_) out.push_back(b.peer);
+        return out;
+    }
+    void Clear() { map_.clear(); bound_.clear(); }
+private:
+    struct Link { uint64_t steam; uint32_t peer; };
+    std::vector<PeerMapEntry> map_;
+    std::vector<Link> bound_;
+};
 
 }  // namespace hsm

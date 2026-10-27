@@ -18,6 +18,10 @@ constexpr uint32_t kChatRefillMs = 1000;    // one token every second
 constexpr uint32_t kChatLogLines = 8;       // lines the log keeps
 constexpr uint32_t kChatExpireMs = 10000;   // overlay shows a line this long
 
+// fromSlot of a line the host itself writes as the server (kick/ban/vote notices, a role=server console "say"), shown
+// under the name SERVER. The host overwrites a client's fromSlot, so no client can send one.
+constexpr uint8_t kChatSystemSlot = 0xFF;
+
 struct ChatLine {
     uint8_t fromSlot = 0;
     std::string text;

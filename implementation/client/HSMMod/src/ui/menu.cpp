@@ -1,14 +1,18 @@
 #include "ui/menu.h"
+#include "ui/chat.h"
 #include "ui/umg.h"
 #include "util/hsm_names.h"
 #include "gameplay/session.h"
 #include "log.h"
 #include "net/report_client.h"
+#include "net/update_check.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
 #include "util/hsm_bmp.h"
 #include <windows.h>
+#include <algorithm>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -22,14 +26,8 @@ constexpr Rgba kFaceHover{0.10f, 0.09f, 0.08f, 0.98f};
 constexpr Rgba kFrame{0.45f, 0.47f, 0.50f, 0.30f};
 constexpr Rgba kFrameHover{0.45f, 0.47f, 0.50f, 0.85f};
 constexpr Rgba kStartHover{0.85f, 0.09f, 0.07f, 1};
+constexpr float kChatHeight = 150;                // the chat log's frame, in px
 constexpr Rgba kClear{1, 1, 1, 0};                  // a Button's own brush, hidden: the frame and face are ours
-
-// The stock menu button, for the injected Multiplayer entry only.
-struct TextButton {
-    Button button;
-    Text label;
-    explicit operator bool() const { return bool(button); }
-};
 
 // Everything clickable on the page: an invisible Button around a frame around a face, so the look is the same on
 // every menu build. `selected` frames it in blood; `live` (clickable) lets the mouse light it up.
@@ -39,10 +37,20 @@ struct Card {
     bool selected = false, live = true;
     explicit operator bool() const { return bool(button) && bool(frame) && bool(face); }
 };
+// The injected Multiplayer entry on the main menu: either a Button in the stock menu button's style (`plain`), or our
+// own card (the page's look) when the stock entry cannot be copied.
+struct TextButton {
+    Button plain;
+    Card card;
+    Text label;
+    Button& button() { return card ? card.button : plain; }
+    explicit operator bool() const { return (bool(plain) || bool(card)) && bool(label); }
+};
 struct Flat { Card card; Text label; };
 struct ModeView { Card card; Text name, blurb; };
 struct MapView { Card card; Text name, tag; };
 struct BrowserView { Card card; Text name, detail, players, note; };
+struct ChatRow { Box row; Text name, text; };
 struct MemberView { Card card; Icon swatch, avatar, ready; Text name, badge, team; };
 
 // A player's Steam avatar as an engine texture, made once and kept while the engine keeps it (an Image's brush holds
@@ -66,18 +74,28 @@ struct State {
     ULONGLONG nextScan = 0, nextText = 0;
     bool built = false, panelOpen = false;
     Kit kit;
-    UObject* buttonStyle = nullptr;          // the stock button the Multiplayer entry copies its look from (older builds)
     TextButton openButton;
     Panel panel;                             // the full-screen multiplayer page (a Border over the whole menu)
-    Text title, me, badge, status, pillText, lobbyTitle, browserTitle, idleHint, hostOnly, waiting;
+    Text title, me, badge, status, notice, updateNote, pillText, lobbyTitle, browserTitle, idleHint, hostOnly, waiting;
     Panel pill;
     Box middle, right;
     Flat hostFriends, hostPublic, find, invite, readyUp, balance, leave, close;
     Flat reportOpen, reportSend, reportCancel;   // REPORT A BUG, and the box it opens
+    Text reportHow;                              // how to report from a fight (/bug)
     Box reportBox;
     EditBox reportText;
     Text reportNote;
+    uint32_t reportSeen = 0;   // Session::ReportStatusSeq last shown in reportNote
     bool reportOpenNow = false;
+    Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF
+    Text helpNote;
+    Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
+    Box chatScroll;
+    std::array<ChatRow, kChatLogLines> chatRows;
+    EditBox chatText;
+    Flat chatSend;
+    uint32_t chatSeen = 0;                   // ChatLinesAdded() at the last draw
+    bool chatFocused = false, enterDown = false;   // the box had the keyboard at the last frame; Enter was down
     std::vector<BrowserView> rows;           // kBrowserRows
     std::vector<uint64_t> rowLobbies;
     std::vector<MemberView> members;         // kMaxLobbyMembers
@@ -94,16 +112,7 @@ struct State {
 
 bool StillAlive(UObject* o, int32_t index, UClass* cls) { return o && ObjectAt(index) == o && ClassOf(o) == cls; }
 
-TextButton MakeButton(const std::string& text) {
-    TextButton b{g.kit.MakeButton(), g.kit.MakeText()};
-    if (!b.button || !b.label) { HSM_LOG("ui: widget spawn failed"); return TextButton{}; }
-    b.button.StyleFrom(g.buttonStyle);
-    b.button.Content(b.label);
-    b.label.Set(text);
-    return b;
-}
-
-bool Clicked(TextButton& b) { return b.button.Clicked(); }
+bool Clicked(TextButton& b) { return b.button().Clicked(); }
 
 // Hidden but still taking its space (the page's columns stay where they are when a lobby is joined or left).
 void SetShown(Widget& w, bool shown) { w.Visibility(shown ? Vis::Visible : Vis::Hidden); }
@@ -167,17 +176,74 @@ void AddFlat(Box& column, Flat& f, float padTop) { if (f.card) AddToVerticalBox(
 
 bool Clicked(Card& c) { return c && c.button.Clicked(); }
 
+// The menu's structure around the anchor, to the log once per run: the next log shows how the stock entries are built
+// (user widgets, buttons, labels, brushes), which is what the Multiplayer entry copies.
+void LogMenuTree(UObject* w, UObject* anchor, int depth, int& budget) {
+    if (budget <= 0) return;
+    --budget;
+    HSM_LOG("ui: menu tree %*s%s%s", depth * 2, "", Describe(w).c_str(), w == anchor ? "   <-- anchor" : "");
+    if (depth >= 4) return;
+    for (UObject* child : ChildrenOf(w)) LogMenuTree(child, anchor, depth + 1, budget);
+}
+
+void LogLookOnce(const std::string& source) {
+    static bool logged = false;
+    if (logged) return;
+    logged = true;
+    HSM_LOG("ui: Multiplayer button look: %s", source.c_str());
+}
+
+// The Multiplayer entry made to look like the menu's own buttons, from what the anchor (a stock button) turns out to be:
+// - its label is a real TextBlock (UI_MainMenuSNF's buttons, or a ribbon with text over it): the same button style, and
+//   the label takes that TextBlock's font and colour;
+// - it is art with the label baked in (this build's UI_Startup_Menu ribbons; copying the style would show the stock
+//   label): the page's own card (dark face, thin frame, lit under the mouse), with the menu's own typeface when any
+//   TextBlock in the menu has one. Never the plain white default button.
+TextButton MakeOpenButton(const std::string& text, UObject* anchor, bool startup) {
+    TextButton b;
+    b.label = g.kit.MakeText();
+    if (!b.label) { HSM_LOG("ui: widget spawn failed"); return TextButton{}; }
+    UObject* stockLabel = startup ? FindTextBlock(anchor, 4) : nullptr;
+    std::string source;
+    if (!startup || stockLabel) {
+        b.plain = g.kit.MakeButton();
+        if (!b.plain) { HSM_LOG("ui: widget spawn failed"); return TextButton{}; }
+        b.plain.StyleFrom(anchor);
+        source = "the anchor's button style";
+        if (stockLabel && b.label.StyleFrom(stockLabel)) source += ", font and colour of its label " + ObjectName(stockLabel);
+        else source += ", the kit's font";
+        b.plain.Content(b.label).Align(HAlign::Center, VAlign::Center);
+    } else {
+        b.card = MakeCard(b.label, {12, 4, 12, 4});
+        if (!b.card) return TextButton{};
+        b.card.face.ContentAlign(HAlign::Center, VAlign::Center);
+        UObject* menuText = FindTextBlock(g.menu, 12);
+        source = "the page's card (the anchor's label is baked into its art)";
+        if (menuText && b.label.StyleFrom(menuText)) source += ", font of the menu's TextBlock " + ObjectName(menuText);
+        else source += ", the kit's font";
+        b.label.Color(style::kBone);
+    }
+    LogLookOnce(source);
+    b.label.Set(text);
+    return b;
+}
+
 // Insert the Multiplayer button right after `anchor`, in whatever container the menu uses.
-bool InjectOpenButton(UObject* anchor) {
+bool InjectOpenButton(UObject* anchor, bool startup) {
     UObject* freeMode = anchor;
     Call gp(freeMode, "GetParent"); gp.invoke();
     UObject* parent = gp.get<UObject*>("ReturnValue");
     if (!parent) { HSM_LOG("ui: menu anchor button has no parent panel"); return false; }
-    g.openButton = MakeButton("MULTIPLAYER");
+    {
+        static bool treeLogged = false;
+        int budget = 80;
+        if (!treeLogged) { treeLogged = true; LogMenuTree(parent, anchor, 0, budget); }
+    }
+    g.openButton = MakeOpenButton("MULTIPLAYER", anchor, startup);
     if (!g.openButton) return false;
     std::string pcls = ObjectName(reinterpret_cast<UObject*>(ClassOf(parent)));
     if (pcls == "CanvasPanel") {
-        Call add(parent, "AddChildToCanvas"); add.set<UObject*>("Content", g.openButton.button.get()).invoke();
+        Call add(parent, "AddChildToCanvas"); add.set<UObject*>("Content", g.openButton.button().get()).invoke();
         Slot slot(add.get<UObject*>("ReturnValue"));
         UObject** freeSlotPtr = Field<UObject*>(freeMode, "Slot");
         if (slot && freeSlotPtr && *freeSlotPtr) {
@@ -187,15 +253,59 @@ bool InjectOpenButton(UObject* anchor) {
             Call anc(fs, "GetAnchors"); anc.invoke(); Anchors a = anc.get<Anchors>("ReturnValue");
             Call al(fs, "GetAlignment"); al.invoke(); Vec2 alignment = al.get<Vec2>("ReturnValue");
             slot.Anchor(a, alignment).Size(s).Position(Vec2{p.x, p.y + s.y * 1.15});
+            // Our own card has no ribbon art to set the type size: the label is a share of the entry's height.
+            if (g.openButton.card && s.y > 0) g.openButton.label.Font(float(std::clamp(s.y * 0.45, 14.0, 40.0)));
         }
     } else {
         // UPanelWidget::InsertChildAt is C++-only in this engine build (tools/check_reflection.py); AddChild is the
         // reflected way in, so the button goes to the end of the box rather than reshuffling the stock layout.
-        Call add(parent, "AddChild"); add.set<UObject*>("Content", g.openButton.button.get()).invoke();
+        Call add(parent, "AddChild"); add.set<UObject*>("Content", g.openButton.button().get()).invoke();
         if (!add.get<UObject*>("ReturnValue")) { HSM_LOG("ui: %s refused the Multiplayer button", pcls.c_str()); return false; }
     }
     HSM_LOG("ui: Multiplayer button added to %s", pcls.c_str());
     return true;
+}
+
+// The lobby chat under the players: the last lines in a framed box of fixed height (it scrolls when long lines wrap
+// past it), then the text box with SEND. Enter sends too (HandleClicks).
+void BuildChat(Box& left) {
+    g.chatBox = g.kit.MakeColumn();
+    Fixed frame = g.kit.MakeFixed();
+    Panel panel = g.kit.MakePanel();
+    g.chatScroll = g.kit.MakeScroll();
+    Box lines = g.kit.MakeColumn(), input = g.kit.MakeRow();
+    g.chatText = g.kit.MakeEditBox();
+    g.chatSend = MakeFlat("SEND", 17);
+    if (!g.chatBox || !frame || !panel || !g.chatScroll || !lines || !input || !g.chatText || !g.chatSend.card) {
+        HSM_LOG("ui: lobby chat widgets could not be made; chat disabled");
+        g.chatBox = Box{};
+        return;
+    }
+    Section(g.chatBox, "CHAT", 0);
+    frame.Height(kChatHeight);
+    panel.Color(kFace);
+    panel.Padding({10, 6, 10, 6});
+    panel.Content(g.chatScroll);
+    frame.Content(panel).Align(HAlign::Fill, VAlign::Fill);
+    AddToVerticalBox(g.chatBox, frame, 6);
+    g.chatScroll.Add(lines);
+    for (ChatRow& r : g.chatRows) {
+        r.row = g.kit.MakeRow();
+        r.name = NewText("", 15, style::kIron);
+        r.text = NewText("", 15, style::kBone);
+        if (!r.row || !r.name || !r.text) continue;
+        r.text.Wrap(true);
+        AddToHorizontalBox(r.row, r.name, 0, 8).Align(HAlign::Left, VAlign::Top);
+        AddToHorizontalBox(r.row, r.text, 1, 0).Align(HAlign::Fill, VAlign::Top);
+        AddToVerticalBox(lines, r.row, 2);
+        r.row.Show(false);
+    }
+    g.chatText.Hint("Say something (or /bug what went wrong)");
+    AddToHorizontalBox(input, g.chatText, 1, 8).Align(HAlign::Fill, VAlign::Center);
+    AddToHorizontalBox(input, g.chatSend.card.button, 0, 0).Align(HAlign::Left, VAlign::Center);
+    AddToVerticalBox(g.chatBox, input, 6);
+    AddToVerticalBox(left, g.chatBox, 14);
+    g.chatBox.Show(false);
 }
 
 // Left column: hosting and the browser (not in a lobby), the players with Invite, Ready, Auto-balance and Leave (in one).
@@ -245,6 +355,7 @@ void BuildLobbyColumn(Box& left) {
         g.members.push_back(v);                 // kept even if empty: g.members[i] is the scene's roster[i]
     }
     g.memberIds.assign(g.members.size(), 0);
+    BuildChat(left);
     g.invite = MakeFlat("Invite friends", 17);
     g.readyUp = MakeFlat("Mark me ready", 17);
     g.balance = MakeFlat("Auto-balance teams", 17);
@@ -260,13 +371,21 @@ void BuildLobbyColumn(Box& left) {
     g.reportNote = NewText("", 14, style::kIron);
     AddFlat(left, g.reportOpen, 26);
     if (g.reportBox && g.reportText) {
-        g.reportText.Hint("What went wrong?");
+        g.reportText.Hint("What went wrong? One line is enough");
         AddToVerticalBox(g.reportBox, g.reportText, 0);
         AddFlat(g.reportBox, g.reportSend, 6); AddFlat(g.reportBox, g.reportCancel, 6);
         AddToVerticalBox(left, g.reportBox, 8);
         SetShown(g.reportBox, false);
     }
     if (g.reportNote) { g.reportNote.Wrap(true); AddToVerticalBox(left, g.reportNote, 8); }
+    g.reportHow = NewText("In a fight: press Enter and type /bug and what happened. Your HSMMod log goes with it.", 13, style::kIron);
+    if (g.reportHow) { g.reportHow.Wrap(true); AddToVerticalBox(left, g.reportHow, 4); }
+
+    // HELP IMPROVE THE MOD: the setting behind help_improve in HSMMod.ini (what it sends is session.cpp's business).
+    g.helpToggle = MakeFlat("HELP IMPROVE THE MOD: OFF", 17);
+    g.helpNote = NewText("When on, your HSMMod log is sent to the bug report server whenever someone in your lobby files a report or a crash is reported (Steam IDs, IPs and your user name removed).", 13, style::kIron);
+    AddFlat(left, g.helpToggle, 26);
+    if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(left, g.helpNote, 6); }
 }
 
 // Middle column: the mode cards two to a row, then a stepper row per setting with its hint.
@@ -286,7 +405,7 @@ void BuildMatchColumn() {
                 v.card = MakeCard(body, {14, 9, 14, 10});
             }
             if (v.card) grid.Add(v.card.button, int32_t(i / 2), int32_t(i % 2)).Align(HAlign::Fill, VAlign::Fill);
-            g.modes.push_back(v);               // kept even if empty: g.modes[i] is kModeOrder[i], the last one Progression
+            g.modes.push_back(v);               // kept even if empty: g.modes[i] is kModeOrder[i], then Brawl, the last one Progression
         }
     }
     Section(g.middle, "SETTINGS", 18);
@@ -388,6 +507,10 @@ bool BuildPanel() {
     AddToVerticalBox(page, rule, 12);
     g.status = NewText("", 16, style::kIron);
     if (g.status) AddToVerticalBox(page, g.status, 8);
+    g.notice = NewText("", 20, style::kBloodInk);   // Session::TakeNotice: kicked, banned, refused; until the page closes
+    if (g.notice) { g.notice.Wrap(true); g.notice.Show(false); AddToVerticalBox(page, g.notice, 8); }
+    g.updateNote = NewText("", 16, style::kOk);   // net/update_check.h: only when a newer release exists
+    if (g.updateNote) { g.updateNote.Show(false); AddToVerticalBox(page, g.updateNote, 6); }
 
     FillVerticalBox(page, body, 18);
     // The left and middle columns scroll (a long mode and settings list, or a small window, no longer cuts them off).
@@ -411,12 +534,12 @@ bool BuildPanel() {
     return true;
 }
 
-void Reset() { g = State{}; }
+void Reset() { g = State{}; SetLobbyTyping(false); }
 
-// UI_Startup_Menu (this build's main menu): image ribbons with the label baked in, so the Multiplayer entry keeps the
-// default style and goes below Quit (Button_3; Button_4 is Free Mode, decomp UI/UI_Startup_Menu.cpp LatentResume_L44),
-// and the page's text takes a new TextBlock's own font. UI_MainMenuSNF (older builds): text buttons; ours copy
-// ButtonFreeMode's style and TextFreeMode's font.
+// UI_Startup_Menu (this build's main menu): image ribbons, the Multiplayer entry goes by Button_3 (Quit; Button_4 is
+// Free Mode, decomp UI/UI_Startup_Menu.cpp LatentResume_L44). UI_MainMenuSNF (older builds): text buttons, anchored on
+// ButtonFreeMode with TextFreeMode's font. How the entry is styled is MakeOpenButton's; the page's text takes a new
+// TextBlock's font.
 void Build() {
     bool startup = SameNameAscii(ObjectName(reinterpret_cast<UObject*>(g.menuClass)), "UI_Startup_Menu_C");
     const char* anchorName = startup ? "Button_3" : "ButtonFreeMode";
@@ -425,10 +548,9 @@ void Build() {
     if (!anchorPtr || !*anchorPtr) { HSM_LOG("ui: %s not found on the main menu", anchorName); return; }
     UObject* anchor = *anchorPtr;
     g.kit = Kit(g.menu, Vis::Visible);
-    g.buttonStyle = startup ? nullptr : anchor;
     if (!startup) if (UObject** tf = Field<UObject*>(g.menu, "TextFreeMode"); tf && *tf) g.kit.FontFrom(*tf, "UI_MainMenuSNF.TextFreeMode");
     if (!g.kit.HasFont()) if (Text probe = g.kit.MakeText()) g.kit.FontFrom(probe.get(), "a new TextBlock");   // sizes by font, not by scale
-    if (!InjectOpenButton(anchor)) return;
+    if (!InjectOpenButton(anchor, startup)) return;
     BuildPanel();
 }
 
@@ -615,6 +737,27 @@ UObject* AvatarFor(steam::SteamId id, ULONGLONG now) {
     return a->texture;
 }
 
+// The chat box (in a lobby only): the history's last lines, each sender's name in the colour the line came with.
+void DrawChat(bool in) {
+    if (!g.chatBox) return;
+    g.chatBox.Show(in);
+    if (!in) return;
+    const std::vector<ChatEntry> history = ChatHistory();
+    const size_t first = history.size() > g.chatRows.size() ? history.size() - g.chatRows.size() : 0;
+    for (size_t i = 0; i < g.chatRows.size(); ++i) {
+        ChatRow& r = g.chatRows[i];
+        if (!r.row) continue;
+        const bool show = first + i < history.size();
+        r.row.Show(show);
+        if (!show) continue;
+        const ChatEntry& e = history[first + i];
+        r.name.Set(e.name);
+        r.name.Color(e.ink);
+        r.text.Set(e.text);
+    }
+    if (ChatLinesAdded() != g.chatSeen) { g.chatSeen = ChatLinesAdded(); g.chatScroll.ScrollToEnd(); }
+}
+
 void UpdatePanel(Session& session) {
     game::Lobby& lobby = session.lobby();
     const auto& list = lobby.listings();
@@ -622,6 +765,10 @@ void UpdatePanel(Session& session) {
     const auto& mem = lobby.members();
     for (size_t i = 0; i < g.memberIds.size(); ++i) g.memberIds[i] = lobby.InLobby() && i < mem.size() ? mem[i].id : 0;
     Draw(BuildLobbyScene(Local(lobby)));
+    DrawChat(lobby.InLobby());
+    const std::string notice = update::Notice();
+    g.updateNote.Set(notice);
+    g.updateNote.Show(!notice.empty());
     ULONGLONG now = GetTickCount64();
     for (size_t i = 0; i < g.members.size(); ++i) {
         UObject* texture = g.memberIds[i] ? AvatarFor(g.memberIds[i], now) : nullptr;
@@ -637,18 +784,42 @@ void UpdateOpenLabel(Session& session) {
     g.openButton.label.Set(label);
 }
 
+// The lobby chat box: SEND, or Enter while the box has the keyboard (or lost it to that Enter this very frame, since the
+// box commits on Enter), sends what is typed through the session (commands included). While the box has the keyboard
+// the game's hotkeys stay off (ui::Typing).
+void HandleChat(Session& session, bool in) {
+    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    const bool enterEdge = enter && !g.enterDown;
+    g.enterDown = enter;
+    if (!g.chatBox || !in) { g.chatFocused = false; SetLobbyTyping(false); return; }
+    const bool focused = g.chatText.Focused();
+    const bool send = Clicked(g.chatSend.card) || (enterEdge && (focused || g.chatFocused));
+    g.chatFocused = focused;
+    SetLobbyTyping(focused);
+    if (!send) return;
+    const std::string text = g.chatText.Value();
+    if (text.empty()) return;
+    g.chatText.Clear();
+    g.chatText.Focus();                         // the next line can be typed straight away
+    session.LobbyChatLine(text);
+    g.nextText = 0;
+}
+
 // Every frame while the page is open: each button is polled (a click is a press and a release seen in turn), the
 // cards are painted for the mouse, and a click acts on what the last drawn scene offered.
 void HandleClicks(Session& session) {
     game::Lobby& lobby = session.lobby();
-    if (Clicked(g.openButton)) { g.panelOpen = !g.panelOpen; g.panel.Show(g.panelOpen); if (g.panelOpen) g.nextText = 0; }
-    if (!g.panelOpen) return;
+    const bool openClicked = Clicked(g.openButton);
+    Paint(g.openButton.card);
+    if (openClicked) { g.panelOpen = !g.panelOpen; g.panel.Show(g.panelOpen); if (g.panelOpen) g.nextText = 0; }
+    if (!g.panelOpen) { SetLobbyTyping(false); return; }
     const LobbyScene& s = g.scene;
     bool acted = false;
     auto act = [&](bool clicked, bool allowed) { bool go = clicked && allowed; acted = acted || go; return go; };
 
-    for (Flat* f : {&g.hostFriends, &g.hostPublic, &g.find, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.reportOpen, &g.reportSend, &g.reportCancel}) Paint(f->card);
+    for (Flat* f : {&g.hostFriends, &g.hostPublic, &g.find, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.reportOpen, &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle}) Paint(f->card);
     g.reportOpen.card.button.Show(report::Enabled());
+    g.reportHow.Show(report::Enabled());
     if (act(Clicked(g.reportOpen.card), report::Enabled())) {
         g.reportOpenNow = !g.reportOpenNow;
         SetShown(g.reportBox, g.reportOpenNow);
@@ -665,6 +836,17 @@ void HandleClicks(Session& session) {
             g.reportOpenNow = false; SetShown(g.reportBox, false);
         }
     }
+    // HELP IMPROVE THE MOD: on gets the blood frame and a green label, as Mark me ready does.
+    const bool help = session.HelpImprove();
+    g.helpToggle.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
+    g.helpToggle.label.Color(help ? style::kOk : style::kBone);
+    g.helpToggle.card.selected = help;
+    if (act(Clicked(g.helpToggle.card), true)) session.SetHelpImprove(!help);
+    if (const uint32_t seq = session.ReportStatusSeq(); seq != g.reportSeen) {
+        g.reportSeen = seq;
+        g.reportNote.Set(s.in ? std::string() : session.ReportStatus());
+    }
+    HandleChat(session, s.in);
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
     if (act(Clicked(g.hostPublic.card), s.idle)) lobby.Host(steam::LobbyType::Public);
     if (act(Clicked(g.find.card), s.idle)) lobby.RefreshList();
@@ -672,7 +854,7 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.readyUp.card), s.ready)) lobby.SetReady(!s.readyOn);
     if (act(Clicked(g.balance.card), s.balance)) lobby.ClearOverrides();
     if (act(Clicked(g.leave.card), s.in)) lobby.Leave();
-    if (Clicked(g.close.card)) { g.panelOpen = false; g.panel.Show(false); return; }
+    if (Clicked(g.close.card)) { g.panelOpen = false; g.panel.Show(false); g.notice.Show(false); return; }
 
     for (size_t i = 0; i < g.rows.size(); ++i) {
         Paint(g.rows[i].card);
@@ -691,8 +873,8 @@ void HandleClicks(Session& session) {
         if (!act(Clicked(g.modes[i].card), i < s.modes.size() && s.modes[i].enabled)) continue;
         if (s.modes[i].progression) { lobby.SetProgression(true); continue; }
         if (lobby.Progression()) lobby.SetProgression(false);
-        MatchConfig next = SelectFormat(c, s.modes[i].format);
-        if (next.format != c.format) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
+        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl);
+        if (next.format != c.format || next.gear != c.gear) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
     }
     for (size_t i = 0; i < g.steppers.size(); ++i) {
         StepperView& v = g.steppers[i];
@@ -756,17 +938,25 @@ void Tick(Session& session, UObject* worldContext) {
     }
     if (!g.built) Build();
     if (!g.openButton) return;
+    // Turned away by a host: the page opens on its own with the reason in large type, so it is not missed.
+    if (std::string why = session.TakeNotice(); !why.empty() && g.notice) {
+        g.notice.Set(why); g.notice.Show(true);
+        g.panelOpen = true; g.panel.Show(true); g.nextText = 0;
+    }
     HandleClicks(session);
     if (now >= g.nextText) { g.nextText = now + 250; UpdateOpenLabel(session); if (g.panelOpen) UpdatePanel(session); }
 }
 
 // Fight levels: no main menu belongs on screen. A client that joined with the multiplayer page open kept the page over
 // the match (test 2026-10-27), so close our page and take any main menu still in the viewport off it.
+bool PanelOpen() { return g.panelOpen && g.menu && StillAlive(g.menu, g.menuIndex, g.menuClass) && InViewport(g.menu); }
+
 void LeaveMenus() {
     static ULONGLONG next = 0;
     const ULONGLONG now = GetTickCount64();
     if (now < next) return;
     next = now + 2000;
+    SetLobbyTyping(false);
     if (g.panelOpen && StillAlive(g.menu, g.menuIndex, g.menuClass)) { g.panelOpen = false; g.panel.Show(false); }
     for (const char* name : {"UI_Startup_Menu_C", "UI_MainMenuSNF_C"})
         for (UObject* o : FindInstances(name))

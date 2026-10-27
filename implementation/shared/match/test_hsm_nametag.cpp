@@ -26,6 +26,11 @@ int main() {
     CHECK(t1.ink.b == style::TeamInk(1).b && t1.ink.r == style::TeamInk(1).r);
     NameTagView ffa = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, 1, Format::FreeForAll);   // no teams: bone
     CHECK(ffa.ink.r == style::kBone.r);
+    NameTagView half = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, kNoTeam, Format::Duel, 0.5f);   // mid fade
+    CHECK(half.visible && half.alpha == 0.5f);
+    CHECK(!NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, kNoTeam, Format::Duel, 0.f).visible);        // behind a wall
+    CHECK(!NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, kNoTeam, Format::Duel, NAN).visible);
+    CHECK(NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, kNoTeam, Format::Duel, 3.f).alpha == 1.f);    // never brighter
     std::printf(g_fail ? "%d FAILED\n" : "all name tag tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -156,6 +156,9 @@ inline std::string FormatName(Format f) {
         default: return "Free-for-all";
     }
 }
+// What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name.
+inline std::string ModeName(Format f, Gear g) { return IsBrawl(f, g) ? "Brawl" : FormatName(f); }
+inline std::string ModeName(uint8_t format, uint8_t gear) { return ModeName(Format(format), Gear(gear)); }
 // The value after `cur` in `options`, wrapping; the first option when `cur` is not one of them.
 inline int NextOf(const std::vector<int>& options, int cur) {
     if (options.empty()) return cur;
@@ -171,6 +174,7 @@ inline std::string TeamLabel(int team) {
 // The lobby's gear setting, with when it changes (RegearFor). The bot formats have no gear option: own loadouts.
 inline std::string GearLabel(Gear g, Format f) {
     if (IsBotFormat(f)) return "Own loadouts";
+    if (g == Gear::Fists) return "Bare fists";
     if (g == Gear::RandomTier) return f == Format::Duel ? "Random by tier, new each round" : "Random by tier, new each life";
     if (g == Gear::Mirror) return f == Format::Duel ? "Everyone identical, new each round" : "Everyone identical";
     return "Own loadouts";

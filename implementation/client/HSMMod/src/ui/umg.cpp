@@ -2,6 +2,7 @@
 #include "util/hsm_names.h"
 #include "log.h"
 #include <algorithm>
+#include <cstdio>
 #include <unordered_map>
 #include <utility>
 
@@ -86,6 +87,80 @@ const ColorLayout& SlateColors() {
         HSM_LOG("umg: SlateColor layout not resolved; text keeps its colour");
     }
     return layout;
+}
+
+// A TextBlock's FSlateFontInfo as raw bytes, for SetFont on another block (the engine copies it into the new widget; a
+// struct holding a TSharedPtr is never memcpy'd into a widget's own field).
+bool ReadFont(UObject* textBlock, std::vector<uint8_t>& out) {
+    void* font = textBlock ? FieldPtr(textBlock, "Font") : nullptr;
+    FProperty* p = font ? FindProperty(ClassOf(textBlock), "Font") : nullptr;
+    if (!p || PropertySize(p) <= 0) return false;
+    out.assign(static_cast<uint8_t*>(font), static_cast<uint8_t*>(font) + PropertySize(p));
+    return true;
+}
+
+float FontSize(const std::vector<uint8_t>& font) {
+    const FontLayout& layout = Fonts();
+    float size = 0;
+    if (layout.ok && layout.end <= font.size()) std::memcpy(&size, font.data() + layout.size, sizeof size);
+    return size;
+}
+
+// A TextBlock's or an EditableTextBox's text, as UTF-8.
+std::string ReadText(UObject* widget) {
+    static UObject* lib = nullptr;
+    if (!lib) if (UObject* cls = FindObject("KismetTextLibrary", "Class")) lib = DefaultObject(reinterpret_cast<UClass*>(cls));
+    Call get(widget, "GetText");
+    if (!get.invoke()) return {};
+    const FText text = get.get<FText>("ReturnValue");
+    Call str(lib, "Conv_TextToString");
+    str.set("InText", text);
+    if (!str.invoke()) return {};
+    return ReadFString(str.paramPtr("ReturnValue"));      // the Call frees the engine's string with its buffer
+}
+
+// An FSlateColor living at `base`, when it is a plain specified colour.
+bool ReadSlateColor(const uint8_t* base, Rgba& out) {
+    const ColorLayout& sc = SlateColors();
+    if (!sc.ok || !base || base[sc.rule] != 0) return false;   // 0: ESlateColorStylingMode::UseColor_Specified
+    std::memcpy(&out, base + sc.color, sizeof out);
+    return true;
+}
+
+std::string ColorText(Rgba c) {
+    char b[80];
+    std::snprintf(b, sizeof b, "(%.2f %.2f %.2f %.2f)", double(c.r), double(c.g), double(c.b), double(c.a));
+    return b;
+}
+
+// One state brush of a ButtonStyle: what it draws, how big, in what tint, with which resource.
+std::string DescribeBrush(const uint8_t* style, const char* member) {
+    UObject* buttonStyle = FindStruct("ButtonStyle");
+    UObject* brushStruct = FindStruct("SlateBrush");
+    FProperty* m = StructMember(buttonStyle, member);
+    if (!m) return std::string(member) + " ?";
+    const uint8_t* brush = style + PropertyOffset(m);
+    std::string out = member;
+    FProperty* draw = StructMember(brushStruct, "DrawAs");
+    FProperty* size = StructMember(brushStruct, "ImageSize");
+    FProperty* tint = StructMember(brushStruct, "TintColor");
+    FProperty* res = StructMember(brushStruct, "ResourceObject");
+    char b[96];
+    if (draw && PropertySize(draw) == 1) { std::snprintf(b, sizeof b, " draw=%d", int(brush[PropertyOffset(draw)])); out += b; }
+    if (size && PropertySize(size) == 8) {
+        float xy[2]; std::memcpy(xy, brush + PropertyOffset(size), sizeof xy);
+        std::snprintf(b, sizeof b, " size=%gx%g", double(xy[0]), double(xy[1])); out += b;
+    } else if (size && PropertySize(size) == 16) {
+        double xy[2]; std::memcpy(xy, brush + PropertyOffset(size), sizeof xy);
+        std::snprintf(b, sizeof b, " size=%gx%g", xy[0], xy[1]); out += b;
+    }
+    Rgba t;
+    if (tint && ReadSlateColor(brush + PropertyOffset(tint), t)) out += " tint=" + ColorText(t);
+    if (res && PropertySize(res) == int32_t(sizeof(UObject*))) {
+        UObject* r = nullptr; std::memcpy(&r, brush + PropertyOffset(res), sizeof r);
+        out += " res=" + (r ? ObjectName(r) : std::string("none"));
+    }
+    return out;
 }
 
 }  // namespace
@@ -181,6 +256,24 @@ void Text::Font(float size, int32_t outline, Rgba outlineColor) {
     if (mul != scaleMul_) { scaleMul_ = mul; ApplyScale(); }
 }
 
+bool Text::StyleFrom(UObject* textBlock) {
+    std::vector<uint8_t> f;
+    if (!w_ || !ReadFont(textBlock, f)) return false;
+    Call c(w_, "SetFont");
+    FProperty* p = c.function() ? FindProperty(c.function(), "InFontInfo") : nullptr;
+    if (!p || size_t(PropertySize(p)) != f.size()) return false;
+    std::memcpy(c.paramPtr("InFontInfo"), f.data(), f.size());   // the engine copies it
+    c.invoke();
+    font_ = f;
+    fontSent_ = Sent<FontKey>{};
+    scaleMul_ = 1; ApplyScale();
+    if (void* col = FieldPtr(textBlock, "ColorAndOpacity")) {
+        Rgba rgba;
+        if (ReadSlateColor(static_cast<uint8_t*>(col), rgba)) Color(rgba);
+    }
+    return true;
+}
+
 void Text::Shadow(Vec2 offset, Rgba color) {
     if (!w_) return;
     if (shadow_.Changed(offset)) Call(w_, "SetShadowOffset").set("InShadowOffset", offset).invoke();
@@ -225,6 +318,8 @@ Slot Box::Add(const Widget& child) {
     }
     return Slot(slot);
 }
+
+void Box::ScrollToEnd() { if (w_ && kind_ == Kind::Scroll) Call(w_, "ScrollToEnd").invoke(); }
 
 Slot Fixed::Content(const Widget& child) {
     Call c(w_, "SetContent"); c.set<UObject*>("Content", child.get()).invoke();
@@ -279,9 +374,8 @@ void Button::StyleFrom(UObject* button) {
     void* style = w_ && button ? FieldPtr(button, "WidgetStyle") : nullptr;
     if (!style) return;
     Call c(w_, "SetStyle");
-    FProperty* p = c.function() ? FindProperty(c.function(), "InStyle") : nullptr;
-    if (!p || !c.paramPtr("InStyle")) return;
-    std::memcpy(c.paramPtr("InStyle"), style, size_t(PropertySize(p)));   // the engine copies it
+    if (!c.function() || !c.paramPtr("InStyle")) return;
+    c.setFrom("InStyle", style);   // a deep copy by the engine: the style's brushes hold shared pointers
     c.invoke();
 }
 
@@ -300,14 +394,8 @@ Canvas Kit::Root() const {
 }
 
 bool Kit::FontFrom(UObject* textBlock, const char* what) {
-    void* font = textBlock ? FieldPtr(textBlock, "Font") : nullptr;
-    FProperty* p = font ? FindProperty(ClassOf(textBlock), "Font") : nullptr;
-    if (!p || PropertySize(p) <= 0) return false;
-    font_.assign(static_cast<uint8_t*>(font), static_cast<uint8_t*>(font) + PropertySize(p));
-    const FontLayout& layout = Fonts();
-    float size = 0;
-    if (layout.ok && layout.end <= font_.size()) std::memcpy(&size, font_.data() + layout.size, sizeof size);
-    HSM_LOG("umg: font copied from %s (%zu bytes, size %.1f)", what, font_.size(), double(size));
+    if (!ReadFont(textBlock, font_)) return false;
+    HSM_LOG("umg: font copied from %s (%zu bytes, size %.1f)", what, font_.size(), double(FontSize(font_)));
     return true;
 }
 
@@ -342,22 +430,49 @@ Grid Kit::MakeGrid() { return Made<Grid>(Spawn(WidgetClass(kUniformGridPanelClas
 Bar Kit::MakeBar() { return Made<Bar>(Spawn(WidgetClass(kProgressBarClass))); }
 Icon Kit::MakeIcon() { return Made<Icon>(Spawn(WidgetClass(kImageClass))); }
 Button Kit::MakeButton() { return Made<Button>(Spawn(WidgetClass(kButtonClass))); }
-EditBox Kit::MakeEditBox() { return Made<EditBox>(Spawn(WidgetClass(kEditBoxClass))); }
-
-std::string EditBox::Value() const {
-    if (!w_) return {};
-    static UObject* lib = nullptr;
-    if (!lib) if (UObject* cls = FindObject("KismetTextLibrary", "Class")) lib = DefaultObject(reinterpret_cast<UClass*>(cls));
-    Call get(w_, "GetText");
-    if (!get.invoke()) return {};
-    const FText text = get.get<FText>("ReturnValue");
-    Call str(lib, "Conv_TextToString");
-    str.set("InText", text);
-    if (!str.invoke()) return {};
-    return ReadFString(str.paramPtr("ReturnValue"));      // the Call frees the engine's string with its buffer
+// The stock EditableTextBox is a light grey field with grey hint text, hard to read on the dark menu: its WidgetStyle
+// gets a near-black field and bone text (the hint is drawn from the same colour, faded). It
+// is written before the Slate widget exists (the box is in no tree yet), so the first build already uses it.
+EditBox Kit::MakeEditBox() {
+    EditBox e = Made<EditBox>(Spawn(WidgetClass(kEditBoxClass)));
+    if (!e) return e;
+    static bool logged = false;
+    const ColorLayout& sc = SlateColors();
+    uint8_t* ws = sc.ok ? static_cast<uint8_t*>(FieldPtr(e.w_, "WidgetStyle")) : nullptr;
+    UObject* boxStyle = FindStruct("EditableTextBoxStyle");
+    UObject* textStyle = FindStruct("TextBlockStyle");
+    if (!ws || !boxStyle) { if (!logged) { logged = true; HSM_LOG("umg: text box style not found; the stock look stays"); } return e; }
+    int painted = 0;
+    auto paint = [&](size_t at, const FProperty* p, Rgba c) {
+        if (!p || size_t(PropertySize(p)) < sc.color + sizeof(Rgba) || size_t(PropertySize(p)) <= sc.rule) return;
+        std::memcpy(ws + at + sc.color, &c, sizeof c);
+        ws[at + sc.rule] = 0;                                  // ESlateColorStylingMode::UseColor_Specified
+        ++painted;
+    };
+    const Rgba field{0.016f, 0.014f, 0.012f, 1}, ink{0.93f, 0.89f, 0.80f, 1};   // style::kBone
+    for (FProperty* p : {StructMember(boxStyle, "BackgroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, field);
+    for (FProperty* p : {StructMember(boxStyle, "ForegroundColor"), StructMember(boxStyle, "FocusedForegroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, ink);
+    if (FProperty* ts = StructMember(boxStyle, "TextStyle")) {
+        const size_t base = size_t(PropertyOffset(ts));
+        if (FProperty* c = StructMember(textStyle, "ColorAndOpacity")) paint(base + size_t(PropertyOffset(c)), c, ink);
+    }
+    if (!logged) { logged = true; HSM_LOG("umg: text box restyled (%d colour(s) set)", painted); }
+    return e;
 }
 
+std::string EditBox::Value() const { return w_ ? ReadText(w_) : std::string(); }
+
 void EditBox::Clear() { if (w_) Call(w_, "SetText").set("InText", MakeText("")).invoke(); }
+// The keyboard sits on the Slate field inside the box, so the box itself is not the answer (HasKeyboardFocus): any
+// focused descendant is.
+bool EditBox::Focused() const {
+    if (!w_) return false;
+    Call c(w_, "HasFocusedDescendants");
+    if (c.invoke() && c.get<bool>("ReturnValue")) return true;
+    Call k(w_, "HasKeyboardFocus");
+    return k.invoke() && k.get<bool>("ReturnValue");
+}
+void EditBox::Focus() { if (w_) Call(w_, "SetKeyboardFocus").invoke(); }
 void EditBox::Hint(const std::string& s) { if (w_) Call(w_, "SetHintText").set("InText", MakeText(s)).invoke(); }
 
 bool InViewport(UObject* userWidget) {
@@ -368,6 +483,53 @@ bool InViewport(UObject* userWidget) {
 UObject* OnScreen(const std::vector<UObject*>& instances) {
     for (UObject* o : instances) if (InViewport(o)) return o;
     return nullptr;
+}
+
+
+// ------------------------------------------------------------------ probing the game's own widgets
+std::vector<UObject*> ChildrenOf(UObject* widget) {
+    std::vector<UObject*> out;
+    if (!widget) return out;
+    if (UObject** tree = Field<UObject*>(widget, "WidgetTree"); tree && *tree)       // a user widget: its tree's root
+        if (UObject** root = Field<UObject*>(*tree, "RootWidget"); root && *root) out.push_back(*root);
+    Call n(widget, "GetChildrenCount");                                                  // a panel (a Button included)
+    if (!n.invoke()) return out;
+    const int32_t count = std::min(n.get<int32_t>("ReturnValue"), 64);
+    for (int32_t i = 0; i < count; ++i) {
+        Call c(widget, "GetChildAt");
+        c.set<int32_t>("Index", i);
+        if (c.invoke())
+            if (UObject* child = c.get<UObject*>("ReturnValue")) out.push_back(child);
+    }
+    return out;
+}
+
+UObject* FindTextBlock(UObject* root, int depth) {
+    UClass* tb = WidgetClass(kTextBlockClass);
+    if (!root || !tb) return nullptr;
+    if (IsA(root, tb)) return root;
+    if (depth <= 0) return nullptr;
+    for (UObject* child : ChildrenOf(root))
+        if (UObject* found = FindTextBlock(child, depth - 1)) return found;
+    return nullptr;
+}
+
+std::string Describe(UObject* widget) {
+    if (!widget) return "(null)";
+    std::string out = ObjectName(widget) + " : " + ObjectName(reinterpret_cast<UObject*>(ClassOf(widget)));
+    if (UClass* tb = WidgetClass(kTextBlockClass); tb && IsA(widget, tb)) {
+        std::vector<uint8_t> f;
+        if (ReadFont(widget, f)) { char b[48]; std::snprintf(b, sizeof b, " font=%.1f", double(FontSize(f))); out += b; }
+        Rgba c;
+        if (void* col = FieldPtr(widget, "ColorAndOpacity"); col && ReadSlateColor(static_cast<uint8_t*>(col), c)) out += " colour=" + ColorText(c);
+        out += " text='" + ReadText(widget) + "'";
+    } else if (UClass* bt = WidgetClass(kButtonClass); bt && IsA(widget, bt)) {
+        const uint8_t* style = static_cast<const uint8_t*>(FieldPtr(widget, "WidgetStyle"));
+        if (style)
+            for (const char* state : {"Normal", "Hovered", "Pressed"}) out += " [" + DescribeBrush(style, state) + "]";
+        if (const void* bg = FieldPtr(widget, "BackgroundColor")) out += " background=" + ColorText(*static_cast<const Rgba*>(bg));
+    }
+    return out;
 }
 
 }  // namespace hsm::ui

@@ -81,6 +81,8 @@ public:
         if (currentSeq && travelSeq != currentSeq) return;
         if (!it->second.ready) { it->second.ready = true; it->second.readyAt = nowMs; }
     }
+    // The travel the slot last reported Ready for (0: none yet, or not a client).
+    uint32_t ReadySeq(uint8_t slot) const { auto it = slots_.find(slot); return it == slots_.end() ? 0 : it->second.readySeq; }
     void OnBlob(uint8_t slot, uint32_t blobId) { auto it = slots_.find(slot); if (it != slots_.end()) it->second.blobId = blobId; }
 
     // Slots whose fighter should be spawned now, lowest slot first. Slot 0 is the host's own stock fighter:

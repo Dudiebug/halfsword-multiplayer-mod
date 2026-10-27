@@ -1,5 +1,7 @@
 #include "gameplay/claims.h"
 #include "util/hsm_names.h"
+#include "util/hsm_sanitize.h"
+#include "util/hsm_validate.h"
 #include "log.h"
 #include "ue/script_hook.h"
 #include <cmath>
@@ -322,6 +324,7 @@ void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     UObject* victim = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;
     UObject* mesh = victim ? adapter_->Mesh(victim) : nullptr;
     if (!mesh) { ++n_.noVictim; return; }   // between lives: the blow has nothing to land on
+    if (!PeerBoneOk(c)) return;
     const FName bone = c.hitBone.empty() ? FName{} : MakeName(c.hitBone);
     Call index(mesh, "GetBoneIndex");
     index.setName("BoneName", bone).invoke();
@@ -467,6 +470,7 @@ void Claims::Effect(const HitClaim& c) {
     UObject* standIn = standIns_->ActorOf(c.victim);
     UObject* mesh = standIn ? adapter_->Mesh(standIn) : nullptr;
     Xform boneWorld;
+    if (mesh && !PeerBoneOk(c)) { ++n_.effectsSkipped; return; }
     const FName bone = (mesh && !c.hitBone.empty()) ? MakeName(c.hitBone) : FName{};
     if (!mesh || c.hitBone.empty() || !BoneXform(mesh, bone, boneWorld)) { ++n_.effectsSkipped; return; }
     const DcdInputs in = combat::ReplayInputs(c, boneWorld);
@@ -504,6 +508,16 @@ uint8_t Claims::RecentAttacker(uint8_t victim, double nowMs) const {
     return r.attacker && nowMs - r.atMs <= kRecentAttackerMs ? r.attacker : 0;
 }
 
+// M7: the FName pool never shrinks, so a bone name from the wire is interned only when it is a plain bone name (letters,
+// digits, underscore, at most 64). An empty hitBone stays allowed (it means "no bone"). Counted, and logged sparingly.
+bool Claims::PeerBoneOk(const combat::HitClaim& c) {
+    if (c.hitBone.empty() || util::ValidBoneName(c.hitBone)) return true;
+    if (++n_.badBone <= 3 || n_.badBone % 1000 == 0)
+        HSM_LOG("claims: #%u from e%u names an invalid bone '%.64s' (%llu so far); dropped", c.claimId, c.attacker,
+                util::StripControlChars(c.hitBone).c_str(), static_cast<unsigned long long>(n_.badBone));
+    return false;
+}
+
 std::string Claims::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
@@ -513,7 +527,7 @@ std::string Claims::HealthLine() {
                   "claims: sent %llu (props %llu gated %llu limited %llu friendly %llu coalesced %llu zero-impulse %llu "
                   "capped %llu) | replayed %llu (props %llu queued %llu dropped %llu dupes %llu stale %llu "
                   "age? %llu parried %llu novictim %llu nobone %llu nostriker %llu failed %llu) | blocked: on stand-ins %llu, "
-                  "on mine %llu, driven props on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu)",
+                  "on mine %llu, driven props on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu) | bad bone names %llu",
                   d(a.sent, b.sent), d(a.propSent, b.propSent), d(a.gated, b.gated), d(a.limited, b.limited),
                   d(a.friendly, b.friendly), d(a.coalesced, b.coalesced), d(a.zeroImpulse, b.zeroImpulse), d(a.capped, b.capped),
                   d(a.replayed, b.replayed), d(a.propReplayed, b.propReplayed), d(a.queued, b.queued), d(a.dropped, b.dropped),
@@ -521,7 +535,7 @@ std::string Claims::HealthLine() {
                   d(a.parried, b.parried), d(a.noVictim, b.noVictim), d(a.noBone, b.noBone), d(a.noStriker, b.noStriker),
                   d(a.failed, b.failed), d(a.blockedStandIn, b.blockedStandIn), d(a.blockedOnMine, b.blockedOnMine),
                   d(a.blockedPropCopy, b.blockedPropCopy), d(a.getDamageBlocked, b.getDamageBlocked), d(a.effects, b.effects),
-                  d(a.effectsSkipped, b.effectsSkipped), d(a.clashes, b.clashes), d(a.clashUnmatched, b.clashUnmatched));
+                  d(a.effectsSkipped, b.effectsSkipped), d(a.clashes, b.clashes), d(a.clashUnmatched, b.clashUnmatched), d(a.badBone, b.badBone));
     reported_ = n_;
     return line;
 }

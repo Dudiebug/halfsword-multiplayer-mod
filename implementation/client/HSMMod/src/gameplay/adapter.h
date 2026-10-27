@@ -44,6 +44,12 @@ public:
     // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
     // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
     bool PauseMenuOpen();
+    // The pause menu widget PauseMenuOpen found (nullptr: none on screen).
+    ue::UObject* PauseMenu();
+    // Closes the pause menu the way its Continue button does (that button's click handler, found by name on the widget's
+    // class); when none is found or the menu stays up, removes it, unpauses and gives the game its input back. True when
+    // the menu is gone.
+    bool ContinueFromPauseMenu();
     // Game-and-UI input with the mouse cursor shown, so the pause menu can be clicked (the game's own menus do the same).
     void ShowPauseCursor();
     // The chat's keyboard: on, UI-only input with the pressed keys flushed (the game's own UI_DeathDoor on open), so the
@@ -53,6 +59,13 @@ public:
     bool FloorZ(const ue::FVector& at, const std::vector<ue::UObject*>& ignore, double& z, std::string* hitName = nullptr);
     // Nothing between `from` and `to` (a fence, a wall), looking through `ignore`; `hitName` gets what is in the way.
     bool LineClear(const ue::FVector& from, const ue::FVector& to, const std::vector<ue::UObject*>& ignore, std::string* hitName = nullptr);
+    // One visibility trace: true on a hit, with its impact point and the hit actor's name when asked for.
+    bool TraceLine(const ue::FVector& start, const ue::FVector& end, const std::vector<ue::UObject*>& ignore, ue::FVector* impact,
+                   std::string* hitName);
+    // Where the player's camera is (the game's, or our follow camera while spectating); false when there is none.
+    bool CameraLocation(ue::FVector& out);
+    // The actors a fighter carries or wears: weapons (held and sheathed), quiver, feet and fists, attached armour.
+    std::vector<ue::UObject*> CarriedActors(ue::UObject* willie);
     // Where a bone (socket) of the fighter's Mesh is in the world; false without a Mesh or a finite position.
     bool BoneLocation(ue::UObject* willie, const char* bone, ue::FVector& out);
     // A navmesh point within `tolerance` of `aim` that the navmesh connects to `from`; false: none found.
@@ -77,6 +90,12 @@ public:
     // every spawner not made for the current game, combat and play modes or the number of combatants (the Pit's bridge
     // and outer ring in Free Mode), and a destroyed one reads (0,0,0), the middle of the Pit.
     std::vector<ue::FVector> SpawnCandidates();
+    // role=server spawn anchor fallbacks, tried in this order after the spawners (shared/session/hsm_spawn_anchor.h): the
+    // level's PlayerStart actors; a navmesh point (the origin or a NavMeshBoundsVolume projected onto the navmesh); the floor
+    // a downward trace finds under the static meshes nearest the origin. The last two return false when there is none.
+    std::vector<ue::FVector> PlayerStarts();
+    bool NavigablePoint(ue::FVector& out);
+    bool StaticMeshFloor(const std::vector<ue::UObject*>& ignore, ue::FVector& out);
     ue::FVector ActorLocation(ue::UObject* actor);
     double ActorYaw(ue::UObject* actor);
     double WorldSeconds();                                 // game seconds since this world began play, -1 unreadable
@@ -93,6 +112,9 @@ public:
     void SetFreeModeFoes(int foes);
     // Every fighter spawned from now on gets at least this tier's build (MuscleFor); -1: their own build.
     void SetMuscleTier(int tier) { muscleTier_ = tier; }                           // GI settings the stock arena select uses for a Free Mode fight
+    // Brawl: every fighter spawned from now on (own body, stand-ins, whatever loadout it was sent) has no armour and
+    // holds no weapon. Done on the fighter's own copy of the passport, so no save and no uploaded loadout changes.
+    void SetBare(bool on) { bare_ = on; }
     void QuitGame();
     bool GamePaused();
     void SetGamePaused(bool paused);
@@ -153,8 +175,7 @@ public:
 
 private:
     int muscleTier_ = -1;
-    bool TraceLine(const ue::FVector& start, const ue::FVector& end, const std::vector<ue::UObject*>& ignore, ue::FVector* impact,
-                   std::string* hitName);
+    bool bare_ = false;
     bool ResolveBones(ue::UObject* mesh);
     std::string TempSlot();
     void DeleteSlot(const std::string& slot);
@@ -162,6 +183,7 @@ private:
     uint32_t slotCounter_ = 0;
     bool CopyPassport(ue::UObject* willie, const SpawnOptions& o, double& height);
     void ApplyMuscle(ue::UObject* willie, ue::FProperty* passport);
+    void StripEquipment(ue::UObject* willie, ue::FProperty* passport);
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
     ue::UObject* world_ = nullptr;
@@ -169,6 +191,8 @@ private:
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;
     bool pauseOpen_ = false, pauseLogged_ = false;
+    ue::UObject* pauseWidget_ = nullptr;           // with its object-array slot: the widget PauseMenuOpen last found on screen
+    int32_t pauseWidgetIndex_ = -1;
     uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;

@@ -734,7 +734,37 @@ static void TestDuelDraw() {
     CHECK(!ffa.RoundInPlay() && !ffa.Draw(t + 1));                              // Duel only
 }
 
+// Brawl: free-for-all with gear = Fists. Only free-for-all can be one, it is tier 0, it never regears (the bodies are
+// stripped at the spawn), and it is scored, respawned and ended like free-for-all.
+static void TestBrawl() {
+    MatchConfig b = Cfg(Format::FreeForAll, 3); b.gear = Gear::Fists; b.tier = 5;
+    CHECK(IsBrawl(b) && IsBrawl(Format::FreeForAll, Gear::Fists) && !IsBrawl(Format::FreeForAll, Gear::Own));
+    MatchConfig s = Sanitize(b);
+    CHECK(s.gear == Gear::Fists && s.tier == 0 && s.format == Format::FreeForAll);   // tier 0: the lowest build and budget
+    for (Format f : {Format::Duel, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies}) {
+        MatchConfig o = b; o.format = f; o.tier = 4;
+        CHECK(Sanitize(o).gear == Gear::Own && Sanitize(o).tier == 4 && !IsBrawl(Sanitize(o)));   // only free-for-all is Brawl
+    }
+    MatchConfig own = Cfg(Format::FreeForAll, 3); own.tier = 5;
+    CHECK(Sanitize(own).tier == 5 && Sanitize(own).gear == Gear::Own);                // the tier is only forced for Brawl
+    for (RespawnCause cause : {RespawnCause::Individual, RespawnCause::RoundReset, RespawnCause::WaveCleared, RespawnCause::Rematch})
+        CHECK(RegearFor(s, cause) == Regear::None);                                   // no generated loadout: not own gear's blob either
+    CHECK(DropClearFor(s.format) == DropClear::EachMatch);                            // the free-for-all rule: the drops go at the rematch
+    CHECK(MuscleFor(0.1, s.tier) == MuscleForTier(0) && MuscleFor(0.9, s.tier) == 0.9);   // tier 0 raises nobody's build, lowers none
+
+    Match m; m.Start(s, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    m.Tick(Match::kCountdownMs);
+    CHECK(m.config().gear == Gear::Fists && m.phase() == MatchPhase::Live);
+    m.OnDeath(2, 1, 6000);
+    CHECK(m.Score(1) == 1 && !m.Alive(2));
+    auto ev = m.Tick(6000 + 5000 + 1);                                                // the respawn delay passes: back, and a fresh life
+    CHECK(ev.respawn.size() == 1 && ev.respawn[0] == 2 && ev.regear == Regear::None);
+    for (uint32_t t = 12000, k = 0; k < 2; ++k, t += 6000) { m.MarkRespawned(2); m.OnDeath(2, 1, t); m.Tick(t + 5001); }
+    CHECK(m.phase() == MatchPhase::Results && m.winner() == 1);                       // first to the limit wins
+}
+
 int main() {
+    TestBrawl();
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();

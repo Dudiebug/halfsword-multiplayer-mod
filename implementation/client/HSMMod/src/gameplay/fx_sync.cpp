@@ -1,6 +1,8 @@
 #include "gameplay/fx_sync.h"
 #include "log.h"
 #include "ue/script_hook.h"
+#include "util/hsm_sanitize.h"
+#include "util/hsm_validate.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -17,7 +19,6 @@ namespace {
 
 constexpr const char* kHookOwner = "fxsync";
 constexpr uint64_t kLogFirst = 10;   // the first reports and replays are logged in full (test evidence)
-constexpr size_t kMaxVoiceCueCache = 256;       // allowlist: max cached voice cues
 constexpr double kVoiceRateMin = 0.0, kVoiceRateMax = 2.0;  // clamp voice rate
 
 FVector ToF(const sync::V3& v) { return FVector{v.x, v.y, v.z}; }
@@ -240,7 +241,7 @@ void FxSync::OnVoice(ScriptCall& c) {
     m.kind = FxKind::Voice;
     m.bone = ObjectName(*sound);
     m.rate = Clamp(volume ? *volume : 1.0, 0, combat::kFxMaxRate);
-    if (m.bone.empty() || m.bone.size() > combat::kMaxClaimString) { ++n_.noName; return; }
+    if (!combat::ValidVoiceCueName(m.bone)) { ++n_.noName; return; }   // a cue every receiver would refuse is not sent
     if (!limiter_.Allow(m.entity, m.kind, SteadyNowMs())) { ++n_.limited; return; }
     m.seq = ++seq_;
     env_.send(m);
@@ -260,7 +261,9 @@ void FxSync::OnPickUpArmor(ScriptCall& c) {
     m.entity = entity;
     m.kind = FxKind::ArmorOn;
     m.local.pos = ToV(adapter_->ActorLocation(actor));   // world for now (the piece, carried in a hand)
-    if (Send(m, self, MakeName(kArmorBone), false, ObjectName(reinterpret_cast<UObject*>(ClassOf(actor))))) ++n_.armor;
+    const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(actor)));
+    if (!combat::ValidArmorClassName(cls)) { ++n_.noName; return; }   // a class every receiver would refuse is not sent
+    if (Send(m, self, MakeName(kArmorBone), false, cls)) ++n_.armor;
 }
 
 // Remove Armor on a fighter simulated here, seen once it returned: the slot left its passport and a loose piece was
@@ -360,6 +363,32 @@ bool FxSync::BoneXform(UObject* mesh, FName bone, Xform& out) const {
 
 // ---------------------------------------------------------------- everyone else (a stand-in of that fighter)
 
+// A peer's report on the receive path (host before it relays, client before it applies): the names it carries must be
+// ones the receiver may look up or intern (M1, M2, M7), and a fighter's reports are limited per second (M1).
+bool FxSync::Accept(const PaintFxMsg& m) {
+    if (m.kind == FxKind::Voice) {
+        if (!combat::ValidVoiceCueName(m.bone)) { Refuse("voice cue name", m, n_.badName); return false; }
+    } else if (m.kind == FxKind::ArmorOn) {
+        if (!combat::ValidArmorClassName(m.bone)) { Refuse("armour class name", m, n_.badName); return false; }
+    } else if (!util::ValidBoneName(m.bone)) {
+        Refuse("bone name", m, n_.badBone);
+        return false;
+    }
+    if (!rxLimiter_.Allow(m.entity, m.kind, SteadyNowMs())) {
+        if (++n_.rxLimited <= 3 || n_.rxLimited % 2000 == 0)
+            HSM_LOG("fx: %s on e%u over the receive limit of %d a second (%llu dropped so far)", KindName(m.kind), m.entity,
+                    combat::kFxMaxRxPerSecond, static_cast<unsigned long long>(n_.rxLimited));
+        return false;
+    }
+    return true;
+}
+
+void FxSync::Refuse(const char* why, const PaintFxMsg& m, uint64_t& counter) {
+    if (++counter > 3 && counter % 1000 != 0) return;
+    HSM_LOG("fx: refused %s from e%u in a %s report (%llu so far): '%.64s'", why, m.entity, KindName(m.kind),
+            static_cast<unsigned long long>(counter), util::StripControlChars(m.bone).c_str());
+}
+
 void FxSync::Apply(const PaintFxMsg& m) {
     if (!active_) return;
     if (combat::IsStripRequest(m)) { ApplyStrip(m); return; }
@@ -370,6 +399,7 @@ void FxSync::Apply(const PaintFxMsg& m) {
         return;
     }
     const bool framedByPelvis = m.kind == FxKind::ArmorOn;
+    if (!framedByPelvis && !util::ValidBoneName(m.bone)) { Refuse("bone name", m, n_.badBone); return; }   // M7: before any MakeName of it
     Xform boneWorld;
     if (!mesh || !BoneXform(mesh, MakeName(framedByPelvis ? kArmorBone : m.bone.c_str()), boneWorld)) { ++n_.skipped; return; }
     switch (m.kind) {
@@ -384,15 +414,22 @@ void FxSync::Apply(const PaintFxMsg& m) {
 
 // The owner's cue on the stand-in's own Voice Audio, then its Helmet Muffle Voice (the low-pass a helmet puts on it).
 void FxSync::ApplyVoice(const PaintFxMsg& m, UObject* standIn) {
+    // M1: only a stock cue name is ever looked up (the lookup scans every loaded object). A name that did not resolve is
+    // remembered for a minute, and new names are scanned for at most 4 a second, so a peer cannot turn messages into scans.
+    if (!combat::ValidVoiceCueName(m.bone)) { Refuse("voice cue name", m, n_.badName); Count(false, m); return; }
     UObject* const* audio = Field<UObject*>(standIn, "Voice Audio");
     // Clamp rate to safe range
     double rate = Clamp(m.rate, kVoiceRateMin, kVoiceRateMax);
-    // Cap the cue cache: erase oldest if exceeding limit
-    if (cues_.size() >= kMaxVoiceCueCache) {
-        cues_.erase(cues_.begin());
+    const double now = SteadyNowMs();
+    UObject* sound = nullptr;
+    const combat::NameCache<ObjRef>::Entry* known = voiceCues_.Find(m.bone, now);
+    if (known && known->found && adapter_->StillValid(known->value.obj, known->value.index)) sound = known->value.obj;
+    else if (known && !known->found) { ++n_.skipped; return; }   // looked up and not there: no second scan
+    else {
+        if (!cueScans_.Allow(now)) { ++n_.scanLimited; return; }
+        sound = FindObject(m.bone, "SoundCue");
+        voiceCues_.Put(m.bone, sound ? ObjRef{sound, ObjectIndex(sound)} : ObjRef{}, sound != nullptr, now);
     }
-    UObject*& sound = cues_[m.bone];
-    if (!sound) sound = FindObject(m.bone, "SoundCue");
     if (!audio || !*audio || !sound) { Count(false, m); return; }
     Call(*audio, "SetSound").set<UObject*>("NewSound", sound).invoke();
     Call(*audio, "SetVolumeMultiplier").set<float>("NewVolumeMultiplier", float(rate)).invoke();
@@ -430,7 +467,14 @@ void FxSync::ApplyStrip(const PaintFxMsg& m) {
 // The nearest loose piece of the owner's class to where the owner's lay, put on the stand-in by its own Pick Up Armor
 // (Player raised for the call: it is the function's first gate).
 void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& boneWorld) {
+    // M2: only the armour Blueprint family is searched for (then handed to a Blueprint call on the stand-in). A class no
+    // loaded object has is remembered for 5 s, and walks are limited to 10 a second.
+    if (!combat::ValidArmorClassName(m.bone)) { Refuse("armour class name", m, n_.badName); Count(false, m); return; }
+    const double now = SteadyNowMs();
+    if (missingArmor_.Find(m.bone, now)) { ++n_.skipped; return; }
+    if (!armorWalks_.Allow(now)) { ++n_.scanLimited; return; }
     const sync::V3 at = boneWorld.FromLocal(m.local.pos);
+    bool classExists = false;
     UObject* best = nullptr;
     double bestD = kArmorMatchUu * kArmorMatchUu;
     std::unordered_map<UClass*, bool> ofClass;   // each class named once per pass, not each object
@@ -440,12 +484,14 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
         auto cls = ofClass.find(ClassOf(o));
         if (cls == ofClass.end()) cls = ofClass.emplace(ClassOf(o), ObjectName(reinterpret_cast<UObject*>(ClassOf(o))) == m.bone).first;
         if (!cls->second) continue;
+        classExists = true;
         Call parent(o, "GetAttachParentActor");
         if (!parent.invoke() || parent.get<UObject*>("ReturnValue")) continue;   // worn or carried already
         const sync::V3 p = ToV(adapter_->ActorLocation(o));
         const double d = (p.x - at.x) * (p.x - at.x) + (p.y - at.y) * (p.y - at.y) + (p.z - at.z) * (p.z - at.z);
         if (d < bestD) { bestD = d; best = o; }
     }
+    if (!classExists) missingArmor_.PutMiss(m.bone, now);   // no object of that class at all: not looked for again for a while
     if (!best) {
         HSM_LOG("fx: no loose %s within %.0f uu of the owner's for the stand-in of e%u", m.bone.c_str(), kArmorMatchUu, m.entity);
         Count(false, m);
@@ -621,11 +667,12 @@ std::string FxSync::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[320];
-    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu (limited %llu nobone %llu noname %llu passed-on %llu) | replayed %llu (skipped %llu failed %llu)",
+    char line[400];
+    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu (limited %llu nobone %llu noname %llu passed-on %llu) | replayed %llu (skipped %llu failed %llu) | refused rx-limit %llu name %llu bone %llu scan-limit %llu",
                   d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.pains, b.pains), d(a.hits, b.hits), d(a.armor, b.armor), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName), d(a.passedOn, b.passedOn),
                   d(a.applied, b.applied),
-                  d(a.skipped, b.skipped), d(a.failed, b.failed));
+                  d(a.skipped, b.skipped), d(a.failed, b.failed), d(a.rxLimited, b.rxLimited), d(a.badName, b.badName), d(a.badBone, b.badBone),
+                  d(a.scanLimited, b.scanLimited));
     reported_ = n_;
     return line;
 }

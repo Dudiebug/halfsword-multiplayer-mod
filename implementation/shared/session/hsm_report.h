@@ -3,7 +3,8 @@
 // out) to the report relay (report_url), which opens a GitHub issue and keeps the logs private. The relay
 // answers with the report's id and an attach token; the reporter shares both with the session (ReportShare), and each
 // other player who types "/sendlog" within kReportOfferMs sends their own log to the same report. Nothing is sent
-// without a player's own command.
+// without a player's own command, except for players who turned on help_improve: their log joins any report filed in
+// their lobby on its own, and a crash in their last session is reported at the next start (CrashLineOf).
 #pragma once
 #include "hsm_protocol.h"
 #include "hsm_chat.h"
@@ -21,12 +22,15 @@ constexpr size_t kReportLogTailBytes = 3u << 20;   // the end of each log that i
 constexpr uint32_t kReportOfferMs = 120000;   // how long another player may answer "/sendlog"
 constexpr uint32_t kReportCooldownMs = 120000;     // one report per player per two minutes
 constexpr uint32_t kReportShareGapMs = 60000;      // the host relays one ReportShare per peer per minute
+constexpr uint32_t kPendingShareMs = 1800000;      // a crash report filed at start is shared with a session joined within 30 min
+constexpr size_t kCrashLineMax = 200;
 
 // ---------------------------------------------------------------- chat commands
 enum class ReportCommandKind : uint8_t { None, Report, SendLog, NoLog };
 struct ReportCommand { ReportCommandKind kind = ReportCommandKind::None; std::string text; };
 
-// "/report <text>" (text may be empty), "/sendlog", "/nolog"; case-insensitive command word. Anything else is chat.
+// "/bug <text>" or "/report <text>" (text may be empty), "/sendlog", "/nolog"; case-insensitive command word. Anything
+// else is chat.
 inline ReportCommand ParseReportCommand(const std::string& line) {
     ReportCommand c;
     if (line.empty() || line[0] != '/') return c;
@@ -43,8 +47,9 @@ inline ReportCommand ParseReportCommand(const std::string& line) {
 }
 
 // ---------------------------------------------------------------- redaction
-// FNV-1a of `s` mixed with the report's salt, as 8 hex digits: the same id reads the same within one report, and a
-// random salt per report keeps a short hash of a Steam ID from being matched by trying every ID.
+// FNV-1a of `s` mixed with the salt, as 8 hex digits. The client takes one random salt per upload (every log of that
+// upload shares it), so an id reads the same across them, and a short hash of a Steam ID cannot be matched by trying
+// every ID. Another player's upload to the same report has its own salt.
 inline std::string RedactHash(const std::string& s, uint64_t salt) {
     uint64_t h = 1469598103934665603ull ^ salt;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
@@ -68,17 +73,47 @@ inline size_t Ipv4At(const std::string& s, size_t i) {
     if (p < s.size() && (Word(s[p]) || (s[p] == '.' && p + 1 < s.size() && Digit(s[p + 1])))) return 0;
     return p - i;
 }
-// The profile folder after "Users\" / "Users/" or "home/": its length, or 0.
-inline size_t ProfileNameAt(const std::string& s, size_t i) {
+inline char Lower(char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; }
+inline bool Sep(char c) { return c == '\\' || c == '/'; }
+// The profile folder at s[i], just after "Users" (any case, as Windows paths are) or "home": its length, or 0. A folder
+// ends at a separator, or for "Users" also at a quote or the end of the line.
+inline size_t ProfileNameAt(const std::string& s, size_t i, bool users) {
     size_t p = i;
-    while (p < s.size() && s[p] != '\\' && s[p] != '/' && s[p] != '\n' && s[p] != '"' && s[p] != '\'' && p - i < 64) ++p;
-    return p < s.size() && (s[p] == '\\' || s[p] == '/') ? p - i : 0;
+    while (p < s.size() && !Sep(s[p]) && s[p] != '\n' && s[p] != '\r' && s[p] != '"' && s[p] != '\'' && p - i < 64) ++p;
+    if (p == i) return 0;
+    if (p < s.size() && Sep(s[p])) return p - i;
+    return users && (p >= s.size() || s[p] == '\n' || s[p] == '\r' || s[p] == '"' || s[p] == '\'') ? p - i : 0;
+}
+// "Users\<name>", "Users/<name>", the escaped "Users\\<name>" of a JSON-ish line (any case) or "home/<name>" at s[i], after
+// a separator, ':' or the start. Sets `keyLen` to the length up to the folder and returns the folder's length, or 0.
+inline size_t ProfileAt(const std::string& s, size_t i, size_t& keyLen) {
+    if (i > 0 && !Sep(s[i - 1]) && s[i - 1] != ':') return 0;
+    const bool users = i + 5 <= s.size() && Lower(s[i]) == 'u' && Lower(s[i + 1]) == 's' && Lower(s[i + 2]) == 'e' && Lower(s[i + 3]) == 'r' && Lower(s[i + 4]) == 's';
+    const bool home = s.compare(i, 4, "home") == 0;
+    if (!users && !home) return 0;
+    size_t p = i + (users ? 5 : 4);
+    if (p < s.size() && s[p] == '/') ++p;
+    else if (users) { size_t q = p; while (q < s.size() && s[q] == '\\' && q - p < 4) ++q; if (q == p) return 0; p = q; }   // one, two, ... backslashes
+    else return 0;
+    keyLen = p - i;
+    return ProfileNameAt(s, p, users);
+}
+// The value of "host=" at s[i] (a host name, or an address): its length, or 0 when it is empty, an IPv4 address (that is
+// redacted on its own), "localhost" or a loopback.
+inline size_t HostValueAt(const std::string& s, size_t i) {
+    size_t p = i;
+    while (p < s.size() && s[p] > ' ' && s[p] != ',' && s[p] != ';' && s[p] != '"' && s[p] != '\'' && p - i < 253) ++p;
+    const std::string v = s.substr(i, p - i);
+    if (v.empty() || Ipv4At(s, i) || v == "localhost" || v == "::1" || v == "[::1]") return 0;
+    return p - i;
 }
 }  // namespace report_detail
 
-// Takes out what identifies a player outside the game: SteamID64s (7656119 and 10 more digits) become "steam:<hash>",
-// IPv4 addresses other than 127.0.0.1 and 0.0.0.0 become "ip:<hash>", and the profile folder in "...\Users\<name>\"
-// and "/home/<name>/" becomes "<user>". Player names stay: the logs go to a private store, and they tell who is who.
+// Takes out what identifies a player outside the game: SteamID64s (7656119 and 10 more digits) become "steam:<hash>", any
+// other 17- or 18-digit number (a Steam lobby or group id) becomes "steamid:<hash>", IPv4 addresses other than 127.0.0.1
+// and 0.0.0.0 become "ip:<hash>", a "host=<name>" becomes "host=host:<hash>", and the profile folder in "...\Users\<name>\"
+// (any case, also the escaped "\\Users\\") and "/home/<name>/" becomes "<user>". Player names stay: the logs go to a
+// private store, and they tell who is who.
 inline std::string RedactLog(const std::string& in, uint64_t salt) {
     using namespace report_detail;
     std::string out; out.reserve(in.size());
@@ -87,8 +122,10 @@ inline std::string RedactLog(const std::string& in, uint64_t salt) {
         const char c = in[i];
         if (Digit(c) && (i == 0 || !Word(in[i - 1]))) {
             size_t p = i; while (p < in.size() && Digit(in[p])) ++p;
-            if (p - i == 17 && in.compare(i, 7, "7656119") == 0 && (p >= in.size() || !Word(in[p]))) {
-                out += "steam:" + RedactHash(in.substr(i, 17), salt); i = p; continue;
+            const bool wordEnd = p >= in.size() || !Word(in[p]);
+            if (wordEnd && (p - i == 17 || p - i == 18)) {
+                const bool steam = p - i == 17 && in.compare(i, 7, "7656119") == 0;
+                out += (steam ? "steam:" : "steamid:") + RedactHash(in.substr(i, p - i), salt); i = p; continue;
             }
             if (size_t n = Ipv4At(in, i)) {
                 const std::string ip = in.substr(i, n);
@@ -97,13 +134,15 @@ inline std::string RedactLog(const std::string& in, uint64_t salt) {
             }
             out.append(in, i, p - i); i = p; continue;
         }
-        bool profile = false;
-        for (const char* key : {"Users\\", "Users/", "home/"}) {
-            const size_t k = std::char_traits<char>::length(key);
-            if (in.compare(i, k, key) != 0 || (i > 0 && in[i - 1] != '\\' && in[i - 1] != '/' && in[i - 1] != ':')) continue;
-            if (size_t n = ProfileNameAt(in, i + k)) { out.append(key); out += "<user>"; i += k + n; profile = true; break; }
+        if ((c == 'h' || c == 'H') && (i == 0 || !Word(in[i - 1])) && in.size() - i > 5 && Lower(in[i + 1]) == 'o' && Lower(in[i + 2]) == 's' &&
+            Lower(in[i + 3]) == 't' && in[i + 4] == '=') {
+            out.append(in, i, 5); i += 5;
+            if (size_t n = HostValueAt(in, i)) { out += "host:" + RedactHash(in.substr(i, n), salt); i += n; }
+            continue;
         }
-        if (!profile) { out.push_back(c); ++i; }
+        size_t keyLen = 0;
+        if (size_t n = ProfileAt(in, i, keyLen)) { out.append(in, i, keyLen); out += "<user>"; i += keyLen + n; continue; }
+        out.push_back(c); ++i;
     }
     return out;
 }
@@ -211,6 +250,77 @@ inline bool ValidIssueUrl(const std::string& s) {
     return s.find("/issues/") != std::string::npos;
 }
 
+// ---------------------------------------------------------------- what the player is told
+// One request to the relay comes to exactly one outcome line in the chat (and the log). "Filed" is said only for a
+// 200/201 that carries a valid id, token and issue URL. A request that left the machine and got no (usable) answer may
+// still have been filed, so it says so instead of "not sent"; "not sent" is only for a request that never got out.
+enum class ReportJob : uint8_t { Report, Crash, Log };   // /bug and the Report buttons; the crash report at start; /sendlog and help_improve
+enum class ReportOutcome : uint8_t { Done, MaybeDone, NotSent, Refused };
+// How the HTTP exchange ended before any status (net/http_client.h HttpResponse::Fail, mirrored here without engine types).
+enum class ReportTransport : uint8_t { Ok, Unavailable, NoConnection, Timeout, Certificate, Unreachable, Other };
+struct ReportVerdict {
+    ReportOutcome outcome = ReportOutcome::NotSent;
+    std::string reason;              // why, for every outcome but Done; lower case, no full stop
+    std::string id, token, issue;    // a filed report (Done, Report/Crash)
+};
+
+// `sent`: the request (with its body) left the machine, so the relay may have acted on it. `status` and `body` only
+// count when transport is Ok.
+inline ReportVerdict JudgeReportAnswer(ReportJob job, ReportTransport transport, bool sent, unsigned status, const std::string& body) {
+    ReportVerdict v;
+    if (transport != ReportTransport::Ok) {
+        switch (transport) {
+            case ReportTransport::Unavailable: v.reason = "Windows' web component (WinHTTP) is unavailable"; break;
+            case ReportTransport::NoConnection: v.reason = "no internet connection"; break;
+            case ReportTransport::Certificate: v.reason = "the report server's certificate is not valid"; break;
+            case ReportTransport::Unreachable: v.reason = "cannot reach the report server"; break;
+            case ReportTransport::Timeout: v.reason = sent ? "no answer from the report server" : "the report server did not answer"; break;
+            default: v.reason = sent ? "the connection broke before the report server answered" : "the connection failed"; break;
+        }
+        // Only a request that got out and then went quiet (or broke) may have reached the relay.
+        const bool afterSend = sent && (transport == ReportTransport::Timeout || transport == ReportTransport::Other);
+        v.outcome = afterSend ? ReportOutcome::MaybeDone : ReportOutcome::NotSent;
+        return v;
+    }
+    if (status == 200 || status == 201) {
+        if (job == ReportJob::Log) { v.outcome = ReportOutcome::Done; return v; }
+        v.id = JsonStringField(body, "id"); v.token = JsonStringField(body, "token"); v.issue = JsonStringField(body, "issue");
+        if (ValidReportId(v.id) && ValidReportToken(v.token) && ValidIssueUrl(v.issue)) { v.outcome = ReportOutcome::Done; return v; }
+        v.id.clear(); v.token.clear(); v.issue.clear();
+        v.outcome = ReportOutcome::MaybeDone;
+        v.reason = "the report server's answer was not understood";
+        return v;
+    }
+    if (status >= 200 && status < 300) { v.outcome = ReportOutcome::MaybeDone; v.reason = "the report server gave an unexpected answer"; return v; }
+    if (status == 504) { v.outcome = ReportOutcome::MaybeDone; v.reason = "the report server timed out"; return v; }   // the proxy gave up waiting on the relay
+    v.outcome = ReportOutcome::Refused;
+    if (status == 429) { v.reason = "too many reports right now, try again in a few minutes"; return v; }
+    if (status == 413) { v.reason = "the report is too large"; return v; }
+    std::string clean;   // the relay's own "error" (printable ASCII only), e.g. its 502 when GitHub failed
+    for (char ch : JsonStringField(body, "error")) if (ch >= 0x20 && ch < 0x7F && clean.size() < 80) clean.push_back(ch);
+    v.reason = clean.empty() ? "the report server answered " + std::to_string(status) : clean;
+    return v;
+}
+
+// The one line the player sees for a verdict. `shared`: a filed report was offered to the other players in the session.
+inline std::string ReportOutcomeLine(ReportJob job, const ReportVerdict& v, bool shared = false) {
+    const std::string what = job == ReportJob::Crash ? "Crash report" : job == ReportJob::Log ? "Your log" : "Bug report";
+    std::string reason = v.reason;
+    if (!reason.empty() && reason[0] >= 'a' && reason[0] <= 'z') reason[0] = char(reason[0] - 'a' + 'A');
+    switch (v.outcome) {
+        case ReportOutcome::Done:
+            if (job == ReportJob::Log) return "Your log was added to the bug report. Thanks!";
+            return what + " filed: " + v.issue + " Thanks!" + (shared ? " The other players were asked to add their logs." : "");
+        case ReportOutcome::MaybeDone:
+            if (job == ReportJob::Log) return reason + ": your log may have been added.";
+            return reason + ": your " + (job == ReportJob::Crash ? "crash" : "bug") +
+                   " report may have been filed. Check the mod's GitHub issues before reporting again.";
+        case ReportOutcome::NotSent: return what + (job == ReportJob::Log ? " was not sent: " : " not sent: ") + v.reason + ".";
+        case ReportOutcome::Refused: return what + (job == ReportJob::Log ? " was not added: " : " not filed: ") + v.reason + ".";
+    }
+    return what + " not sent.";
+}
+
 // ReportShare (rev 18): the reporter -> host -> every other player. fromSlot is the host's stamp (a client's own value
 // is replaced), so the prompt names the real reporter.
 struct ReportShareMsg { uint8_t fromSlot = 0; std::string id, token; };
@@ -236,6 +346,35 @@ public:
     void Decline() { open_ = false; }
 private:
     std::string id_, token_; uint32_t at_ = 0; bool open_ = false;
+};
+
+// ---------------------------------------------------------------- crash reports (help_improve)
+// The last "crash: fault ..." line crash_log.cpp wrote in a log, printable ASCII only and cut to kCrashLineMax; empty
+// when the session did not crash. It becomes the report's (public) text: code, module+offset, thread; no paths.
+inline std::string CrashLineOf(const std::string& log) {
+    const size_t at = log.rfind("crash: fault ");
+    if (at == std::string::npos) return {};
+    std::string line;
+    for (size_t i = at; i < log.size() && log[i] != '\n' && log[i] != '\r' && line.size() < kCrashLineMax; ++i)
+        if (log[i] >= 0x20 && log[i] < 0x7F) line += log[i];
+    return line;
+}
+inline std::string CrashReportText(const std::string& crashLine) { return "Crash (sent automatically): " + crashLine; }
+
+// A report filed while no session was up (the crash report at start): its id and token wait for the next session, so
+// the players there who turned on help_improve add their logs. Taken once; gone after kPendingShareMs.
+class PendingShare {
+public:
+    void Hold(const std::string& id, const std::string& token, uint32_t nowMs) { id_ = id; token_ = token; at_ = nowMs; held_ = true; }
+    bool Held(uint32_t nowMs) const { return held_ && nowMs - at_ < kPendingShareMs; }
+    bool Take(uint32_t nowMs, std::string& id, std::string& token) {
+        const bool ok = Held(nowMs);
+        if (ok) { id = id_; token = token_; }
+        held_ = false;
+        return ok;
+    }
+private:
+    std::string id_, token_; uint32_t at_ = 0; bool held_ = false;
 };
 
 }  // namespace hsm

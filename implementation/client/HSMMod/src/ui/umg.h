@@ -90,6 +90,9 @@ public:
     // Point size (0: the copied font's own) and an outline of `outline` px in `outlineColor`, patched into a copy of
     // the game's font. When the font layout cannot be resolved the size is approximated with render scale instead.
     void Font(float size, int32_t outline = 0, Rgba outlineColor = {0, 0, 0, 1});
+    // Takes another TextBlock's font (copied through SetFont) and, when it is a plain specified colour, its colour. False
+    // when it has no readable font.
+    bool StyleFrom(ue::UObject* textBlock);
     void Shadow(Vec2 offset, Rgba color);
     void Align(Justify j);
     void Wrap(bool on);
@@ -133,6 +136,7 @@ class Box : public Widget {
 public:
     enum class Kind : uint8_t { Row, Column, Stack, Scroll };
     Slot Add(const Widget& child);
+    void ScrollToEnd();                       // a Scroll: show its last child
 private:
     friend class Kit;
     Kind kind_ = Kind::Column;
@@ -204,6 +208,8 @@ public:
     std::string Value() const;                // what is typed now (empty when it cannot be read)
     void Clear();
     void Hint(const std::string& s);          // greyed text shown while empty
+    bool Focused() const;                     // the player is typing in it (the keyboard is on the box or the field inside it)
+    void Focus();                             // take the keyboard
 };
 
 // Makes widgets in one user widget's tree.
@@ -238,6 +244,11 @@ private:
     Vis shown_ = Vis::HitTestInvisible;
     std::vector<uint8_t> font_;
 };
+
+// Probing the game's own widgets (to copy their look, and to log their structure once).
+std::vector<ue::UObject*> ChildrenOf(ue::UObject* widget);    // a panel's children (a Button's content too), or a user widget's root
+ue::UObject* FindTextBlock(ue::UObject* root, int depth);     // the first TextBlock at or under root, `depth` levels down
+std::string Describe(ue::UObject* widget);                    // "Name : Class", plus a TextBlock's font/colour/text or a Button's brushes
 
 bool InViewport(ue::UObject* userWidget);
 // The first of `instances` that is on screen, or nullptr.

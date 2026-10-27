@@ -50,7 +50,7 @@ struct LobbyLocal {
 enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, MyTeam };
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
-struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; };   // progression: the extra last card
+struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false; };
 struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; };
 struct RosterRow {
@@ -60,7 +60,7 @@ struct RosterRow {
 };
 
 inline constexpr size_t kBrowserRows = 6;
-inline constexpr size_t kModeCardCount = kFormatCount + 1;   // the formats, then Progression
+inline constexpr size_t kModeCardCount = kFormatCount + 2;   // the formats, then Brawl and Progression
 
 struct LobbyScene {
     Span pill;
@@ -109,8 +109,8 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir) {
         case LobbyRow::Time: c.timeLimitS = uint16_t(StepOf(kTimeOptions, c.timeLimitS, dir)); break;
         case LobbyRow::Respawn: c.respawnDelayS = uint16_t(StepOf(kRespawnOptions, c.respawnDelayS, dir)); break;
         case LobbyRow::Gear: {
-            uint8_t g = uint8_t(c.gear) < kGearCount ? uint8_t(c.gear) : 0;
-            c.gear = Gear((g + (back ? kGearCount - 1 : 1)) % kGearCount);
+            uint8_t g = uint8_t(c.gear) < kGearRowCount ? uint8_t(c.gear) : 0;   // Fists (the Brawl card) is no stop of the row
+            c.gear = Gear((g + (back ? kGearRowCount - 1 : 1)) % kGearRowCount);
             break;
         }
         case LobbyRow::Tier: c.tier = uint8_t((std::min<uint8_t>(c.tier, 7) + (back ? 7 : 1)) % 8); break;
@@ -128,6 +128,26 @@ inline MatchConfig SelectFormat(MatchConfig c, Format f) {
     return c;
 }
 
+// A mode card picked: the Brawl card is free-for-all with bare fists (gear Fists, tier 0, free-for-all's default limit);
+// the format cards are SelectFormat, and leaving Brawl puts the gear and tier back at their defaults (even for the
+// free-for-all card: the same format, other rules).
+inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl) {
+    if (brawl) {
+        if (IsBrawl(c)) return c;
+        c.format = Format::FreeForAll;
+        c.scoreLimit = DefaultScoreLimit(c.format);
+        c.gear = Gear::Fists;
+        c.tier = 0;
+        return c;
+    }
+    if (c.gear == Gear::Fists) {                     // leaving Brawl
+        c.gear = Gear::Own;
+        c.tier = MatchConfig{}.tier;
+        if (c.format == f) { c.scoreLimit = DefaultScoreLimit(f); return c; }
+    }
+    return SelectFormat(c, f);
+}
+
 // Forward: Auto, team 0, ..., the last team, Auto (NextTeamPick). Back the other way. A pick the format has no team
 // for counts as Auto, as ResolveTeams counts it.
 inline int8_t StepTeamPick(int8_t cur, int teams, int dir) {
@@ -140,6 +160,8 @@ inline int8_t StepTeamPick(int8_t cur, int teams, int dir) {
 // ------------------------------------------------------------------ text
 
 inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams; }
+
+inline constexpr const char* kBrawlBlurb = "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.";
 
 inline const char* FormatBlurb(Format f) {
     switch (f) {
@@ -244,6 +266,7 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     Format f = c.format;
     if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Tier, LobbyRow::FriendlyFire};   // endless, own gear, back at a wave clear
+    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn};            // nothing to choose in gear: everyone is bare
     std::vector<LobbyRow> v = {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear};
     if (c.gear != Gear::Own) v.push_back(LobbyRow::Tier);
     if (HasTeams(f)) { v.push_back(LobbyRow::FriendlyFire); v.push_back(LobbyRow::MyTeam); }
@@ -312,7 +335,15 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.readyLabel = s.readyOn ? "Ready \xC2\xB7 click to undo" : "Mark me ready";
     }
     s.balance = l.host && HasTeams(f);
-    for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f && !l.progression, l.host});
+    for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f && !IsBrawl(c) && !l.progression, l.host});
+    {
+        ModeCard b;
+        b.format = Format::FreeForAll;
+        b.name = Upper(ModeName(Format::FreeForAll, Gear::Fists));
+        b.description = kBrawlBlurb;
+        b.selected = IsBrawl(c) && !l.progression; b.enabled = l.host; b.brawl = true;
+        s.modes.push_back(b);
+    }
     {
         ModeCard p;
         p.name = "PROGRESSION (CO-OP)";

@@ -18,17 +18,26 @@ struct Config {
     // Host only (clients take the host's choice from Welcome). true: every machine simulates its own fighter and the
     // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
     bool ownerSync = true;
+    // true: clients also send Pose and Vitals straight to each other (Steam lobbies only; session/hsm_mesh.h), and the host
+    // stops relaying what a client already hears directly. false (default): every stream goes through the host, as in 0.6.5.
+    // Needs mesh=1 on the host and on the clients that should use it; ENet (direct IP) stays a star either way.
+    bool mesh = false;
     ChatKey chatKey = ChatKey::Enter;
     // true: a stand-in's hands lock their grip joints and carry the weapon (the game's own firm grip); false: the grips
     // are freed and each weapon is servoed on its own (pre7 behaviour). Each machine's own setting applies to its stand-ins.
     bool standInGripLock = true;   // opens the chat (enter, t, y or u); the game's Talk is very likely T
     // true: the host starts a match even while another player runs a different mod build (testing only).
     bool allowBuildMismatch = false;
-    // In-game bug reports ("/report" in the chat; net/report_client.h). Nothing is sent without the player's command.
+    // In-game bug reports ("/bug" in the chat; net/report_client.h). Nothing is sent without the player's command.
     // true: other fighters' names float over their heads in a match (name_tags=0 turns them off).
     bool nameTags = true;
     bool reports = true;
-    std::string reportUrl = "https://reports.dutybug.net";
+    // true: your HSMMod log is also sent to the report relay when someone in your lobby files a report or a crash is reported
+    // (the multiplayer page's HELP IMPROVE THE MOD toggle; SaveHelpImprove writes the key). Off by default.
+    bool helpImprove = false;
+    std::string reportUrl = "https://reports.dudiebug.net";
+    // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
+    bool updateCheck = true;
     // role=server only (see session/hsm_autoflow.h). transport: "direct" (ENet on `port`) or "steam" (experimental).
     std::string serverTransport = "direct";
     std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
@@ -37,8 +46,13 @@ struct Config {
     int serverTimeLimitS = 0;                  // 0: none
     int serverCountdownS = 30;                 // lobby countdown once serverMinPlayers have joined
     int serverMinPlayers = 2;
+    // role=server moderation (session/hsm_moderation.h): Steam IDs that may /kick, /ban and /unban from the chat (the
+    // console, HSMMod.cmd, always may), and whether players can start a /votekick.
+    std::string serverAdmins;
+    bool serverVoteKick = true;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists
 const char* RoleName(Role r);
+bool SaveHelpImprove(bool on);   // writes help_improve= under [net] in HSMMod.ini, the rest of the file untouched; false: could not
 }  // namespace hsm

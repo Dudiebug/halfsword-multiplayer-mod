@@ -418,6 +418,45 @@ static void TestModes() {
     CHECK(std::string(FormatBlurb(Format::Zombies)) == "Endless zombie hordes in the Abyss. The fallen return when a wave is cleared.");
 }
 
+// The Brawl card: free-for-all with bare fists. A mode card (format free-for-all, gear Fists), not a format; no Gear or
+// Tier row; picking it and leaving it restore the settings.
+static void TestBrawl() {
+    LobbyScene s = BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Fists));
+    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kFormatCount) + 2);
+    const ModeCard& card = s.modes[s.modes.size() - 2];                       // Brawl, then Progression
+    CHECK(card.brawl && card.format == Format::FreeForAll && card.name == "BRAWL" && card.selected && card.enabled && !card.progression);
+    CHECK(card.description == "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.");
+    int selected = 0, brawls = 0;
+    for (const ModeCard& m : s.modes) { selected += m.selected; brawls += m.brawl; }
+    CHECK(selected == 1 && brawls == 1 && !s.modes[0].selected);              // the free-for-all card is not also lit
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn}));   // no Gear, no Tier
+    CHECK(RowOf(s, LobbyRow::Gear) == nullptr && RowOf(s, LobbyRow::Tier) == nullptr);
+    LobbyScene own = BuildLobbyScene(InLobby(true));
+    CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 2].selected && RowOf(own, LobbyRow::Gear) != nullptr);
+    LobbyScene member = BuildLobbyScene(InLobby(false, Format::FreeForAll, Gear::Fists));
+    CHECK(member.modes[member.modes.size() - 2].selected && !member.modes[member.modes.size() - 2].enabled);
+    LobbyLocal prog = InLobby(true, Format::FreeForAll, Gear::Fists); prog.progression = true;
+    CHECK(!BuildLobbyScene(prog).modes[BuildLobbyScene(prog).modes.size() - 2].selected);   // the Progression card wins
+
+    MatchConfig c; c.format = Format::TwoTeams; c.scoreLimit = 30; c.gear = Gear::Mirror; c.tier = 6; c.timeLimitS = 600;
+    MatchConfig b = SelectMode(c, Format::FreeForAll, true);
+    CHECK(IsBrawl(b) && b.gear == Gear::Fists && b.tier == 0 && b.scoreLimit == DefaultScoreLimit(Format::FreeForAll) && b.timeLimitS == 600);
+    CHECK(Sanitize(b).gear == Gear::Fists && Sanitize(b).tier == 0);
+    b.scoreLimit = 20;
+    CHECK(SelectMode(b, Format::FreeForAll, true).scoreLimit == 20);          // the card again changes nothing
+    MatchConfig back = SelectMode(b, Format::FreeForAll, false);              // the free-for-all card: same format, other rules
+    CHECK(!IsBrawl(back) && back.format == Format::FreeForAll && back.gear == Gear::Own && back.tier == MatchConfig{}.tier && back.scoreLimit == 5);
+    MatchConfig duel = SelectMode(b, Format::Duel, false);
+    CHECK(duel.format == Format::Duel && duel.gear == Gear::Own && duel.tier == MatchConfig{}.tier && duel.scoreLimit == DefaultScoreLimit(Format::Duel));
+    CHECK(SelectMode(c, Format::TwoTeams, false).scoreLimit == 30 && SelectMode(c, Format::TwoTeams, false).gear == Gear::Mirror);   // unchanged
+    CHECK(SelectMode(c, Format::Duel, false).gear == Gear::Mirror);                                                                    // as SelectFormat
+    // The Gear row never lands on Fists, whichever way it is stepped.
+    MatchConfig g; g.gear = Gear::Mirror;
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::Own && StepSetting(StepSetting(g, LobbyRow::Gear, -1), LobbyRow::Gear, -1).gear == Gear::Own);
+    g.gear = Gear::Fists;
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::Mirror);
+}
+
 static size_t IndexOf(const char* display) { for (size_t i = 0; i < MapCount(); ++i) if (std::string(kMaps[i].display) == display) return i; return MapCount(); }
 
 static const MapCard* Card(const LobbyScene& s, size_t index) { for (const MapCard& m : s.maps) if (m.index == index) return &m; return nullptr; }
@@ -501,6 +540,7 @@ int main() {
     TestRoster();
     TestReady();
     TestModes();
+    TestBrawl();
     TestMaps();
     TestBuildMismatch();
     if (g_fail) { std::printf("%d lobby scene checks failed\n", g_fail); return 1; }

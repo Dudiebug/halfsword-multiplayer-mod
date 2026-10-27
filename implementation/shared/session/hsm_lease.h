@@ -54,6 +54,11 @@ constexpr float kRestSpeed = 8.0f;            // cm/s; slower (and turning slowe
 constexpr float kRestSpin = 10.0f;            // deg/s
 constexpr double kFreeStreamMs = 16.0;        // the host streams a moving FREE prop as fast as a leased one (about 60 Hz)...
 constexpr double kFreeIdleMs = 1000.0;        // ... and one at rest once a second (a lost state, a late joiner)
+// M4: a slot holds at most this many leases (TOUCH or HOLD) at once; a request for one more is denied and counted. A
+// fighter holds two weapons and touches the few props it is pushing (a touch ends 1.5 s after the prop comes to rest), so
+// normal play stays in the low tens even through a pile of barrels. 128 per slot bounds the host's table (and the Grants
+// every machine keeps) at 6 x 128 entries, however many fresh prop ids a peer invents.
+constexpr int kMaxLeasesPerSlot = 128;
 
 // ---------------------------------------------------------------- identity
 constexpr uint64_t kPropLevelBit = uint64_t(1) << 63;
@@ -124,9 +129,23 @@ uint64_t MintDropPropId(uint8_t ownerEntity, uint8_t hand, uint8_t& seq, uint32_
 // Touch on a weapon id it minted -- the thrown or dropped weapon is still that machine's simulation. Only this makes
 // a machine that does not know propId look for the copy in the owner's stand-in's hand; a Hold (a pick-up), any
 // other slot or a level prop never does.
-inline bool DropSignature(uint64_t propId, LeaseLevel level, uint8_t slot) {
-    if (IsLevelProp(propId) || !ValidPropId(propId) || level != LeaseLevel::Touch) return false;
+//
+// idKnown: this machine's view already has the id (it was granted or streamed earlier in this level). A minted id's first
+// Grant is its drop; a Touch Grant on an id heard of before is the owner touching an old drop again (stepping on a weapon
+// it dropped a while ago), and the weapon in that stand-in's hand now is not that drop (W5: it was forced out at 1.5 s and
+// then streamed as the old prop).
+inline bool DropSignature(uint64_t propId, LeaseLevel level, uint8_t slot, bool idKnown = false) {
+    if (IsLevelProp(propId) || !ValidPropId(propId) || level != LeaseLevel::Touch || idKnown) return false;
     return slot == OwnerSlotOf(PropOwnerEntity(propId));
+}
+
+// The host, on a PropLease from a client: is the client in the level the host is in? A client's Ready names the travel
+// it loaded (HostDirector::ReadySeq); one that has not reported Ready for the host's present travel is still in the
+// previous level or loading, and its lease messages are from there -- granted after the host's clear they would reach the
+// others as a drop of a weapon the owner's new fighter never held (W6: the loadout sword was forced out ~1.5 s after
+// spawning). hostSeq 0: no broadcast travel yet (nothing to compare); the host's own slot is always current.
+inline bool LeaseSeqCurrent(uint8_t fromSlot, uint32_t peerReadySeq, uint32_t hostSeq) {
+    return fromSlot == kHostSlot || hostSeq == 0 || peerReadySeq == hostSeq;
 }
 
 // May the copy in the stand-in's hand be released for that drop now? Only once the owner's newest pose shows that
@@ -269,21 +288,39 @@ public:
             Lessee(propId, r.slot, r.level);
             return r;
         }
-        Entry& e = table_[propId];
-        const LeaseLevel prevLevel = e.level;
-        const uint8_t prevSlot = e.slot;
+        auto it = table_.find(propId);
+        const bool known = it != table_.end();
+        const LeaseLevel prevLevel = known ? it->second.level : LeaseLevel::Free;
+        const uint8_t prevSlot = known ? it->second.slot : kHostSlot;
         const bool free = prevLevel == LeaseLevel::Free;
         const bool mine = !free && prevSlot == slot;
         const bool wins = free || mine || uint8_t(level) > uint8_t(prevLevel);
         LeaseResult r;
+        if (wins && !mine && HeldBy(slot) >= kMaxLeasesPerSlot) {   // M4: one more lease than a slot may hold
+            ++capDenied_;
+            if (known) { r.slot = prevSlot; r.level = prevLevel; }
+            return r;
+        }
         if (wins) {
+            Entry& e = known ? it->second : table_[propId];
             e.slot = slot; e.level = level; e.lastMs = nowMs;
             r.granted = true;
             r.changed = free || prevSlot != slot || prevLevel != level;
+            r.slot = e.slot; r.level = e.level;
+        } else {
+            r.slot = prevSlot; r.level = prevLevel;
         }
-        r.slot = e.slot; r.level = e.level;
         return r;
     }
+
+    // How many leases slot holds now (M4).
+    int HeldBy(uint8_t slot) const {
+        int n = 0;
+        for (const auto& kv : table_) n += kv.second.slot == slot;
+        return n;
+    }
+    // Requests refused because the slot already held kMaxLeasesPerSlot (a flood of fresh prop ids, M4).
+    uint64_t CapDenied() const { return capDenied_; }
 
     // slot gives up its lease on propId. A no-op (not granted) if slot does not hold it, or it is already FREE.
     LeaseResult Release(uint64_t propId, uint8_t slot) {
@@ -349,6 +386,7 @@ public:
 private:
     struct Entry { uint8_t slot = kHostSlot; LeaseLevel level = LeaseLevel::Free; double lastMs = 0.0; };
     std::map<uint64_t, Entry> table_;
+    uint64_t capDenied_ = 0;
 };
 
 // ---------------------------------------------------------------- every machine's view
@@ -392,6 +430,8 @@ public:
         auto it = entries_.find(propId);
         return it == entries_.end() || !it->second.have ? nullptr : &it->second.state;
     }
+    // Granted or streamed since the last Clear: the id was heard of in this level.
+    bool Known(uint64_t propId) const { return entries_.count(propId) != 0; }
     uint8_t Streamer(uint64_t propId) const {
         auto it = entries_.find(propId);
         return it == entries_.end() ? kHostSlot : it->second.streamer;

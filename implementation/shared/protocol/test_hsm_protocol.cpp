@@ -60,6 +60,11 @@ static void TestEventAndReject() {
     auto bad = b; bad[8] = 99; CHECK(!Decode(bad.data(), bad.size(), o));
     Reject r; r.reason = RejectReason::BuildMismatch; auto rb = Encode(r); Reject ro;
     CHECK(Decode(rb.data(), rb.size(), ro) && ro.reason == RejectReason::BuildMismatch);
+    for (RejectReason k : {RejectReason::Kicked, RejectReason::Banned}) {   // rev 20
+        Reject rk; rk.reason = k; auto kb = Encode(rk); Reject ko;
+        CHECK(Decode(kb.data(), kb.size(), ko) && ko.reason == k);
+    }
+    { auto bad = rb; bad[4] = 0; CHECK(!Decode(bad.data(), bad.size(), ro)); bad[4] = kMaxRejectReason + 1; CHECK(!Decode(bad.data(), bad.size(), ro)); }
     Welcome w; w.snapshotHz = 0; auto wb = Encode(w); Welcome wo; CHECK(!Decode(wb.data(), wb.size(), wo));
     w.snapshotHz = 30; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; wb = Encode(w); CHECK(Decode(wb.data(), wb.size(), wo) && wo.map == w.map);
     MsgType t; CHECK(PeekType(rb.data(), rb.size(), t) && t == MsgType::Reject);
@@ -152,6 +157,9 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.fighters[0].team = 8; }));
     CHECK(bad([](MatchInfo& x) { x.fighters.resize(kMaxWillies + 1, {1, 0, 0, 0, ""}); }));
     CHECK(bad([](MatchInfo& x) { x.scores.resize(kMaxWillies + 1); }));
+    { MatchInfo x = m; x.format = uint8_t(Format::FreeForAll); x.gear = uint8_t(Gear::Fists); x.tier = 0;   // rev 21: Brawl
+      auto e = Encode(x); MatchInfo y; CHECK(Decode(e.data(), e.size(), y) && y.gear == 3 && y.format == 0 && y.tier == 0); }
+    CHECK(kGearCount == 4 && uint8_t(Gear::Fists) == kGearCount - 1);          // the last accepted gear is Fists; an older build's range ended at 2
     CHECK(bad([](MatchInfo& x) { x.gear = kGearCount; }));
     CHECK(bad([](MatchInfo& x) { x.tier = 8; }));
     { auto e = Encode(m); CHECK(e.back() == 3); e.back() = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only
@@ -165,7 +173,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 16 && kProtocolRevision == 19);   // rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 16 && kProtocolRevision == 21);   // rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so

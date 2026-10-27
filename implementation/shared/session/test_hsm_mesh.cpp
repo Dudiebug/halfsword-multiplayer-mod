@@ -21,6 +21,9 @@ int main() {
     CHECK(h.TakeChange(13100, &m) && m == 0x04);             // slot 3 lapsed at 12100; slot 2 heard again
     CHECK(h.TakeChange(20000, &m) && m == 0);                // everything lapsed
     h.Note(9, 1); CHECK(h.Mask(1) == 0);                     // out of range ignored
+    h.Note(1, 30000); CHECK(h.TakeChange(30000, &m) && m == 0x02);
+    h.Invalidate(); CHECK(h.TakeChange(30200, &m) && m == 0x02);   // a new host table: the same mask goes out again
+    h.Invalidate(); h.Note(1, 99999); CHECK(h.TakeChange(99999, &m) && m == 0x02);
     h.Clear(); CHECK(h.Mask(20000) == 0);
 
     MeshMasks k;
@@ -37,6 +40,53 @@ int main() {
     t = RelayTargets(1, conn, k); CHECK(t.size() == 2);
     k.Set(2, 0x08); k.Reset(2); CHECK(!k.Hears(2, 3));
     MeshMasks z; CHECK(RelayTargets(1, conn, z) == RelayTargets(1, conn));   // mask 0 == 0.6.5 behaviour
+
+    // MakePeerMap: host out, bad entries out, slot order.
+    auto pe = [](uint8_t slot, uint64_t id) { PeerMapEntry e; e.slot = slot; e.steamId = id; return e; };
+    PeerMapMsg pm = MakePeerMap({pe(3, 33), pe(0, 10), pe(1, 11), pe(2, 0), pe(1, 99), pe(4, 11), pe(7, 77), pe(5, 55)});
+    CHECK(pm.peers.size() == 3 && pm.peers[0].slot == 1 && pm.peers[1].slot == 3 && pm.peers[2].slot == 5);   // host, no id, dup slot, dup id, slot 7 gone
+    CHECK(pm.peers[0].steamId == 11 && pm.peers[2].steamId == 55);
+    { PeerMapMsg dec; auto b = Encode(pm); CHECK(Decode(b.data(), b.size(), dec) && dec.peers.size() == 3); }   // what it makes the wire accepts
+    CHECK(MakePeerMap({}).peers.empty());
+
+    // MeshPeers: a client in slot 2, the host is Steam 10.
+    MeshPeers mp;
+    PeerMapMsg a; a.peers = {pe(1, 11), pe(2, 22), pe(3, 33), pe(0, 10)};
+    MeshPeers::Change c = mp.Apply(a, 2, 22, 10);
+    CHECK(c.want.size() == 2 && c.want[0] == 11 && c.want[1] == 33 && c.drop.empty());   // not itself, not the host
+    {   // the host's Steam ID under a client slot (a damaged or hostile map): never a mesh peer, the host is reached already
+        MeshPeers h; PeerMapMsg hm; hm.peers = {pe(4, 10), pe(1, 11)};
+        MeshPeers::Change hc = h.Apply(hm, 2, 22, 10);
+        CHECK(hc.want.size() == 1 && hc.want[0] == 11 && !h.Has(10));
+    }
+    mp.Bind(11, 5); mp.Bind(33, 6); mp.Bind(44, 7); mp.Bind(10, 8);
+    CHECK(mp.SlotOfPeer(5) == 1 && mp.SlotOfPeer(6) == 3);
+    CHECK(mp.SlotOfPeer(7) == 0xFF && mp.SlotOfPeer(8) == 0xFF && mp.SlotOfPeer(99) == 0xFF);   // unnamed peers, the host, strangers
+    CHECK(mp.Peers().size() == 2 && mp.Named() == 2);
+    PeerMapMsg b2; b2.peers = {pe(3, 33), pe(4, 44)};                  // slot 1 left, slot 4 joined
+    c = mp.Apply(b2, 2, 22, 10);
+    CHECK(c.want.size() == 2 && c.drop.size() == 1 && c.drop[0] == 11);
+    CHECK(mp.SlotOfPeer(5) == 0xFF && mp.SlotOfPeer(6) == 3 && mp.Peers().size() == 1);   // the dropped peer streams no more
+    mp.Bind(44, 9); CHECK(mp.SlotOfPeer(9) == 4 && mp.IsBound(44));
+    PeerMapMsg b3; b3.peers = {pe(3, 55)};                             // slot 3's player was replaced
+    c = mp.Apply(b3, 2, 22, 10);
+    CHECK(c.drop.size() == 2 && c.want.size() == 1 && c.want[0] == 55);
+    CHECK(mp.SlotOfPeer(6) == 0xFF);                                   // the old player's peer does not inherit slot 3
+    mp.Bind(55, 12); CHECK(mp.SlotOfPeer(12) == 3);
+    mp.ForgetPeer(12); mp.Bind(55, 14); CHECK(mp.SlotOfPeer(12) == 0xFF && mp.SlotOfPeer(14) == 3);   // the old peer's late Disconnected
+    mp.ForgetPeer(14); mp.Bind(55, 12);
+    mp.Forget(55); CHECK(mp.SlotOfPeer(12) == 0xFF && mp.Has(55) && !mp.IsBound(55));   // member left: named, to be allowed again
+    mp.Bind(55, 13); CHECK(mp.SlotOfPeer(13) == 3);
+    PeerMapMsg dup; dup.peers = {pe(1, 11), pe(1, 12), pe(3, 11)};     // a map naming a slot or a Steam ID twice keeps the first
+    c = mp.Apply(dup, 2, 22, 10); CHECK(c.want.size() == 1 && c.want[0] == 11);
+    mp.Apply(PeerMapMsg{}, 2, 22, 10); CHECK(mp.Named() == 0 && mp.Peers().empty());
+    mp.Apply(a, 2, 22, 10); mp.Clear(); CHECK(mp.Named() == 0 && mp.SlotOfPeer(5) == 0xFF);
+
+    // A direct Pose or Vitals from a mesh peer passes only for the entity that peer's slot owns.
+    mp.Apply(a, 2, 22, 10); mp.Bind(11, 5);
+    const uint8_t from = mp.SlotOfPeer(5);
+    CHECK(MayStream(from, 2) && !MayStream(from, 3) && !MayStream(from, 1) && !MayStream(from, uint8_t(kMaxFighters + 1)));
+    CHECK(!MayStream(mp.SlotOfPeer(77), 1) && !MayStream(mp.SlotOfPeer(77), 2));   // a stranger (0xFF) owns nothing
 
     if (g_fail) { std::printf("%d failures\n", g_fail); return 1; }
     std::puts("ok");

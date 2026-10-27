@@ -2,15 +2,53 @@
 // sees the fault first (before the engine's crash reporter), writes code, address and module+offset, and lets the
 // fault carry on unchanged. It never handles anything. Faults inside KernelBase are skipped: IsBadReadPtr probes fault
 // there by design and are caught.
+//
+// The first fault that is logged also writes a small minidump, HSMMod.crash.dmp next to HSMMod.log (the one before it
+// becomes HSMMod.crash.prev.dmp). The game's own crash reporter may not leave a dump, and the log alone cannot say who
+// called through a bad pointer. dbghelp.dll is loaded from System32 only, and the dump is written by a helper thread the
+// handler waits for: dbghelp needs far more stack than a faulting thread may have left, and a hung dump (the faulting
+// thread held a lock the helper needs) gives up after kDumpWaitMs instead of hanging the game on top of its crash.
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
+#include <cwchar>
+#include <string>
 #include "log.h"
+#include "paths.h"
 
 namespace hsm {
 namespace {
 std::atomic<int> g_logged{0};
 std::atomic<uintptr_t> g_last{0};   // the same fault again (a crash reporter retrying it): logged once
+std::atomic<bool> g_dumped{false};  // one minidump per process: the first fault logged (later ones are the crash reporter's)
+constexpr DWORD kDumpWaitMs = 15000;
+// The few dbghelp.h declarations used, as dbghelp.dll lays them out (every one of them is packed to 4 bytes there). The
+// header is left out: dbghelp.dll is loaded by hand, so nothing else of it is needed.
+#pragma pack(push, 4)
+struct MiniDumpException { DWORD thread; EXCEPTION_POINTERS* pointers; BOOL clientPointers; };
+struct MiniDumpCallbackInput {
+    ULONG process; HANDLE processHandle; ULONG type;
+    ULONG includeThreadId;   // the union's first member for IncludeThreadCallback (MINIDUMP_INCLUDE_THREAD_INFO)
+};
+struct MiniDumpCallbackOutput { ULONG writeFlags; };   // first member of the union (Module/ThreadWriteFlags)
+struct MiniDumpCallbackInfo {
+    BOOL(CALLBACK* routine)(PVOID, const MiniDumpCallbackInput*, MiniDumpCallbackOutput*);
+    PVOID param;
+};
+#pragma pack(pop)
+constexpr ULONG kIncludeThreadCallback = 3, kThreadWriteStack = 2;
+// MiniDumpNormal | WithIndirectlyReferencedMemory | WithUnloadedModules | WithThreadInfo | IgnoreInaccessibleMemory
+constexpr DWORD kDumpType = 0x40 | 0x20 | 0x1000 | 0x20000;
+
+wchar_t g_dumpPath[MAX_PATH], g_prevPath[MAX_PATH];   // set by InstallCrashLog; the handler allocates nothing
+
+struct DumpJob {
+    EXCEPTION_POINTERS* ep = nullptr;
+    DWORD thread = 0;               // the faulting thread
+    DWORD error = 0;                // 0: written
+    unsigned long long bytes = 0;
+};
+DumpJob g_job;
 
 bool Fatal(DWORD code) {
     switch (code) {
@@ -59,6 +97,73 @@ void LogCallers(uintptr_t rsp) {
     if (found) LogTry("crash: stack code addresses:%s", line);
 }
 
+// Only the faulting thread keeps its stack: the others' stacks are most of a dump of a game with ~100 threads, and the
+// fault is on the thread whose stack matters.
+BOOL CALLBACK DumpFilter(PVOID, const MiniDumpCallbackInput* in, MiniDumpCallbackOutput* out) {
+    if (in && out && in->type == kIncludeThreadCallback && in->includeThreadId != g_job.thread)
+        out->writeFlags &= ~kThreadWriteStack;
+    return TRUE;
+}
+
+DWORD WINAPI DumpThread(void*) {
+    using WriteDump = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, DWORD, MiniDumpException*, void*, MiniDumpCallbackInfo*);
+    wchar_t dir[MAX_PATH];
+    UINT n = GetSystemDirectoryW(dir, MAX_PATH);
+    if (n == 0 || n + 14 >= MAX_PATH) { g_job.error = ERROR_PATH_NOT_FOUND; return 1; }
+    std::wcscpy(dir + n, L"\\dbghelp.dll");
+    HMODULE m = LoadLibraryW(dir);
+    WriteDump write = m ? reinterpret_cast<WriteDump>(reinterpret_cast<void*>(GetProcAddress(m, "MiniDumpWriteDump"))) : nullptr;
+    if (!write) { g_job.error = GetLastError() ? GetLastError() : ERROR_PROC_NOT_FOUND; return 1; }
+    MoveFileExW(g_dumpPath, g_prevPath, MOVEFILE_REPLACE_EXISTING);   // keep the last two
+    HANDLE f = CreateFileW(g_dumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { g_job.error = GetLastError(); return 1; }
+    MiniDumpException ex{g_job.thread, g_job.ep, FALSE};   // the pointers are in this process
+    MiniDumpCallbackInfo cb{DumpFilter, nullptr};
+    const BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), f, kDumpType, &ex, nullptr, &cb);
+    g_job.error = ok ? 0 : (GetLastError() ? GetLastError() : ERROR_WRITE_FAULT);
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(f, &size)) g_job.bytes = static_cast<unsigned long long>(size.QuadPart);
+    CloseHandle(f);
+    return ok ? 0 : 1;
+}
+
+void WriteMinidump(EXCEPTION_POINTERS* ep) {
+    if (!g_dumpPath[0] || g_dumped.exchange(true)) return;
+    g_job.ep = ep;
+    g_job.thread = GetCurrentThreadId();
+    HANDLE t = CreateThread(nullptr, 0, DumpThread, nullptr, 0, nullptr);
+    if (!t) { LogTry("crash: no minidump (CreateThread failed, error %lu)", GetLastError()); return; }
+    if (WaitForSingleObject(t, kDumpWaitMs) != WAIT_OBJECT_0) {
+        LogTry("crash: no minidump (gave up after %lu ms)", kDumpWaitMs);
+        CloseHandle(t);
+        return;
+    }
+    CloseHandle(t);
+    char path[MAX_PATH * 3] = "?";
+    WideCharToMultiByte(CP_UTF8, 0, g_dumpPath, -1, path, sizeof path, nullptr, nullptr);
+    if (g_job.error) LogTry("crash: no minidump (error %lu)", g_job.error);
+    else LogTry("crash: minidump %s (%llu KB)", path, g_job.bytes / 1024);
+}
+
+}  // namespace
+
+// The calling thread's stack as module+offset, innermost first (an unwind, unlike LogCallers' scan).
+void LogCallStack(const char* what) {
+    void* frames[12];
+    const USHORT n = RtlCaptureStackBackTrace(1, 12, frames, nullptr);
+    char line[768]; size_t used = 0;
+    line[0] = 0;
+    for (USHORT i = 0; i < n; ++i) {
+        char mod[MAX_PATH]; uintptr_t off = 0;
+        ModuleOf(reinterpret_cast<uintptr_t>(frames[i]), mod, sizeof mod, &off);
+        const int w = mod[0] ? std::snprintf(line + used, sizeof line - used, " %s+0x%llX", mod, (unsigned long long)off) : 0;
+        if (w <= 0 || size_t(w) >= sizeof line - used) break;
+        used += size_t(w);
+    }
+    Log("%s: stack%s", what, line);
+}
+
+namespace {
 LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
     const EXCEPTION_RECORD& r = *ep->ExceptionRecord;
@@ -84,12 +189,31 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
         ? (r.ExceptionInformation[0] == 0 ? " reading" : r.ExceptionInformation[0] == 1 ? " writing" : " executing") : "";
     LogTry("crash: fault 0x%08lX at %s+0x%llX%s 0x%llX (thread %lu); the game may close now",
            r.ExceptionCode, name, (unsigned long long)off, op, target, GetCurrentThreadId());
-    if (ep->ContextRecord) LogCallers(ep->ContextRecord->Rsp);
+    if (ep->ContextRecord) {
+        const CONTEXT& c = *ep->ContextRecord;
+        LogTry("crash: rax %llX rcx %llX rdx %llX r8 %llX rsp %llX", (unsigned long long)c.Rax, (unsigned long long)c.Rcx,
+               (unsigned long long)c.Rdx, (unsigned long long)c.R8, (unsigned long long)c.Rsp);
+        // Executing at an address no module owns is a call through a bad pointer: [rsp] is then the return address, the
+        // code that made the call.
+        uintptr_t ret = 0;
+        char caller[MAX_PATH]; uintptr_t callerOff = 0;
+        if (name[0] == '?' && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rsp), &ret, sizeof ret, nullptr)) {
+            ModuleOf(ret, caller, sizeof caller, &callerOff);
+            if (caller[0]) LogTry("crash: return address on the stack: %s+0x%llX", caller, (unsigned long long)callerOff);
+        }
+        LogCallers(c.Rsp);
+    }
+    WriteMinidump(ep);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 }  // namespace
 
 void InstallCrashLog() {
+    const std::wstring dump = InstanceFilePath(L"HSMMod", L".crash.dmp"), prev = InstanceFilePath(L"HSMMod", L".crash.prev.dmp");
+    if (dump.size() < MAX_PATH && prev.size() < MAX_PATH) {
+        std::wcscpy(g_dumpPath, dump.c_str());
+        std::wcscpy(g_prevPath, prev.c_str());
+    }
     if (AddVectoredExceptionHandler(1, OnFault)) HSM_LOG("crash log: armed");
 }
 }  // namespace hsm

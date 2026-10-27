@@ -20,28 +20,63 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
 `.agents/workflow/tools/workflowctl.py verify`.
 
-## New in 0.7.0 (pre-release, not yet play-tested)
+## New in 0.7.0 (pre-release)
 
-- **Name tags** above other fighters, team colours in team formats (`name_tags=0` under `[net]` hides them).
-- **Give up while downed** in FFA and team matches (hold G). The last attacker within 60 s gets the kill; with none,
-  nobody scores. Holding G with nothing to give up shows why.
+- **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
+- **`mesh=1` under `[net]` (experimental, off by default):** in a Steam lobby the players also send their movement
+  straight to each other, which should cut the delay between two clients. Set it on the host and on every client that
+  should use it. The host stops relaying what a client already receives directly and relays it again within a few
+  seconds if the direct path breaks; claims, effects, equipment, grabs and props still go through the host. Direct-IP
+  (ENet) sessions stay a star, and `mesh=0` is exactly the old behaviour.
+- **Hold G to give up** in FFA, team matches and Duel, downed or not: your fighter dies, and the last player who hit
+  you within 60 s gets the kill (in a Duel, the round too); with none, nobody scores. The hold shows as a bar in the
+  middle of the screen. Holding G with nothing to give up shows why.
+- **Brawl** (a mode card next to the formats): free-for-all with bare fists. Every fighter spawns and respawns with no
+  armour and no weapons (tier 0), in the host's lobby, whatever loadout they brought; the Gear and Tier rows are hidden
+  and nobody's saved loadout is touched. Scoring, limits and respawns are free-for-all's. Weapons the level has lying
+  around can still be picked up.
+- **Kick, ban and votekick:** the host types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat
+  (`/players`, `/bans`, `/unban`); on a `role=server` host players can `/votekick <name>`. See *Kick, ban and votekick*.
 - **Respawns retry** up to 5 times and log each attempt; a Duel always starts with both fighters alive.
 - **Leavers:** a fighter who quits mid-fight counts as dead; in a Duel the one left standing takes the rounds.
   A rejoin within the reservation keeps its team; a reused FFA slot starts at 0.
-- **Spectating** follows only living fighters; the pause menu shows the cursor so Continue works without Alt+Tab.
+- **Spectating** follows only living fighters with a follow camera behind and above their head (Left/Right switch);
+  the pause menu shows the cursor so Continue works without Alt+Tab, and Esc no longer stacks a second pause menu.
 - **Map picker** offers only the arenas (the Abyss only for Zombies); **PROGRESSION (CO-OP)** card takes everyone to
-  the Tavern hub; the lobby columns scroll; **REPORT A BUG** on the multiplayer page.
+  the Tavern hub; the lobby columns scroll.
+- **Bug reports from the game:** `/bug <what went wrong>` in the match or lobby chat (`/report` works too), **REPORT A
+  BUG** on the multiplayer page, or **REPORT A BUG** on the pause menu in a session fight (it opens the chat with `/bug `
+  typed). The report goes to the report server at reports.dudiebug.net, which opens a public GitHub issue with your
+  text; your redacted log stays private. You first see "Sending...", then exactly one answer: the issue link once it is
+  filed, "not sent" when the server could not be reached, "not filed" with the reason when it refused, or "may have
+  been filed" when the answer was lost after the report went out (look at the issues before sending it again).
+- **Lobby chat** on the multiplayer page, under the players: the last 8 lines, a text box and SEND (Enter sends too).
+  Lines go to everyone in the lobby as Steam lobby chat, so they work before a match starts, with the sender's name in
+  their team colour; "<name> joined/left" lines show too. The chat keeps the 120-byte cap and the one-line-a-second
+  rate limit of the match chat, and the lines are still in the match chat after the travel. `/bug`, `/sendlog` and
+  `/nolog` work in the box as in the match chat.
+- **HELP IMPROVE THE MOD** toggle on the multiplayer page (`help_improve=1` under `[net]`, default off); see
+  *In-game bug reports*.
 - **Flails:** the stand-in's chain no longer drags on the floor and is moved along with teleports.
 - **Saves:** a stale or empty backup never overwrites a newer save (it is renamed `HSMMP_stale_*`); leftover backups
   are checked at every game start, even with `role=off`.
 - **Safety:** clients only follow travels to known maps; size caps on network input; `-hsm*` flags are ignored on a
   Steam join launch (`+connect_lobby`).
-- **Crash notes:** a fault writes `crash: fault ... at <module>+<offset>` to `HSMMod.log` before the game closes.
+- **Crash notes:** a fault writes `crash: fault ... at <module>+<offset>` to `HSMMod.log` before the game closes, with
+  the return address and code addresses on the stack, and a small minidump `HSMMod.crash.dmp` next to the log (the
+  previous one becomes `HSMMod.crash.prev.dmp`; one per game run, written with the system `dbghelp.dll`). Send both with
+  the newest folder under `%LOCALAPPDATA%\HalfSwordUE5\Saved\Crashes\`. A call on a pointer that is no longer a game
+  object is refused instead of crashing: `engine: call of <function> refused` and a stack line in the log.
 - **`role=server` (experimental):** the host runs matches without a fighter of its own and cycles maps by itself.
   Keys under `[net]`: `server_format` (ffa, teams, survival, zombies, duel), `server_maps` (comma list or `all`),
-  `server_score_limit`, `server_time_limit_s`, `server_countdown_s` (30), `server_min_players` (2). Direct IP only.
-  This is a hosted copy of the retail game, not a dedicated server.
-- Protocol revision 19: 0.7.0 does not connect to 0.6.x.
+  `server_score_limit`, `server_time_limit_s`, `server_countdown_s` (30), `server_min_players` (2).
+  `server_transport=steam` opens a public Steam lobby by itself (named after `name=`) and keeps it open; players join
+  it from the Multiplayer page and Steam relays the traffic. It needs Steam running and signed in on that machine,
+  with an account that owns the game. `server_transport=direct` (default) listens on `port` for direct-IP clients.
+  This is a hosted copy of the retail game, not a dedicated server. With no host fighter to spawn around, players
+  spawn at the map's PlayerStart, else a navmesh point, else the floor found by a trace, and the map origin only as
+  the last resort.
+- Protocol revision 21: 0.7.0-pre3 connects only to 0.7.0-pre3 (not to earlier pre-releases or 0.6.x).
 
 ## Steam lobbies (default, Phase 1)
 
@@ -137,12 +172,26 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **HUD** inside the game's own `UI_HUD`: score line and clock, respawn countdown, kill feed, and a scoreboard while
   Tab is held.
 
+## Kick, ban and votekick
+
+Chat commands, run by the session host (the console of a `role=server` host takes the same words without the `/`, in
+`HSMMod.cmd` next to the log):
+
+- `/players`: the slots and names. `/kick <who>`: out now; they can join again straight away.
+- `/ban <who> [30m|2h|7d|perm]`: out and kept out (default permanent); written to `HSMMod.bans`. `/unban <who>`,
+  `/bans`. `<who>` is `#slot`, a name or a unique start of one.
+- `role=server` only: `/votekick <who>` (`/vk`), `/yes`, `/no`. A passed vote keeps the player out for 15 minutes.
+  `server_admins=` (Steam IDs) may kick and ban from the chat; `server_votekick=0` turns votes off.
+
+A kicked or banned player goes back to the main menu, and the multiplayer page opens with the reason in red.
+
 ## In-game bug reports
 
-Type `/report <what went wrong>` (or `/bug ...`) in the chat. The mod sends the text, a few facts (mod and game
+Type `/bug <what went wrong>` (or `/report ...`) in the chat, or use REPORT A BUG on the multiplayer page. The first
+session fight of each game run shows this hint in the chat. The mod sends the text, a few facts (mod and game
 build, protocol, host/client, Steam or direct IP, sync mode, level, match mode and phase, player count, Windows or
 Wine version) and the end of `HSMMod.log` and `HSMMod.prev.log` (at most 3 MB each) over HTTPS to the report relay
-(`report_url` in `HSMMod.ini`, default `https://reports.dutybug.net`).
+(`report_url` in `HSMMod.ini`, default `https://reports.dudiebug.net`).
 The relay opens a public GitHub issue with the text and the facts only (label `in-game-report`) and keeps the logs
 in a private repository. Before sending, Steam IDs and IP addresses in the logs become salted hashes (`steam:1a2b3c4d`,
 `ip:5e6f7a8b`; the salt is new for every report, so reports cannot be matched up) and the profile folder name in
@@ -152,8 +201,29 @@ When a session player files a report, every other player sees "<name> filed a bu
 your log, or /nolog." `/sendlog` within 2 minutes adds that player's own log to the same report; nothing is sent
 otherwise. One report per player every 2 minutes; the host relays one share per player per minute.
 
-The mod makes no web request except on `/report` and `/sendlog`; WinHTTP is loaded from System32 only then.
-`reports=off` in `HSMMod.ini` turns the commands off.
+The only web requests are `/bug` and `/sendlog` (below) and the update check (next section); WinHTTP is loaded from
+System32 only then. `reports=off` in `HSMMod.ini` turns the report commands off.
+
+## Update check
+
+At startup the mod makes one HTTPS request to `api.github.com` (the public releases list of
+`Dudiebug/halfsword-multiplayer-mod`) with the header `User-Agent: HSMMod/<version>`; nothing else is sent, no IDs and
+no names. The log says `update: HSMMod <new> is available (this is <cur>): <link>`, `update: up to date (<cur>)` or
+`update: check failed (<reason>)`. When a newer release exists, the multiplayer page shows "HSMMod 0.7.0-pre3 is out
+(you have 0.7.0-pre2). Get it from GitHub: Dudiebug/halfsword-multiplayer-mod", and the chat repeats it once a few
+seconds into the first fight level. Nothing is downloaded or installed. A prerelease build is offered prereleases and
+full releases; a full release only full releases (`session/hsm_version.h`). `update_check=0` under `[net]` in
+`HSMMod.ini` turns it off. `build.sh` passes the nearest `v*` git tag so a prerelease build knows its number
+(`kModVersion` is "0.7.0" for every 0.7.0 prerelease): tag the commit before building a release.
+
+**Help improve the mod.** `help_improve=1` under `[net]` (default `0`, off) is the switch behind the **HELP IMPROVE THE
+MOD: ON/OFF** button on the multiplayer page; the button writes the key back to `HSMMod.ini`, and nothing else in the
+file changes. When on, your HSMMod log (same redaction as above: Steam IDs, IPs and your user name removed) is sent to
+the bug report server whenever someone in your lobby files a report, without waiting for you to type `/sendlog`. And if
+your last session crashed (`crash: fault` in `HSMMod.prev.log`), the next start files a crash report by itself: its
+public text is the crash line only, both logs go privately. When that report is filed in the menu, it is shared with
+the next session you join within 30 minutes, so the players there who also turned it on add their logs (their logs
+still hold the crashed session if they kept playing). Off, nothing is sent unless you type the command.
 
 ## Command-line options and the agent bridge (testing)
 
@@ -235,6 +305,12 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore, grabs,
   dropped weapons and level props are synced; the client-side delay and the unsynced gore listed below apply to
   `sync_mode=host` only.
+- Time of day follows the map; there is no way to change it yet (public issue #2). A lobby setting is planned. It is
+  not done because the part that needs the game's own data is unknown here: which game object decides a fight level's
+  lighting (the save and the game instance carry a `Day Time` / `Current Day Time` byte of `Enum_DayTime`, but the
+  reflection index lists no enum values and no owning class, and the maps also ship per-map morning, evening and night
+  lighting classes), and whether setting it before the level loads changes anything. It needs a look at the game's
+  Blueprints before any code is written.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
 - Direct-IP (ENet) sessions have no lobby, so they play Free-for-all with default settings (Progression co-op

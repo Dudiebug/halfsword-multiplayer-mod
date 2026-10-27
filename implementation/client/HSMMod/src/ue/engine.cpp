@@ -313,6 +313,13 @@ FProperty* FindPropertyPrefix(const void* ustruct, const std::string& prefix) {
     return nullptr;
 }
 
+std::vector<FProperty*> StructProperties(const void* ustruct) {
+    std::vector<FProperty*> out;
+    if (ustruct)
+        for (const void* p = Read<void*>(ustruct, kStructChildProps); p; p = Read<void*>(p, kFFieldNext)) out.push_back(static_cast<FProperty*>(const_cast<void*>(p)));
+    return out;
+}
+
 UObject* FindStruct(const std::string& name) { return FindObject(name, "ScriptStruct"); }
 FProperty* StructMember(const UObject* scriptStruct, const std::string& member) { return scriptStruct ? FindProperty(scriptStruct, member) : nullptr; }
 
@@ -353,10 +360,46 @@ std::vector<FProperty*> Params(const UFunction* f) {
 }
 
 // ---------------------------------------------------------------- calls / fields
-void ProcessEvent(UObject* obj, UFunction* fn, void* params) {
+namespace {
+// Whether address p lies in committed memory backed by a loaded image (a DLL or the exe): where every vtable lives.
+bool InImage(const void* p) {
+    MEMORY_BASIC_INFORMATION mbi;
+    return VirtualQuery(p, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE;
+}
+
+// A pointer that is not (or no longer) an object has no vtable in an image: obj+0 is whatever data sits there, and the
+// slot read from it is a jump to anything (0x300000002 in the 0.7.0-pre1 test). Vtables that passed are remembered.
+bool LooksLikeObject(const UObject* obj) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(obj);
+    if (a < 0x10000 || (a & 7) || a >= 0x800000000000ull || IsBadReadPtr(obj, 8)) return false;
+    const void* vtable = Read<const void*>(obj, 0);
+    const uintptr_t v = reinterpret_cast<uintptr_t>(vtable);
+    if (v < 0x10000 || (v & 7) || v >= 0x800000000000ull) return false;
+    static thread_local uintptr_t known[64] = {};
+    uintptr_t& slot = known[(v >> 4) & 63];
+    if (slot == v) return true;
+    // The slot's target is not checked: another mod may point a vtable slot at its own hook outside any image.
+    const void* entry = static_cast<const uint8_t*>(vtable) + size_t(g_build->processEventIndex) * 8;
+    if (!InImage(vtable) || !InImage(entry)) return false;
+    slot = v;
+    return true;
+}
+}  // namespace
+
+bool ProcessEvent(UObject* obj, UFunction* fn, void* params) {
     using Fn = void (*)(UObject*, UFunction*, void*);
+    if (!LooksLikeObject(obj)) {
+        static int logged = 0;
+        if (++logged <= 5) {
+            HSM_LOG("engine: call of %s refused: %p is not an object (a stale pointer)", fn ? ObjectName(reinterpret_cast<UObject*>(fn)).c_str() : "?",
+                    static_cast<const void*>(obj));
+            LogCallStack("refused call");
+        }
+        return false;
+    }
     void** vtable = Read<void**>(obj, 0);
     reinterpret_cast<Fn>(vtable[g_build->processEventIndex])(obj, fn, params);
+    return true;
 }
 
 void* FieldPtr(UObject* obj, const std::string& property) {
@@ -425,8 +468,7 @@ void* Call::paramPtr(const std::string& param) {
 
 bool Call::invoke() {
     if (!valid()) return false;
-    ProcessEvent(target_, fn_, buf_.data());
-    return true;
+    return ProcessEvent(target_, fn_, buf_.data());
 }
 
 PreparedCall::PreparedCall(const UClass* cls, const std::string& name, std::initializer_list<const char*> params) {
@@ -471,7 +513,7 @@ const void* PreparedCall::slot(size_t i, size_t size) const {
 bool PreparedCall::invoke(UObject* target) {
     if (!fn_ || !target || !IsA(target, cls_)) return false;
     if (ran_) for (FProperty* p : owning_) ClearPropertyValue(p, buf_.data() + PropertyOffset(p));
-    ProcessEvent(target, fn_, buf_.data());
+    if (!ProcessEvent(target, fn_, buf_.data())) return false;
     ran_ = true;
     return true;
 }

@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 19;         // 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 21;         // 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -81,7 +81,8 @@ constexpr size_t kAxisCount = static_cast<size_t>(Axis::Count);
 constexpr size_t kActionCount = static_cast<size_t>(Action::Count);
 static_assert(kActionCount <= 32, "action bitmask is 32 bits");
 
-enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4 };
+enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4, Kicked = 5, Banned = 6 };
+constexpr uint8_t kMaxRejectReason = 6;
 
 enum class EventKind : uint8_t {
     Spawned = 1,       // a = entity, b = slot
@@ -255,7 +256,7 @@ inline bool Decode(const uint8_t* d, size_t n, Welcome& m) {
 inline std::vector<uint8_t> Encode(const Reject& m) { Writer w; w.header(MsgType::Reject); w.u8(uint8_t(m.reason)); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Reject& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Reject) return false;
-    uint8_t v = r.u8(); if (v < 1 || v > 4) return false; m.reason = RejectReason(v); return r.done();
+    uint8_t v = r.u8(); if (v < 1 || v > kMaxRejectReason) return false; m.reason = RejectReason(v); return r.done();
 }
 
 inline void PutInputBody(Writer& w, const InputFrame& m) {

@@ -147,6 +147,16 @@ private:
     uint32_t lastPacketMs_ = 0;
 };
 
+// N3: what a direct-IP (ENet) client does when its connection to the host ends -- the host closed, the link timed out, or
+// the connection never came up. In a fight level it is the HostLossMonitor's return to the menu. Anywhere else (the menu,
+// the lobby screen, a connect that timed out) nothing used to follow: net_ stayed up, the client stayed "joined" (levels
+// blocked, saves guarded) for the rest of the run. Now it leaves. Steam clients have the lobby to say when the host is gone.
+enum class DisconnectAction : uint8_t { Ignore, HostLossMonitor, Leave };
+inline DisconnectAction ClientDisconnectAction(bool steam, bool welcomed, bool inFightLevel) {
+    if (welcomed && inFightLevel) return DisconnectAction::HostLossMonitor;
+    return steam ? DisconnectAction::Ignore : DisconnectAction::Leave;
+}
+
 // Host side, Steam peers: the Steam transport has no timeout of its own, so a peer that stops sending (a crashed or frozen
 // client, a dead route) would keep its slot forever. Every message from a peer is Seen; Expired returns the peers silent for
 // kSilentMs and forgets them, once each. The limit is generous: a client loading a level sends nothing for a while.
@@ -166,6 +176,29 @@ public:
     }
 private:
     std::map<uint32_t, uint32_t> last_;
+};
+
+// M5: host side, ENet and Steam. A peer that connected but sent no Hello holds a transport slot (and, on Steam, a session
+// the lobby thinks is live) for as long as it likes; one that is silent for kHelloMs after connecting is dropped. Any Hello
+// ends the watch (the host answers it with a Welcome or a Reject), a disconnect forgets the peer. Expired reports each once.
+class HelloWatch {
+public:
+    static constexpr uint32_t kHelloMs = 5000;
+    void Connected(uint32_t peer, uint32_t nowMs) { since_[peer] = nowMs; }
+    void Hello(uint32_t peer) { since_.erase(peer); }
+    void Forget(uint32_t peer) { since_.erase(peer); }
+    void Clear() { since_.clear(); }
+    std::vector<uint32_t> Expired(uint32_t nowMs) {
+        std::vector<uint32_t> out;
+        for (auto it = since_.begin(); it != since_.end();) {
+            if (ElapsedAtLeast(it->second, nowMs, kHelloMs)) { out.push_back(it->first); it = since_.erase(it); }
+            else ++it;
+        }
+        return out;
+    }
+    size_t size() const { return since_.size(); }
+private:
+    std::map<uint32_t, uint32_t> since_;
 };
 
 }  // namespace hsm

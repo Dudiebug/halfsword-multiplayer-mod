@@ -28,6 +28,7 @@ struct State {
     Kit kit;
     Box top; std::array<Block, kStripBlocks> blocks; Fixed barBox; Bar bar; Panel pill; Text pillText, clock;   // top centre
     Box bannerBox; Text banner, bannerSub;                                                                      // centre
+    Panel hold; Text holdText; Fixed holdBarBox; Bar holdBar;                                                   // the G hold, mid screen
     Panel dead; Text deadTitle, deadDetail, deadHint; Fixed deadBarBox; Bar deadBar;                            // lower third
     Box feed; std::array<FeedLine, kFeedRows> feedLines;                                                       // top right
     std::array<TagLabel, 16> tags;                                                                              // name tags over heads
@@ -130,6 +131,14 @@ void BuildCentre(Canvas& root) {
     g.bannerSub = MakeText(26, 2, style::kBone, Justify::Center);
     g.bannerBox.Add(g.bannerSub).Align(HAlign::Center, VAlign::Top);
 
+    g.hold = MakePanel(style::kSmoke, {22, 8, 22, 10});
+    root.Add(g.hold).Anchor({{0.5, 0.56}, {0.5, 0.56}}, {0.5, 0.5}).AutoSize().Z(kZOrder + 1);
+    Box holdCol = g.kit.MakeColumn();
+    g.hold.Content(holdCol);
+    g.holdText = MakeText(30, 2, style::kBloodInk, Justify::Center);
+    holdCol.Add(g.holdText).Align(HAlign::Center, VAlign::Top);
+    g.holdBar = MakeBar(g.holdBarBox, holdCol, 280, 8, {0, 8, 0, 0});
+
     g.dead = MakePanel(style::kSmoke, {28, 12, 28, 14});
     root.Add(g.dead).Anchor({{0.5, 0.70}, {0.5, 0.70}}, {0.5, 0.5}).AutoSize().Z(kZOrder);
     Box col = g.kit.MakeColumn();
@@ -227,7 +236,7 @@ void ApplyTags(const std::vector<NameTagSrc>& src) {
         const Vec2 sp = ok ? pj.get<Vec2>("ScreenLocation") : Vec2{};
         const double dx = n.wx - eye.x, dy = n.wy - eye.y, dz = n.wz - eye.z;
         NameTagView v = NameTagLayout(ok, float(sp.x), float(sp.y), float(view.x), float(view.y), scale,
-                                      float(std::sqrt(dx * dx + dy * dy + dz * dz)), n.alive, n.team, g.tagFormat);
+                                      float(std::sqrt(dx * dx + dy * dy + dz * dz)), n.alive, n.team, g.tagFormat, n.seen);
         t.text.Show(v.visible);
         if (!v.visible) continue;
         t.text.Set(n.name);
@@ -249,7 +258,7 @@ bool Build() {
     BuildFeed(root);
     BuildBoard(root);
     BuildTags(root);
-    if (!g.pillText || !g.banner || !g.boardTitle) { HSM_LOG("hud: could not make the match HUD widgets"); return false; }
+    if (!g.pillText || !g.banner || !g.holdText || !g.boardTitle) { HSM_LOG("hud: could not make the match HUD widgets"); return false; }
     HSM_LOG("hud: match HUD added to UI_HUD");
     return true;
 }
@@ -283,6 +292,14 @@ void ApplyTop(const HudScene& s) {
     g.pill.Show(s.pill.visible);
     if (s.pill.visible) { g.pillText.Set(s.pill.text); g.pillText.Color(s.pill.color); }
     Line(g.clock, s.clock, s.timeBar && !s.clock.empty());
+}
+
+void ApplyHold(const HoldView& h) {
+    g.hold.Show(h.visible);
+    if (!h.visible) return;
+    g.holdText.Set(h.text); g.holdText.Color(h.color);
+    g.holdBarBox.Show(h.bar);
+    if (h.bar) g.holdBar.Percent(h.frac);
 }
 
 void ApplyDead(const DeadPanel& d) {
@@ -377,6 +394,7 @@ void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format form
     ApplyTop(s);
     Apply(g.banner, s.banner);
     Apply(g.bannerSub, s.bannerSub);
+    ApplyHold(s.hold);
     ApplyDead(s.dead);
     ApplyFeed(s.feed);
     ApplyBoard(s.board);
