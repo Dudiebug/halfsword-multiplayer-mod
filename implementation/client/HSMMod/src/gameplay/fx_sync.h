@@ -44,7 +44,10 @@ public:
     // The session calls this on every PaintFx it decoded, before it applies or relays it: false drops the message (a report
     // over the receive limit of kFxMaxRxPerSecond per fighter and kind, or one naming a cue / class off the allowlists). M1, M2.
     bool Accept(const combat::PaintFxMsg& m);
-    void Forget(uint8_t entity) { limiter_.Forget(entity); rxLimiter_.Forget(entity); }
+    void Forget(uint8_t entity);
+    // Applies armour changes held back by Apply while their fighter's vertex-paint tasks were still running (T5), each once
+    // the tasks are done or after kPaintWaitMs. Every frame; costs nothing while none is held.
+    void Tick();
     std::string HealthLine();                                        // since the previous call
 
 private:
@@ -74,6 +77,9 @@ private:
     void Count(bool ok, const combat::PaintFxMsg& m);
     void Refuse(const char* why, const combat::PaintFxMsg& m, uint64_t& counter);   // counts a refused peer message, logs the first few
     ue::UObject* PaintBox(uint8_t entity, ue::UObject* standIn);
+    void ApplyNow(const combat::PaintFxMsg& m);
+    ue::UObject* ArmorTarget(const combat::PaintFxMsg& m);           // the fighter an armour change acts on, null if none
+    bool PaintBusy(ue::UObject* willie);                             // its VertexPaintDetectionComponent has tasks queued up
 
     bool active_ = false;
     Adapter* adapter_ = nullptr;
@@ -96,6 +102,13 @@ private:
     combat::FxLimiter limiter_;                                      // sender side: kFxMaxPerSecond per (fighter, kind)
     combat::FxLimiter rxLimiter_{combat::kFxMaxRxPerSecond};         // receiver side, per fighter and kind (one fighter = one peer)
     std::map<int, Box> boxes_;                                       // stand-in entity -> its private paint box
+    // T5: the game's paint tasks read a fighter's skinned mesh on worker threads; an armour piece taken off or put on
+    // under them frees what they read. Armour changes on a busy fighter wait here, in arrival order.
+    struct Held { combat::PaintFxMsg m; double since = 0; };
+    std::vector<Held> held_;
+    ue::UClass* paintClass_ = nullptr;
+    bool paintClassLooked_ = false;
+    uint32_t paintWaitsLogged_ = 0, paintBusyOwnLogged_ = 0;
     Counters n_, reported_;
 };
 

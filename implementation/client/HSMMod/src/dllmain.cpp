@@ -6,7 +6,7 @@
 bool HsmInitProxy();
 namespace hsm { DWORD WINAPI ModMain(void*); }
 
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
         HsmInitProxy();
@@ -16,6 +16,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         HANDLE once = CreateMutexW(nullptr, FALSE, name);
         if (once && GetLastError() == ERROR_ALREADY_EXISTS) return TRUE;
         if (HANDLE t = CreateThread(nullptr, 0, hsm::ModMain, nullptr, 0, nullptr)) CloseHandle(t);
+    } else if (reason == DLL_PROCESS_DETACH && reserved) {
+        hsm::LogExit();   // the process is exiting the normal way (a crash ends it with TerminateProcess: no detach)
     }
     return TRUE;
 }

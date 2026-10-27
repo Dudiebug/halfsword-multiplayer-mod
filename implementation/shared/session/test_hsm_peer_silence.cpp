@@ -9,16 +9,16 @@ using namespace hsm;
 
 int main() {
     PeerSilenceMonitor m;
-    m.Seen(1, 1000); m.Seen(2, 1000);
-    CHECK(m.Expired(5000).empty());
+    m.Seen(1, 1000); m.Seen(2, 1000); m.Loaded(1, 1000); m.Loaded(2, 1000);
+    CHECK(m.Expired(5000, true).empty());
     m.Seen(2, 14000);                                   // peer 2 keeps talking
-    auto e = m.Expired(1000 + PeerSilenceMonitor::kSilentMs);
+    auto e = m.Expired(1000 + PeerSilenceMonitor::kSilentMs, true);
     CHECK(e.size() == 1 && e[0] == 1);
-    CHECK(m.Expired(1000 + PeerSilenceMonitor::kSilentMs + 1).empty());   // reported once
-    m.Seen(3, 10); m.Forget(3);
-    CHECK(m.Expired(14000 + PeerSilenceMonitor::kSilentMs).size() == 1);   // only peer 2 left, now silent too
-    PeerSilenceMonitor w; w.Seen(4, 0xFFFFFF00u);       // clock wrap
-    CHECK(w.Expired(0x200u).empty());
+    CHECK(m.Expired(1000 + PeerSilenceMonitor::kSilentMs + 1, true).empty());   // reported once
+    m.Seen(3, 10); m.Loaded(3, 10); m.Forget(3);
+    CHECK(m.Expired(14000 + PeerSilenceMonitor::kSilentMs, true).size() == 1);   // only peer 2 left, now silent too
+    PeerSilenceMonitor w; w.Seen(4, 0xFFFFFF00u); w.Loaded(4, 0xFFFFFF00u);   // clock wrap
+    CHECK(w.Expired(0x200u, true).empty());
 
     HostDirector d;
     d.OnJoin(0, 0); d.OnJoin(1, 0); d.OnBlob(1, MakeBlobId(1, 1));

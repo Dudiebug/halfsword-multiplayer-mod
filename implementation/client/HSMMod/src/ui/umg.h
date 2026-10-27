@@ -153,6 +153,12 @@ private:
     Sent<float> width_, height_, minWidth_;
 };
 
+// ScaleBox set to ScaleToFit, DownOnly: its child at its own size, shrunk (never grown) to fit the space it is given.
+class Shrink : public Widget {
+public:
+    Slot Content(const Widget& child);
+};
+
 // UniformGridPanel: children in rows and columns of equal size.
 class Grid : public Widget {
 public:
@@ -231,6 +237,7 @@ public:
     Box MakeStack();
     Box MakeScroll();
     Fixed MakeFixed();
+    Shrink MakeShrink();
     Grid MakeGrid();
     Bar MakeBar();
     Icon MakeIcon();

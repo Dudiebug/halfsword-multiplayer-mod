@@ -76,7 +76,20 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   This is a hosted copy of the retail game, not a dedicated server. With no host fighter to spawn around, players
   spawn at the map's PlayerStart, else a navmesh point, else the floor found by a trace, and the map origin only as
   the last resort.
-- Protocol revision 21: 0.7.0-pre3 connects only to 0.7.0-pre3 (not to earlier pre-releases or 0.6.x).
+- Protocol revision 21: 0.7.0-pre4 and 0.7.0-pre3 connect to each other (not to earlier pre-releases or 0.6.x).
+
+### Fixed in 0.7.0-pre4
+
+- **Players dropped from Steam lobbies:** the host no longer drops a client 15 s after it joins, nor one that is
+  still loading a map (up to 60 s) or spectating; "only bots spawn" came from this. Fixed on the host, so it helps
+  pre3 clients too.
+- **Crash on quit** after a Steam session (the game closing with an error on exit).
+- **Mid-fight engine crashes** on a worker thread: the game's vertex-paint tasks read a fighter's mesh while armour came
+  off or went on. Armour changes the mod replays now wait (up to 1.5 s) until that fighter's paint tasks are done.
+- **Black screen while spectating after a death:** the camera fade is cleared and the game's vignettes (which follow
+  your dead fighter's consciousness) are hidden while you spectate, and come back when you respawn.
+- **Automatic crash reports** only for real crashes, once each (a fault the game survived is no longer reported).
+- The **MULTIPLAYER** button's label shrinks to fit its ribbon.
 
 ## Steam lobbies (default, Phase 1)
 

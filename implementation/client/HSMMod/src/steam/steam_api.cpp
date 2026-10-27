@@ -164,7 +164,9 @@ bool Init() {
     if (g_ready) return true;
     static int lastStep = -1;
     auto step = [](int n, const char* what) { if (n != lastStep) { lastStep = n; HSM_LOG("steam: %s", what); } };
-    if (!g_dll) g_dll = GetModuleHandleW(L"steam_api64.dll");
+    // Pinned: the game unloads its copy while it shuts down, and anything the mod calls after that would jump into
+    // unmapped memory (public #6). A pinned DLL stays mapped until the process ends.
+    if (!g_dll && !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"steam_api64.dll", &g_dll)) g_dll = nullptr;
     if (!g_dll) g_dll = LoadBundledSteamApi();
     if (!g_dll) { step(1, "steam_api64.dll is not loaded and the game's copy could not be loaded"); return false; }
     g.GetHSteamPipe = Fn<Api::GetHSteamPipe_t>("SteamAPI_GetHSteamPipe");

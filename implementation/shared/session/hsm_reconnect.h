@@ -157,25 +157,44 @@ inline DisconnectAction ClientDisconnectAction(bool steam, bool welcomed, bool i
     return steam ? DisconnectAction::Ignore : DisconnectAction::Leave;
 }
 
-// Host side, Steam peers: the Steam transport has no timeout of its own, so a peer that stops sending (a crashed or frozen
-// client, a dead route) would keep its slot forever. Every message from a peer is Seen; Expired returns the peers silent for
-// kSilentMs and forgets them, once each. The limit is generous: a client loading a level sends nothing for a while.
+// N6, host side, Steam: Steam has no transport timeout, so a joined peer that sends nothing for kSilentMs is gone.
+// A peer loading a level (from its first message, and again from each level load of the host, until its Ready for that
+// level: Loaded) gets kLoadingMs, since it sends nothing while it loads; packets it queued before the load do not shorten
+// that window (public #8, #10, #17: a client that joined mid-fight, or loaded slowly, was dropped). A client with the
+// keep-alive (a Ping every second once welcomed, from 0.7.0-pre4) is timed in every level; an older one only in fight
+// levels and only while `streams(peer)` (it has a live fighter), since it sends nothing in the lobby menu (public #9) or
+// while it spectates (public #8, #10); its clock starts fresh whenever it is not timed.
 class PeerSilenceMonitor {
 public:
     static constexpr uint32_t kSilentMs = 15000;
-    void Seen(uint32_t peer, uint32_t nowMs) { last_[peer] = nowMs; }
+    static constexpr uint32_t kLoadingMs = 60000;
+    void Seen(uint32_t peer, uint32_t nowMs, bool keepAlive = false) {
+        Entry& e = last_[peer];
+        e.ms = nowMs; e.keepsAlive = e.keepsAlive || keepAlive;
+    }
+    void Loaded(uint32_t peer, uint32_t nowMs) {
+        auto it = last_.find(peer);
+        if (it != last_.end()) { it->second.ms = nowMs; it->second.loading = false; }
+    }
     void Forget(uint32_t peer) { last_.erase(peer); }
     void Clear() { last_.clear(); }
-    std::vector<uint32_t> Expired(uint32_t nowMs) {
+    void LevelLoaded(uint32_t nowMs) { for (auto& [peer, e] : last_) { e.ms = nowMs; e.loading = true; } }
+    template <class Streams>
+    std::vector<uint32_t> Expired(uint32_t nowMs, bool inFight, Streams&& streams) {
         std::vector<uint32_t> out;
         for (auto it = last_.begin(); it != last_.end();) {
-            if (ElapsedAtLeast(it->second, nowMs, kSilentMs)) { out.push_back(it->first); it = last_.erase(it); }
+            Entry& e = it->second;
+            const bool timed = e.keepsAlive || (inFight && streams(it->first));
+            if (!timed) { e.ms = nowMs; ++it; continue; }   // not timed now; its clock starts fresh when it is
+            if (ElapsedAtLeast(e.ms, nowMs, e.loading ? kLoadingMs : kSilentMs)) { out.push_back(it->first); it = last_.erase(it); }
             else ++it;
         }
         return out;
     }
+    std::vector<uint32_t> Expired(uint32_t nowMs, bool inFight) { return Expired(nowMs, inFight, [](uint32_t) { return true; }); }
 private:
-    std::map<uint32_t, uint32_t> last_;
+    struct Entry { uint32_t ms = 0; bool loading = true, keepsAlive = false; };
+    std::map<uint32_t, Entry> last_;
 };
 
 // M5: host side, ENet and Steam. A peer that connected but sent no Hello holds a transport slot (and, on Steam, a session

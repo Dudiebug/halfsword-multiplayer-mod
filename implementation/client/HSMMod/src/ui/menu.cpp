@@ -43,6 +43,7 @@ struct TextButton {
     Button plain;
     Card card;
     Text label;
+    Slot inner{nullptr};                     // the plain button's content slot: inset to the ribbon's flat middle
     Button& button() { return card ? card.button : plain; }
     explicit operator bool() const { return (bool(plain) || bool(card)) && bool(label); }
 };
@@ -212,7 +213,16 @@ TextButton MakeOpenButton(const std::string& text, UObject* anchor, bool startup
         source = "the anchor's button style";
         if (stockLabel && b.label.StyleFrom(stockLabel)) source += ", font and colour of its label " + ObjectName(stockLabel);
         else source += ", the kit's font";
-        b.plain.Content(b.label).Align(HAlign::Center, VAlign::Center);
+        // The anchor's ribbon (Quit) is sized for its four letters at that font; "MULTIPLAYER" or "LOBBY (HOST) 6/6"
+        // ran past its ends. The label shrinks to fit instead (a ScaleBox), when the kit can make one.
+        Shrink fit = g.kit.MakeShrink();
+        if (fit) {
+            fit.Content(b.label).Align(HAlign::Center, VAlign::Center);
+            b.inner = b.plain.Content(fit);
+        } else {
+            b.inner = b.plain.Content(b.label);
+        }
+        b.inner.Align(HAlign::Center, VAlign::Center);
     } else {
         b.card = MakeCard(b.label, {12, 4, 12, 4});
         if (!b.card) return TextButton{};
@@ -255,6 +265,9 @@ bool InjectOpenButton(UObject* anchor, bool startup) {
             slot.Anchor(a, alignment).Size(s).Position(Vec2{p.x, p.y + s.y * 1.15});
             // Our own card has no ribbon art to set the type size: the label is a share of the entry's height.
             if (g.openButton.card && s.y > 0) g.openButton.label.Font(float(std::clamp(s.y * 0.45, 14.0, 40.0)));
+            // The ribbon's curled ends and its shadow take the edges: the label keeps to the flat middle.
+            if (g.openButton.inner && s.x > 0 && s.y > 0)
+                g.openButton.inner.Padding({float(s.x * 0.18), float(s.y * 0.18), float(s.x * 0.18), float(s.y * 0.22)});
         }
     } else {
         // UPanelWidget::InsertChildAt is C++-only in this engine build (tools/check_reflection.py); AddChild is the

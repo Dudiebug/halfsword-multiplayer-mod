@@ -3,6 +3,7 @@
 #pragma once
 #include "gameplay/adapter.h"
 #include "ue/engine.h"
+#include <string>
 
 namespace hsm::game {
 
@@ -21,5 +22,20 @@ ue::UObject* FollowCamera(Adapter& a, ue::UObject* target, bool snap, float dtSe
 
 // Destroys the follow camera (spectating is over, or the level is going).
 void EndFollowCamera(Adapter& a);
+
+// PlayerCameraManager::StopCameraFade on the local camera: a fade to black the game's death flow starts would otherwise
+// stay over the follow camera (public #8, #10: a black screen while spectating after a death; joining mid-round, without
+// a death, showed the fight).
+void ClearCameraFade(Adapter& a);
+
+// The classes of the widgets in the viewport, comma separated ("none"): what covers the screen, for the log.
+std::string WidgetsOnScreen();
+
+// The game's vignette widgets (UI_Vignette, UI_VignetteDark, UI_VignetteDamage) darken the screen with the local fighter's
+// consciousness, health and pain; a dead fighter's stay dark over the follow camera (public #8, #10: spectating after a
+// death is black, after a rejoin without dying it is not). Hidden while spectating (call again now and then: a new HUD
+// brings new ones), put back as they were by RestoreDeathOverlays. `own`: the dead fighter, for the log line only.
+void HideDeathOverlays(ue::UObject* own, bool log);
+void RestoreDeathOverlays(Adapter& a);
 
 }  // namespace hsm::game

@@ -24,6 +24,9 @@ constexpr uint32_t kReportCooldownMs = 120000;     // one report per player per 
 constexpr uint32_t kReportShareGapMs = 60000;      // the host relays one ReportShare per peer per minute
 constexpr uint32_t kPendingShareMs = 1800000;      // a crash report filed at start is shared with a session joined within 30 min
 constexpr size_t kCrashLineMax = 200;
+// The last line of a log whose game closed the normal way (log.cpp LogExit, from DllMain at process exit). A crash ends
+// the process without it: the engine's crash reporter calls TerminateProcess, which runs no DLL detach.
+constexpr const char* kCleanExitLine = "exit: the game closed normally";
 
 // ---------------------------------------------------------------- chat commands
 enum class ReportCommandKind : uint8_t { None, Report, SendLog, NoLog };
@@ -349,11 +352,25 @@ private:
 };
 
 // ---------------------------------------------------------------- crash reports (help_improve)
+// Where the last log line starting with `token` begins (after the "[time][thread] " prefix, or at a line start), or npos.
+// A token quoted inside another line does not count: "report: ... sending a crash report: crash: fault ..." is not a
+// fault, and counting it re-reported the last crash at every start after it (public #7).
+inline size_t LastLogLineAt(const std::string& log, const char* token) {
+    for (size_t at = log.rfind(token); at != std::string::npos; at = at ? log.rfind(token, at - 1) : std::string::npos)
+        if (at == 0 || log[at - 1] == '\n' || log[at - 1] == '\r' || (at >= 2 && log[at - 1] == ' ' && log[at - 2] == ']'))
+            return at;
+    return std::string::npos;
+}
+
 // The last "crash: fault ..." line crash_log.cpp wrote in a log, printable ASCII only and cut to kCrashLineMax; empty
-// when the session did not crash. It becomes the report's (public) text: code, module+offset, thread; no paths.
+// when the session did not crash: no fault, or the game closed normally after it (kCleanExitLine follows). A fault the
+// game plays on past is no proof: the engine's crash reporter lets the game run for seconds (3 to 20 in public #11,
+// #13, #14) before it ends the process. It becomes the report's (public) text: code, module+offset, thread; no paths.
 inline std::string CrashLineOf(const std::string& log) {
-    const size_t at = log.rfind("crash: fault ");
+    const size_t at = LastLogLineAt(log, "crash: fault ");
     if (at == std::string::npos) return {};
+    const size_t exited = LastLogLineAt(log, kCleanExitLine);
+    if (exited != std::string::npos && exited > at) return {};
     std::string line;
     for (size_t i = at; i < log.size() && log[i] != '\n' && log[i] != '\r' && line.size() < kCrashLineMax; ++i)
         if (log[i] >= 0x20 && log[i] < 0x7F) line += log[i];

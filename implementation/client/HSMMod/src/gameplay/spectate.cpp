@@ -1,9 +1,12 @@
 #include "gameplay/spectate.h"
 #include "log.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace hsm::game {
 using namespace hsm::ue;
@@ -141,6 +144,85 @@ bool SetViewTarget(Adapter& a, UObject* target, float blendSeconds) {
     UObject* controller = LocalController(a);
     if (!controller) return false;
     return Blend(controller, target, std::max(0.0f, blendSeconds));
+}
+
+void ClearCameraFade(Adapter& a) {
+    UObject* statics = GameplayStatics();
+    if (!statics || !a.World()) return;
+    Call m(statics, "GetPlayerCameraManager");
+    m.set<UObject*>("WorldContextObject", a.World()).set<int32_t>("PlayerIndex", kLocalPlayer);
+    if (UObject* manager = m.invoke() ? m.get<UObject*>("ReturnValue") : nullptr) Call(manager, "StopCameraFade").invoke();
+}
+
+std::string WidgetsOnScreen() {
+    UClass* uw = FindClass("UserWidget");
+    std::string out;
+    for (int32_t i = 0, n = ObjectCount(); i < n && uw; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o) || !IsA(o, uw)) continue;
+        Call v(o, "IsInViewport");
+        if (!v.invoke() || !v.get<bool>("ReturnValue")) continue;
+        if (!out.empty()) out += ", ";
+        out += ObjectName(reinterpret_cast<UObject*>(ClassOf(o)));
+    }
+    return out.empty() ? "none" : out;
+}
+
+namespace {
+
+constexpr uint8_t kSlateHidden = 2;   // ESlateVisibility::Hidden
+
+// "UI_VignetteDark_C" -> "uivignettedarkc": the index's normalised form, so a spelling of the underscores cannot miss.
+std::string Squash(const std::string& s) {
+    std::string out;
+    for (char ch : s) if (std::isalnum(static_cast<unsigned char>(ch))) out += char(std::tolower(static_cast<unsigned char>(ch)));
+    return out;
+}
+
+bool IsDeathOverlay(const std::string& squashed) {
+    return squashed == "uivignettec" || squashed == "uivignettedarkc" || squashed == "uivignettedamagec";
+}
+
+struct HiddenOverlay { UObject* w = nullptr; int32_t index = -1; uint8_t visibility = 0; };
+std::vector<HiddenOverlay> g_hidden;
+
+}  // namespace
+
+void HideDeathOverlays(UObject* own, bool log) {
+    std::string seen;
+    int postProcess = 0;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o)) continue;
+        const std::string cls = Squash(ObjectName(reinterpret_cast<UObject*>(ClassOf(o))));
+        if (log && cls == "bpcustompostprocessc") ++postProcess;
+        if (!IsDeathOverlay(cls)) continue;
+        if (std::any_of(g_hidden.begin(), g_hidden.end(), [o](const HiddenOverlay& h) { return h.w == o; })) continue;
+        Call gv(o, "GetVisibility");
+        const uint8_t was = gv.invoke() ? gv.get<uint8_t>("ReturnValue") : uint8_t(4);   // SelfHitTestInvisible if unread
+        if (log) {
+            Call op(o, "GetRenderOpacity");
+            const float opacity = op.invoke() ? op.get<float>("ReturnValue") : -1.0f;
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "%s%s (visibility %u, opacity %.2f)", seen.empty() ? "" : ", ",
+                          ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).c_str(), unsigned(was), opacity);
+            seen += buf;
+        }
+        if (was == kSlateHidden || was == 1) continue;   // already off (Hidden, Collapsed)
+        Call(o, "SetVisibility").set<uint8_t>("InVisibility", kSlateHidden).invoke();
+        g_hidden.push_back({o, ObjectIndex(o), was});
+    }
+    if (!log) return;
+    double consciousness = -1.0;
+    if (own) if (const double* c = Field<double>(own, "Consciousness")) consciousness = *c;
+    HSM_LOG("spectate: hid the death overlays: %s; my fighter's consciousness %.2f; %d custom post-process actor(s)",
+            seen.empty() ? "none found" : seen.c_str(), consciousness, postProcess);
+}
+
+void RestoreDeathOverlays(Adapter& a) {
+    for (const HiddenOverlay& h : g_hidden)
+        if (a.StillValid(h.w, h.index)) Call(h.w, "SetVisibility").set<uint8_t>("InVisibility", h.visibility).invoke();
+    g_hidden.clear();
 }
 
 bool ResetViewToPawn(Adapter& a) {

@@ -115,7 +115,7 @@ static_assert(Match::kMaxBotsAlive <= kLastBotEntity - kFirstBotEntity + 1, "eve
 constexpr uint32_t kInfoIntervalMs = 1000, kScanIntervalMs = 1000, kTintRetryMs = 500;
 constexpr uint32_t kDrawSampleMs = 250;      // the Duel draw check's look at the fighters (hsm_draw.h)
 constexpr int kTintTries = 8;
-constexpr uint32_t kKeepAliveMs = 1000;          // owner sync: the host's own traffic when it streams nothing (HostLossMonitor)
+constexpr uint32_t kKeepAliveMs = 1000;          // the host's traffic when it streams nothing (HostLossMonitor); a client's, always (PeerSilenceMonitor)
 constexpr uint32_t kVitalsDeathMs = 1500;        // owner sync: a fighter its owner reports dead this long without a DeathReport
 constexpr const char* kHubLevel = "/Game/Maps/Map_Hub_Tavern_Frank";
 constexpr const char* kMenuLevel = "/Game/Maps/Menus/Map_Menu_Startup";
@@ -1502,6 +1502,7 @@ private:
         if (progressionHub_) HSM_LOG("session: %s is the Progression hub; no fighters, the game keeps its own input", currentLevel_.c_str());
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
         levelLoadedAt_ = NowMs();
+        peerSilence_.LevelLoaded(NowMs());   // the clients load too, and send nothing meanwhile
         ui::ChatDrop("level change");   // the new level's controller starts with the game's input
         agent::VmHookFlush();
         mirror_.OnLevel();
@@ -1734,7 +1735,12 @@ private:
         });
         if (peerMapDirty_) SendPeerMap();
         // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (ENet times its own peers out) (N6).
-        for (uint32_t peer : peerSilence_.Expired(NowMs())) {
+        // Clients without the keep-alive are only timed in fight levels, while they have a live fighter (public #8, #9, #10).
+        const auto streams = [this](uint32_t peer) {
+            auto it = peers_.find(peer);
+            return it != peers_.end() && (match_.phase() == MatchPhase::Idle || match_.Alive(Roster::EntityForSlot(it->second.slot)));
+        };
+        for (uint32_t peer : peerSilence_.Expired(NowMs(), FighterLevel(), streams)) {
             auto it = peers_.find(peer);
             if (it == peers_.end() || (it->second.key >> 63)) continue;
             HSM_LOG("host: steam peer %u silent for %u s; dropping slot %u", peer, PeerSilenceMonitor::kSilentMs / 1000, it->second.slot);
@@ -1808,6 +1814,7 @@ private:
         Timed(kPumpGrabs, [&] { grabs_.Tick(now, dt, owned); });
         Timed(kPumpProps, [&] { props_.Tick(now, owned); });
         Timed(kPumpEquip, [&] { equip_.Tick(now, owned); });
+        fx_.Tick();
         if (!peers_.empty() && NowMs() >= nextKeepAlive_) {
             nextKeepAlive_ = NowMs() + kKeepAliveMs;
             net_->Broadcast(kChanUnreliable, EncodePing(NowMs(), false), false);
@@ -2345,10 +2352,11 @@ private:
     }
 
     void HostReceive(const NetEvent& ev) {
-        peerSilence_.Seen(ev.peer, NowMs());
         const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
         MsgType t;
-        if (!PeekType(d, n, t)) { if (IsForeignHello(d, n)) OnHello(ev); return; }
+        const bool typed = PeekType(d, n, t);
+        peerSilence_.Seen(ev.peer, NowMs(), typed && t == MsgType::Ping);
+        if (!typed) { if (IsForeignHello(d, n)) OnHello(ev); return; }
         if (t == MsgType::Hello) { OnHello(ev); return; }
         if (t == MsgType::Ping) {
             Ping p; bool pong; DecodePing(d, n, p, pong);
@@ -2436,6 +2444,7 @@ private:
         } else if (t == MsgType::Ready) {
             Ready r; Decode(d, n, r);
             director_.OnReady(peer.slot, r.travelSeq, NowMs(), travelSeq_);
+            if (r.travelSeq == travelSeq_) peerSilence_.Loaded(ev.peer, NowMs());   // its 15 s count from here
             for (const Spawn& sp : director_.LiveSpawns()) net_->Send(ev.peer, kChanReliable, Encode(sp), true);
             // The level props' census, then every current lease (a client refuses a level prop's Grant its census lacks),
             // after the level load that cleared the joiner's view (props_.Clear).
@@ -3544,7 +3553,11 @@ private:
         if (!watching) {
             if (spectating_) {
                 // A failed reset keeps the state so the next tick tries again (V4).
-                if (game::ResetViewToPawn(adapter_) || !own) { spectating_ = 0; spectateActor_ = nullptr; spectateIndex_ = -1; game::EndFollowCamera(adapter_); }
+                if (game::ResetViewToPawn(adapter_) || !own) {
+                    spectating_ = 0; spectateActor_ = nullptr; spectateIndex_ = -1;
+                    game::EndFollowCamera(adapter_);
+                    game::RestoreDeathOverlays(adapter_);
+                }
             }
             return;
         }
@@ -3578,7 +3591,18 @@ private:
         spectateMovedAt_ = now;
         if (cam && ShouldApplyView(fresh ? -1 : int(*target), int(spectating_), spectateApplyAt_, now)
             && game::SetViewTarget(adapter_, cam, 0.0f)) {
+            const bool started = !spectating_;
             spectating_ = *target; spectateActor_ = actor; spectateIndex_ = ObjectIndex(actor); spectateApplyAt_ = now;
+            game::ClearCameraFade(adapter_);   // with the view target: the game's death fade would black it out (#8, #10)
+            const bool logScreens = started && spectateScreensLogged_ < 10;
+            if (logScreens) {
+                ++spectateScreensLogged_;
+                HSM_LOG("spectate: watching entity %u; widgets on screen: %s", unsigned(*target), game::WidgetsOnScreen().c_str());
+            }
+            if (started || now - spectateOverlaysAt_ >= 2000) {   // a scan of every object: not each 500 ms apply
+                spectateOverlaysAt_ = now;
+                game::HideDeathOverlays(own, logScreens);
+            }
         }
     }
 
@@ -3708,6 +3732,10 @@ private:
         if (hostGone) { ReturnToMenuAfterHostLoss(); return; }
         if (hostUnreachable_) { LeaveUnreachableHost(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
+        if (welcomed_ && hostPeer_ && DueAt(NowMs(), nextKeepAlive_)) {   // in every level: the host's silence check (public #9)
+            nextKeepAlive_ = NowMs() + kKeepAliveMs;
+            net_->Send(hostPeer_, kChanUnreliable, EncodePing(NowMs(), false), false);
+        }
         if (!welcomed_ || !FighterLevel()) { myWillie_.store(nullptr); return; }
         if (OwnerMode() && !ClientGateOpen()) { myWillie_.store(adapter_.PlayerWillie(0)); return; }
         if (OwnerMode()) RecoverLostPuppets();
@@ -3828,6 +3856,7 @@ private:
         Timed(kPumpGrabs, [&] { grabs_.Tick(now, dt, owned); });
         Timed(kPumpProps, [&] { props_.Tick(now, owned); });
         Timed(kPumpEquip, [&] { equip_.Tick(now, owned); });
+        fx_.Tick();
     }
 
     // Once per life: my fighter died here, natively; the host referees the match and credits the last blow I took.
@@ -4396,6 +4425,8 @@ private:
     std::array<uint8_t, kMaxWillies + 1> clientLife_{};  // client: the life the host's last Spawn named, per entity
     uint32_t staleLife_ = 0;                             // claims and reports dropped for naming an old body
     uint32_t nextKeepAlive_ = 0, streamsDropped_ = 0, claimsRejected_ = 0;
+    uint32_t spectateOverlaysAt_ = 0;   // the last HideDeathOverlays scan
+    int spectateScreensLogged_ = 0;   // "widgets on screen" lines at a spectate start (the first 10 a game run)
     uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
     std::vector<double> frameMs_, tickMs_;
@@ -4406,7 +4437,9 @@ private:
     uint64_t lookupsAtWindow_ = 0, lookupMissesAtWindow_ = 0;
 };
 
-std::unique_ptr<SessionImpl> g_session;
+// Never deleted. Its destructor would run at process exit, after the game has unloaded steam_api64.dll, and the
+// transports' Stop() would call into the unloaded DLL: a crash on every quit after a Steam session (public #6, #7).
+SessionImpl* g_session = nullptr;
 UClass* g_gameModeClass = nullptr;
 }  // namespace
 
@@ -4416,7 +4449,7 @@ bool StartMod(const Config& cfg) {
     game::SetAllowBuildMismatch(cfg.allowBuildMismatch);
     report::Configure(cfg.reports, cfg.reportUrl);
     update::Start(cfg.updateCheck);   // a worker thread; the menu page and UpdateNoticeTick show the result
-    g_session = std::make_unique<SessionImpl>(cfg);
+    g_session = new SessionImpl(cfg);
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));
     // Pump the session from the GameMode's Blueprint tick (game thread, every frame, menus included).
@@ -4445,6 +4478,7 @@ bool StartMod(const Config& cfg) {
         if (FProperty* p = FindProperty(fn, "DeltaSeconds")) std::memcpy(&dt, static_cast<uint8_t*>(params) + PropertyOffset(p), sizeof dt);
         if (!(dt > 0.f && dt < 1.f)) dt = 1.f / 60.f;
         g_session->ProfilerTick(true);
+        NoteGameCarriedOn();
         const auto t0 = std::chrono::steady_clock::now();
         ue::prof::Scope scope("HSMMod session tick", ue::prof::Kind::kMod);
         g_session->Tick(obj, dt);

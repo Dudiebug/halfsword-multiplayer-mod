@@ -136,6 +136,31 @@ static void TestCrashLine() {
     std::string longLine = "crash: fault " + std::string(500, 'x');
     CHECK(CrashLineOf(longLine).size() == kCrashLineMax);
     CHECK(CrashLineOf(std::string("crash: fault \x01\x7f\xc3\xa9" "ok")) == "crash: fault ok");   // control and non-ASCII bytes dropped
+    // a fault the game played on past, then a normal quit: not a crash; without the quit it is one (the engine's crash
+    // reporter ends the game seconds after the fault: public #14), and so is a later fault that ended the session
+    const std::string survived =
+        "[02:30:18.947][10664] crash: fault 0xC0000005 at G.exe+0x4A33C5A reading 0x4 (thread 10664); the game may close now\n"
+        "[02:30:28.950][3308] crash: the game still runs 10 s after the fault on thread 10664\n"
+        "[02:31:10.750][3308] session: pause menu open; cursor shown\n";
+    const std::string quit = "[02:31:20.001][3308] exit: the game closed normally\r\n";
+    CHECK(std::string(kCleanExitLine) == "exit: the game closed normally");
+    CHECK(CrashLineOf(survived + quit).empty());
+    CHECK(CrashLineOf(survived) == "crash: fault 0xC0000005 at G.exe+0x4A33C5A reading 0x4 (thread 10664); the game may close now");
+    CHECK(CrashLineOf(survived + "[02:31:13.294][21600] crash: fault 0xC0000005 at ntdll.dll+0x304D4 writing 0xE0 (thread 21600)\n")
+          == "crash: fault 0xC0000005 at ntdll.dll+0x304D4 writing 0xE0 (thread 21600)");
+    CHECK(CrashLineOf(quit + "crash: fault 9 (thread 1)") == "crash: fault 9 (thread 1)");   // a crash on the way out (T6)
+    CHECK(CrashLineOf("[1][2] crash: fault 9\n[3][4] chat: exit: the game closed normally\n") == "crash: fault 9");   // quoted
+    // the next start's own log quotes the crash line it reported: that start did not crash (public #7)
+    const std::string quoted =
+        "[02:31:24.836][12936] report: the last session crashed; sending a crash report (help_improve is on): crash: fault "
+        "0xC0000005 at ?+0x7FFC4FC41800 executing 0x7FFC4FC41800 (thread 3308); the game may close now\n"
+        "[02:31:25.010][12936] report: the last session crashed (crash: fault 0xC0000005 at ?+0x1 (thread 1)); help_improve is off\n"
+        "[02:35:03.066][12936] steam: could not reach the Steam servers (result 3)\n";
+    CHECK(CrashLineOf(quoted).empty());
+    CHECK(CrashLineOf("[1][2] crash: fault 7 (thread 2)\n" + quoted) == "crash: fault 7 (thread 2)");   // the real one before them
+    CHECK(LastLogLineAt("crash: fault 1", "crash: fault ") == 0);
+    CHECK(LastLogLineAt("x crash: fault 1", "crash: fault ") == std::string::npos);
+    CHECK(LastLogLineAt("a]crash: fault 1", "crash: fault ") == std::string::npos);
     CHECK(CrashReportText("crash: fault 1") == "Crash (sent automatically): crash: fault 1");
 }
 

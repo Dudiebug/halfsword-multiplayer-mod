@@ -11,7 +11,7 @@
 namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 6;
-constexpr const char* kModVersion = "0.7.0-pre3";   // bump with every release tag
+constexpr const char* kModVersion = "0.7.0-pre4";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.

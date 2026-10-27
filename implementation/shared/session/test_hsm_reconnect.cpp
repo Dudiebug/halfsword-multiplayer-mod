@@ -242,24 +242,86 @@ static void TestHelloWatch() {
 
 // N6: a peer silent for 15 s is reported once; a packet resets its clock; a forgotten peer is never reported.
 static void TestPeerSilence() {
+    constexpr uint32_t S = PeerSilenceMonitor::kSilentMs;
     PeerSilenceMonitor m;
-    m.Seen(1, 1000); m.Seen(2, 1000); m.Seen(3, 1000);
+    m.Seen(1, 1000); m.Seen(2, 1000); m.Seen(3, 1000);                         // loaded and playing (Ready)
+    m.Loaded(1, 1000); m.Loaded(2, 1000); m.Loaded(3, 1000);
     m.Seen(2, 5000);                                                             // peer 2 spoke again
     m.Forget(3);                                                                 // peer 3 left
-    CHECK(m.Expired(1000 + PeerSilenceMonitor::kSilentMs - 1).empty());
-    const auto e = m.Expired(1000 + PeerSilenceMonitor::kSilentMs);
+    CHECK(m.Expired(1000 + S - 1, true).empty());
+    const auto e = m.Expired(1000 + S, true);
     CHECK(e.size() == 1 && e[0] == 1);
-    CHECK(m.Expired(5000 + PeerSilenceMonitor::kSilentMs - 1).empty());
-    const auto e2 = m.Expired(5000 + PeerSilenceMonitor::kSilentMs);
+    CHECK(m.Expired(5000 + S - 1, true).empty());
+    const auto e2 = m.Expired(5000 + S, true);
     CHECK(e2.size() == 1 && e2[0] == 2);
-    CHECK(m.Expired(1000 + 10 * PeerSilenceMonitor::kSilentMs).empty());          // reported once
-    m.Seen(4, 0xFFFFFF00u);                                                      // clock wrap
-    CHECK(m.Expired(0x100u).empty() && m.Expired(0xFFFFFF00u + PeerSilenceMonitor::kSilentMs).size() == 1);
-    m.Seen(5, 10); m.Clear(); CHECK(m.Expired(10 + 10 * PeerSilenceMonitor::kSilentMs).empty());
+    CHECK(m.Expired(1000 + 10 * S, true).empty());                               // reported once
+    m.Seen(4, 0xFFFFFF00u); m.Loaded(4, 0xFFFFFF00u);                            // clock wrap
+    CHECK(m.Expired(0x100u, true).empty() && m.Expired(0xFFFFFF00u + S, true).size() == 1);
+    m.Seen(5, 10); m.Clear(); CHECK(m.Expired(10 + 10 * S, true).empty());
+}
+
+// Public #9: a client that joined and waits in the lobby menu sends nothing (0.7.0-pre3 clients have no keep-alive); the
+// host dropped it 15 s after it joined, and the Brawl started with bots only.
+static void TestPeerSilenceLobby() {
+    constexpr uint32_t S = PeerSilenceMonitor::kSilentMs, L = PeerSilenceMonitor::kLoadingMs;
+    PeerSilenceMonitor m;
+    m.Seen(1, 1000);                                                             // Hello; then nothing in the menu
+    CHECK(m.Expired(1000 + S, false).empty());
+    CHECK(m.Expired(1000 + 20 * S, false).empty());                              // five minutes in the lobby
+    // the fight starts: its silence counts from now, never from the Hello
+    const uint32_t fight = 1000 + 20 * S;
+    m.LevelLoaded(fight);
+    CHECK(m.Expired(fight + S, true).empty());                                   // still loading on a slower machine
+    m.Seen(1, fight + S + 100);                                                  // a packet it queued before the load
+    CHECK(m.Expired(fight + S + 100 + S, true).empty());                         // keeps the load window
+    m.Seen(1, fight + S + 500); m.Loaded(1, fight + S + 500);                    // its Ready: streaming now
+    CHECK(m.Expired(fight + S + 500 + S - 1, true).empty());
+    const auto e = m.Expired(fight + S + 500 + S, true);                         // then it froze
+    CHECK(e.size() == 1 && e[0] == 1);
+    // a client that never comes back from the load is dropped once the load window is over
+    m.Seen(2, 100); m.Loaded(2, 100); m.LevelLoaded(200);
+    CHECK(m.Expired(200 + L - 1, true).empty());
+    CHECK(m.Expired(200 + L, true).size() == 1);
+    // a client with the keep-alive is timed in the menu too: a crashed one frees its slot there
+    m.Seen(3, 5000, true); m.Seen(3, 6000); m.Loaded(3, 6000);                   // a later message without the flag keeps it
+    CHECK(m.Expired(6000 + S - 1, false).empty());
+    const auto e3 = m.Expired(6000 + S, false);
+    CHECK(e3.size() == 1 && e3[0] == 3);
+    // without the keep-alive, the fight's silence counts from the last menu tick, never from the Hello
+    m.Seen(4, 0); m.Loaded(4, 0); m.Expired(S - 1, false);
+    CHECK(m.Expired(2 * S - 2, true).empty() && m.Expired(2 * S - 1, true).size() == 1);
+}
+
+static void TestPeerSilenceJoinAndSpectate() {
+    constexpr uint32_t S = PeerSilenceMonitor::kSilentMs, L = PeerSilenceMonitor::kLoadingMs;
+    // a client that joins mid-fight loads the arena after its Hello: the load window, not 15 s (public #8, #10)
+    PeerSilenceMonitor m;
+    m.Seen(1, 1000, true);                                                       // Hello, then its first Ping, then the load
+    CHECK(m.Expired(1000 + S, true).empty());
+    CHECK(m.Expired(1000 + L - 1, true).empty());
+    CHECK(m.Expired(1000 + L, true).size() == 1);                                // it never came back
+    m.Seen(2, 0, true); m.Loaded(2, 30000);                                      // Ready after 30 s: timed from it
+    CHECK(m.Expired(30000 + S - 1, true).empty() && m.Expired(30000 + S, true).size() == 1);
+    // a Ready only ends the load it answers: a new level load restarts the window
+    m.Seen(3, 0, true); m.Loaded(3, 0); m.LevelLoaded(100);
+    CHECK(m.Expired(100 + S, true).empty() && m.Expired(100 + L, true).size() == 1);
+    // an older client (no keep-alive) that spectates sends nothing: not timed while it has no live fighter
+    bool alive = false;
+    const auto streams = [&](uint32_t) { return alive; };
+    m.Seen(4, 0); m.Loaded(4, 0);
+    CHECK(m.Expired(S, true, streams).empty());
+    CHECK(m.Expired(10 * S, true, streams).empty());                             // a whole round spectating
+    alive = true;                                                                // respawned: its clock starts now
+    CHECK(m.Expired(10 * S + S - 1, true, streams).empty());
+    CHECK(m.Expired(11 * S, true, streams).size() == 1);                         // and then it went silent
+    // one with the keep-alive is timed whatever `streams` says
+    m.Seen(5, 0, true); m.Loaded(5, 0);
+    alive = false;
+    CHECK(m.Expired(S, true, streams).size() == 1);
 }
 
 int main() {
-    TestClientDisconnectAction(); TestHelloWatch(); TestPeerSilence();
+    TestClientDisconnectAction(); TestHelloWatch(); TestPeerSilence(); TestPeerSilenceLobby(); TestPeerSilenceJoinAndSpectate();
     TestClaimBeforeExpiryAndDoubleClaim(); TestClaimAfterExpiry(); TestWrongKey(); TestExpiryList();
     TestRefreshAndSameKeyRules(); TestRejections(); TestCap(); TestLapsedEvictedByReserve(); TestWrapAround();
     TestResendOrder(); TestMonitorSilenceToLostThenMenu(); TestMonitorPacketRecovers(); TestMonitorLateTickGoesToMenu();

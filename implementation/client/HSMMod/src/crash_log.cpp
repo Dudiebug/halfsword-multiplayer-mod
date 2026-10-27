@@ -3,6 +3,11 @@
 // fault carry on unchanged. It never handles anything. Faults inside KernelBase are skipped: IsBadReadPtr probes fault
 // there by design and are caught.
 //
+// The game often runs on for seconds after a fault: the engine's crash reporter takes its time before it ends the process,
+// and some faults the game survives. NoteGameCarriedOn, called every game tick, logs that the game still runs
+// kFaultSurvivedMs past the last fault, and lets the next fault write a dump again. Whether the session crashed is decided
+// at the next start (CrashLineOf, shared/session/hsm_report.h): a fault with no normal exit after it (log.cpp LogExit).
+//
 // The first fault that is logged also writes a small minidump, HSMMod.crash.dmp next to HSMMod.log (the one before it
 // becomes HSMMod.crash.prev.dmp). The game's own crash reporter may not leave a dump, and the log alone cannot say who
 // called through a bad pointer. dbghelp.dll is loaded from System32 only, and the dump is written by a helper thread the
@@ -21,6 +26,11 @@ namespace {
 std::atomic<int> g_logged{0};
 std::atomic<uintptr_t> g_last{0};   // the same fault again (a crash reporter retrying it): logged once
 std::atomic<bool> g_dumped{false};  // one minidump per process: the first fault logged (later ones are the crash reporter's)
+std::atomic<uint32_t> g_faultSeq{0};      // faults logged so far; the last one's time and thread below
+std::atomic<uint64_t> g_faultAtMs{0};
+std::atomic<DWORD> g_faultThread{0};
+uint32_t g_carriedOnSeq = 0;              // game thread only: the last fault already marked "carried on"
+constexpr uint64_t kFaultSurvivedMs = 10000;
 constexpr DWORD kDumpWaitMs = 15000;
 // The few dbghelp.h declarations used, as dbghelp.dll lays them out (every one of them is packed to 4 bytes there). The
 // header is left out: dbghelp.dll is loaded by hand, so nothing else of it is needed.
@@ -189,6 +199,9 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
         ? (r.ExceptionInformation[0] == 0 ? " reading" : r.ExceptionInformation[0] == 1 ? " writing" : " executing") : "";
     LogTry("crash: fault 0x%08lX at %s+0x%llX%s 0x%llX (thread %lu); the game may close now",
            r.ExceptionCode, name, (unsigned long long)off, op, target, GetCurrentThreadId());
+    g_faultAtMs.store(GetTickCount64());
+    g_faultThread.store(GetCurrentThreadId());
+    g_faultSeq.fetch_add(1);
     if (ep->ContextRecord) {
         const CONTEXT& c = *ep->ContextRecord;
         LogTry("crash: rax %llX rcx %llX rdx %llX r8 %llX rsp %llX", (unsigned long long)c.Rax, (unsigned long long)c.Rcx,
@@ -207,6 +220,15 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 }  // namespace
+
+void NoteGameCarriedOn() {
+    const uint32_t seq = g_faultSeq.load();
+    if (seq == g_carriedOnSeq || GetTickCount64() - g_faultAtMs.load() < kFaultSurvivedMs) return;
+    g_carriedOnSeq = seq;
+    g_dumped.store(false);   // a later fault gets its own dump
+    HSM_LOG("crash: the game still runs %llu s after the fault on thread %lu",
+            (unsigned long long)(kFaultSurvivedMs / 1000), (unsigned long)g_faultThread.load());
+}
 
 void InstallCrashLog() {
     const std::wstring dump = InstanceFilePath(L"HSMMod", L".crash.dmp"), prev = InstanceFilePath(L"HSMMod", L".crash.prev.dmp");

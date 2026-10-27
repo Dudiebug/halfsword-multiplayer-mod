@@ -18,6 +18,9 @@ constexpr const char* kVerticalBoxClass = "VerticalBox";
 constexpr const char* kOverlayClass = "Overlay";
 constexpr const char* kScrollBoxClass = "ScrollBox";
 constexpr const char* kSizeBoxClass = "SizeBox";
+constexpr const char* kScaleBoxClass = "ScaleBox";
+constexpr uint8_t kStretchScaleToFit = 2;   // EStretch::ScaleToFit
+constexpr uint8_t kStretchDownOnly = 1;     // EStretchDirection::DownOnly
 constexpr const char* kUniformGridPanelClass = "UniformGridPanel";
 constexpr const char* kProgressBarClass = "ProgressBar";
 constexpr const char* kImageClass = "Image";
@@ -329,6 +332,11 @@ void Fixed::Width(float w) { if (w_ && width_.Changed(w)) Call(w_, "SetWidthOver
 void Fixed::Height(float h) { if (w_ && height_.Changed(h)) Call(w_, "SetHeightOverride").set<float>("InHeightOverride", h).invoke(); }
 void Fixed::MinWidth(float w) { if (w_ && minWidth_.Changed(w)) Call(w_, "SetMinDesiredWidth").set<float>("InMinDesiredWidth", w).invoke(); }
 
+Slot Shrink::Content(const Widget& child) {
+    Call c(w_, "SetContent"); c.set<UObject*>("Content", child.get()).invoke();
+    return Slot(c.get<UObject*>("ReturnValue"));
+}
+
 Slot Grid::Add(const Widget& child, int32_t row, int32_t column) {
     Call c(w_, "AddChildToUniformGrid");
     c.set<UObject*>("Content", child.get()).set<int32_t>("InRow", row).set<int32_t>("InColumn", column).invoke();
@@ -426,6 +434,14 @@ Box Kit::MakeColumn() { return MakeBox(WidgetClass(kVerticalBoxClass), Box::Kind
 Box Kit::MakeStack() { return MakeBox(WidgetClass(kOverlayClass), Box::Kind::Stack); }
 Box Kit::MakeScroll() { return MakeBox(WidgetClass(kScrollBoxClass), Box::Kind::Scroll); }
 Fixed Kit::MakeFixed() { return Made<Fixed>(Spawn(WidgetClass(kSizeBoxClass))); }
+Shrink Kit::MakeShrink() {
+    Shrink s = Made<Shrink>(Spawn(WidgetClass(kScaleBoxClass)));
+    if (s) {
+        Call(s.get(), "SetStretch").set<uint8_t>("InStretch", kStretchScaleToFit).invoke();
+        Call(s.get(), "SetStretchDirection").set<uint8_t>("InStretchDirection", kStretchDownOnly).invoke();
+    }
+    return s;
+}
 Grid Kit::MakeGrid() { return Made<Grid>(Spawn(WidgetClass(kUniformGridPanelClass))); }
 Bar Kit::MakeBar() { return Made<Bar>(Spawn(WidgetClass(kProgressBarClass))); }
 Icon Kit::MakeIcon() { return Made<Icon>(Spawn(WidgetClass(kImageClass))); }

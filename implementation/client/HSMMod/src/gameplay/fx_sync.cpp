@@ -20,6 +20,13 @@ namespace {
 constexpr const char* kHookOwner = "fxsync";
 constexpr uint64_t kLogFirst = 10;   // the first reports and replays are logged in full (test evidence)
 constexpr double kVoiceRateMin = 0.0, kVoiceRateMax = 2.0;  // clamp voice rate
+constexpr double kPaintWaitMs = 1500.0;   // longest an armour change waits for its fighter's paint tasks (T5)
+constexpr size_t kHeldMax = 64;           // armour changes held at once; beyond it they apply at once, as before
+constexpr uint32_t kPaintLogFirst = 20;
+
+bool ChangesArmor(const PaintFxMsg& m) {
+    return combat::IsStripRequest(m) || m.kind == FxKind::Armor || m.kind == FxKind::ArmorOn;
+}
 
 FVector ToF(const sync::V3& v) { return FVector{v.x, v.y, v.z}; }
 sync::V3 ToV(const FVector& v) { return sync::V3{v.x, v.y, v.z}; }
@@ -283,6 +290,10 @@ void FxSync::OnRemoveArmor(ScriptCall& c) {
     uint8_t slot = 0;
     FTransform t{};
     if (!c.get("Slot", slot) || !c.get("SpawnTransform", t)) return;
+    // T5 evidence: the game's own Remove Armor while that fighter's paint tasks still run (the mod cannot hold this one).
+    if (!strip && paintBusyOwnLogged_ < kPaintLogFirst && PaintBusy(self))
+        HSM_LOG("fx: the game removed armour slot %u from my e%u while its paint tasks were still queued (%u)", unsigned(slot),
+                entity, ++paintBusyOwnLogged_);
     PaintFxMsg m;
     m.entity = entity;
     m.kind = FxKind::Armor;
@@ -389,7 +400,65 @@ void FxSync::Refuse(const char* why, const PaintFxMsg& m, uint64_t& counter) {
             static_cast<unsigned long long>(counter), util::StripControlChars(m.bone).c_str());
 }
 
+void FxSync::Forget(uint8_t entity) {
+    limiter_.Forget(entity);
+    rxLimiter_.Forget(entity);
+    held_.erase(std::remove_if(held_.begin(), held_.end(), [entity](const Held& h) { return h.m.entity == entity; }), held_.end());
+}
+
+UObject* FxSync::ArmorTarget(const PaintFxMsg& m) {
+    if (combat::IsStripRequest(m)) return env_.ownedActor ? env_.ownedActor(m.entity) : nullptr;
+    return standIns_->ActorOf(m.entity);
+}
+
+// HasAnyTasksQueuedUp on the fighter's VertexPaintDetectionComponent (REVERSE_ENGINEERING.md: check it before changing
+// a painted mesh). False when the component or the call is missing: the change then goes ahead as before.
+bool FxSync::PaintBusy(UObject* willie) {
+    if (!willie || !adapter_) return false;
+    if (!paintClassLooked_) {
+        paintClassLooked_ = true;
+        paintClass_ = FindClass("VertexPaintDetectionComponent");
+        HSM_LOG("fx: paint component class %s (armour changes %s for paint tasks)", paintClass_ ? "ok" : "MISSING",
+                paintClass_ ? "wait" : "do not wait");
+    }
+    if (!paintClass_) return false;
+    Call get(willie, "GetComponentByClass");
+    get.set<UClass*>("ComponentClass", paintClass_);
+    UObject* comp = get.valid() && get.invoke() ? get.get<UObject*>("ReturnValue") : nullptr;
+    if (!comp) return false;
+    Call busy(comp, "HasAnyTasksQueuedUp");
+    return busy.valid() && busy.invoke() && busy.get<bool>("ReturnValue");
+}
+
 void FxSync::Apply(const PaintFxMsg& m) {
+    if (!active_) return;
+    if (ChangesArmor(m) && held_.size() < kHeldMax) {
+        const bool queued = std::any_of(held_.begin(), held_.end(), [&m](const Held& h) { return h.m.entity == m.entity; });
+        if (queued || PaintBusy(ArmorTarget(m))) { held_.push_back({m, SteadyNowMs()}); return; }   // keeps the order per fighter
+    }
+    ApplyNow(m);
+}
+
+void FxSync::Tick() {
+    if (held_.empty()) return;
+    if (!active_) { held_.clear(); return; }
+    const double now = SteadyNowMs();
+    std::set<uint8_t> waiting;   // a fighter whose first held change still waits keeps its later ones too
+    std::vector<Held> todo, keep;
+    todo.swap(held_);
+    for (Held& h : todo) {
+        if (waiting.count(h.m.entity)) { keep.push_back(std::move(h)); continue; }
+        const bool timedOut = now - h.since >= kPaintWaitMs;
+        if (!timedOut && PaintBusy(ArmorTarget(h.m))) { waiting.insert(h.m.entity); keep.push_back(std::move(h)); continue; }
+        if (paintWaitsLogged_ < kPaintLogFirst)
+            HSM_LOG("fx: armour change (%s) on e%u waited %.0f ms for its paint tasks%s (%u)", KindName(h.m.kind), h.m.entity,
+                    now - h.since, timedOut ? ", gave up waiting" : "", ++paintWaitsLogged_);
+        ApplyNow(h.m);
+    }
+    held_.swap(keep);
+}
+
+void FxSync::ApplyNow(const PaintFxMsg& m) {
     if (!active_) return;
     if (combat::IsStripRequest(m)) { ApplyStrip(m); return; }
     UObject* standIn = standIns_->ActorOf(m.entity);
