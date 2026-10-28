@@ -1,28 +1,24 @@
-// Dropped, thrown and disarmed weapons in owner sync (protocol rev 9, Phase 4b "props"). Every weapon a fighter
-// simulated here lets go of becomes a prop with an id this machine mints (session/hsm_lease.h, MakeDropPropId); the
-// copy every other machine has of that weapon is still in the hand of its stand-in of that fighter, so on hearing the
-// drop's Touch Grant each of them makes its stand-in let go of it (the game's own "Set Up ... Hand Weapon" drop) once
-// the owner's pose shows that hand empty. From then on one stream drives the prop everywhere: its lessee's (TOUCH:
-// whoever touched or threw it last, HOLD: whoever holds it), or the host's while it is FREE (session/hsm_lease.h,
-// LeaseTable, arbitrated by the host). Everyone else teleports its copy to that stream (world_sync's ApplyWorldObject).
-// A weapon a fighter holds and has never let go of is carried by its Pose and never enters the lease table; a prop
-// picked up again stays a prop (HOLD), streamed by the picker.
-// Stand-in hands follow the owner's pose (sync/hsm_handmatch.h): a weapon the owner picked up (a prop, or one lying in
-// the level) is taken into the stand-in's hand here too ("Set Up ... Hand Weapon" with it), and a weapon the stand-in
-// still holds that the owner no longer does is let go. A weapon that leaves a stand-in's hand by itself is taken back
-// while the pose still shows it there, and otherwise falls as a loose weapon would; one this machine let go of before
-// the owner's drop was heard of becomes that drop's prop when it is.
-// Level props (an actor that is no fighter and no weapon, attached to nothing, whose root simulates physics: barrels,
-// stools, debris) are named by the host's census (session/hsm_prop_census.h): the host gives each an index and sends
-// the list; a client finds its own actor for each index (same class, nearest the host's first-seen place). From then
-// on a level prop is leased like a dropped weapon (FREE: the host streams it; TOUCH: whoever's fighter touched it),
-// never HOLD. In the first census of a level a client destroys its own props tagged 'Random Delete' that matched
-// nothing: the host's level manager deleted those, so both sides keep the host's set.
-// Game thread only; inert until Start; owner sync only (host sync keeps world_sync's WorldState untouched).
+// Objects in owner sync (protocol rev 26, plan M0): dropped weapons, level props and every other physics object that appears
+// mid-match (a helmet knocked off, a snapped plank, a thrown barrel). An id names an OBJECT (session/hsm_object.h); each
+// object has bodies (the actor's movable primitive components, the root first, BodyIndex) and one BodyState per simulating
+// body travels from the object's streamer: its lessee (TOUCH: whoever's fighter touched it last, HOLD: whoever holds a
+// weapon) or the host while it is FREE (session/hsm_lease.h, LeaseTable, arbitrated by the host). Everyone else drives the
+// body to that stream (ApplyPropPose for a root, a component transform for the other bodies).
+// Three id kinds: a weapon a fighter let go of (MakeDropPropId; the copy is found in a stand-in's hand, weapon_hands.cpp), a
+// level prop named by the host's first census (session/hsm_prop_census.h), and a spawned object (MakeSpawnedId): anything
+// the periodic re-check finds that nobody names yet. The host announces its own (ObjectAnnounce, canonical); a client
+// proposes with a provisional id and streams nothing under it until the host's canonical announce re-keys it
+// (ObjectReconciler); every other machine matches its own actor to a canonical announce by class and place, keeping a
+// ghost (GhostTable) until it can. Events (ObjectEvent: a joint broke, a body detached or attached, an object destroyed) are
+// polled on the machine that streams the object and replayed idempotently everywhere else (object_events.cpp).
+// Stand-in hands follow the owner's pose (sync/hsm_handmatch.h, weapon_hands.cpp). Game thread only; inert until Start.
 #pragma once
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
+#include "gameplay/weapon_hands.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_object.h"
+#include "session/hsm_object_event.h"
 #include "session/hsm_prop_census.h"
 #include "sync/hsm_handmatch.h"
 #include "ue/engine.h"
@@ -39,7 +35,7 @@
 
 namespace hsm::game {
 
-class PropSync {
+class ObjectSync {
 public:
     struct Env {
         bool host = false;
@@ -75,11 +71,19 @@ public:
     // touching a known prop. Cheap when neither actor is a prop.
     void NoteContact(ue::UObject* a, ue::UObject* b);
 
-    // Host: a PropState from the machine in fromSlot. True when it came from the prop's granted streamer and is newer:
-    // relay it (RelayTargets). Client: a relayed PropState; the return value is unused.
-    bool OnPropState(const uint8_t* d, size_t n, uint8_t fromSlot);
+    // Host: a BodyState from the machine in fromSlot. True when it came from the object's granted streamer and is newer:
+    // relay it (RelayTargets). Client: a relayed BodyState; the return value is unused.
+    bool OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot);
     // Host: a PropLease Request/Release from the machine in fromSlot. Client: the host's Grant.
     void OnPropLease(const uint8_t* d, size_t n, uint8_t fromSlot);
+    // Host: a client's proposal (answered with the canonical announce, sent to everyone). Client: the host's canonical announce.
+    void OnObjectAnnounce(const uint8_t* d, size_t n, uint8_t fromSlot);
+    // Host: an ObjectEvent from fromSlot; true when it is valid and to be relayed. Client: replay it (idempotent).
+    bool OnObjectEvent(const uint8_t* d, size_t n, uint8_t fromSlot);
+    // Something spawned that should be looked for now (armour knocked off): the re-check is brought forward.
+    void NoteSpawn();
+    // Host: every announced object as canonical announces, then the event history, for a machine that has just joined.
+    std::vector<std::vector<uint8_t>> ObjectsForJoiner() const;
     void SlotLeft(uint8_t slot);                                     // host: every lease the slot held goes FREE
     std::vector<std::vector<uint8_t>> GrantsForJoiner() const;       // host: every current lease, as Grants
     void ForgetEntity(uint8_t entity);                               // the entity's fighter is gone (left, respawned, removed)
@@ -106,11 +110,32 @@ private:
     struct RootCalls {
         ue::PreparedCall toWorld, linVel, angVel, setAng, setLin, simulating;
     };
+    struct BodyRef {                       // one body of an object: a movable primitive component of its actor
+        ue::UObject* comp = nullptr;
+        int32_t index = -1;
+        bool dirty = false;                // a fresh state from the streamer was applied to the view since the last drive
+        bool detached = false;             // left the object (a Detached event): it is its own object now
+        uint64_t readTick = 0;             // the tick `read` was taken in
+        bool readOk = false;
+        BodyStateMsg read;
+    };
+    struct ConstraintRef { ue::UObject* comp = nullptr; int32_t index = -1; };
     struct Prop {
         ue::UObject* actor = nullptr;
         int32_t index = -1;
-        ue::UObject* root = nullptr;
+        ue::UObject* root = nullptr;       // bodies[0].comp
         int32_t rootIndex = -1;
+        std::vector<BodyRef> bodies;       // BodyIndex order: the root body first, then the actor's components in their order
+        std::vector<ConstraintRef> constraints;   // PhysicsConstraintComponents of the actor, by index
+        uint64_t brokenMask = 0;           // constraints known broken (a bit per index)
+        uint64_t attachedMask = 0;         // bodies (>= 1) that hung on a parent when tracked
+        uint32_t classHash = 0;
+        bool spawned = false;              // a spawned object (MakeSpawnedId), announced
+        bool provisional = false;          // proposed here under a provisional id: nothing streams or claims until it is re-keyed
+        bool rootBody = true;              // bodies[0] is the actor's root component (else every body is placed by its component)
+        bool sub = false;                 // a detached body: its own object on its old actor (not in byActor_)
+        bool attachedSent = false;         // attached to another tracked object: not streamed or driven any more
+        double provisionalMs = 0;          // when it was proposed
         LeaseClaim claim;
         double lastContactMs = -1e18;
         double lastSentMs = -1e18;
@@ -120,65 +145,28 @@ private:
         bool level = false;                // a level prop (MakeLevelPropId), not a dropped weapon
         bool moving = false;               // its last read was not at rest (level props: streamed before those at rest)
         uint8_t toucher = 0;               // the fighter simulated here that held or touched it last (Touch)
-        uint64_t readTick = 0;             // the tick `read` was taken in
-        bool readOk = false;
-        PropStateMsg read;
     };
-    struct Hands {                         // what an owned fighter held as of the previous tick
-        ue::UObject* willie = nullptr;
-        std::array<ue::UObject*, 2> weapon{};
-        std::array<int32_t, 2> index{{-1, -1}};
-    };
-    struct StandInHand {                   // one hand of a stand-in, as the matcher last left it
-        sync::HandMatch match;
-        ue::UObject* held = nullptr;       // the real weapon in it (not fists, for the left not the right's again)
-        int32_t heldIndex = -1;
-        uint32_t heldClass = 0;
-        double episodeMs = -1;             // the pose's since-time this hand's attach retries belong to
-        double retryMs = 0, backoffMs = 0;
-        double reattachMs = -1e18;         // the last time a weapon that left by itself was taken back
-        bool selfDropLogged = false;       // its first loss since the stand-in was bound (left by itself, or gone) is logged
-        // A lease change from the owner let this hand go (NoticeDrop) while the owner's pose still showed that hand in the
-        // episode that began at leaseLetGoPoseMs: until the pose moves on the hand takes nothing (it would take the weapon
-        // just dropped).
-        bool leaseLetGo = false;
-        double leaseLetGoPoseMs = 0;
-    };
-    struct StandInHands {
-        ue::UObject* willie = nullptr;
-        int32_t index = -1;
-        double boundMs = 0;                // when this stand-in was bound (a respawn binds a new one)
-        std::array<StandInHand, 2> hand{};
-    };
-    struct PendingDrop {                   // a drop heard of (its Touch Grant), not resolved yet
-        double heardMs = 0;
-        double deadlineMs = 0;
-        ue::UObject* witness = nullptr;    // the weapon that hand of the stand-in held when it was heard (sync::DropFacts)
-        int32_t witnessIndex = -1;
-    };
-    struct Loose {                         // a weapon a stand-in let go of here that is not a prop (yet)
-        ue::UObject* actor = nullptr;
-        int32_t index = -1;
-        ue::UObject* root = nullptr;
-        int32_t rootIndex = -1;
-        uint8_t entity = 0;                // the stand-in's, 0 once that fighter is gone
-        int hand = 0;
-        uint32_t classHash = 0;
-        double atMs = 0;
-        int restoreTicks = 0;
-    };
-    struct Candidate {                     // a weapon actor the attach may take (WeaponActors, refreshed now and then)
-        ue::UObject* actor = nullptr;
-        int32_t index = -1;
-        uint32_t classHash = 0;
-    };
-    enum class DropResult : uint8_t { Dropped, Skipped, Failed };
+    using Hands = hands::Hands;
+    using StandInHand = hands::StandInHand;
+    using StandInHands = hands::StandInHands;
+    using PendingDrop = hands::PendingDrop;
+    using Loose = hands::Loose;
+    using Candidate = hands::Candidate;
+    using DropResult = hands::DropResult;
     struct LevelActor {                    // a physics prop of the level as the census walk found it here
         ue::UObject* actor = nullptr;
         int32_t index = -1;
         uint32_t classHash = 0;
         ue::FVector at;
+        bool anySim = false;               // some movable primitive of it simulates physics
+        ue::UObject* simComp = nullptr;    // the first one that does
+        uint8_t bodies = 0;                // movable primitives it has (capped at kMaxObjectBodies)
     };
+    struct Announced {                     // a canonical announce with no actor here yet
+        ObjectAnnounceMsg msg;
+        double sinceMs = 0;
+    };
+    struct QueuedEvent { ObjectEventMsg msg; double atMs = 0; };
     using LevelKey = std::pair<const ue::UObject*, int32_t>;        // a level actor and its object-array slot
     struct Counters {
         uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, forced = 0, kept = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
@@ -187,9 +175,19 @@ private:
                  attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
                  spawned = 0, spawnFailed = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0,
-                 despawned = 0;
+                 despawned = 0,
+                 announced = 0, proposed = 0, refused = 0, rekeyed = 0, bound = 0, ghostsExpired = 0, announceRejected = 0,
+                 eventsSent = 0, eventsApplied = 0, eventsQueued = 0, eventsRejected = 0, jointsBroken = 0, bodiesDetached = 0,
+                 destroyedSent = 0, destroyedApplied = 0, rechecks = 0, bodyDriven = 0;
     };
 
+    static constexpr double kCensusRefreshMs = 5000.0;  // the host walks again this often; a client retries its misses this often
+    static constexpr double kProposalWaitMs = 5000.0;   // a provisional id waits this long for the host's canonical announce
+    static constexpr double kRefusedKeepMs = 30000.0;   // an actor the host did not name is not proposed again for this long
+    static constexpr double kEventPollMs = 250.0;       // joint, detach and attach checks of the objects streamed here
+    static constexpr double kHintGapMs = 250.0;         // NoteSpawn pulls the re-check forward at most this often
+    static constexpr double kEventKeepMs = 20000.0;     // an event for an object not found here yet is kept this long
+    static constexpr size_t kMaxQueuedEvents = 128, kMaxHistory = 128, kProposalsPerPass = 4, kSpawnsPerPass = 8;
     uint8_t MySlot() const { return env_.mySlot ? env_.mySlot() : kHostSlot; }
     void DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned);
     void ResolvePending(double nowMs);
@@ -220,14 +218,37 @@ private:
     void OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level);   // every machine: the view, and a drop to resolve
     // The owner's lease on a prop a stand-in holds here changed (sync DropNoticed): the stand-in lets the copy go at once.
     void NoticeDrop(uint64_t propId, LeaseLevel prevLevel, uint8_t prevSlot, LeaseLevel level, uint8_t slot);
-    bool Read(Prop& p, PropStateMsg& out);
-    void StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs);   // read, and send when due
+    bool Read(Prop& p, size_t body, BodyStateMsg& out);
+    // Read every simulating body of an object I stream and send them when due; returns the bodies read (the tick's budget).
+    size_t StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs);
     void StreamLevel(const std::vector<uint64_t>& due, uint64_t& cursor, size_t& budget, bool countDeferred, uint8_t me, double nowMs);
-    bool Drive(Prop& p, const PropStateMsg& s);
+    bool Drive(uint64_t id, Prop& p);                                // every body with a fresh state from the streamer
+    bool DriveBody(Prop& p, size_t body, const BodyStateMsg& s);
+    bool BuildBodies(Prop& p, bool multi);                           // BodyIndex over the actor's movable primitives
+    std::vector<ue::UObject*> ComponentsOf(ue::UObject* actor, const ue::UClass* cls);
+    bool MovableComp(ue::UObject* comp);
     // Level props (session/hsm_prop_census.h).
-    std::vector<LevelActor> WalkLevel(size_t& notSimulating);       // every physics prop of the level here
+    std::vector<LevelActor> WalkLevel(size_t& notSimulating);       // every physics object of the level here
     void HostCensus(double nowMs);                                   // walk, index, track, and send when it changed
     void ClientCensus(double nowMs);                                 // bind the census's indices to actors here
+    // Spawned objects and events (object_events.cpp).
+    void Recheck(double nowMs);                                      // client: walk, bind announces, propose what nobody names
+    void AfterWalk(std::vector<LevelActor>& free, double nowMs);     // free: tracked by nothing yet
+    void HostSpawn(const LevelActor& a, double nowMs);               // host: a new object -> a canonical id and its announce
+    void ProposeLocal(const LevelActor& a, double nowMs);            // client: provisional id and a proposal
+    void HostPropose(const ObjectAnnounceMsg& m, uint8_t fromSlot, double nowMs);
+    void ClientAnnounce(const ObjectAnnounceMsg& m, double nowMs);
+    void BindAnnounced(std::vector<LevelActor>& free, double nowMs); // match pending announces to actors in free
+    void Bound(uint64_t id, double nowMs);                           // an object got its actor here: queued events replay
+    bool Rekey(uint64_t provisional, uint64_t canonical);
+    uint64_t MintSpawned();
+    void SendEvent(const ObjectEventMsg& m);
+    void PollEvents(double nowMs);
+    void Replay(const ObjectEventMsg& m, double nowMs);
+    bool ReplayNow(const ObjectEventMsg& m, double nowMs);          // false: the object is not here (yet)
+    Prop* TrackSub(uint64_t id, Prop& from, size_t body, double nowMs, bool mine);
+    bool CompMoving(ue::UObject* comp);
+    ue::UObject* ParentActorOf(ue::UObject* actor);
     bool InCensus(uint64_t propId) const;                            // a level id of the current census
     bool TaggedRandomDelete(ue::UObject* actor);
     void RestorePhysics(ue::UObject* root, int32_t rootIndex);
@@ -243,14 +264,14 @@ private:
     Env env_;
     uint64_t tick_ = 0;
     LeaseTable table_;                                               // host only
-    PropStateView view_;
+    BodyStateView view_;
     std::map<uint64_t, Prop> props_;                                 // every prop with an actor here
     std::unordered_map<const ue::UObject*, uint64_t> byActor_;
     std::map<uint64_t, PendingDrop> pending_;                        // drops heard of, not found yet
     // Drops given up as unresolved -> when: a later Grant of the id does not open another window (test 5: one came back
     // with every Grant and fired its deadline 18 s after the drop); forgotten after kLooseKeepMs.
     std::unordered_map<uint64_t, double> givenUp_;
-    std::unordered_map<uint64_t, double> heardMs_;                   // last PropState heard per id (minting skips live ids)
+    std::unordered_map<uint64_t, double> heardMs_;                   // last BodyState heard per id (minting skips live ids)
     std::unordered_map<uint64_t, double> freeSince_;                 // when each lease went FREE here (its first FREE Grant)
     double idleCheckMs_ = 0;                                         // DespawnIdle: the next check
     bool idleDespawn_ = false;                                       // the bot formats (match/hsm_match.h DropClearFor)
@@ -288,7 +309,24 @@ private:
     ue::FName randomDelete_{};
     bool randomDeleteKnown_ = false;
     std::unordered_map<const ue::UClass*, int32_t> rootOff_, mobilityOff_;   // WalkLevel: "RootComponent", "Mobility"
-    std::unordered_map<const ue::UClass*, uint8_t> classKind_;      // WalkLevel: 0 not a candidate, 1 a candidate actor class
+    std::unordered_map<const ue::UClass*, uint8_t> classKind_;      // WalkLevel: 1 a primitive component class
+    std::unordered_map<const ue::UClass*, uint8_t> actorKind_;      // WalkLevel: 1 an actor class
+    // Spawned objects (object_events.cpp). reconciler_: host only. minter_: this machine's provisional ids (client).
+    ObjectReconciler reconciler_;
+    SpawnedIdMinter minter_;
+    GhostTable ghosts_;
+    std::map<uint64_t, Announced> announced_;                        // canonical announces with no actor here yet
+    std::unordered_map<const ue::UObject*, double> refused_;         // actors the host would not name -> when to try again
+    std::unordered_map<const ue::UObject*, double> touched_;         // untracked actors a fighter simulated here touched
+    std::set<const ue::UObject*> leftBefore_;                        // unnamed, simulating actors the previous re-check saw
+    std::set<uint64_t> detached_;                                    // host: ids of detached bodies (valid spawned ids)
+    std::set<uint64_t> destroyed_;                                   // spawned ids destroyed (a late announce is not bound)
+    std::vector<QueuedEvent> queuedEvents_;                          // events for objects not found here yet
+    std::vector<std::vector<uint8_t>> history_;                      // host: events relayed, for a joiner
+    double recheckMs_ = 0, eventMs_ = 0, hintMs_ = -1e18;
+    ue::UClass* primitiveClass_ = nullptr;
+    ue::UClass* constraintClass_ = nullptr;
+    ue::PreparedCall components_;                                    // Actor::K2_GetComponentsByClass
     Counters n_, reported_;
 };
 

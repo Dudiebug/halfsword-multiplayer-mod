@@ -1,10 +1,10 @@
 // Dropped weapons and loose props in owner sync (protocol rev 9): FREE/TOUCH/HOLD leases, host-arbitrated.
-// A prop starts FREE (the host simulates and streams it, exactly like a WorldState object used to). Touching it
+// A prop starts FREE (the host simulates and streams it, as host sync did before rev 26). Touching it
 // grants a TOUCH lease; holding it (a hand's grab) grants a HOLD lease; HOLD beats TOUCH, and between two requests
-// at the same level the first one standing keeps it (ties lose). The lessee streams PropState itself; everyone
-// else drives the prop toward that stream (PropStateView: only the granted streamer's states apply). A lease
+// at the same level the first one standing keeps it (ties lose). The lessee streams BodyState itself; everyone
+// else drives the prop toward that stream (BodyStateView: only the granted streamer's states apply). A lease
 // lapses kLeaseLapseMs after the last report -- a Request renewing the touch/hold, sent every kClaimRenewMs while
-// it lasts (LeaseClaim). A PropState never renews: the lessee streams every tick for as long as it is the lessee,
+// it lasts (LeaseClaim). A BodyState never renews: the lessee streams every tick for as long as it is the lessee,
 // so a lessee that stopped renewing (crashed hand logic, lost link) must still lose the prop. The prop then reverts
 // to FREE; leaving the session releases every lease a slot held. Weapons actively held/equipped are carried by
 // Pose instead (protocol/hsm_owner.h) and never enter this table -- only loose/dropped weapons and level props do.
@@ -24,7 +24,12 @@
 //     actors tagged 'Random Delete' on a per-machine coin flip and re-spawns the ones tagged 'Respawn' under new
 //     names (BP_LevelManager), so the two machines' names differ. Bit 63 set (kPropLevelBit), so the two id spaces
 //     can never collide; bits 16-62 clear (IsCanonicalLevelPropId).
+//   - A spawned object (rev 26, session/hsm_object.h): anything that appears mid-match. Bit 62 set, bit 63 clear, bits
+//     56-61 the spawning slot, bits 32-55 clear, low 32 bits a per-slot sequence (MakeSpawnedId). The three kinds are
+//     told apart by bits 63 and 62 alone, so they never collide (ValidPropId).
 //   propId 0 is reserved ("no identity yet", e.g. a weapon nobody has ever held) and every decoder rejects it.
+//   Since rev 26 an id names an OBJECT; its simulating bodies are numbered per object (hsm_object.h) and BodyState
+//   carries {objId, body}. A lease still covers the whole object.
 #pragma once
 #include "hsm_protocol.h"
 #include "session/hsm_authority.h"
@@ -62,6 +67,9 @@ constexpr int kMaxLeasesPerSlot = 128;
 
 // ---------------------------------------------------------------- identity
 constexpr uint64_t kPropLevelBit = uint64_t(1) << 63;
+constexpr uint64_t kPropSpawnedBit = uint64_t(1) << 62;   // spawned object (bit 63 clear): see hsm_object.h
+constexpr int kSpawnedSlotShift = 56;         // bits 56-61: the spawning slot
+constexpr uint64_t kSpawnedSlotMask = 0x3F;
 constexpr int kDropEpochShift = 16;           // a dropped weapon's epoch: bits 16-47 ...
 constexpr int kWeaponIdBits = 48;             // ... and nothing above them in a weapon id
 
@@ -72,18 +80,32 @@ inline uint64_t MakeWeaponPropId(uint8_t lastOwnerEntity, uint8_t sheathSlot) {
 }
 inline uint64_t MakeLevelPropId(uint16_t hostIndex) { return kPropLevelBit | hostIndex; }
 
-// An id some machine could have made: any level-prop hash, or a weapon id (any epoch) whose owner byte is a valid
+// An id some machine could have made: any level-prop hash, a spawned id (ValidSpawnedId), or a weapon id (any epoch) whose owner byte is a valid
 // entity. Every decoder rejects anything else (0 included), so garbage never reaches the lease table or an actor lookup.
+inline uint64_t MakeSpawnedId(uint8_t slot, uint32_t seq) {
+    if (slot >= kMaxFighters) return 0;
+    return kPropSpawnedBit | (uint64_t(slot) << kSpawnedSlotShift) | seq;
+}
+inline bool IsSpawnedId(uint64_t id) { return (id >> 62) == 1; }   // bit 62 set, bit 63 clear
+inline uint8_t SpawnedIdSlot(uint64_t id) { return IsSpawnedId(id) ? uint8_t((id >> kSpawnedSlotShift) & kSpawnedSlotMask) : uint8_t(0xFF); }
+inline uint32_t SpawnedIdSeq(uint64_t id) { return IsSpawnedId(id) ? uint32_t(id) : 0; }
+// A spawned id some machine could have made: slot a real fighter slot, bits 32-55 clear.
+inline bool ValidSpawnedId(uint64_t id) {
+    return IsSpawnedId(id) && ((id >> 32) & 0xFFFFFF) == 0 && ((id >> kSpawnedSlotShift) & kSpawnedSlotMask) < kMaxFighters;
+}
+
 inline bool ValidPropId(uint64_t propId) {
     if (propId & kPropLevelBit) return true;
+    if (IsSpawnedId(propId)) return ValidSpawnedId(propId);
     if (propId >> kWeaponIdBits) return false;
     const uint64_t owner = (propId >> 8) & 0xFF;
     return owner >= 1 && owner <= kMaxWillies;
 }
 // What a receiver needs to find a weapon prop's actor: its holder entity and sheath slot (both 0 for a level prop).
 inline bool IsLevelProp(uint64_t propId) { return (propId & kPropLevelBit) != 0; }
-inline uint8_t PropOwnerEntity(uint64_t propId) { return IsLevelProp(propId) ? 0 : uint8_t(propId >> 8); }
-inline uint8_t PropSheathSlot(uint64_t propId) { return IsLevelProp(propId) ? 0 : uint8_t(propId & 0xFF); }
+inline bool IsWeaponId(uint64_t propId) { return (propId >> 62) == 0; }
+inline uint8_t PropOwnerEntity(uint64_t propId) { return IsWeaponId(propId) ? uint8_t(propId >> 8) : 0; }
+inline uint8_t PropSheathSlot(uint64_t propId) { return IsWeaponId(propId) ? uint8_t(propId & 0xFF) : 0; }
 // A level prop's census index (0 for a weapon id); IsCanonicalLevelPropId: a level id with nothing above the index,
 // the only kind a census names (ValidPropId lets the rest through the decoders; prop_sync drops them).
 inline uint16_t LevelPropIndex(uint64_t propId) { return IsLevelProp(propId) ? uint16_t(propId & 0xFFFF) : 0; }
@@ -108,7 +130,7 @@ inline uint64_t MakeDropPropId(uint8_t ownerEntity, uint8_t hand, uint8_t seq, u
 }
 inline uint8_t PropHand(uint64_t propId) { return uint8_t(PropSheathSlot(propId) & 1); }
 inline uint8_t PropDropSeq(uint64_t propId) { return uint8_t(PropSheathSlot(propId) >> 1); }
-inline uint32_t PropDropEpoch(uint64_t propId) { return IsLevelProp(propId) ? 0 : uint32_t(propId >> kDropEpochShift); }
+inline uint32_t PropDropEpoch(uint64_t propId) { return !IsWeaponId(propId) ? 0 : uint32_t(propId >> kDropEpochShift); }
 
 // The owner's machine, on a drop: the next id of ownerEntity's sequence and epoch that inUse(id) does not report live
 // (an older drop still lying in the level keeps its id). Advances seq past what it returns, and the epoch with every
@@ -135,7 +157,7 @@ uint64_t MintDropPropId(uint8_t ownerEntity, uint8_t hand, uint8_t& seq, uint32_
 // it dropped a while ago), and the weapon in that stand-in's hand now is not that drop (W5: it was forced out at 1.5 s and
 // then streamed as the old prop).
 inline bool DropSignature(uint64_t propId, LeaseLevel level, uint8_t slot, bool idKnown = false) {
-    if (IsLevelProp(propId) || !ValidPropId(propId) || level != LeaseLevel::Touch || idKnown) return false;
+    if (!IsWeaponId(propId) || !ValidPropId(propId) || level != LeaseLevel::Touch || idKnown) return false;
     return slot == OwnerSlotOf(PropOwnerEntity(propId));
 }
 
@@ -177,11 +199,15 @@ inline bool DropNoticed(LeaseLevel prev, uint8_t prevSlot, LeaseLevel now, uint8
     return now == LeaseLevel::Touch && nowSlot == ownerSlot && !ownerTouchedBefore;
 }
 
-// ---------------------------------------------------------------- PropState (unreliable)
-// Sent every tick by whoever currently streams the prop: the lessee when leased, otherwise the host (a FREE prop
-// is the host's to simulate, exactly as a WorldState object used to be). Everyone else applies it to the actor.
-struct PropStateMsg {
-    uint64_t propId = 0;
+// ---------------------------------------------------------------- BodyState (unreliable; PropState 28 before rev 26)
+// Sent every tick, per simulating body, by whoever currently streams the object: the lessee when leased, otherwise
+// the host (a FREE object is the host's to simulate). Everyone else applies it to the body. objId names the object
+// (any of the three id kinds); body is its body index (hsm_object.h: root 0, then components in order).
+// Wire: 4 header + 8 objId + 1 body + 1 lessee + 4 time + 12 pos + 8 quat + 12 vel + 12 angVel = 62 bytes.
+constexpr uint8_t kMaxObjectBodies = 64;      // bodies per object; a body index is below this
+struct BodyStateMsg {
+    uint64_t objId = 0;
+    uint8_t body = 0;                         // body index under objId, < kMaxObjectBodies
     uint8_t lessee = kHostSlot;               // the roster slot currently streaming it (kHostSlot when FREE)
     uint32_t senderTimeMs = 0;                // sender's own clock, for SeqNewer staleness on the unreliable channel
     float px = 0, py = 0, pz = 0;
@@ -190,23 +216,23 @@ struct PropStateMsg {
     float wx = 0, wy = 0, wz = 0;              // angular velocity, deg/s
 };
 
-inline std::vector<uint8_t> Encode(const PropStateMsg& m) {
-    Writer w; w.header(MsgType::PropState);
-    w.u64(m.propId); w.u8(m.lessee); w.u32(m.senderTimeMs);
+inline std::vector<uint8_t> Encode(const BodyStateMsg& m) {
+    Writer w; w.header(MsgType::BodyState);
+    w.u64(m.objId); w.u8(m.body); w.u8(m.lessee); w.u32(m.senderTimeMs);
     w.f32(m.px); w.f32(m.py); w.f32(m.pz);
     w.i16(m.rot.x); w.i16(m.rot.y); w.i16(m.rot.z); w.i16(m.rot.w);
     w.f32(m.vx); w.f32(m.vy); w.f32(m.vz);
     w.f32(m.wx); w.f32(m.wy); w.f32(m.wz);
     return w.buf;
 }
-inline bool Decode(const uint8_t* d, size_t n, PropStateMsg& m) {
-    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::PropState) return false;
-    m.propId = r.u64(); m.lessee = r.u8(); m.senderTimeMs = r.u32();
+inline bool Decode(const uint8_t* d, size_t n, BodyStateMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::BodyState) return false;
+    m.objId = r.u64(); m.body = r.u8(); m.lessee = r.u8(); m.senderTimeMs = r.u32();
     m.px = r.f32(); m.py = r.f32(); m.pz = r.f32();
     m.rot.x = r.i16(); m.rot.y = r.i16(); m.rot.z = r.i16(); m.rot.w = r.i16();
     m.vx = r.f32(); m.vy = r.f32(); m.vz = r.f32();
     m.wx = r.f32(); m.wy = r.f32(); m.wz = r.f32();
-    if (!r.done() || !ValidPropId(m.propId) || m.lessee >= kMaxFighters) return false;
+    if (!r.done() || !ValidPropId(m.objId) || m.body >= kMaxObjectBodies || m.lessee >= kMaxFighters) return false;
     if (std::fabs(m.px) > kMaxPropCoord || std::fabs(m.py) > kMaxPropCoord || std::fabs(m.pz) > kMaxPropCoord) return false;
     if (std::fabs(m.vx) > kMaxPropSpeed || std::fabs(m.vy) > kMaxPropSpeed || std::fabs(m.vz) > kMaxPropSpeed) return false;
     if (std::fabs(m.wx) > kMaxPropSpin || std::fabs(m.wy) > kMaxPropSpin || std::fabs(m.wz) > kMaxPropSpin) return false;
@@ -214,7 +240,7 @@ inline bool Decode(const uint8_t* d, size_t n, PropStateMsg& m) {
 }
 
 // At rest: slower than kRestSpeed and turning slower than kRestSpin (whole vectors, not per axis).
-inline bool PropAtRest(const PropStateMsg& m) {
+inline bool PropAtRest(const BodyStateMsg& m) {
     return m.vx * m.vx + m.vy * m.vy + m.vz * m.vz < kRestSpeed * kRestSpeed &&
            m.wx * m.wx + m.wy * m.wy + m.wz * m.wz < kRestSpin * kRestSpin;
 }
@@ -369,9 +395,9 @@ public:
         return it == table_.end() ? kHostSlot : it->second.slot;
     }
 
-    // A PropState the host received from fromSlot: only the current streamer's, and only sent as itself. Anything
+    // A BodyState the host received from fromSlot: only the current streamer's, and only sent as itself. Anything
     // else (a lessee that lost the prop and has not heard yet, a forged lessee) is dropped, not relayed.
-    bool Accepts(const PropStateMsg& m, uint8_t fromSlot) const { return m.lessee == fromSlot && Streamer(m.propId) == fromSlot; }
+    bool Accepts(const BodyStateMsg& m, uint8_t fromSlot) const { return m.lessee == fromSlot && Streamer(m.objId) == fromSlot; }
 
     // Every current lease as the Grant a late joiner needs (a prop missing from it is FREE).
     std::vector<PropLeaseMsg> Grants() const {
@@ -390,33 +416,35 @@ private:
 };
 
 // ---------------------------------------------------------------- every machine's view
-// Who streams each prop (from the host's Grants) and its latest PropState. senderTimeMs is the streamer's own clock,
-// so staleness is judged per streamer: the unreliable channel can reorder or duplicate (only a strictly newer time
-// from the same streamer applies, as in WorldView, session/hsm_world.h), and a new streamer's first state applies
-// whatever its clock says -- the host's clock may be hours ahead of the new lessee's. A state from anyone but the
-// granted streamer is dropped (a former lessee's late packet, or a new lessee whose Grant has not arrived yet: the
-// Grant is reliable, the state is not, so at most a round trip of its states is lost). Unknown props are FREE.
-class PropStateView {
+// Who streams each object (from the host's Grants) and the latest BodyState of each of its bodies. senderTimeMs is the
+// streamer's own clock, so staleness is judged per streamer and per body: the unreliable channel can reorder or duplicate
+// (only a strictly newer time from the same streamer applies), and a new streamer's first state applies whatever its
+// clock says -- the host's clock may be hours ahead of the new lessee's. A state from anyone but the granted streamer is
+// dropped (a former lessee's late packet, or a new lessee whose Grant has not arrived yet: the Grant is reliable, the
+// state is not, so at most a round trip of its states is lost). Unknown objects are FREE.
+class BodyStateView {
 public:
-    // The host's Grant (the host applies its own too): from now on only slot streams propId, the host when FREE.
-    void OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
-        Entry& e = entries_[propId];
+    // The host's Grant (the host applies its own too): from now on only slot streams objId, the host when FREE.
+    void OnGrant(uint64_t objId, uint8_t slot, LeaseLevel level) {
+        Obj& o = objs_[objId];
         const uint8_t streamer = level == LeaseLevel::Free ? kHostSlot : slot;
-        if (streamer != e.streamer) {
+        if (streamer != o.streamer) {
             // A-B-A: the first streamer's late packets must not apply again just because the stream changed hands twice;
             // what each streamer last got through is remembered, and its next state must be newer than that.
-            if (e.fresh) e.lastTime[e.streamer] = e.state.senderTimeMs;
-            e.streamer = streamer;
-            e.fresh = false;
+            for (auto& [idx, b] : o.bodies) {
+                if (b.fresh) b.lastTime[o.streamer] = b.state.senderTimeMs;
+                b.fresh = false;
+            }
+            o.streamer = streamer;
         }
-        e.level = level;
+        o.level = level;
     }
-    // True if m came from the streamer and was newer: it is now the current state (drive the prop's actor to it).
-    bool Apply(const PropStateMsg& m) {
-        auto it = entries_.find(m.propId);
-        if (m.lessee != (it == entries_.end() ? kHostSlot : it->second.streamer)) return false;
-        if (it == entries_.end()) it = entries_.emplace(m.propId, Entry{}).first;
-        Entry& e = it->second;
+    // True if m came from the streamer and was newer: it is now that body's current state (drive the body to it).
+    bool Apply(const BodyStateMsg& m) {
+        auto it = objs_.find(m.objId);
+        if (m.lessee != (it == objs_.end() ? kHostSlot : it->second.streamer)) return false;
+        if (it == objs_.end()) it = objs_.emplace(m.objId, Obj{}).first;
+        Body& e = it->second.bodies[m.body];
         if (e.fresh && !SeqNewer(m.senderTimeMs, e.state.senderTimeMs)) return false;
         if (!e.fresh) {
             const auto seen = e.lastTime.find(m.lessee);
@@ -425,33 +453,38 @@ public:
         e.state = m; e.fresh = true; e.have = true;
         return true;
     }
-    // The latest state applied, kept across a streamer change until the new streamer's first one.
-    const PropStateMsg* Find(uint64_t propId) const {
-        auto it = entries_.find(propId);
-        return it == entries_.end() || !it->second.have ? nullptr : &it->second.state;
+    // The latest state applied for a body, kept across a streamer change until the new streamer's first one.
+    const BodyStateMsg* Find(uint64_t objId, uint8_t body = 0) const {
+        auto it = objs_.find(objId);
+        if (it == objs_.end()) return nullptr;
+        auto b = it->second.bodies.find(body);
+        return b == it->second.bodies.end() || !b->second.have ? nullptr : &b->second.state;
     }
     // Granted or streamed since the last Clear: the id was heard of in this level.
-    bool Known(uint64_t propId) const { return entries_.count(propId) != 0; }
-    uint8_t Streamer(uint64_t propId) const {
-        auto it = entries_.find(propId);
-        return it == entries_.end() ? kHostSlot : it->second.streamer;
+    bool Known(uint64_t objId) const { return objs_.count(objId) != 0; }
+    uint8_t Streamer(uint64_t objId) const {
+        auto it = objs_.find(objId);
+        return it == objs_.end() ? kHostSlot : it->second.streamer;
     }
-    LeaseLevel Level(uint64_t propId) const {
-        auto it = entries_.find(propId);
-        return it == entries_.end() ? LeaseLevel::Free : it->second.level;
+    LeaseLevel Level(uint64_t objId) const {
+        auto it = objs_.find(objId);
+        return it == objs_.end() ? LeaseLevel::Free : it->second.level;
     }
-    void Clear() { entries_.clear(); }
+    void Clear() { objs_.clear(); }
 
 private:
-    struct Entry {
-        uint8_t streamer = kHostSlot;
-        LeaseLevel level = LeaseLevel::Free;
+    struct Body {
         bool fresh = false;           // state came from the current streamer (its time is the staleness baseline)
         bool have = false;            // state holds anything at all
-        PropStateMsg state;
-        std::map<uint8_t, decltype(PropStateMsg::senderTimeMs)> lastTime;   // per former streamer: its last applied time
+        BodyStateMsg state;
+        std::map<uint8_t, decltype(BodyStateMsg::senderTimeMs)> lastTime;   // per former streamer: its last applied time
     };
-    std::map<uint64_t, Entry> entries_;
+    struct Obj {
+        uint8_t streamer = kHostSlot;
+        LeaseLevel level = LeaseLevel::Free;
+        std::map<uint8_t, Body> bodies;
+    };
+    std::map<uint64_t, Obj> objs_;
 };
 
 // ---------------------------------------------------------------- each machine's claim on one prop
@@ -460,7 +493,7 @@ private:
 // -> keep a Touch while it still moves (the throw or push is this machine's simulation) and release it once it has
 // been at rest for kRestReleaseMs. A claim is re-sent when its level changes and renewed every kClaimRenewMs; a
 // denied claim is simply renewed (the host answers only changes), and the machine streams only once a Grant names
-// it (PropStateView::Streamer).
+// it (BodyStateView::Streamer).
 enum class ClaimSend : uint8_t { None = 0, Request = 1, Release = 2 };
 
 struct LeaseClaim {

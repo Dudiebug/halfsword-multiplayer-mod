@@ -4,7 +4,7 @@
 // before it is decoded further, applied or relayed, and counted. Pure state, no engine headers.
 //
 // The numbers are one machine's own legitimate traffic times a margin of 2 or more. A machine owns one fighter, so
-// toward the host a client sends at most: Pose + Vitals about 60 Hz each, PropState for the props it leases (up to ~20
+// toward the host a client sends at most: Pose + Vitals about 60 Hz each, BodyState for the bodies it leases (up to ~20
 // at 60 Hz), claims bounded by physics contacts, PaintFx at most 6 kinds x 30/s (the sender's own FxLimiter). The host
 // relays every fighter's streams to a client (8 fighters + up to 10 bots, kMaxWillies), so a client's budget for what
 // the HOST sends is the per-peer one times kMaxWillies (MsgBudget(kMaxWillies)). Classes that carry setup or are
@@ -23,11 +23,11 @@ enum class BudgetClass : uint8_t { Free, Stream, Prop, Lease, Combat, Fx, Blob, 
 
 inline BudgetClass BudgetClassOf(MsgType t) {
     switch (t) {
-        case MsgType::Input: case MsgType::Snapshot: case MsgType::WorldState: case MsgType::RelayInput:
+        case MsgType::Input: case MsgType::Snapshot: case MsgType::RelayInput:
         case MsgType::OwnerState: case MsgType::Pose: case MsgType::Vitals:
             return BudgetClass::Stream;
-        case MsgType::PropState: return BudgetClass::Prop;
-        case MsgType::PropLease: return BudgetClass::Lease;
+        case MsgType::BodyState: return BudgetClass::Prop;
+        case MsgType::PropLease: case MsgType::ObjectAnnounce: case MsgType::ObjectEvent: return BudgetClass::Lease;
         case MsgType::CombatEvent: case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim:
         case MsgType::SeverNotice: case MsgType::StuckBlade: case MsgType::GrabState: case MsgType::Equip:
         case MsgType::DeathReport: case MsgType::GiveUp:

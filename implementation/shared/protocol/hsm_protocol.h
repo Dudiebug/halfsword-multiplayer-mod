@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 25;         // 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 26;         // 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -41,7 +41,7 @@ enum class MsgType : uint8_t {
     MatchInfo = 14,  // host -> client, reliable: match settings, phase, scores, teams
     Kill = 15,       // host -> client, reliable: kill feed entry
     Chat = 16,        // both ways, reliable: chat line (protocol/hsm_chat.h); host relays
-    WorldState = 17,  // host -> client, unreliable: loose world objects (session/hsm_world.h)
+    // 17 was WorldState (host sync, removed in rev 26): reserved, never reuse.
     CombatEvent = 18, // host -> client, reliable: dismemberment / blood (session/hsm_combat.h)
     RelayInput = 19,  // host -> client, unreliable: one fighter's input frame (unused since owner authority)
     OwnerState = 20,  // client -> host, unreliable: the sender's own fighter as it simulates it (it is the authority)
@@ -52,7 +52,7 @@ enum class MsgType : uint8_t {
     HitFx = 25,       // host -> everyone else, reliable: the same blow, shown cosmetically on their stand-in
     SeverClaim = 26,  // attacker -> host -> everyone, reliable: a sever started on a stand-in (combat/hsm_sever.h)
     GrabState = 27,   // grabber's owner -> host -> others: what its hands hold (reliable on change, unreliable refresh; sync/hsm_grab.h)
-    PropState = 28,   // lessee -> host -> others, unreliable: a leased or FREE prop's transform (session/hsm_lease.h)
+    // 28 was PropState (replaced by BodyState 46 in rev 26): reserved, never reuse.
     StuckBlade = 29,  // attacker -> host -> victim's owner, reliable: my blade stuck in / pulled out of a stand-in
     PropLease = 30,   // both ways, reliable: a lease request/release, or the host's grant (session/hsm_lease.h)
     PaintFx = 31,     // owner -> host -> others, reliable: blood or a wound painted on an owned fighter (combat/hsm_fx.h)
@@ -69,6 +69,9 @@ enum class MsgType : uint8_t {
     RouteTable = 42,  // host -> client, reliable: this client's detour routes and pair keys, and the pairs it relays
     Forward = 43,     // client -> client, unreliable: another client's Pose or Vitals, passed on by a relay (detour)
     VoteState = 44,   // host -> client, reliable: the votekick running now (or none), and this client's own vote
+    ObjectAnnounce = 45, // spawner -> host -> all, reliable: an object appeared (a client's is a proposal; only the host's relay is canonical; session/hsm_object.h)
+    BodyState = 46,   // streamer -> host -> others, unreliable: one body of an object (replaces PropState; session/hsm_lease.h)
+    ObjectEvent = 47, // owner -> host -> all, reliable: a joint broke, a body detached/attached, an object destroyed, a mod event (session/hsm_object_event.h)
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.

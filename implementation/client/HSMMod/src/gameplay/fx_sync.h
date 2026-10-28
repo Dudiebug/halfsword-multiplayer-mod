@@ -37,6 +37,7 @@ public:
         std::function<uint8_t(const ue::UObject*)> ownedEntity;     // the entity of a fighter simulated here, 0 if none
         std::function<void(const combat::PaintFxMsg&)> send;        // a report made here (the session routes it)
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
+        std::function<void()> noteSpawn;                            // armour came off a fighter: a new loose object (ObjectSync::NoteSpawn). Optional.
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
     bool Start(Adapter& adapter, StandIns& standIns, Env env);

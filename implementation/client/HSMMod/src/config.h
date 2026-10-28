@@ -18,9 +18,6 @@ struct Config {
     std::string playerName = "Player";
     int snapshotHz = 30;
     int inputHz = 60;
-    // Host only (clients take the host's choice from Welcome). true: every machine simulates its own fighter and the
-    // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
-    bool ownerSync = true;
     // true: clients also send Pose and Vitals straight to each other (Steam lobbies only; session/hsm_mesh.h), and the host
     // stops relaying what a client already hears directly (default from 0.7.0-pre6). false (mesh=0): every stream goes
     // through the host, as in 0.6.5. Used where the host and the client both have it on; ENet (direct IP) stays a star.

@@ -3,8 +3,9 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: release.** The current build is v0.7.2. Expect rough edges, and please report what you find
+> **Status: release.** The current release is v0.7.2. Expect rough edges, and please report what you find
 > with `/bug` in the game. Everyone in a session needs the same version (0.7.2 connects only to 0.7.2).
+> **Prerelease:** v0.8.0-pre1 tries out the new object sync (below); it connects only to 0.8.0-pre1.
 
 ## What it does
 
@@ -27,9 +28,11 @@ No game files are changed; delete the DLL to go back to vanilla.
   are physics stand-ins driven by a 60 Hz pose stream.
 - **Hits through the game's own damage code:** the attacker claims a hit; the victim's machine replays it on its own
   fighter, so armour, wounds, bleeding, knockouts and deaths work as in solo.
-- **Gore, grabs, dropped weapons and level props** are synced: severed limbs, stuck blades, dislocations, grabbing
+- **Gore, grabs, dropped weapons and loose objects** are synced: severed limbs, stuck blades, dislocations, grabbing
   and carrying another player (alive or down), loose weapons everyone sees in the same place, and the level's barrels, stools and other loose
-  props, which the host names for everyone.
+  props, which the host names for everyone. From 0.8.0-pre1 anything that starts moving mid-match (a thrown helmet,
+  armour knocked off, a bridge pulled down, a snapped plank) gets the same name on every machine, each of its parts
+  moves the same everywhere, and a joint that breaks on one screen breaks on all of them.
 - Match modes, scores, chat and spectating with a follow camera behind the fighter you watch. **Brawl** is free-for-all with bare fists: everyone spawns naked with no
   weapons, and your own gear is untouched afterwards.
 - **Name tags** over other fighters, hidden behind walls (team colours in team modes; `name_tags=0` turns them off), and **hold G to give
@@ -98,8 +101,6 @@ about full releases. Set `update_check=0` under `[net]` in `HSMMod.ini` to turn 
 
 Every player needs the same mod version and the same game build (Steam build 24185754). On any other game build the
 mod logs "unsupported build" and does nothing.
-
-To use the older host-simulates-everyone sync, the **host** sets `sync_mode=host` under `[net]` in `HSMMod.ini`.
 
 ## Build from source (Linux, no MSVC)
 

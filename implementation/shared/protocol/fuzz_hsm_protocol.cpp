@@ -8,6 +8,7 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_object_event.h"
 #include "session/hsm_prop_census.h"
 #include "session/hsm_report.h"
 #include "sync/hsm_grab.h"
@@ -41,8 +42,9 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<MatchInfo>(d, n); Try<Kill>(d, n);
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
-    Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
+    Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
+    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -108,12 +110,22 @@ std::vector<std::vector<uint8_t>> Seeds() {
     sb.stuck = false; sb.bone = ""; s.push_back(Encode(sb));
     GrabStateMsg gm; gm.grabber = 1; gm.seq = 4; gm.hands[0].held = true; gm.hands[0].target = 2; gm.hands[0].grabId = 9;
     gm.hands[0].bone = "lowerarm_l"; gm.hands[0].grip = sync::V3{ 1.5, -2.25, 10 }; s.push_back(Encode(gm));
-    PropStateMsg ps; ps.propId = MakeDropPropId(3, 1, 5); ps.lessee = 2; ps.senderTimeMs = 77; ps.px = 120; ps.pz = 40;
+    BodyStateMsg ps; ps.objId = MakeDropPropId(3, 1, 5); ps.lessee = 2; ps.senderTimeMs = 77; ps.px = 120; ps.pz = 40;
     ps.rot = PackQuat(0, 0, 0.3f, 0.95f); ps.vx = 300; ps.wz = 720; s.push_back(Encode(ps));
-    PropLeaseMsg pl; pl.propId = ps.propId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
+    PropLeaseMsg pl; pl.propId = ps.objId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
     PropLeaseMsg lv; lv.propId = MakeLevelPropId(3); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
-    PropStateMsg pe = ps; pe.propId = MakeDropPropId(uint8_t(kMaxWillies), 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
-    PropLeaseMsg le = pl; le.propId = pe.propId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
+    BodyStateMsg pe = ps; pe.objId = MakeDropPropId(uint8_t(kMaxWillies), 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
+    PropLeaseMsg le = pl; le.propId = pe.objId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
+    ObjectAnnounceMsg oa; oa.objId = MakeSpawnedId(2, 1); oa.classHash = 0xDEADBEEFu; oa.px = 10; oa.py = -4; oa.pz = 55; oa.bodyCount = 3; oa.parentId = MakeLevelPropId(2);
+    s.push_back(Encode(oa));
+    oa.flags = kAnnounceCanonical; oa.objId = MakeSpawnedId(0, 9); oa.proposalId = MakeSpawnedId(2, 1); s.push_back(Encode(oa));
+    BodyStateMsg bs = pe; bs.objId = MakeSpawnedId(uint8_t(kMaxFighters - 1), 0xFFFFFFFFu); bs.body = kMaxObjectBodies - 1; s.push_back(Encode(bs));
+    ObjectEventMsg ev; ev.objId = MakeSpawnedId(2, 1); ev.body = 2; ev.kind = ObjectEventKind::JointBroke; ev.constraint = 5; s.push_back(Encode(ev));
+    ev.kind = ObjectEventKind::Detached; ev.otherId = MakeSpawnedId(2, 2); s.push_back(Encode(ev));
+    ev.kind = ObjectEventKind::Attached; ev.otherId = MakeLevelPropId(7); s.push_back(Encode(ev));
+    ev.kind = ObjectEventKind::Destroyed; s.push_back(Encode(ev));
+    ev.kind = ObjectEventKind::Custom; ev.modId = 77; ev.data = {1, 2, 3}; s.push_back(Encode(ev));
+    ev.data.assign(kMaxCustomEventBytes, 0x5A); s.push_back(Encode(ev));   // the longest custom payload
     combat::PaintFxMsg bl; bl.entity = 3; bl.kind = combat::FxKind::Blood; bl.seq = 7; bl.bone = "lowerarm_r"; bl.bodyPart = 2;
     bl.local.pos = sync::V3{ 4, -2, 7.5 }; bl.local.rot = sync::Q4{ 0, 0, std::sin(0.3), std::cos(0.3) }; bl.rate = 12.5; bl.damageRate = 1;
     bl.loopCount = 4; bl.extraVelocity = true; bl.velocity = sync::V3{ -30, 12, 400 }; bl.bleeding = 37; s.push_back(Encode(bl));
@@ -136,7 +148,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::VoteState))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::ObjectEvent))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

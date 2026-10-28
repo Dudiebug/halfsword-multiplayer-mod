@@ -23,9 +23,6 @@ constexpr char kDefaultIni[] =
     "name=Player\n"
     "snapshot_hz=30\n"
     "input_hz=60\n"
-    "; owner: each player's own machine simulates their fighter (no added latency on your own body);\n"
-    "; host: the host simulates every fighter (the v0.3 behaviour). Only the host's setting matters.\n"
-    "sync_mode=owner\n"
     "; the key that opens the chat: enter, t, y or u (Enter sends, Esc cancels)\n"
     "chat_key=enter\n"
     "; lock: the other players' hands hold their weapons firmly (default); free: each weapon is steered on its own\n"
@@ -136,7 +133,7 @@ Config LoadConfig() {
     c.playerName = ReadString(ini, L"name", "Player").substr(0, 32);
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
-    c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
+    if (!ReadString(ini, L"sync_mode", "").empty()) HSM_LOG("config: sync_mode is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
     c.mesh = ReadString(ini, L"mesh", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
@@ -194,12 +191,12 @@ Config LoadConfig() {
         if (auto h = CmdArg(cl, "hsmhost"); h && !h->empty()) c.hostAddress = *h;
         c.port = uint16_t(CmdArgInt(cl, "hsmport", c.port, 1024, 65535));
         if (auto n = CmdArg(cl, "hsmname"); n && !n->empty()) c.playerName = n->substr(0, 32);
-        if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) c.ownerSync = *m != "host";
+        if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) HSM_LOG("config: -hsmsync is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
         if (auto k = CmdArg(cl, "hsmchatkey"); k && !ParseChatKey(*k, c.chatKey))
             HSM_LOG("config: -hsmchatkey=%s is not enter, t, y or u; ignored", k->c_str());
     }
-    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
-            c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
+    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
+            c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
     HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
             c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);

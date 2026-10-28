@@ -347,11 +347,11 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
 
 ## Known gaps (next milestones)
 
-- The sections above describe the original host-simulates-everyone sync (`sync_mode=host`). In owner sync (the
-  default) each machine simulates its own fighter, the others are stand-ins driven by a 60 Hz pose stream, hits are
-  claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore, grabs,
-  dropped weapons and level props are synced; the client-side delay and the unsynced gore listed below apply to
-  `sync_mode=host` only.
+- The sections above describe the original host-simulates-everyone sync, which was removed in 0.8.0. Owner sync is
+  the only mode: each machine simulates its own fighter, the others are stand-ins driven by a 60 Hz pose stream, hits
+  are claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore,
+  grabs, dropped weapons and level props are synced. `sync_mode` in `HSMMod.ini` and `-hsmsync` are ignored (the log
+  says so once). It needs the script VM hook: without it multiplayer refuses to start a session.
 - Time of day follows the map; there is no way to change it yet (public issue #2). A lobby setting is planned. It is
   not done because the part that needs the game's own data is unknown here: which game object decides a fight level's
   lighting (the save and the game instance carry a `Day Time` / `Current Day Time` byte of `Enum_DayTime`, but the
@@ -364,6 +364,3 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   outside Free Mode).
 - Next: a spectator host (`role=server`): the retail game plus this mod hosting with no fighter of its own and
   automatic match start/rotation. It is a hosted retail instance, not a dedicated server build.
-- `sync_mode=host`: no client prediction (the client's own Willie responds with one round trip of delay); weapon
-  transforms, grab constraints, dismemberment, gore and level props are not synced, and blocking hit delegates mutes
-  client-side hit sounds and blood.
