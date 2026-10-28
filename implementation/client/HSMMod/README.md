@@ -28,7 +28,8 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   where the host and the client both have it on. The host stops relaying movement a client already receives directly and relays it again within a few
   seconds if the direct path breaks. From 0.7.0-pre5 hits, cuts, stuck blades, blood and wounds, drawn weapons, grabs
   and prop movement also go straight to the players they concern, with a copy to the host, which still checks, scores
-  and relays everything; whichever copy arrives first is used and the second is dropped. `mesh=0` is exactly the old behaviour. With the mesh on, detours (`detour=0` turns them off) let the
+  and relays everything; whichever copy arrives first is used and the second is dropped. Direct-IP (ENet) sessions
+  stay a star, and `mesh=0` is exactly the old behaviour. With the mesh on, detours (`detour=0` turns them off) let the
   host route a pair of players through a third when that is faster, from their measured pings.
 - **Hold G to give up** in FFA, team matches and Duel, downed or not: your fighter dies, and the last player who hit
   you within 60 s gets the kill (in a Duel, the round too); with none, nobody scores. The hold shows as a bar in the
@@ -73,9 +74,10 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **`role=server` (experimental):** the host runs matches without a fighter of its own and cycles maps by itself.
   Keys under `[net]`: `server_format` (ffa, teams, survival, zombies, duel), `server_maps` (comma list or `all`),
   `server_score_limit`, `server_time_limit_s`, `server_countdown_s` (30), `server_min_players` (2).
-  The server opens a public Steam lobby by itself (named after `name=`) and keeps it open;
+  `server_transport=steam` (default) opens a public Steam lobby by itself (named after `name=`) and keeps it open;
   players find it in the game's lobby browser and Steam relays the traffic. It needs Steam running and signed in on
-  that machine, with an account that owns the game.
+  that machine, with an account that owns the game. `server_transport=direct` listens on `port` for direct-IP clients;
+  it is deprecated and removed in 0.8.0.
   This is a hosted copy of the retail game, not a dedicated server. With no host fighter to spawn around, players
   spawn at the map's PlayerStart, else a navmesh point, else the floor found by a trace, and the map origin only as
   the last resort.
@@ -96,7 +98,8 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   The figure is the median of the last 8 pings; `steam` is Steam's own estimate for the same link.
 - **Mesh v2** (with `mesh=1`): see the mesh entry above.
 - **Proximity voice chat**, off by default: `voice=1` under `[net]` turns it on. It needs it on the host and on every
-  player who wants to talk or listen. It uses Steam voice (your default microphone; Steam must be running) and sends while you speak above a level: no key to hold. You hear other players at full volume
+  player who wants to talk or listen. It uses Steam voice (your default microphone; Steam must be running, also for
+  direct-IP games) and sends while you speak above a level: no key to hold. You hear other players at full volume
   within 5 m, fading out by 30 m, from the side they stand on. A fighter whose consciousness drops below 30% of full,
   or who is knocked out or dead, is cut off. The dead and waiting players hear the living from their camera, and talk
   only to each other, at full volume. A `> ` before a name tag shows who is talking. Keys under `[net]`:
@@ -153,7 +156,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 |---|---|
 | Load / vanilla safety | XInput proxy; `role=off` or an unknown build = pure passthrough |
 | Engine access | Runtime reflection by name; startup self-test (`Add_IntInt` layout, object index round trip, a ProcessEvent call) or it disables itself |
-| Transport | Steam relay (ISteamNetworkingMessages): reliable channel (hello/welcome/travel/spawn/blobs/events), unreliable channel (input 60 Hz, snapshots 30 Hz); every packet decoded and validated before the game thread sees it |
+| Transport | Steam relay (default) or ENet UDP: reliable channel (hello/welcome/travel/spawn/blobs/events), unreliable channel (input 60 Hz, snapshots 30 Hz); every packet decoded and validated before the game thread sees it |
 | Host | Up to 8 fighters; snapshots 23 body bones + vitals per fighter to every client; announces spawns, despawns and deaths |
 | Client | Captures its input and blocks it locally (camera look/turn still local); velocity-tracks its fighter and puppets to host poses; copies vitals; plays deaths on host events |
 | Damage authority | Clients block all `...ComponentHitSignature` delegates while joined, so Chaos contacts never run damage locally |
@@ -163,19 +166,10 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 1. Copy `build/dwmapi.dll` to `Half Sword/HalfswordUE5/Binaries/Win64/`.
 2. Proton/Linux only: set Steam launch options to `WINEDLLOVERRIDES="dwmapi=n,b" %command%`. Launch through Steam:
    starting Proton by hand outside Steam's runtime falls back to software rendering or crashes the D3D12 renderer.
-3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). Direct IP (`role=host`, `role=client`, `host=`, `port=`) was removed in 0.8.0: an old
-   value is logged once as ignored and Steam is used. Players join through Steam lobbies.
+3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). Direct IP is deprecated (testing only, removed in 0.8.0; use Steam lobbies), but still works if you edit it:
+   - Host: `role=host`, and forward UDP `27777` (or your `port`) to the host machine.
+   - Client: `role=client`, `host=<host IP>`.
 4. Logs go to `HSMMod.log` in the same folder.
-   **UE4SS (optional):** install UE4SS as usual, then copy HSMMod's `dwmapi.dll` over UE4SS's `dwmapi.dll`. HSMMod
-   chain-loads UE4SS from its worker thread (`ue4ss_load.cpp`, never DllMain): `ue4ss/UE4SS.dll` (UE4SS 3.x layout),
-   else `UE4SS.dll` next to the exe. Updating UE4SS later overwrites HSMMod's proxy, so copy ours back (the
-   multiplayer page warns when the `dwmapi.dll` next to the exe is not ours). `[mod]` in `HSMMod.ini`: `ue4ss=1`
-   (default; 0 skips it) and `ue4ss_order=after` (default: after HSMMod's ProcessEvent hook is installed; `before`
-   loads UE4SS first). The log says `ue4ss: loaded <path> (<version>)`, `ue4ss: none`, `ue4ss: off (ue4ss=0)` or the
-   failure with its Windows error. A UE4SS 2.x install (proxy `xinput1_3.dll`) loads itself and is only noted in the
-   log. UE4SS mods are never synced; every player installs their own. Bug reports and crash reports carry the UE4SS
-   version and the names (only) of the enabled UE4SS mods (`Mods/mods.txt`, folders with `enabled.txt`). The load
-   order is unproven until the in-game spike.
 5. Every player needs the same HSMMod build. The lobby names anyone on another build ("Bob on 0.6.5 - update") and the
    host cannot start a match until it matches; `allow_build_mismatch=1` in `HSMMod.ini` overrides this for testing.
 
@@ -242,7 +236,7 @@ A kicked or banned player goes back to the main menu, and the multiplayer page o
 
 Type `/bug <what went wrong>` (or `/report ...`) in the chat, or use REPORT A BUG on the multiplayer page. The first
 session fight of each game run shows this hint in the chat. The mod sends the text, a few facts (mod and game
-build, protocol, host/client, sync mode, level, match mode and phase, player count, Windows or
+build, protocol, host/client, Steam or direct IP, sync mode, level, match mode and phase, player count, Windows or
 Wine version) and the end of `HSMMod.log` and `HSMMod.prev.log` (at most 3 MB each) over HTTPS to the report relay
 (`report_url` in `HSMMod.ini`, default `https://reports.dudiebug.net`).
 The relay opens a public GitHub issue with the text and the facts only (label `in-game-report`) and keeps the logs
@@ -284,7 +278,7 @@ All optional; several instances can share one install.
 
 | Flag | Effect |
 |---|---|
-| `-hsmrole=steam\|server\|off`, `-hsmname=NAME` | override `HSMMod.ini` |
+| `-hsmrole=host\|client\|steam\|off`, `-hsmhost=IP`, `-hsmport=N`, `-hsmname=NAME` | override `HSMMod.ini` |
 | `-hsmtag=NAME` | per-instance files: `HSMMod-NAME.log`, `HSMTest-NAME.json` |
 | `-hsmauto=/Game/Maps/...` | a host/solo instance opens that Free Mode level by itself |
 | `-hsmquit=SECONDS` | quit cleanly after that long |
@@ -353,11 +347,11 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
 
 ## Known gaps (next milestones)
 
-- The sections above describe the original host-simulates-everyone sync, which was removed in 0.8.0. Owner sync is
-  the only mode: each machine simulates its own fighter, the others are stand-ins driven by a 60 Hz pose stream, hits
-  are claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore,
-  grabs, dropped weapons and level props are synced. `sync_mode` in `HSMMod.ini` and `-hsmsync` are ignored (the log
-  says so once). It needs the script VM hook: without it multiplayer refuses to start a session.
+- The sections above describe the original host-simulates-everyone sync (`sync_mode=host`). In owner sync (the
+  default) each machine simulates its own fighter, the others are stand-ins driven by a 60 Hz pose stream, hits are
+  claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore, grabs,
+  dropped weapons and level props are synced; the client-side delay and the unsynced gore listed below apply to
+  `sync_mode=host` only.
 - Time of day follows the map; there is no way to change it yet (public issue #2). A lobby setting is planned. It is
   not done because the part that needs the game's own data is unknown here: which game object decides a fight level's
   lighting (the save and the game instance carry a `Day Time` / `Current Day Time` byte of `Enum_DayTime`, but the
@@ -366,6 +360,10 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   Blueprints before any code is written.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
-- Direct IP (ENet) was removed in 0.8.0; servers and players use Steam lobbies.
+- Direct-IP (ENet) is deprecated and removed in 0.8.0; servers and players use Steam lobbies. Direct-IP sessions have no lobby, so they play Free-for-all with default settings (Progression co-op
+  outside Free Mode).
 - Next: a spectator host (`role=server`): the retail game plus this mod hosting with no fighter of its own and
   automatic match start/rotation. It is a hosted retail instance, not a dedicated server build.
+- `sync_mode=host`: no client prediction (the client's own Willie responds with one round trip of delay); weapon
+  transforms, grab constraints, dismemberment, gore and level props are not synced, and blocking hit delegates mutes
+  client-side hit sounds and blood.

@@ -289,17 +289,18 @@ static void TestBreakFree() {
     CHECK(ps.size() == 1);
     if (ps.size() != 1) return;
     const GrabPull p = ps[0];
-    // Over 130 uu, then back under: the timer starts over.
-    CHECK(!in.NoteDistance(p, 131, 0));
-    CHECK(!in.NoteDistance(p, 131, 300));
-    CHECK(!in.NoteDistance(p, 129, 350));
-    CHECK(!in.NoteDistance(p, 131, 400));
-    CHECK(!in.NoteDistance(p, 131, 799));
-    CHECK(in.Pulls(799, mine, alive).size() == 1);
-    CHECK(!in.NoteDistance(p, sync::kGrabBreakUu, 1000));        // exactly 130 is not past it
-    CHECK(!in.NoteDistance(p, 131, 1001));
-    CHECK(!in.NoteDistance(p, 131, 1400));
-    CHECK(in.NoteDistance(p, 131, 1401));                         // 400 ms past 130 uu: broke free
+    // Over 80 uu, then back under: the timer starts over.
+    CHECK(sync::kGrabBreakUu == 80 && sync::kGrabBreakMs == 300);
+    CHECK(!in.NoteDistance(p, 81, 0));
+    CHECK(!in.NoteDistance(p, 81, 200));
+    CHECK(!in.NoteDistance(p, 79, 250));
+    CHECK(!in.NoteDistance(p, 81, 400));
+    CHECK(!in.NoteDistance(p, 81, 699));
+    CHECK(in.Pulls(699, mine, alive).size() == 1);
+    CHECK(!in.NoteDistance(p, sync::kGrabBreakUu, 1101));        // exactly 80 is not past it
+    CHECK(!in.NoteDistance(p, 81, 1101));
+    CHECK(!in.NoteDistance(p, 81, 1400));
+    CHECK(in.NoteDistance(p, 81, 1401));                          // 300 ms past 80 uu: broke free
     CHECK(in.Pulls(1401, mine, alive).empty());
     CHECK(in.NoteDistance(p, 0, 1402));                           // and stays broken, however close
     m.seq = 78; CHECK(in.Accept(m, 1410));                         // the grabber's refreshes of that grab
@@ -478,13 +479,13 @@ static void TestDropTarget() {
     const std::vector<GrabPull> ps = brk.Pulls(0, mine, alive);
     CHECK(ps.size() == 1);
     if (ps.size() != 1) return;
-    CHECK(!brk.NoteDistance(ps[0], 131, 0));
+    CHECK(!brk.NoteDistance(ps[0], 81, 0));
     brk.DropTarget(5);
     CHECK(brk.NoteDistance(ps[0], 0, 10));                       // still broken for that grab (NoteDistance keeps it so)
     g.seq = 78; g.hands[0].grabId = 12; CHECK(brk.Accept(g, 20));
     const std::vector<GrabPull> again = brk.Pulls(20, mine, alive);
     CHECK(again.size() == 1);
-    if (again.size() == 1) CHECK(!brk.NoteDistance(again[0], 131, 20) && !brk.NoteDistance(again[0], 131, 419));   // a fresh timer
+    if (again.size() == 1) CHECK(!brk.NoteDistance(again[0], 81, 20) && !brk.NoteDistance(again[0], 81, 319));   // a fresh timer
 }
 
 // ---------------------------------------------------------------- the pull law
@@ -493,7 +494,8 @@ static V3 Dv(V3 grip, V3 vel, V3 anchor, V3 anchorVel, double dt) { return GrabP
 
 static void TestPullLaw() {
     const GrabPullParams d;
-    CHECK(d.stiffness == 1500 && d.damping == 150 && d.leadUu == 40 && d.maxDvUu == 800);   // HSMPInteract's handle
+    CHECK(d.stiffness == 600 && d.damping == 75 && d.leadUu == 30 && d.maxDvUu == 300);       // 0.7.3: about 18 g at most
+    CHECK(d.damping > 2 * std::sqrt(d.stiffness));                                             // overdamped
     const double dt = 1.0 / 60;
 
     // At rest on the hand, and moving with it: nothing to do.
@@ -501,16 +503,16 @@ static void TestPullLaw() {
     CHECK(Len(Dv(V3{ 10, 20, 30 }, V3{ 150, -40, 9 }, V3{ 10, 20, 30 }, V3{ 150, -40, 9 }, dt)) < 1e-9);
 
     // Toward the hand, along the line only; the pinned value is the implicit spring-damper step from rest.
-    const V3 toward = Dv(V3{}, V3{}, V3{ 20, 0, 0 }, V3{}, dt);
+    const V3 toward = Dv(V3{}, V3{}, V3{ 15, 0, 0 }, V3{}, dt);
     CHECK(toward.x > 0 && toward.y == 0 && toward.z == 0);
-    const double atLead = dt * 1500 * 40 / (1 + dt * 150 + dt * dt * 1500);
-    CHECK(Near(Dv(V3{}, V3{}, V3{ 40, 0, 0 }, V3{}, dt).x, atLead, 1e-9));
+    const double atLead = dt * 600 * 30 / (1 + dt * 75 + dt * dt * 600);
+    CHECK(Near(Dv(V3{}, V3{}, V3{ 30, 0, 0 }, V3{}, dt).x, atLead, 1e-9));
     CHECK(Near(toward.x, atLead / 2, 1e-9));
     // Farther than the lead pulls no harder: the pull never exceeds stiffness x lead (the victim can struggle).
     CHECK(Near(Dv(V3{}, V3{}, V3{ 0, -300, 0 }, V3{}, dt).y, -atLead, 1e-9));
     CHECK(Near(Len(Dv(V3{}, V3{}, V3{ 3000, 4000, 0 }, V3{}, dt)), atLead, 1e-9));
 
-    // Converges from inside the lead, never past the hand (overdamped: zeta = 150 / (2 sqrt 1500) ~ 1.9).
+    // Converges from inside the lead, never past the hand (overdamped: zeta = 75 / (2 sqrt 600) ~ 1.5).
     V3 x{}, v{};
     const V3 hand{ 30, -10, 5 };
     bool overshot = false;
@@ -585,7 +587,8 @@ static void TestPullLaw() {
 static void TestDownCarry() {
     using hsm::sync::DownPullParams;
     const GrabPullParams soft, down = DownPullParams();
-    CHECK(down.stiffness == 3 * soft.stiffness && down.leadUu == 2 * soft.leadUu && down.maxDvUu > soft.maxDvUu);
+    CHECK(down.stiffness == 4500 && down.damping == 200 && down.leadUu == 80 && down.maxDvUu == 1500);   // carrying: unchanged
+    CHECK(down.stiffness > soft.stiffness && down.leadUu > soft.leadUu && down.maxDvUu > soft.maxDvUu);
     CHECK(down.damping > 2 * std::sqrt(down.stiffness));                             // overdamped
     const double dt = 1.0 / 60;
     const V3 far{ 60, 0, 0 };
@@ -601,7 +604,7 @@ static void TestDownCarry() {
     }
     CHECK(!overshot && Len(x) < 0.5);
 
-    // Break-free: the soft hold breaks past 130 uu for 400 ms; a down body's only past 250 uu for 1 s.
+    // Break-free: the soft hold breaks past 80 uu for 300 ms; a down body's only past 250 uu for 1 s.
     const auto mine = [](uint8_t e) { return e == 5; };
     const auto alive = [](uint8_t) { return false; };
     GrabInbox in;

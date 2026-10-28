@@ -1,7 +1,6 @@
 #include "config.h"
 #include "session/hsm_cmdline.h"
 #include "session/hsm_roster.h"
-#include "session/hsm_ue4ss.h"
 #include "util/hsm_ini.h"
 #include "log.h"
 #include "paths.h"
@@ -14,13 +13,19 @@
 namespace hsm {
 namespace {
 constexpr char kDefaultIni[] =
-    "; HalfSwordMP configuration. role = steam | server | off\n"
-    "; steam: use the Multiplayer button on the main menu (Steam lobbies, invites, no port forwarding). off: completely vanilla.\n"
+    "; HalfSwordMP configuration. role = steam | host | client | off\n"
+    "; steam: use the Multiplayer button on the main menu (Steam lobbies, invites, no port forwarding).\n"
+    "; host/client: DEPRECATED direct IP over UDP (testing only; removed in 0.8.0, use role=steam). off: completely vanilla.\n"
     "[net]\n"
     "role=steam\n"
+    "host=127.0.0.1\n"
+    "port=27777\n"
     "name=Player\n"
     "snapshot_hz=30\n"
     "input_hz=60\n"
+    "; owner: each player's own machine simulates their fighter (no added latency on your own body);\n"
+    "; host: the host simulates every fighter (the v0.3 behaviour). Only the host's setting matters.\n"
+    "sync_mode=owner\n"
     "; the key that opens the chat: enter, t, y or u (Enter sends, Esc cancels)\n"
     "chat_key=enter\n"
     "; lock: the other players' hands hold their weapons firmly (default); free: each weapon is steered on its own\n"
@@ -29,8 +34,6 @@ constexpr char kDefaultIni[] =
     "allow_build_mismatch=0\n"
     "; 1: show the other fighters' names over their heads in a match; 0: off\n"
     "name_tags=1\n"
-    "; 0 turns off the armour paint crash guard (armour is destroyed at once, as in the stock game)\n"
-    "paint_defer=1\n"
     "; in-game bug reports: type /bug <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
     "; (Steam IDs, IP addresses and your Windows user name are removed first). Nothing is sent unless you type it.\n"
     "reports=on\n"
@@ -58,13 +61,15 @@ constexpr char kDefaultIni[] =
     "voice_cutoff=30\n"
     "voice_volume=100\n"
     "; role=server (a hosted retail instance with no fighter of its own that starts matches by itself):\n"
-    "; the server opens a public Steam lobby that shows in the game's lobby browser. server_format=ffa|duel|teams|survival|zombies,\n"
+    "; server_transport=steam|direct (steam: a public Steam lobby in the game's lobby browser, the way servers run; direct is\n"
+    "; DEPRECATED and removed in 0.8.0), server_format=ffa|duel|teams|survival|zombies,\n"
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
     "; server_countdown_s=30, server_min_players=2 (1..8), server_damage=stock or a percent (player damage for everyone,\n"
     "; 100 = the game's rate 1.0, inside the game's own damage slider)\n"
     "; server_admins=Steam IDs (comma list) allowed to /kick, /ban and /unban from the chat; server_votekick=1 lets players\n"
     "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players\n"
     "; and say (HSMMod.cmd)\n"
+    "server_transport=direct\n"
     "server_format=ffa\n"
     "server_maps=all\n"
     "server_score_limit=0\n"
@@ -74,13 +79,7 @@ constexpr char kDefaultIni[] =
     "server_damage=stock\n"
     "server_admins=\n"
     "server_votekick=1\n"
-    "votekick=1\n"
-    "\n"
-    "[mod]\n"
-    "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it); 0: do not.\n"
-    "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
-    "ue4ss=1\n"
-    "ue4ss_order=after\n";
+    "votekick=1\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -91,24 +90,14 @@ std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* 
     if (!WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, sizeof out, nullptr, nullptr)) return def;
     return out;
 }
-std::string ReadModString(const std::wstring& ini, const wchar_t* key, const char* def) {
-    wchar_t buf[64], wdef[64];
-    MultiByteToWideChar(CP_UTF8, 0, def, -1, wdef, 64);
-    GetPrivateProfileStringW(L"mod", key, wdef, buf, 64, ini.c_str());
-    char out[3 * 64 + 1];
-    if (!WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, sizeof out, nullptr, nullptr)) return def;
-    return out;
-}
 int Clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 }  // namespace
 
 const char* RoleName(Role r) {
-    return r == Role::Steam ? "steam" : r == Role::Server ? "server" : "off";
+    return r == Role::Steam ? "steam" : r == Role::Host ? "host" : r == Role::Client ? "client" : r == Role::Server ? "server" : "off";
 }
-// Direct IP (role=host|client, -hsmrole=host|client) was removed in 0.8.0: logged once, then Steam is used.
-static Role ParseRole(const std::string& r, const char* source) {
-    if (r == "host" || r == "client") HSM_LOG("config: %s=%s is ignored: direct IP was removed in 0.8.0; using role=steam", source, r.c_str());
-    return r == "off" ? Role::Off : r == "server" ? Role::Server : Role::Steam;
+static Role ParseRole(const std::string& r) {
+    return r == "host" ? Role::Host : r == "client" ? Role::Client : r == "off" ? Role::Off : r == "server" ? Role::Server : Role::Steam;
 }
 
 // Reads the whole ini, sets the key in the text, writes a sibling file and moves it over the ini (a crash in between
@@ -141,12 +130,13 @@ Config LoadConfig() {
     }
     Config c;
     std::string role = ReadString(ini, L"role", "steam");
-    c.role = ParseRole(role, "role");
-    if (!ReadString(ini, L"server_transport", "").empty()) HSM_LOG("config: server_transport is ignored: direct IP was removed in 0.8.0, servers use a public Steam lobby");
+    c.role = ParseRole(role);
+    c.hostAddress = ReadString(ini, L"host", "127.0.0.1");
+    c.port = uint16_t(Clamp(std::atoi(ReadString(ini, L"port", "27777").c_str()), 1024, 65535));
     c.playerName = ReadString(ini, L"name", "Player").substr(0, 32);
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
-    if (!ReadString(ini, L"sync_mode", "").empty()) HSM_LOG("config: sync_mode is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
+    c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
     c.mesh = ReadString(ini, L"mesh", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
@@ -177,12 +167,12 @@ Config LoadConfig() {
     c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
     c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
     c.nameTags = ReadString(ini, L"name_tags", "1") != "0";
-    c.paintDefer = ReadString(ini, L"paint_defer", "1") != "0";
     c.reports = ReadString(ini, L"reports", "on") != "off";
     c.reportUrl = ReadString(ini, L"report_url", "https://reports.dudiebug.net");
     if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
     c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
     c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
+    c.serverTransport = ReadString(ini, L"server_transport", "steam") == "direct" ? "direct" : "steam";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
     c.serverMaps = ReadString(ini, L"server_maps", "all");
     c.serverScoreLimit = Clamp(std::atoi(ReadString(ini, L"server_score_limit", "0").c_str()), 0, 100);
@@ -195,29 +185,30 @@ Config LoadConfig() {
     }
     c.serverAdmins = ReadString(ini, L"server_admins", "");
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
-    c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
-    c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
-    // Command-line overrides (several instances may share one ini).
+    // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags
         HSM_LOG("config: +connect_lobby on the command line, -hsm* flags ignored");
     } else {
-        if (auto r = CmdArg(cl, "hsmrole")) c.role = ParseRole(*r, "-hsmrole");
-        if (CmdArg(cl, "hsmhost") || CmdArg(cl, "hsmport")) HSM_LOG("config: -hsmhost and -hsmport are ignored: direct IP was removed in 0.8.0");
+        if (auto r = CmdArg(cl, "hsmrole")) c.role = ParseRole(*r);
+        if (auto h = CmdArg(cl, "hsmhost"); h && !h->empty()) c.hostAddress = *h;
+        c.port = uint16_t(CmdArgInt(cl, "hsmport", c.port, 1024, 65535));
         if (auto n = CmdArg(cl, "hsmname"); n && !n->empty()) c.playerName = n->substr(0, 32);
-        if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) HSM_LOG("config: -hsmsync is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
+        if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) c.ownerSync = *m != "host";
         if (auto k = CmdArg(cl, "hsmchatkey"); k && !ParseChatKey(*k, c.chatKey))
             HSM_LOG("config: -hsmchatkey=%s is not enter, t, y or u; ignored", k->c_str());
     }
-    HSM_LOG("config: role=%s snapshot_hz=%d input_hz=%d chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
-            c.snapshotHz, c.inputHz, ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
+    HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
+            c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
     HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
             c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);
+    if (c.role == Role::Host || c.role == Role::Client || (c.role == Role::Server && c.serverTransport == "direct"))
+        HSM_LOG("config: direct IP (role=host/client or server_transport=direct) is deprecated and will be removed in 0.8.0; use Steam lobbies");
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)
-        HSM_LOG("config: server format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d",
+        HSM_LOG("config: server transport=%s format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d", c.serverTransport.c_str(),
                 c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
     if (c.role == Role::Server)
         HSM_LOG("config: server admins=%s", c.serverAdmins.empty() ? "none (console only)" : "set");

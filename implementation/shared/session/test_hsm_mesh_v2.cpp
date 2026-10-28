@@ -12,8 +12,7 @@ int main() {
     // ---- which types travel direct
     CHECK(MeshDirectType(MsgType::HitClaim) && MeshDirectType(MsgType::HitFx) && MeshDirectType(MsgType::SeverClaim));
     CHECK(MeshDirectType(MsgType::SeverNotice) && MeshDirectType(MsgType::StuckBlade) && MeshDirectType(MsgType::PaintFx));
-    CHECK(MeshDirectType(MsgType::Equip) && MeshDirectType(MsgType::GrabState) && MeshDirectType(MsgType::BodyState));
-    CHECK(MeshDirectType(MsgType::ObjectEvent) && !MeshDirectType(MsgType::ObjectAnnounce));   // announces go through the host (it reconciles)
+    CHECK(MeshDirectType(MsgType::Equip) && MeshDirectType(MsgType::GrabState) && MeshDirectType(MsgType::PropState));
     CHECK(!MeshDirectType(MsgType::Pose) && !MeshDirectType(MsgType::Vitals));   // rev 19's streams, checked on their own path
     CHECK(!MeshDirectType(MsgType::Chat) && !MeshDirectType(MsgType::DeathReport) && !MeshDirectType(MsgType::PropLease));
     CHECK(!MeshDirectType(MsgType::MatchInfo) && !MeshDirectType(MsgType::Kill) && !MeshDirectType(MsgType::PingTable));
@@ -31,8 +30,7 @@ int main() {
     CHECK(!MeshSenderOk(MsgType::PaintFx, 2, F(3, 0, true), me));
     CHECK(MeshSenderOk(MsgType::Equip, 2, F(3), me) && MeshSenderOk(MsgType::GrabState, 2, F(3), me));
     CHECK(MeshSenderOk(MsgType::SeverNotice, 2, F(3), me) && !MeshSenderOk(MsgType::SeverNotice, 2, F(5), me));
-    CHECK(MeshSenderOk(MsgType::BodyState, 2, F(3), me) && !MeshSenderOk(MsgType::BodyState, 2, F(0), me));
-    CHECK(MeshSenderOk(MsgType::ObjectEvent, 2, F(3), me) && !MeshSenderOk(MsgType::ObjectEvent, 2, F(4), me));
+    CHECK(MeshSenderOk(MsgType::PropState, 2, F(3), me) && !MeshSenderOk(MsgType::PropState, 2, F(0), me));
     // blows: the attacker is the sender's, the victim real and not the attacker
     CHECK(MeshSenderOk(MsgType::HitClaim, 2, F(3, me), me));
     CHECK(!MeshSenderOk(MsgType::HitClaim, 2, F(3, 7), me));               // replayed by its owner only: not for us

@@ -163,8 +163,7 @@ private:
 inline bool MeshDirectType(MsgType t) {
     switch (t) {
         case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim: case MsgType::SeverNotice:
-        case MsgType::StuckBlade: case MsgType::PaintFx: case MsgType::Equip: case MsgType::GrabState: case MsgType::BodyState:
-        case MsgType::ObjectEvent:
+        case MsgType::StuckBlade: case MsgType::PaintFx: case MsgType::Equip: case MsgType::GrabState: case MsgType::PropState:
             return true;
         default: return false;
     }
@@ -173,7 +172,7 @@ inline bool MeshDirectType(MsgType t) {
 // What a direct message claims to speak for, as the receiver decoded it.
 struct MeshMsgFacts {
     uint8_t actor = 0;          // the entity it speaks for: the attacker of a blow, sever or stuck blade; the painted,
-                                // equipped, grabbing or notified fighter; for a BodyState, the lessee's fighter entity; for an ObjectEvent, the sender's own
+                                // equipped, grabbing or notified fighter; for a PropState, the lessee's fighter entity
     uint8_t victim = 0;         // HitClaim, HitFx, SeverClaim, StuckBlade: the fighter struck; else 0
     bool stripRequest = false;  // a PaintFx strip request (for another machine's fighter): those go through the host
 };

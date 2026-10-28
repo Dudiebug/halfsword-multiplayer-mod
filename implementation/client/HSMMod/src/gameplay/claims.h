@@ -22,7 +22,7 @@
 #include "combat/hsm_claim.h"
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
-#include "gameplay/object_sync.h"
+#include "gameplay/prop_sync.h"
 #include "session/hsm_authority.h"
 #include "ue/engine.h"
 #include <array>
@@ -42,10 +42,10 @@ public:
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
         std::function<void(const combat::HitClaim&)> send;          // a claim made here (the session routes it)
         std::function<bool(uint8_t attacker, uint8_t victim)> allowed;   // the friendly-fire rule
-        // Props: what a prop actor is here (ObjectSync::PropOf), a prop's actor here (ObjectSync::ActorOf), and this machine's
+        // Props: what a prop actor is here (PropSync::PropOf), a prop's actor here (PropSync::ActorOf), and this machine's
         // player entity (a prop claim's attacker when no fighter simulated here touched the prop). Without the first two
         // a prop's contact with a stand-in is blocked and one with my fighter runs natively, as before rev 13.
-        std::function<bool(ue::UObject* actor, ObjectSync::Touch& out)> prop;
+        std::function<bool(ue::UObject* actor, PropSync::Touch& out)> prop;
         std::function<ue::UObject*(uint64_t propId)> propActor;
         std::function<uint8_t()> myEntity;
     };
@@ -86,7 +86,7 @@ private:
     void AfterDealComplexDamage(ue::ScriptCall& c);
     void SendPending(ue::ScriptCall& c);                             // the claim made before the body ran, coalesced by its damage
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
-                   const ObjectSync::Touch* prop);
+                   const PropSync::Touch* prop);
     void ReplayNow(const combat::HitClaim& c, double nowMs);         // a queued claim, through my fighter's own DCD
     void ReplayStuck(const combat::HitClaim& c, double nowMs);       // a lodged blade's damage, through my fighter's own Get Damage
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;

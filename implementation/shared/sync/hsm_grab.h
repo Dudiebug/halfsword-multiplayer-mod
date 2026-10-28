@@ -106,8 +106,10 @@ namespace hsm::sync {
 constexpr double kGrabRefreshMs = 100.0;   // a hold is resent this often: the lease refresh (HSMP grab_update_ms)
 constexpr double kGrabLeaseMs = 1500.0;    // nothing newer heard for this long: released (grab_lease_ms)
 constexpr double kGripMaxUu = 55.0;        // the sender clamps the grip to this, inside kMaxGripUu (grip_max)
-constexpr double kGrabBreakUu = 130.0;     // the grip farther than this from the hand ... (grab_break)
-constexpr double kGrabBreakMs = 400.0;     // ... for this long: broke free until a new grab (grab_break_ms)
+// 0.7.3: 80 uu for 300 ms (was HSMP's 130 / 400): a fighter on its feet that pulls away gets free, as from a stock grab
+// whose hand cannot hold the weight (Willie_BP.cpp:16797, Grab R Release Rate).
+constexpr double kGrabBreakUu = 80.0;      // the grip farther than this from the hand ... (grab_break)
+constexpr double kGrabBreakMs = 300.0;     // ... for this long: broke free until a new grab (grab_break_ms)
 // A body that cannot struggle (dead, fallen, knocked out) breaks free only on a glitch: farther and longer than that.
 constexpr double kGrabDownBreakUu = 250.0, kGrabDownBreakMs = 1000.0;
 // The grabber's stand-in shows its hand a playout delay late; the pull aims this far ahead along the hand's velocity.
@@ -257,18 +259,21 @@ private:
     std::array<Slot, kMaxWillies> slots_{};
 };
 
+// A fighter on its feet. 0.7.3: HSMP's handle (1500, 150, 40, 800) pulled up to 60 000 cm/s^2 (about 60 g) on one bone,
+// whatever the body weighed, so a held player could not pull away (reports: grappling "unreasonably overpowering").
+// Now at most 600 x 30 = 18 000 cm/s^2 and 300 cm/s a step: the hold still leads the body, the body can still resist.
 struct GrabPullParams {
-    double stiffness = 1500.0;   // 1/s^2: HSMP grab_k, a soft handle the victim can struggle against
-    double damping = 150.0;      // 1/s: grab_d; zeta = 150 / (2 sqrt 1500) ~ 1.9, overdamped: never past the hand
-    double leadUu = 40.0;        // the spring's stretch is capped here: pull <= stiffness x lead (grab_lead)
-    double maxDvUu = 800.0;      // cm/s per step at most (HSMP apply_max_dv): a glitch never launches a body
+    double stiffness = 600.0;    // 1/s^2: a soft handle the victim can struggle against
+    double damping = 75.0;       // 1/s; zeta = 75 / (2 sqrt 600) ~ 1.5, overdamped: never past the hand
+    double leadUu = 30.0;        // the spring's stretch is capped here: pull <= stiffness x lead (grab_lead)
+    double maxDvUu = 300.0;      // cm/s per step at most: a glitch never launches a body
     double minDtS = 0.004, maxDtS = 0.080;   // the stand-in servo's frame-time clamp
 };
 
 // A held body that cannot struggle (dead, fallen, knocked out): carried the way the game carries a held NPC, not
 // dragged on a soft spring (test 2026-10-25: grabbing another player's body "worked" but did not feel like the game's).
-// Three times as stiff, twice the lead, still overdamped (zeta = 200 / (2 sqrt 4500) ~ 1.5), and the same per-step cap
-// raised so a body keeps up with a walking grabber.
+// Stiffer, a longer lead, still overdamped (zeta = 200 / (2 sqrt 4500) ~ 1.5), and a higher per-step cap so a body keeps
+// up with a walking grabber (unchanged in 0.7.3: carrying a body was never the problem).
 inline GrabPullParams DownPullParams() {
     GrabPullParams p;
     p.stiffness = 4500.0; p.damping = 200.0; p.leadUu = 80.0; p.maxDvUu = 1500.0;

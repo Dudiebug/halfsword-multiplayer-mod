@@ -32,8 +32,6 @@ struct LobbyFound {                     // a public lobby from Find
     std::string reason;                 // why not, when !compatible
 };
 
-struct LobbyModMap { std::string path, display, pak; };   // a custom map from a mod pak (session/hsm_modmaps.h); pak empty when unknown
-
 struct LobbyLocal {
     LobbyPhase phase = LobbyPhase::Offline;
     bool host = false;                  // we own the lobby
@@ -45,8 +43,6 @@ struct LobbyLocal {
     DamageRange damage;                 // the game's own damage slider here (game::VanillaDamageRange)
     std::string mapPick;                // the host's pick (package path), empty until picked
     bool progression = false;           // the host chose the Progression card (LobbyData hsm_prog): the stock hub, no match
-    std::vector<LobbyModMap> modMaps;   // the custom maps found on this machine (modded maps, after the stock ones)
-    bool modPickPending = false;        // the pick is a modded map whose pak is still being hashed: START waits
     std::vector<LobbyPlayer> players;
     std::vector<LobbyFound> found;
     int maxPlayers = 8;
@@ -57,8 +53,7 @@ enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, 
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
-struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
-                 bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
+struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false; };
 struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; };
 struct RosterRow {
     std::string name, team;             // team: the formats with teams only
@@ -203,17 +198,6 @@ inline const char* GearName(Gear g) {
 inline int TierBudget(int tier) { return kTierBudget[std::clamp(tier, 0, 7)]; }
 
 namespace lobby_detail {
-inline bool SamePath(std::string_view a, std::string_view pick) {
-    const std::string_view b = map_detail::StripObjectName(pick);
-    if (a.empty() || a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        char x = a[i], y = b[i];
-        if (x >= 'A' && x <= 'Z') x = char(x + 32);
-        if (y >= 'A' && y <= 'Z') y = char(y + 32);
-        if (x != y) return false;
-    }
-    return true;
-}
 
 inline bool ValidTeam(int t, Format f) { return HasTeams(f) && t >= 0 && t < TeamCount(f); }
 inline int EffectiveTeam(const LobbyPlayer& p, Format f) {
@@ -380,10 +364,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
     if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
     else s.settings.push_back(Row(l, LobbyRow::Damage));   // co-op fights take player damage too
     if (!l.host) s.hostOnly = "Only the host can change these.";
-    size_t customChosen = l.modMaps.size();   // the picked custom map (none: l.modMaps.size())
-    if (f != Format::Zombies)
-        for (size_t i = 0; i < l.modMaps.size(); ++i) if (lobby_detail::SamePath(l.modMaps[i].path, l.mapPick)) customChosen = i;
-    const size_t chosen = customChosen < l.modMaps.size() ? MapCount() : EffectiveMap(f, l.mapPick);
+    size_t chosen = EffectiveMap(f, l.mapPick);
     for (size_t i = 0; i < MapCount() && !l.progression; ++i) {
         if (!kMaps[i].pick) continue;
         MapCard m;
@@ -396,28 +377,12 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         m.enabled = l.host && m.allowed;
         s.maps.push_back(m);
     }
-    for (size_t i = 0; i < l.modMaps.size() && !l.progression; ++i) {   // modded maps follow the stock ones
-        MapCard m;
-        m.index = MapCount() + i;
-        m.modded = true;
-        m.path = l.modMaps[i].path;
-        m.name = l.modMaps[i].display;
-        m.tag = l.modMaps[i].pak.empty() ? "Modded map" : "Modded map \xC2\xB7 " + l.modMaps[i].pak;
-        m.allowed = f != Format::Zombies;                              // the Abyss is the only Zombies map
-        if (!m.allowed) m.reason = MapRefusal(f);
-        m.selected = i == customChosen;
-        m.enabled = l.host && m.allowed;
-        s.maps.push_back(m);
-    }
     std::vector<PeerBuild> others;
     for (const LobbyPlayer& p : l.players) if (!p.me) others.push_back({p.name, p.build});
     const std::string warn = BuildWarning(l.myBuild, others);
     s.buildMismatch = !warn.empty();
     s.start = l.host && MayStartMatch(l.myBuild, others, l.allowBuildMismatch);
-    const bool modWait = l.host && customChosen < l.modMaps.size() && l.modPickPending;
-    if (modWait) s.start = false;
     if (!l.host) s.waiting = "Waiting for the host";
-    if (modWait) s.waiting = "Checking the map pack";
     if (s.buildMismatch) s.waiting = l.host && l.allowBuildMismatch ? warn + " (allowed: allow_build_mismatch=1)" : warn;
     return s;
 }

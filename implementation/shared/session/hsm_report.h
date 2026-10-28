@@ -191,7 +191,6 @@ inline std::string ValidUtf8(const std::string& s) {
 struct ReportLog { std::string name, text; };   // name: "HSMMod.log", "HSMMod.prev.log"
 struct ReportFacts {
     std::string modBuild, gameBuild, role, transport, syncMode, level, matchFormat, matchPhase, os;
-    std::string ue4ss, ue4ssMods;   // UE4SS version ("none", "off", "3.0.1.0"...) and the enabled UE4SS mods' names
     int protocol = 0, players = 0;
 };
 
@@ -200,7 +199,7 @@ inline std::string ReportFactsJson(const ReportFacts& f) {
     return "{" + s("modBuild", f.modBuild) + "," + s("gameBuild", f.gameBuild) + ",\"protocol\":" + std::to_string(f.protocol) + "," +
            s("role", f.role) + "," + s("transport", f.transport) + "," + s("syncMode", f.syncMode) + "," + s("level", f.level) + "," +
            s("matchFormat", f.matchFormat) + "," + s("matchPhase", f.matchPhase) + ",\"players\":" + std::to_string(f.players) + "," +
-           s("os", f.os) + "," + s("ue4ss", f.ue4ss) + "," + s("ue4ssMods", f.ue4ssMods) + "}";
+           s("os", f.os) + "}";
 }
 inline std::string ReportLogsJson(const std::vector<ReportLog>& logs) {
     std::string o = "[";

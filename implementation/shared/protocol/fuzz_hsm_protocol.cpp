@@ -8,15 +8,12 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "session/hsm_lease.h"
-#include "session/hsm_modmaps.h"
-#include "session/hsm_object_event.h"
 #include "session/hsm_prop_census.h"
 #include "session/hsm_report.h"
 #include "sync/hsm_grab.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 
 using namespace hsm;
 
@@ -38,27 +35,14 @@ void Try(const uint8_t* d, size_t n) {
     }
 }
 
-// The pak index reader on arbitrary bytes: no over-read, and whatever it returns stays inside its caps.
-void FuzzPak(const uint8_t* d, size_t n) {
-    PakFooter f; PakPrimary pr; std::vector<std::string> maps;
-    ParsePakFooter(d, n, uint64_t(n) * (1 + (n & 3)), f);
-    ParsePakPrimaryIndex(d, n, uint64_t(n) + 4096, pr);
-    if (ParsePakDirectoryIndex(d, n, "../../../", maps) == PakParse::Ok && maps.size() > kMaxPakMaps) { std::printf("pak maps over the cap\n"); ++g_roundTripFailures; }
-    HashCache c; c.Parse(std::string_view(reinterpret_cast<const char*>(d), n));
-    HashCache c2; c2.Parse(c.Serialize());
-    if (c2.Serialize() != c.Serialize()) { std::printf("hash cache round trip\n"); ++g_roundTripFailures; }
-}
-
 void TryAll(const uint8_t* d, size_t n) {
     Try<Hello>(d, n); Try<Welcome>(d, n); Try<Reject>(d, n); Try<InputFrame>(d, n); Try<Snapshot>(d, n);
     Try<Event>(d, n); Try<Travel>(d, n); Try<Ready>(d, n); Try<Spawn>(d, n); Try<Despawn>(d, n); Try<BlobChunk>(d, n);
     Try<MatchInfo>(d, n); Try<Kill>(d, n);
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
-    Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
+    Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
-    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n);
-    FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -124,38 +108,12 @@ std::vector<std::vector<uint8_t>> Seeds() {
     sb.stuck = false; sb.bone = ""; s.push_back(Encode(sb));
     GrabStateMsg gm; gm.grabber = 1; gm.seq = 4; gm.hands[0].held = true; gm.hands[0].target = 2; gm.hands[0].grabId = 9;
     gm.hands[0].bone = "lowerarm_l"; gm.hands[0].grip = sync::V3{ 1.5, -2.25, 10 }; s.push_back(Encode(gm));
-    BodyStateMsg ps; ps.objId = MakeDropPropId(3, 1, 5); ps.lessee = 2; ps.senderTimeMs = 77; ps.px = 120; ps.pz = 40;
+    PropStateMsg ps; ps.propId = MakeDropPropId(3, 1, 5); ps.lessee = 2; ps.senderTimeMs = 77; ps.px = 120; ps.pz = 40;
     ps.rot = PackQuat(0, 0, 0.3f, 0.95f); ps.vx = 300; ps.wz = 720; s.push_back(Encode(ps));
-    PropLeaseMsg pl; pl.propId = ps.objId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
+    PropLeaseMsg pl; pl.propId = ps.propId; pl.action = LeaseAction::Grant; pl.level = LeaseLevel::Touch; pl.slot = 2; s.push_back(Encode(pl));
     PropLeaseMsg lv; lv.propId = MakeLevelPropId(3); lv.action = LeaseAction::Request; lv.level = LeaseLevel::Hold; lv.slot = 1; s.push_back(Encode(lv));
-    BodyStateMsg pe = ps; pe.objId = MakeDropPropId(uint8_t(kMaxWillies), 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
-    PropLeaseMsg le = pl; le.propId = pe.objId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
-    ObjectAnnounceMsg oa; oa.objId = MakeSpawnedId(2, 1); oa.classHash = 0xDEADBEEFu; oa.px = 10; oa.py = -4; oa.pz = 55; oa.bodyCount = 3; oa.parentId = MakeLevelPropId(2);
-    s.push_back(Encode(oa));
-    oa.flags = kAnnounceCanonical; oa.objId = MakeSpawnedId(0, 9); oa.proposalId = MakeSpawnedId(2, 1); s.push_back(Encode(oa));
-    BodyStateMsg bs = pe; bs.objId = MakeSpawnedId(uint8_t(kMaxFighters - 1), 0xFFFFFFFFu); bs.body = kMaxObjectBodies - 1; s.push_back(Encode(bs));
-    ObjectEventMsg ev; ev.objId = MakeSpawnedId(2, 1); ev.body = 2; ev.kind = ObjectEventKind::JointBroke; ev.constraint = 5; s.push_back(Encode(ev));
-    ev.kind = ObjectEventKind::Detached; ev.otherId = MakeSpawnedId(2, 2); s.push_back(Encode(ev));
-    ev.kind = ObjectEventKind::Attached; ev.otherId = MakeLevelPropId(7); s.push_back(Encode(ev));
-    ev.kind = ObjectEventKind::Destroyed; s.push_back(Encode(ev));
-    ev.kind = ObjectEventKind::Custom; ev.modId = 77; ev.data = {1, 2, 3}; s.push_back(Encode(ev));
-    ev.data.assign(kMaxCustomEventBytes, 0x5A); s.push_back(Encode(ev));   // the longest custom payload
-    ev.kind = ObjectEventKind::Fracture; ev.data.clear(); ev.modId = 0; ev.item = 41; ev.x = 120.5f; ev.y = -3400.f; ev.z = 88.f;
-    ev.radius = 75.f; ev.strain = 250000.f; s.push_back(Encode(ev));
-    ev.item = kMaxFractureItem; ev.x = kMaxPropCoord; ev.radius = kMaxFractureRadius; ev.strain = kMaxFractureStrain; s.push_back(Encode(ev));
-    ModMapMsg mm; mm.path = "/Game/Maps/Custom/Arena_Bog"; mm.display = "Arena Bog"; mm.pakName = "BogMap_P.pak"; mm.pakSize = 123456789;
-    for (size_t i = 0; i < mm.sha.size(); ++i) mm.sha[i] = uint8_t(i + 1);
-    s.push_back(Encode(mm));
-    mm.pakName.clear(); mm.pakSize = 0; mm.sha = {}; s.push_back(Encode(mm));      // a map no pak is known for
-    s.push_back(Encode(ModMapMsg{}));                                              // the stock-pick clear
-    {   // a pak full directory index, for the pak reader (byte-level mutation reaches its length and count checks)
-        std::vector<uint8_t> fdi;
-        auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) fdi.push_back(uint8_t(v >> (8 * i))); };
-        auto fstr = [&](const char* t) { const size_t n = std::strlen(t); u32(uint32_t(n + 1)); fdi.insert(fdi.end(), t, t + n); fdi.push_back(0); };
-        u32(2); fstr("HalfswordUE5/Content/Maps/Custom/"); u32(2); fstr("Arena_Bog.umap"); u32(0); fstr("Arena_Bog.uexp"); u32(0);
-        fstr("/"); u32(1); fstr("Top.umap"); u32(0);
-        s.push_back(fdi);
-    }
+    PropStateMsg pe = ps; pe.propId = MakeDropPropId(uint8_t(kMaxWillies), 0, 127, 0xFFFFFFFFu); s.push_back(Encode(pe));   // the top drop epoch
+    PropLeaseMsg le = pl; le.propId = pe.propId; le.action = LeaseAction::Request; le.level = LeaseLevel::Hold; s.push_back(Encode(le));
     combat::PaintFxMsg bl; bl.entity = 3; bl.kind = combat::FxKind::Blood; bl.seq = 7; bl.bone = "lowerarm_r"; bl.bodyPart = 2;
     bl.local.pos = sync::V3{ 4, -2, 7.5 }; bl.local.rot = sync::Q4{ 0, 0, std::sin(0.3), std::cos(0.3) }; bl.rate = 12.5; bl.damageRate = 1;
     bl.loopCount = 4; bl.extraVelocity = true; bl.velocity = sync::V3{ -30, 12, 400 }; bl.bleeding = 37; s.push_back(Encode(bl));
@@ -178,7 +136,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(kLastReservedMsgType)); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::VoteState))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

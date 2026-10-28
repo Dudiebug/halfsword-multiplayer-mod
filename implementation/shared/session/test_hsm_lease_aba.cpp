@@ -1,4 +1,4 @@
-// BodyStateView A-B-A: a former streamer's late state must not apply again after the stream changed hands twice.
+// PropStateView A-B-A: a former streamer's late state must not apply again after the stream changed hands twice.
 // Run via implementation/shared/run_tests.sh test_hsm_lease_aba.
 #include "session/hsm_lease.h"
 #include <cstdio>
@@ -7,9 +7,9 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 using namespace hsm;
 
-static BodyStateMsg State(uint64_t id, uint8_t lessee, uint32_t t) {
-    BodyStateMsg m;
-    m.objId = id;
+static PropStateMsg State(uint64_t id, uint8_t lessee, uint32_t t) {
+    PropStateMsg m;
+    m.propId = id;
     m.lessee = lessee;
     m.senderTimeMs = t;
     return m;
@@ -17,7 +17,7 @@ static BodyStateMsg State(uint64_t id, uint8_t lessee, uint32_t t) {
 
 int main() {
     const uint64_t id = MakeWeaponPropId(3, 5);
-    BodyStateView v;
+    PropStateView v;
     v.OnGrant(id, 2, LeaseLevel::Touch);
     CHECK(v.Apply(State(id, 2, 5000)));
     v.OnGrant(id, 3, LeaseLevel::Touch);

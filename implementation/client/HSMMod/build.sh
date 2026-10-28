@@ -15,12 +15,13 @@ COMMON="$OPT -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -DNOMINMA
 DESCRIBE=$(git describe --always --dirty --exclude='*' 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
 # The update check (net/update_check.cpp) reads the prerelease number from the nearest v* tag, as git describe prints it.
 TAG=$(git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
-INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/minhook/include"
+INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/enet/include -Ithird_party/minhook/include"
 
 objs=()
-for f in third_party/minhook/src/{buffer,hook,trampoline}.c third_party/minhook/src/hde/hde64.c; do
+for f in third_party/enet/{callbacks,compress,host,list,packet,peer,protocol,win32}.c \
+         third_party/minhook/src/{buffer,hook,trampoline}.c third_party/minhook/src/hde/hde64.c; do
   o=build/obj/$(basename "${f%.c}").o
-  "$CC" $COMMON -w -Ithird_party/minhook/include -c "$f" -o "$o"
+  "$CC" $COMMON -w -Ithird_party/enet/include -Ithird_party/minhook/include -c "$f" -o "$o"
   objs+=("$o")
 done
 for f in src/*.cpp src/*/*.cpp; do

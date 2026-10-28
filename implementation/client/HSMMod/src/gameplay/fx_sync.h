@@ -37,7 +37,6 @@ public:
         std::function<uint8_t(const ue::UObject*)> ownedEntity;     // the entity of a fighter simulated here, 0 if none
         std::function<void(const combat::PaintFxMsg&)> send;        // a report made here (the session routes it)
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
-        std::function<void()> noteSpawn;                            // armour came off a fighter: a new loose object (ObjectSync::NoteSpawn). Optional.
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
     bool Start(Adapter& adapter, StandIns& standIns, Env env);
@@ -55,13 +54,15 @@ public:
 private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
     struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
-                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0; };
+                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
     void OnBoxVertexPaint(ue::ScriptCall& c);
     void OnVoice(ue::ScriptCall& c);
     void OnPickUpArmor(ue::ScriptCall& c);
     void OnRemoveArmor(ue::ScriptCall& c);
+    void OnStripBegin(ue::ScriptCall& c);   // a stand-in its owner reports down counts as Fallen for the stock strip
+    void OnStripEnd();
     void SendHitSound(uint8_t entity, ue::UObject* willie, ue::ScriptCall& c, double damageRawScaled);
     void ApplyVoice(const combat::PaintFxMsg& m, ue::UObject* standIn);
     void ApplyStrip(const combat::PaintFxMsg& m);
@@ -92,6 +93,7 @@ private:
     bool cueFailLogged_ = false;
     uint32_t noBoneLogged_ = 0;                                      // one bit per (kind, reason) already logged
     bool replaying_ = false;                                         // inside our own Remove / Pick Up Armor on a stand-in
+    ue::UObject* stripFallen_ = nullptr;                              // the stand-in made Fallen for the running strip call
     std::set<std::pair<uint8_t, uint8_t>> stripped_;                 // (entity, slot) stripped here, awaiting the owner's report
     std::map<std::string, ue::UObject*> cues_;                       // Get Damage's sound cues, found once
     // A peer-named object, found once (or not found: remembered so a bad name costs one scan, not one per message).

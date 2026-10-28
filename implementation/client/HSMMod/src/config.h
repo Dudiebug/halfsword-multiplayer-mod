@@ -8,17 +8,22 @@
 #include <vector>
 
 namespace hsm {
-// Steam: lobby-driven (Multiplayer button on the main menu; lobby owner hosts). Server: below.
-enum class Role { Off, Steam, Server };   // Server: a hosted retail instance with no fighter of its own, auto-starting matches
+// Steam: lobby-driven (Multiplayer button on the main menu; lobby owner hosts). Host/Client: direct IP via ENet.
+enum class Role { Off, Steam, Host, Client, Server };   // Server: a hosted retail instance with no fighter of its own, auto-starting matches
 
 struct Config {
     Role role = Role::Steam;
+    std::string hostAddress = "127.0.0.1";
+    uint16_t port = 27777;
     std::string playerName = "Player";
     int snapshotHz = 30;
     int inputHz = 60;
+    // Host only (clients take the host's choice from Welcome). true: every machine simulates its own fighter and the
+    // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
+    bool ownerSync = true;
     // true: clients also send Pose and Vitals straight to each other (Steam lobbies only; session/hsm_mesh.h), and the host
     // stops relaying what a client already hears directly (default from 0.7.0-pre6). false (mesh=0): every stream goes
-    // through the host, as in 0.6.5. Used where the host and the client both have it on.
+    // through the host, as in 0.6.5. Used where the host and the client both have it on; ENet (direct IP) stays a star.
     bool mesh = true;
     // true (default from 0.7.0-pre6): with the mesh on, the host also plans each client pair's fastest path from the
     // measured pings and a client may pass another pair's Pose and Vitals on (detours, session/hsm_detour.h). detour=0
@@ -57,8 +62,6 @@ struct Config {
     // In-game bug reports ("/bug" in the chat; net/report_client.h). Nothing is sent without the player's command.
     // true: other fighters' names float over their heads in a match (name_tags=0 turns them off).
     bool nameTags = true;
-    // true: armour swapped out while paint tasks still read it is destroyed later (the T5 crash); paint_defer=0 turns it off.
-    bool paintDefer = true;
     bool reports = true;
     // true: your HSMMod log is also sent to the report relay when someone in your lobby files a report or a crash is reported
     // (the multiplayer page's HELP IMPROVE THE MOD toggle; SaveHelpImprove writes the key). Off by default.
@@ -66,7 +69,8 @@ struct Config {
     std::string reportUrl = "https://reports.dudiebug.net";
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
-    // role=server only (see session/hsm_autoflow.h): a public Steam lobby.
+    // role=server only (see session/hsm_autoflow.h). transport: "steam" (a public Steam lobby, default) or "direct" (ENet on `port`; deprecated, removed in 0.8.0).
+    std::string serverTransport = "steam";
     std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
     std::string serverMaps = "all";            // comma list of map display names, or all
     int serverScoreLimit = 0;                  // 0: the format's default
@@ -79,10 +83,6 @@ struct Config {
     // player out; since 0.7.0-pre6 in every hosted session, from the chat or the in-match menu.
     std::string serverAdmins;
     bool serverVoteKick = true;
-    // [mod] section (ue4ss_load.h): HSMMod's dwmapi.dll chain-loads UE4SS. ue4ss=0 skips it; ue4ss_order=before loads it
-    // before HSMMod's ProcessEvent hook is installed, after (default) once the hook is in.
-    bool ue4ss = true;
-    bool ue4ssBefore = false;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

@@ -108,6 +108,8 @@ bool FxSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Helmet Muffle Voice", [this](ScriptCall& c) { OnVoice(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Pick Up Armor", {}, [this](ScriptCall& c) { OnPickUpArmor(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Remove Armor", {}, [this](ScriptCall& c) { OnRemoveArmor(c); });
+    n += ObserveScript(kHookOwner, "Willie_BP_C", "Strip Armor From Bone", [this](ScriptCall& c) { OnStripBegin(c); },
+                       [this](ScriptCall&) { OnStripEnd(); });
     active_ = ScriptHookActive();
     HSM_LOG("fx: %s (%d function(s) observed now; box class %s)",
             active_ ? "on: blood, wounds, voice, hit sounds and armour off and on on fighters simulated here are shown on every stand-in of them"
@@ -303,7 +305,26 @@ void FxSync::OnRemoveArmor(ScriptCall& c) {
     m.local = ToXform(t);   // world for now
     if (strip) stripped_.insert({entity, slot});   // the owner's report of it is not replayed again here
     if (Send(m, self, MakeName(kArmorBone), false)) ++n_.armor;
-    if (env_.noteSpawn) env_.noteSpawn();   // the loose piece is a new object: the object sync looks for it now
+}
+
+// Strip Armor From Bone (Willie_BP.cpp:7291) strips only a Fallen fighter, and a stand-in's Fallen never follows its
+// owner. While my fighter strips a stand-in whose owner reports it down (vitals: dead, fallen or knocked out), the
+// stand-in is Fallen for that one call, so the stock strip runs and its Remove Armor goes to the owner as a strip request.
+void FxSync::OnStripBegin(ScriptCall& c) {
+    stripFallen_ = nullptr;
+    if (!active_ || replaying_ || !env_.ownedEntity(c.self())) return;
+    UObject* target = c.get<UObject*>("Stripped Willie");
+    const uint8_t entity = target ? standIns_->EntityOf(target) : 0;
+    const VitalsMsg* v = entity ? standIns_->Vitals(entity) : nullptr;
+    if (!v || !((v->flags & 7u) != 0 || v->health <= 0.f) || Flag(target, "Fallen")) return;
+    if (!SetBool(target, "Fallen", true)) return;
+    stripFallen_ = target;
+    if (n_.stripTries++ < 10) HSM_LOG("fx: stripping e%u's stand-in (its owner reports it down)", entity);
+}
+
+void FxSync::OnStripEnd() {
+    if (stripFallen_) SetBool(stripFallen_, "Fallen", false);
+    stripFallen_ = nullptr;
 }
 
 void FxSync::SendWound(uint8_t entity, UObject* willie, FName bone, const Xform& boxWorld, const sync::V3& extent) {
@@ -628,7 +649,6 @@ void FxSync::ApplyArmor(const PaintFxMsg& m, UObject* standIn, UObject* mesh, co
         replaying_ = false;
     }
     HSM_LOG("fx: armour slot %u removed from the stand-in of e%u (#%u)%s", unsigned(m.rate), m.entity, m.seq, ok ? "" : ": FAILED");
-    if (ok && env_.noteSpawn) env_.noteSpawn();   // the same loose piece, on this machine
     Count(ok, m);
 }
 

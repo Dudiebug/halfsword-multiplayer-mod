@@ -1,7 +1,7 @@
 // Prop leases (FREE/TOUCH/HOLD, host-arbitrated, 3 s lapse): wire format for PropState and PropLease (round trip,
 // truncation, non-finite, out-of-range, trailing bytes, propId bounds), the host's LeaseTable (grant/conflict/renew/
 // lapse/release/entity-left, host-owned bots, who may stream, grants for a late joiner), the host's check of a peer's
-// PropLease, the BodyStateView (only the granted streamer applies; stale/duplicate rejection per streamer), each
+// PropLease, the PropStateView (only the granted streamer applies; stale/duplicate rejection per streamer), each
 // machine's LeaseClaim (request/renew/downgrade/release from its own holds and touches), the rest test and the host's
 // FREE stream schedule, and the propId identity scheme (weapon owner+slot vs. level-prop name hash never collide, id 0
 // reserved; a dropped weapon's id carries a 32-bit epoch above the owner byte, advanced on every sequence wrap).
@@ -15,9 +15,9 @@ static int g_fail = 0;
 using namespace hsm;
 
 // ---------------------------------------------------------------- wire format: PropState
-static BodyStateMsg SomeState() {
-    BodyStateMsg m;
-    m.objId = MakeWeaponPropId(3, 5);
+static PropStateMsg SomeState() {
+    PropStateMsg m;
+    m.propId = MakeWeaponPropId(3, 5);
     m.lessee = 2;
     m.senderTimeMs = 123456;
     m.px = 10.5f; m.py = -20.25f; m.pz = 5.f;
@@ -28,11 +28,11 @@ static BodyStateMsg SomeState() {
 }
 
 static void TestPropStateRoundTrip() {
-    const BodyStateMsg m = SomeState();
+    const PropStateMsg m = SomeState();
     const auto bytes = Encode(m);
-    BodyStateMsg o;
+    PropStateMsg o;
     CHECK(Decode(bytes.data(), bytes.size(), o));
-    CHECK(o.objId == m.objId && o.lessee == 2 && o.senderTimeMs == 123456);
+    CHECK(o.propId == m.propId && o.lessee == 2 && o.senderTimeMs == 123456);
     CHECK(o.px == 10.5f && o.py == -20.25f && o.pz == 5.f);
     CHECK(o.rot.x == m.rot.x && o.rot.w == m.rot.w);
     CHECK(o.vx == 100.f && o.vy == -50.f && o.vz == 0.f);
@@ -40,9 +40,9 @@ static void TestPropStateRoundTrip() {
 }
 
 static void TestPropStateRejects() {
-    auto bad = [](BodyStateMsg m) { const auto b = Encode(m); BodyStateMsg o; return !Decode(b.data(), b.size(), o); };
-    BodyStateMsg m = SomeState();
-    m.objId = 0; CHECK(bad(m));                                             // id 0 reserved
+    auto bad = [](PropStateMsg m) { const auto b = Encode(m); PropStateMsg o; return !Decode(b.data(), b.size(), o); };
+    PropStateMsg m = SomeState();
+    m.propId = 0; CHECK(bad(m));                                             // id 0 reserved
     m = SomeState(); m.lessee = uint8_t(kMaxFighters); CHECK(bad(m));         // slot out of range
     m = SomeState(); m.lessee = uint8_t(kMaxFighters - 1); CHECK(!bad(m));    // last valid slot
     m = SomeState(); m.px = 1.0e7f; CHECK(!bad(m));                          // bound itself allowed
@@ -51,7 +51,7 @@ static void TestPropStateRejects() {
     m = SomeState(); m.vz = std::numeric_limits<float>::infinity(); CHECK(bad(m));
 
     const auto good = Encode(SomeState());
-    BodyStateMsg o;
+    PropStateMsg o;
     auto b = good; b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));     // trailing byte
     b = good; b.pop_back(); CHECK(!Decode(b.data(), b.size(), o));            // missing byte
     for (size_t n = 0; n < good.size(); ++n) CHECK(!Decode(good.data(), n, o) || n == good.size());
@@ -98,7 +98,7 @@ static void TestPropLeaseRejects() {
 // propId decode bounds: a weapon id (bit 63 clear) is (owner << 8) | sheathSlot with owner a valid entity, plus a drop
 // epoch in bits 16-47 (TestDropEpoch); an owner byte that is no entity is garbage, whatever the message.
 static void TestPropIdBoundsOnDecode() {
-    auto stateOk = [](uint64_t id) { BodyStateMsg m = SomeState(); m.objId = id; const auto b = Encode(m); BodyStateMsg o; return Decode(b.data(), b.size(), o); };
+    auto stateOk = [](uint64_t id) { PropStateMsg m = SomeState(); m.propId = id; const auto b = Encode(m); PropStateMsg o; return Decode(b.data(), b.size(), o); };
     auto leaseOk = [](uint64_t id) {
         PropLeaseMsg m; m.propId = id; m.action = LeaseAction::Request; m.level = LeaseLevel::Hold; m.slot = 1;
         const auto b = Encode(m); PropLeaseMsg o; return Decode(b.data(), b.size(), o);
@@ -233,65 +233,65 @@ static void TestDuplicateRequestFromSameSlotIsIdempotent() {
     CHECK(dup.granted && !dup.changed);
 }
 
-// ---------------------------------------------------------------- client-side BodyStateView
-static void TestBodyStateViewStaleAndDuplicateRejected() {
-    BodyStateView v;
+// ---------------------------------------------------------------- client-side PropStateView
+static void TestPropStateViewStaleAndDuplicateRejected() {
+    PropStateView v;
     v.OnGrant(7, 2, LeaseLevel::Touch);               // SomeState's lessee streams it
-    BodyStateMsg a = SomeState(); a.objId = 7; a.senderTimeMs = 100; a.px = 1.f;
+    PropStateMsg a = SomeState(); a.propId = 7; a.senderTimeMs = 100; a.px = 1.f;
     CHECK(v.Apply(a));
-    BodyStateMsg dup = a;                             // exact duplicate (same sender time): rejected
+    PropStateMsg dup = a;                             // exact duplicate (same sender time): rejected
     CHECK(!v.Apply(dup));
-    BodyStateMsg stale = a; stale.senderTimeMs = 50; stale.px = 2.f;   // older: rejected
+    PropStateMsg stale = a; stale.senderTimeMs = 50; stale.px = 2.f;   // older: rejected
     CHECK(!v.Apply(stale));
     CHECK(v.Find(7) && v.Find(7)->px == 1.f);
-    BodyStateMsg fresh = a; fresh.senderTimeMs = 150; fresh.px = 3.f;
+    PropStateMsg fresh = a; fresh.senderTimeMs = 150; fresh.px = 3.f;
     CHECK(v.Apply(fresh));
     CHECK(v.Find(7)->px == 3.f);
     CHECK(v.Find(123) == nullptr);
 }
 
-static void TestBodyStateViewWrapAround() {
-    BodyStateView v;
+static void TestPropStateViewWrapAround() {
+    PropStateView v;
     v.OnGrant(8, 2, LeaseLevel::Hold);
-    BodyStateMsg a = SomeState(); a.objId = 8; a.senderTimeMs = 0xFFFFFFF0u; a.px = 1.f;
+    PropStateMsg a = SomeState(); a.propId = 8; a.senderTimeMs = 0xFFFFFFF0u; a.px = 1.f;
     CHECK(v.Apply(a));
-    BodyStateMsg b = a; b.senderTimeMs = 4u; b.px = 2.f;              // 20 ms later across the wrap
+    PropStateMsg b = a; b.senderTimeMs = 4u; b.px = 2.f;              // 20 ms later across the wrap
     CHECK(v.Apply(b));
     CHECK(v.Find(8)->px == 2.f);
-    BodyStateMsg c = a; c.senderTimeMs = 0xFFFFFFF8u; c.px = 3.f;     // older across the wrap: rejected
+    PropStateMsg c = a; c.senderTimeMs = 0xFFFFFFF8u; c.px = 3.f;     // older across the wrap: rejected
     CHECK(!v.Apply(c));
     CHECK(v.Find(8)->px == 2.f);
 }
 
 // A new streamer's clock has nothing to do with the previous one's: the host's clock may be far ahead of the new
 // lessee's. Only the granted streamer's states apply, each strictly newer than that streamer's last.
-static void TestBodyStateViewFollowsGrants() {
-    BodyStateView v;
+static void TestPropStateViewFollowsGrants() {
+    PropStateView v;
     CHECK(v.Streamer(9) == kHostSlot && v.Level(9) == LeaseLevel::Free);   // unknown: FREE, the host streams it
-    BodyStateMsg h = SomeState(); h.objId = 9; h.lessee = kHostSlot; h.senderTimeMs = 1000000; h.px = 1.f;
+    PropStateMsg h = SomeState(); h.propId = 9; h.lessee = kHostSlot; h.senderTimeMs = 1000000; h.px = 1.f;
     CHECK(v.Apply(h));
-    BodyStateMsg early = h; early.lessee = 2; early.senderTimeMs = 500; early.px = 5.f;
+    PropStateMsg early = h; early.lessee = 2; early.senderTimeMs = 500; early.px = 5.f;
     CHECK(!v.Apply(early));                           // slot 2 streams before its grant reached us: not yet
     CHECK(v.Find(9)->px == 1.f);
     v.OnGrant(9, 2, LeaseLevel::Touch);
     CHECK(v.Streamer(9) == 2 && v.Level(9) == LeaseLevel::Touch);
     CHECK(v.Find(9) && v.Find(9)->px == 1.f);         // the last state stays until the new streamer's first
-    BodyStateMsg c = early; c.senderTimeMs = 600; c.px = 2.f;
+    PropStateMsg c = early; c.senderTimeMs = 600; c.px = 2.f;
     CHECK(v.Apply(c));                                // far behind the host's clock, still the newest from slot 2
     CHECK(v.Find(9)->px == 2.f);
-    BodyStateMsg late = h; late.senderTimeMs = 1000050; late.px = 9.f;
+    PropStateMsg late = h; late.senderTimeMs = 1000050; late.px = 9.f;
     CHECK(!v.Apply(late));                            // the former streamer's delayed state: dropped
     CHECK(!v.Apply(c));                               // duplicate within the streamer
-    BodyStateMsg older = c; older.senderTimeMs = 599; CHECK(!v.Apply(older));
+    PropStateMsg older = c; older.senderTimeMs = 599; CHECK(!v.Apply(older));
     v.OnGrant(9, 2, LeaseLevel::Hold);                // same streamer upgrading: its clock still counts
     CHECK(v.Level(9) == LeaseLevel::Hold);
     CHECK(!v.Apply(older));
-    BodyStateMsg next = c; next.senderTimeMs = 616; next.px = 3.f; CHECK(v.Apply(next));
+    PropStateMsg next = c; next.senderTimeMs = 616; next.px = 3.f; CHECK(v.Apply(next));
     v.OnGrant(9, 3, LeaseLevel::Free);                // FREE always means the host, whatever slot it names
     CHECK(v.Streamer(9) == kHostSlot && v.Level(9) == LeaseLevel::Free);
-    BodyStateMsg h2 = h; h2.senderTimeMs = 1000100; h2.px = 4.f; CHECK(v.Apply(h2));
+    PropStateMsg h2 = h; h2.senderTimeMs = 1000100; h2.px = 4.f; CHECK(v.Apply(h2));
     v.OnGrant(9, 4, LeaseLevel::Touch);
-    BodyStateMsg s4 = h; s4.lessee = 4; s4.senderTimeMs = 7; s4.px = 6.f; CHECK(v.Apply(s4));
+    PropStateMsg s4 = h; s4.lessee = 4; s4.senderTimeMs = 7; s4.px = 6.f; CHECK(v.Apply(s4));
     CHECK(v.Find(9)->px == 6.f && v.Find(9)->lessee == 4);
     v.OnGrant(11, 2, LeaseLevel::Touch);              // a grant for a prop never streamed carries no state
     CHECK(v.Find(11) == nullptr && v.Streamer(11) == 2);
@@ -302,15 +302,15 @@ static void TestBodyStateViewFollowsGrants() {
 static void TestLeaseStreamerAndAccepts() {
     LeaseTable t;
     CHECK(t.Streamer(1) == kHostSlot);                // FREE: the host streams it
-    BodyStateMsg m = SomeState(); m.objId = 1; m.lessee = 2;
+    PropStateMsg m = SomeState(); m.propId = 1; m.lessee = 2;
     CHECK(!t.Accepts(m, 2));                          // nobody leases it: slot 2 may not stream it
     CHECK(t.Request(1, 2, LeaseLevel::Touch, 0.0).granted);
     CHECK(t.Streamer(1) == 2);
     CHECK(t.Accepts(m, 2));
     CHECK(!t.Accepts(m, 3));                          // claims to be slot 2, sent by slot 3
-    BodyStateMsg spoof = m; spoof.lessee = 3; CHECK(!t.Accepts(spoof, 3));   // slot 3 is not the lessee
-    BodyStateMsg lie = m; lie.lessee = 3; CHECK(!t.Accepts(lie, 2));        // the lessee naming another slot: not relayed
-    BodyStateMsg other = m; other.objId = 2; CHECK(!t.Accepts(other, 2));   // a lease covers one prop only
+    PropStateMsg spoof = m; spoof.lessee = 3; CHECK(!t.Accepts(spoof, 3));   // slot 3 is not the lessee
+    PropStateMsg lie = m; lie.lessee = 3; CHECK(!t.Accepts(lie, 2));        // the lessee naming another slot: not relayed
+    PropStateMsg other = m; other.propId = 2; CHECK(!t.Accepts(other, 2));   // a lease covers one prop only
     CHECK(t.Request(1, 4, LeaseLevel::Hold, 10.0).granted);                  // evicted by a hold
     CHECK(!t.Accepts(m, 2) && t.Streamer(1) == 4);
     CHECK(t.Release(1, 4).granted);
@@ -399,7 +399,7 @@ static void TestClaimContactWindowAndRestReset() {
 
 static void TestPropAtRestAndFreeSchedule() {
     auto rest = [](float vx, float vy, float vz, float wx, float wy, float wz) {
-        BodyStateMsg m = SomeState(); m.vx = vx; m.vy = vy; m.vz = vz; m.wx = wx; m.wy = wy; m.wz = wz; return PropAtRest(m);
+        PropStateMsg m = SomeState(); m.vx = vx; m.vy = vy; m.vz = vz; m.wx = wx; m.wy = wy; m.wz = wz; return PropAtRest(m);
     };
     CHECK(rest(0, 0, 0, 0, 0, 0));
     CHECK(rest(7.9f, 0, 0, 0, 0, 9.9f));
@@ -523,11 +523,10 @@ static void TestDropEpoch() {
     CHECK(!ValidPropId(uint64_t(0xABCD) << 16));
     CHECK(!ValidPropId((uint64_t(7) << 16) | (uint64_t(kMaxWillies + 1) << 8)));
     CHECK(!ValidPropId(MakeDropPropId(3, 1, 5) | (uint64_t(1) << 48)));
-    CHECK(ValidPropId(MakeDropPropId(3, 1, 5) | (uint64_t(1) << 62)));   // rev 26: bit 62 is a spawned id (slot 0, a sequence), not a weapon id
-    CHECK(!ValidPropId(MakeDropPropId(3, 1, 5) | (uint64_t(1) << 62) | (uint64_t(1) << 48)));   // ... with bits 32-55 clear or it is garbage
+    CHECK(!ValidPropId(MakeDropPropId(3, 1, 5) | (uint64_t(1) << 62)));
     CHECK(ValidPropId(MakeDropPropId(3, 1, 5) | (uint64_t(1) << 47)));
     // Both decoders take an epoch id and refuse bits above it.
-    auto stateOk = [](uint64_t id) { BodyStateMsg m = SomeState(); m.objId = id; const auto b = Encode(m); BodyStateMsg o; return Decode(b.data(), b.size(), o) && o.objId == id; };
+    auto stateOk = [](uint64_t id) { PropStateMsg m = SomeState(); m.propId = id; const auto b = Encode(m); PropStateMsg o; return Decode(b.data(), b.size(), o) && o.propId == id; };
     auto leaseOk = [](uint64_t id) {
         PropLeaseMsg m; m.propId = id; m.action = LeaseAction::Request; m.level = LeaseLevel::Touch; m.slot = 1;
         const auto b = Encode(m); PropLeaseMsg o; return Decode(b.data(), b.size(), o) && o.propId == id;
@@ -575,7 +574,7 @@ static void TestDropSignature() {
 // weapon it dropped a while ago) opens no window, so the weapon in its stand-in's hand is not forced out.
 static void TestDropSignatureFirstGrantOnly() {
     const uint64_t a = MakeDropPropId(3, 0, 5, 0x77u);
-    BodyStateView v;
+    PropStateView v;
     CHECK(!v.Known(a));
     CHECK(DropSignature(a, LeaseLevel::Touch, 2, v.Known(a)));            // the drop itself: first heard
     v.OnGrant(a, 2, LeaseLevel::Touch);
@@ -583,13 +582,13 @@ static void TestDropSignatureFirstGrantOnly() {
     v.OnGrant(a, kHostSlot, LeaseLevel::Free);                            // it came to rest and was released
     CHECK(v.Known(a));
     CHECK(!DropSignature(a, LeaseLevel::Touch, 2, v.Known(a)));           // the owner touches it again: not a drop
-    BodyStateMsg s = SomeState(); s.objId = a; s.lessee = kHostSlot; s.senderTimeMs = 5;
-    BodyStateView w;
+    PropStateMsg s = SomeState(); s.propId = a; s.lessee = kHostSlot; s.senderTimeMs = 5;
+    PropStateView w;
     CHECK(w.Apply(s) && w.Known(a));                                      // streamed by the host: also heard of
     w.Clear();
     CHECK(!w.Known(a) && DropSignature(a, LeaseLevel::Touch, 2, w.Known(a)));   // a new level: ids start over
-    BodyStateMsg early = s; early.lessee = 2;
-    BodyStateView x;
+    PropStateMsg early = s; early.lessee = 2;
+    PropStateView x;
     CHECK(!x.Apply(early) && !x.Known(a));                                // a state ahead of its Grant does not make it known
 }
 
@@ -656,7 +655,7 @@ static void TestDropNoticedFollowsTheTable() {
     const uint8_t owner = 2, other = 1;
     const uint64_t id = MakeWeaponPropId(3, 5);
     LeaseTable t;
-    BodyStateView v;
+    PropStateView v;
     auto heard = [&](const LeaseResult& r) {
         const LeaseLevel pl = v.Level(id);
         const uint8_t ps = v.Streamer(id);
@@ -819,7 +818,7 @@ int main() {
     TestGrantWhenFree(); TestTouchVsTouchFirstWins(); TestHoldBeatsTouch(); TestHoldVsHoldFirstWins();
     TestRenewAndUpgrade(); TestLapseAtExactly3sBoundary(); TestRelease(); TestEntityLeft();
     TestHostOwnedBots(); TestDuplicateRequestFromSameSlotIsIdempotent(); TestLeaseCapPerSlot();
-    TestBodyStateViewStaleAndDuplicateRejected(); TestBodyStateViewWrapAround(); TestBodyStateViewFollowsGrants();
+    TestPropStateViewStaleAndDuplicateRejected(); TestPropStateViewWrapAround(); TestPropStateViewFollowsGrants();
     TestLeaseStreamerAndAccepts(); TestGrantsForLateJoiner(); TestLeaseFromPeer();
     TestClaimTouchLifecycle(); TestClaimHoldThrowSettle(); TestClaimContactWindowAndRestReset(); TestPropAtRestAndFreeSchedule();
     TestIdentityScheme(); TestIdleDespawn(); TestLooseTimer();
