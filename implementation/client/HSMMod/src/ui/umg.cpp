@@ -401,6 +401,20 @@ Canvas Kit::Root() const {
     return c;
 }
 
+Canvas Kit::FirstCanvas() const {
+    Canvas c = Root();
+    if (c) return c;
+    UObject** rootPtr = tree_ ? Field<UObject*>(tree_, "RootWidget") : nullptr;
+    std::vector<UObject*> queue;
+    if (rootPtr && *rootPtr) queue.push_back(*rootPtr);
+    for (size_t i = 0; i < queue.size() && i < 200; ++i) {
+        UObject* w = queue[i];
+        if (SameNameAscii(ObjectName(reinterpret_cast<UObject*>(ClassOf(w))), "CanvasPanel")) { c.w_ = w; return c; }
+        for (UObject* child : ChildrenOf(w)) if (child) queue.push_back(child);
+    }
+    return c;
+}
+
 bool Kit::FontFrom(UObject* textBlock, const char* what) {
     if (!ReadFont(textBlock, font_)) return false;
     HSM_LOG("umg: font copied from %s (%zu bytes, size %.1f)", what, font_.size(), double(FontSize(font_)));

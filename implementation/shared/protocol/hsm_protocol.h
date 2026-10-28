@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 22;         // 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 23;         // 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -65,6 +65,10 @@ enum class MsgType : uint8_t {
     MeshHeard = 38,   // client -> host, reliable: which other slots this client hears directly (mesh fallback)
     PingTable = 39,   // client -> host, reliable: this client's measured ping to the host and to each other client
     Voice = 40,       // both ways, unreliable: one chunk of a fighter's microphone (Steam-compressed), proximity voice
+    VoiceMode = 41,   // host -> client, reliable: the host changed its voice setting (Off / Proximity / Everyone)
+    RouteTable = 42,  // host -> client, reliable: this client's detour routes and pair keys, and the pairs it relays
+    Forward = 43,     // client -> client, unreliable: another client's Pose or Vitals, passed on by a relay (detour)
+    VoteState = 44,   // host -> client, reliable: the votekick running now (or none), and this client's own vote
 };
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
@@ -109,12 +113,13 @@ struct Welcome {
     std::string map;
     uint8_t syncMode = 0;    // session/hsm_authority.h SyncMode: 0 the host simulates every fighter, 1 each owner its own
     std::string modBuild;    // rev 17: the host's mod build
-    uint8_t flags = 0;       // rev 19: kWelcomeNoHostFighter | kWelcomeMesh; rev 22: kWelcomePeerPing | kWelcomeVoice
+    uint8_t flags = 0;       // rev 19: kWelcomeNoHostFighter | kWelcomeMesh; rev 22: kWelcomePeerPing | kWelcomeVoice; rev 23: kWelcomeVoiceAll
 };
 constexpr uint8_t kWelcomeNoHostFighter = 1;   // the host plays no fighter of its own
 constexpr uint8_t kWelcomeMesh = 2;            // mesh offered: clients send Pose/Vitals to each other too (PeerMap follows)
 constexpr uint8_t kWelcomePeerPing = 4;        // rev 22: the PeerMap follows so clients can ping each other (mesh on or off)
 constexpr uint8_t kWelcomeVoice = 8;           // rev 22: the host relays proximity voice (voice=1 in its HSMMod.ini)
+constexpr uint8_t kWelcomeVoiceAll = 16;       // rev 23: with kWelcomeVoice: every living player hears every living one (voice_reach=everyone)
 struct Reject { RejectReason reason = RejectReason::Malformed; };
 
 struct InputFrame {
@@ -254,7 +259,7 @@ inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgTyp
 inline bool Decode(const uint8_t* d, size_t n, Welcome& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Welcome) return false;
     m.sessionId = r.u32(); m.slot = r.u8(); m.entity = r.u8(); m.snapshotHz = r.u16(); m.map = r.str(200); m.syncMode = r.u8(); m.modBuild = r.str(kMaxModBuild); m.flags = r.u8();
-    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1 && (m.flags & ~(kWelcomeNoHostFighter | kWelcomeMesh | kWelcomePeerPing | kWelcomeVoice)) == 0;
+    return r.done() && m.snapshotHz >= 1 && m.snapshotHz <= 120 && m.syncMode <= 1 && (m.flags & ~(kWelcomeNoHostFighter | kWelcomeMesh | kWelcomePeerPing | kWelcomeVoice | kWelcomeVoiceAll)) == 0;
 }
 
 inline std::vector<uint8_t> Encode(const Reject& m) { Writer w; w.header(MsgType::Reject); w.u8(uint8_t(m.reason)); return w.buf; }
@@ -515,8 +520,10 @@ inline bool Decode(const uint8_t* d, size_t n, PingTableMsg& m) {
 }
 
 // Voice (rev 22): one Steam-compressed microphone chunk. A client sends its own (entity = its fighter); the host
-// relays it to the players who may hear it (voice/hsm_voice.h) with the entity it checked. flags bit0: the first
-// chunk of a talk spurt.
+// relays it to the players who may hear it (voice/hsm_voice.h) with the entity it checked. flags: kVoiceSpurt, the
+// first chunk of a talk spurt; kVoiceAdpcm (rev 23), the data is IMA ADPCM at 16 kHz (voice/hsm_adpcm.h), recorded
+// by the mod from a microphone the player picked, instead of Steam-compressed.
+constexpr uint8_t kVoiceSpurt = 1, kVoiceAdpcm = 2;
 constexpr size_t kMaxVoiceBytes = 4096;   // over a second of speech: only a long hitch makes a chunk this big
 struct VoiceMsg { uint8_t entity = 0; uint16_t seq = 0; uint8_t flags = 0; std::vector<uint8_t> data; };
 inline std::vector<uint8_t> Encode(const VoiceMsg& m) {
@@ -529,9 +536,105 @@ inline bool Decode(const uint8_t* d, size_t n, VoiceMsg& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Voice) return false;
     m.entity = r.u8(); m.seq = r.u16(); m.flags = r.u8();
     const size_t len = r.u16();
-    if (!r.ok() || m.entity == 0 || m.flags > 1 || len == 0 || len > kMaxVoiceBytes || n < 10 || n - 10 != len) return false;   // 4 header + 6 fields
+    if (!r.ok() || m.entity == 0 || (m.flags & ~(kVoiceSpurt | kVoiceAdpcm)) != 0 || len == 0 || len > kMaxVoiceBytes || n < 10 || n - 10 != len) return false;   // 4 header + 6 fields
     m.data.assign(d + 10, d + n);
     return true;
+}
+
+// VoiceMode (rev 23): the host's voice setting changed mid-session (voice/hsm_voice.h Reach: 0 Off, 1 Proximity,
+// 2 Everyone). The session's starting value comes in Welcome.flags.
+struct VoiceModeMsg { uint8_t reach = 0; };
+inline std::vector<uint8_t> Encode(const VoiceModeMsg& m) { Writer w; w.header(MsgType::VoiceMode); w.u8(m.reach); return w.buf; }
+inline bool Decode(const uint8_t* d, size_t n, VoiceModeMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::VoiceMode) return false;
+    m.reach = r.u8(); return r.done() && m.reach <= 2;
+}
+
+// Detours (rev 23, session/hsm_route.h, session/hsm_detour.h). The host plans each client pair's path and sends every
+// client its RouteTable: for each other client, the path (direct, through the host, or through a relay client) and the
+// pair's key; and the pairs this client relays for. A Forward carries one Pose or Vitals message from `from` to `to`
+// through the relay, with a tag only the pair's two ends can make (the relay never gets the key). epoch: the table's
+// number; a Forward from another epoch is dropped.
+constexpr uint8_t kRouteViaDirect = 0xFE;   // RouteKey.via: straight to the peer (session/hsm_route.h kRouteDirect)
+constexpr uint8_t kRouteViaHost = 0;        // RouteKey.via: through the host (slot 0), as before detours
+constexpr size_t kRouteKeyBytes = 16;
+constexpr size_t kMaxRoutePairs = kMaxPeerMap * (kMaxPeerMap - 1) / 2;
+struct RouteKey { uint8_t peer = 0; uint8_t via = kRouteViaHost; std::array<uint8_t, kRouteKeyBytes> key{}; };
+struct RoutePair { uint8_t a = 0, b = 0; };   // a < b; the relay passes on both directions
+struct RouteTableMsg { uint8_t epoch = 0; std::vector<RouteKey> keys; std::vector<RoutePair> relays; };
+inline std::vector<uint8_t> Encode(const RouteTableMsg& m) {
+    Writer w; w.header(MsgType::RouteTable); w.u8(m.epoch);
+    const size_t k = m.keys.size() < kMaxPeerMap ? m.keys.size() : kMaxPeerMap; w.u8(uint8_t(k));
+    for (size_t i = 0; i < k; ++i) { w.u8(m.keys[i].peer); w.u8(m.keys[i].via); w.buf.insert(w.buf.end(), m.keys[i].key.begin(), m.keys[i].key.end()); }
+    const size_t p = m.relays.size() < kMaxRoutePairs ? m.relays.size() : kMaxRoutePairs; w.u8(uint8_t(p));
+    for (size_t i = 0; i < p; ++i) { w.u8(m.relays[i].a); w.u8(m.relays[i].b); }
+    return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, RouteTableMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::RouteTable) return false;
+    m.epoch = r.u8();
+    const size_t k = r.u8(); if (k > kMaxPeerMap) return false;
+    m.keys.assign(k, RouteKey{});
+    uint32_t seen = 0;
+    for (RouteKey& e : m.keys) {
+        e.peer = r.u8(); e.via = r.u8();
+        for (uint8_t& b : e.key) b = r.u8();
+        if (e.peer == 0 || e.peer >= kMaxPeerMap || (seen >> e.peer & 1)) return false;   // clients only, once each
+        if (e.via != kRouteViaDirect && (e.via >= kMaxPeerMap || e.via == e.peer)) return false;
+        seen |= 1u << e.peer;
+    }
+    const size_t p = r.u8(); if (p > kMaxRoutePairs) return false;
+    m.relays.assign(p, RoutePair{});
+    for (size_t i = 0; i < p; ++i) {
+        RoutePair& e = m.relays[i];
+        e.a = r.u8(); e.b = r.u8();
+        if (e.a == 0 || e.a >= e.b || e.b >= kMaxPeerMap) return false;
+        for (size_t j = 0; j < i; ++j) if (m.relays[j].a == e.a && m.relays[j].b == e.b) return false;
+    }
+    return r.done();
+}
+
+constexpr size_t kForwardHeader = 4 + 1 + 1 + 1 + 2 + 8 + 2;   // header, from, to, epoch, seq, tag, length
+constexpr size_t kMaxForwardBytes = kMaxPacket - kForwardHeader;
+struct ForwardMsg { uint8_t from = 0, to = 0, epoch = 0; uint16_t seq = 0; uint64_t tag = 0; std::vector<uint8_t> payload; };
+inline std::vector<uint8_t> Encode(const ForwardMsg& m) {
+    Writer w; w.header(MsgType::Forward); w.u8(m.from); w.u8(m.to); w.u8(m.epoch); w.u16(m.seq); w.u64(m.tag);
+    const size_t len = m.payload.size() < kMaxForwardBytes ? m.payload.size() : kMaxForwardBytes;
+    w.u16(uint16_t(len)); w.buf.insert(w.buf.end(), m.payload.begin(), m.payload.begin() + long(len));
+    return w.buf;
+}
+// The payload must be a whole message of this revision, a Pose or a Vitals (never another Forward); the receiver
+// decodes it after the tag checks.
+inline bool Decode(const uint8_t* d, size_t n, ForwardMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Forward) return false;
+    m.from = r.u8(); m.to = r.u8(); m.epoch = r.u8(); m.seq = r.u16(); m.tag = r.u64();
+    const size_t len = r.u16();
+    if (!r.ok() || m.from == 0 || m.to == 0 || m.from >= kMaxPeerMap || m.to >= kMaxPeerMap || m.from == m.to) return false;
+    if (len == 0 || len > kMaxForwardBytes || n < kForwardHeader || n - kForwardHeader != len) return false;
+    MsgType inner; if (!PeekType(d + kForwardHeader, len, inner) || (inner != MsgType::Pose && inner != MsgType::Vitals)) return false;
+    m.payload.assign(d + kForwardHeader, d + n);
+    return true;
+}
+
+// VoteState (rev 23): the votekick as the host counts it, sent to each client when it changes and each second while it
+// runs. target: the slot being voted on (kVoteNone: no vote). mine: this client's vote (1 yes, -1 no, 0 not yet,
+// kVoteNotVoter: not a voter, e.g. the target). ban: 1 for a voteban (role=server, 7 days), 0 for a votekick. Votes are
+// cast as chat lines (/votekick #slot, /voteban #slot, /yes, /no).
+constexpr uint8_t kVoteNone = 0xFF;
+constexpr int8_t kVoteNotVoter = -2;
+struct VoteStateMsg { uint8_t target = kVoteNone; uint8_t yes = 0, no = 0, needed = 0, voters = 0, secondsLeft = 0; int8_t mine = kVoteNotVoter; uint8_t ban = 0; };
+inline std::vector<uint8_t> Encode(const VoteStateMsg& m) {
+    Writer w; w.header(MsgType::VoteState); w.u8(m.target); w.u8(m.yes); w.u8(m.no); w.u8(m.needed); w.u8(m.voters); w.u8(m.secondsLeft);
+    w.u8(uint8_t(m.mine)); w.u8(m.ban); return w.buf;
+}
+inline bool Decode(const uint8_t* d, size_t n, VoteStateMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::VoteState) return false;
+    m.target = r.u8(); m.yes = r.u8(); m.no = r.u8(); m.needed = r.u8(); m.voters = r.u8(); m.secondsLeft = r.u8(); m.mine = int8_t(r.u8()); m.ban = r.u8();
+    if (!r.done()) return false;
+    if (m.ban > 1 || (m.target == kVoteNone && m.ban)) return false;
+    if (m.target == kVoteNone) return m.yes == 0 && m.no == 0 && m.needed == 0 && m.voters == 0 && m.secondsLeft == 0 && m.mine == kVoteNotVoter;
+    return m.target < kMaxPeerMap && m.voters <= kMaxPeerMap && m.yes + m.no <= m.voters && m.needed <= m.voters && m.secondsLeft <= 60 &&
+           m.mine >= kVoteNotVoter && m.mine <= 1;
 }
 
 // ---------------------------------------------------------------- quantization

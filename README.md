@@ -3,8 +3,8 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build is v0.7.0-pre5. Expect rough edges, and please report what you find
-> with `/bug` in the game. Everyone in a session needs the same version (0.7.0-pre5 connects only to 0.7.0-pre5).
+> **Status: pre-release.** The current build is v0.7.0-pre6. Expect rough edges, and please report what you find
+> with `/bug` in the game. Everyone in a session needs the same version (0.7.0-pre6 connects only to 0.7.0-pre6).
 
 ## What it does
 
@@ -13,10 +13,16 @@ No game files are changed; delete the DLL to go back to vanilla.
 - **Up to 8 players** with their own loadouts, carried over from each player's game, plus bots.
 - **Host migration:** if the host of a Steam lobby leaves, another player takes over the lobby and reopens the map,
   and everyone else follows (scores start over). `host_migration=0` under `[net]` in `HSMMod.ini` turns it off.
-- **Proximity voice chat (off by default):** `voice=1` under `[net]` in `HSMMod.ini`, on the host and on each player
-  who wants it. You hear players near you, from the side they stand on, fading out by 30 m. It sends while you speak
-  (`voice_mode=ptt` for push-to-talk on `V`). A badly hurt, knocked-out or dead fighter goes quiet; the dead talk only
-  to each other. A `> ` before a name tag shows who is talking. Steam must be running.
+- **Voice chat (off by default):** the host turns it on under VOICE CHAT on the multiplayer page: **Proximity** (you
+  hear players near you, from the side they stand on, fading out by 30 m) or **Everyone** (every living player hears
+  every living one). Each player picks their microphone there or in the Esc menu: push to talk (on `V` by default;
+  click CHANGE to pick another key), open mic with a threshold, or muted; the recording device; voice volume; and
+  HEAR MYSELF to check the microphone, with a level meter. A badly hurt, knocked-out or dead fighter goes quiet; the
+  dead talk only to each other. A `> ` before a name tag shows who is talking. Steam must be running.
+- **Multiplayer Esc menu:** Esc in a session match opens PLAYERS (mute or unmute each player, set their volume, and
+  for the host kick or ban; everyone else can start a vote kick and vote YES or NO), VOICE (your microphone settings)
+  and NETWORK (role, ping to the host, direct links). GAME MENU opens the game's own pause menu (settings, quit), and
+  MULTIPLAYER MENU there brings you back. RESUME, REPORT A BUG and LEAVE SESSION are at the bottom.
 - **Owner sync (default):** your own machine simulates your fighter, so your body has no added latency. Other players
   are physics stand-ins driven by a 60 Hz pose stream.
 - **Hits through the game's own damage code:** the attacker claims a hit; the victim's machine replays it on its own
@@ -31,16 +37,21 @@ No game files are changed; delete the DLL to go back to vanilla.
 - **Crash notes:** if the game crashes, the last lines of `HSMMod.log` name the fault, and `HSMMod.crash.dmp` (a small
   crash dump, next to the log in the game's `Binaries\Win64` folder) is written. Please attach both and the newest
   folder under `%LOCALAPPDATA%\HalfSwordUE5\Saved\Crashes\` to an issue.
-- **Kick and ban:** the host types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat (`/players` lists
-  everyone, `/bans` and `/unban` manage bans). On a hosted server players can `/votekick <name>`.
+- **Kick and ban:** the host uses the Esc menu, or types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat
+  (`/players` lists everyone, `/bans` and `/unban` manage bans). Players can start a vote kick from the Esc menu or
+  with `/votekick <name>`, then `/yes` or `/no`; the host votes too. A passed vote kick keeps the player out for 15
+  minutes. On a `role=server` host players can also start a vote ban (VOTE BAN, or `/voteban <name>`): it needs two
+  thirds of the votes and bans the player for 7 days. `votekick=0` in the host's `HSMMod.ini` turns votes off.
 - **In-game bug reports:** found a bug? Open the chat and type `/bug <what went wrong>` (or use REPORT A BUG on the
   multiplayer page, or on the pause menu in a session fight, which opens the chat with `/bug ` typed) to open an issue
   here with your mod log attached privately. You see "Sending...", then the issue link once it is filed, or a short
   reason if it was not. Other players in the session are asked whether to add theirs (`/sendlog` or `/nolog`).
-- **Direct client-to-client movement (experimental):** `mesh=1` under `[net]` in `HSMMod.ini`, on the host and the
-  clients, lets players in a Steam lobby send their movement, blows and other fight events straight to each other instead of
-  through the host. It is
-  off by default; the host relays again by itself if a direct path fails.
+- **Direct client-to-client movement (experimental, on by default):** players in a Steam lobby send their movement,
+  blows and other fight events straight to each other instead of through the host; the host relays again by itself if
+  a direct path fails. `mesh=0` under `[net]` in `HSMMod.ini` sends everything through the host as before.
+- **Detours (experimental, on by default):** the host picks a faster path for each pair of players from their measured
+  pings: when A to C through B is quicker than A to C directly, B passes A's movement on as well. Only A and C can make
+  or check those packets. `detour=0` turns it off.
 - **Hosting without playing (experimental):** `role=server` runs matches and rotates maps with no fighter of its own;
   players spawn at the map's start points. It runs a normal copy of the game.
 

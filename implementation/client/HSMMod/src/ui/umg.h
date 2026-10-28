@@ -226,6 +226,7 @@ public:
     Kit(ue::UObject* userWidget, Vis shown);
     explicit operator bool() const { return tree_ != nullptr; }
     Canvas Root() const;                      // the tree's root when it is a CanvasPanel, else an empty Canvas
+    Canvas FirstCanvas() const;               // the root canvas, else the first CanvasPanel under the root (breadth first)
     // Copies a TextBlock's font (the game's typeface) for every Text made after. False when it has none.
     bool FontFrom(ue::UObject* textBlock, const char* what);
     bool HasFont() const { return !font_.empty(); }

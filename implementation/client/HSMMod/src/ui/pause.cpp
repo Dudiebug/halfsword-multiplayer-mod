@@ -1,5 +1,6 @@
 #include "ui/pause.h"
 #include "ui/umg.h"
+#include "ui/mp_widgets.h"
 #include "match/hsm_hud_style.h"
 #include "log.h"
 #include <windows.h>
@@ -18,10 +19,11 @@ struct Found { UObject* button; UObject* parent; };
 // The injected button and which pause menu instance it is in (the slot and the class guard against a reused address).
 struct State {
     UObject* menu = nullptr; int32_t menuIndex = -1; UClass* menuClass = nullptr;
-    bool tried = false;
+    bool tried = false, escTried = false, open = false;
     Kit kit;
     Button button;
     Text label;
+    mp::EscPanel esc;
 } s;
 
 bool IsClass(UObject* o, const char* cls) {
@@ -109,7 +111,7 @@ bool CopyFont(UObject* from, UObject* to) {
 }
 
 bool Build(UObject* menu) {
-    s.kit = Kit(menu, Vis::Visible);
+    if (!s.kit) s.kit = Kit(menu, Vis::Visible);
     if (!s.kit) { HSM_LOG("ui: pause menu has no widget tree; no report button"); return false; }
     UObject** tree = Field<UObject*>(menu, "WidgetTree");
     UObject** rootPtr = tree && *tree ? Field<UObject*>(*tree, "RootWidget") : nullptr;
@@ -127,7 +129,7 @@ bool Build(UObject* menu) {
     s.label = s.kit.MakeText();
     if (!s.button || !s.label) { HSM_LOG("ui: pause menu report button: widget spawn failed"); return false; }
     s.button.Content(s.label);
-    s.label.Set("REPORT A BUG");
+    s.label.Set(s.esc ? "MULTIPLAYER MENU" : "REPORT A BUG");
     s.label.Color(style::kBone);
     s.label.Align(Justify::Center);
     if (last && stockLabel) {   // a text button: its look and typeface. A picture button keeps the default look.
@@ -175,22 +177,64 @@ bool Build(UObject* menu) {
     return true;
 }
 
+// The multiplayer Esc menu, on the menu's root canvas (or the first canvas in it), in the stock labels' typeface.
+bool BuildEsc(UObject* menu) {
+    if (!s.kit) s.kit = Kit(menu, Vis::Visible);
+    if (!s.kit) { HSM_LOG("ui: pause menu has no widget tree; no multiplayer Esc menu"); return false; }
+    if (!s.kit.HasFont()) {
+        UObject* stock = FindTextBlock(menu, 12);
+        if (!stock || !s.kit.FontFrom(stock, "the pause menu")) if (Text probe = s.kit.MakeText()) s.kit.FontFrom(probe.get(), "a new TextBlock");
+    }
+    Canvas canvas = s.kit.FirstCanvas();
+    if (!canvas) { HSM_LOG("ui: pause menu has no canvas panel; the stock menu stays (no multiplayer Esc menu)"); return false; }
+    if (!s.esc.Build(s.kit, canvas)) return false;
+    HSM_LOG("ui: multiplayer Esc menu built on the pause menu");
+    return true;
+}
+
 }  // namespace
 
-bool PauseReportTick(UObject* menu, bool show) {
-    if (!menu) { if (s.menu) s = State{}; return false; }
+PauseAction PauseMenuTick(UObject* menu, Session* session, bool reportButton) {
+    if (!menu) {   // closed: the same instance may be shown again, so its widgets are kept
+        if (s.esc && s.esc.Shown()) s.esc.Show(false);
+        s.open = false;
+        return PauseAction::None;
+    }
     if (s.menu != menu || ObjectAt(s.menuIndex) != menu || ClassOf(menu) != s.menuClass) {   // a new menu instance
         s = State{};
         s.menu = menu; s.menuIndex = ObjectIndex(menu); s.menuClass = ClassOf(menu);
     }
-    if (!show) { if (s.button) s.button.Show(false); return false; }
-    if (!s.tried) {
-        s.tried = true;
-        if (!Build(menu)) { if (s.button) s.button.Show(false); s.button = Button{}; return false; }   // not tried again in this instance
+    const bool opened = !s.open;
+    s.open = true;
+    if (session && !s.escTried) { s.escTried = true; BuildEsc(menu); }
+    const bool esc = session && s.esc;
+    if (esc && opened) s.esc.Show(true);                    // Esc in a match: the multiplayer menu first
+    if (!esc && s.esc && s.esc.Shown()) s.esc.Show(false);  // the session ended with the menu open
+    if (esc || reportButton) {
+        if (!s.tried) {
+            s.tried = true;
+            if (!Build(menu)) { if (s.button) s.button.Show(false); s.button = Button{}; }   // not tried again in this instance
+        }
+        if (s.button) {
+            s.label.Set(esc ? "MULTIPLAYER MENU" : "REPORT A BUG");
+            s.button.Show(!(esc && s.esc.Shown()));
+            if (s.button.Clicked()) {
+                if (esc) s.esc.Show(true);
+                else return PauseAction::ReportBug;
+            }
+        }
+    } else if (s.button) {
+        s.button.Show(false);
     }
-    if (!s.button) return false;
-    s.button.Show(true);
-    return s.button.Clicked();
+    if (!esc || !s.esc.Shown()) return PauseAction::None;
+    switch (s.esc.Tick(*session, reportButton)) {
+        case mp::EscPanel::Action::None: break;
+        case mp::EscPanel::Action::Resume: return PauseAction::Resume;
+        case mp::EscPanel::Action::GameMenu: s.esc.Show(false); HSM_LOG("ui: Esc menu: GAME MENU (the stock pause menu)"); break;
+        case mp::EscPanel::Action::ReportBug: return PauseAction::ReportBug;
+        case mp::EscPanel::Action::Leave: return PauseAction::Leave;
+    }
+    return PauseAction::None;
 }
 
 }  // namespace hsm::ui

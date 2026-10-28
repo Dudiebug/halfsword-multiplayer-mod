@@ -1,8 +1,11 @@
 // HSMMod.ini next to the game exe. Missing file or role=off keeps the game fully vanilla.
 #pragma once
 #include "hsm_chat.h"
+#include "voice/hsm_voice_ui.h"
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace hsm {
 // Steam: lobby-driven (Multiplayer button on the main menu; lobby owner hosts). Host/Client: direct IP via ENet.
@@ -19,9 +22,13 @@ struct Config {
     // others are stand-ins (protocol rev 9 owner authority); false: the host simulates every fighter from inputs.
     bool ownerSync = true;
     // true: clients also send Pose and Vitals straight to each other (Steam lobbies only; session/hsm_mesh.h), and the host
-    // stops relaying what a client already hears directly. false (default): every stream goes through the host, as in 0.6.5.
-    // Needs mesh=1 on the host and on the clients that should use it; ENet (direct IP) stays a star either way.
-    bool mesh = false;
+    // stops relaying what a client already hears directly (default from 0.7.0-pre6). false (mesh=0): every stream goes
+    // through the host, as in 0.6.5. Used where the host and the client both have it on; ENet (direct IP) stays a star.
+    bool mesh = true;
+    // true (default from 0.7.0-pre6): with the mesh on, the host also plans each client pair's fastest path from the
+    // measured pings and a client may pass another pair's Pose and Vitals on (detours, session/hsm_detour.h). detour=0
+    // turns it off; nothing happens with mesh=0.
+    bool detour = true;
     // true (default): on a Steam lobby every client pings the host and every other client every 2 s and reports the
     // results to the host every 10 s; both log them in the health window ("ping:" lines). Measures what a mesh would get
     // without turning it on. Host and clients both need it; mesh=1 is not needed.
@@ -29,12 +36,17 @@ struct Config {
     // true (default): when a Steam lobby's host leaves, the member Steam makes the new lobby owner hosts the same lobby
     // and the others follow it (session/hsm_migration.h) instead of everyone going back to the menu.
     bool hostMigration = true;
-    // Proximity voice (gameplay/voice.h): Steam records the microphone; the host relays it to the players near the
-    // speaker. A fighter below voiceCutoff of full consciousness (or knocked out, or dead) is cut off; the dead hear
-    // only the dead. voiceMode 0: open microphone above voiceLevelDb (default); 1: push to talk on voiceKey.
-    // Off by default (voice=1 turns it on); the host's voice=0 turns it off for the whole session.
+    // Voice chat (gameplay/voice.h). The host's voice and voiceReach are the session's setting: off (the default), by
+    // distance (proximity: full volume within voiceNearM, silent past voiceFarM) or every living player hears every
+    // living one (everyone). A fighter below voiceCutoff of full consciousness (or knocked out, or dead) is cut off; the
+    // dead hear only the dead. Every player hears whatever the host's setting allows; the rest is each player's own:
+    // voiceMic (push to talk on voiceKey by default, an open microphone above voiceLevelDb, or off), voiceDevice (a
+    // Windows recording device by name; empty: the Windows default, recorded by Steam) and voiceVolume. The multiplayer
+    // page and the in-match menu change them and write them back (SaveIniValues).
     bool voice = false;
-    int voiceMode = 0;
+    voice::Reach voiceReach = voice::Reach::Proximity;   // when voice is on
+    voice::Mic voiceMic = voice::Mic::PushToTalk;
+    std::string voiceDevice;
     float voiceLevelDb = -40.f;
     int voiceKey = 'V';          // a virtual-key code
     float voiceNearM = 5.f, voiceFarM = 30.f;
@@ -64,8 +76,9 @@ struct Config {
     int serverTimeLimitS = 0;                  // 0: none
     int serverCountdownS = 30;                 // lobby countdown once serverMinPlayers have joined
     int serverMinPlayers = 2;
-    // role=server moderation (session/hsm_moderation.h): Steam IDs that may /kick, /ban and /unban from the chat (the
-    // console, HSMMod.cmd, always may), and whether players can start a /votekick.
+    // Moderation (session/hsm_moderation.h): on role=server, Steam IDs that may /kick, /ban and /unban from the chat (the
+    // console, HSMMod.cmd, always may). serverVoteKick (votekick= or server_votekick=): whether players can vote a
+    // player out; since 0.7.0-pre6 in every hosted session, from the chat or the in-match menu.
     std::string serverAdmins;
     bool serverVoteKick = true;
 };
@@ -73,4 +86,6 @@ struct Config {
 Config LoadConfig();          // writes a commented default file if none exists
 const char* RoleName(Role r);
 bool SaveHelpImprove(bool on);   // writes help_improve= under [net] in HSMMod.ini, the rest of the file untouched; false: could not
+// Writes these keys under [net] in HSMMod.ini in one replace, the rest of the file untouched; false: could not.
+bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys);
 }  // namespace hsm

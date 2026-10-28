@@ -6,7 +6,8 @@
 // - ConsciousGate: a fighter whose consciousness drops below a share of its full value is cut off (and a knocked-out
 //   or dead one); the full value is the highest seen, so the game's scale does not matter.
 // - Audible / RelayVoice: the living are heard near them (dead spectators hear them too, from their camera); the dead
-//   are heard only by the dead, at full volume.
+//   are heard only by the dead, at full volume. AudibleIn: the host's setting (pre6) can make the living heard by
+//   every living player at full volume instead (Everyone).
 // - Spatialize: distance fade and left/right pan from the listener's camera.
 // - SeqGuard, VoiceRate: late or repeated frames are dropped; a sender cannot flood.
 // - Mixer: per speaker queue of mono PCM, a short prebuffer (jitter), gains ramped per buffer (no clicks).
@@ -104,6 +105,15 @@ inline Hear Audible(bool speakerAlive, bool speakerAwake, bool listenerAlive) {
     if (!speakerAlive) return listenerAlive ? Hear::None : Hear::Flat;   // the dead talk among themselves
     if (!speakerAwake) return Hear::None;                                 // knocked out or nearly: cut off
     return Hear::Spatial;
+}
+
+// The host's session setting (0.7.0-pre6): no voice, by distance, or every living player hears every living one.
+enum class Reach : uint8_t { Off = 0, Proximity = 1, Everyone = 2 };
+
+inline Hear AudibleIn(Reach reach, bool speakerAlive, bool speakerAwake, bool listenerAlive) {
+    if (reach == Reach::Off) return Hear::None;
+    const Hear h = Audible(speakerAlive, speakerAwake, listenerAlive);
+    return reach == Reach::Everyone && h == Hear::Spatial ? Hear::Flat : h;
 }
 
 struct Range { float nearCm = 500.f, farCm = 3000.f; };

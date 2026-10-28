@@ -18,7 +18,7 @@ static void TestWire() {
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(9); CHECK(!Decode(extra.data(), extra.size(), o));   // length must match
     VoiceMsg bad = m; bad.entity = 0; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));
-    bad = m; bad.flags = 2; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));
+    bad = m; bad.flags = 4; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));   // rev 23: bit1 is kVoiceAdpcm, bit2 unknown
     bad = m; bad.data.clear(); b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));     // an empty chunk is not sent
     VoiceMsg big = m; big.data.assign(kMaxVoiceBytes + 50, 7); b = Encode(big);           // the encoder bounds it
     CHECK(Decode(b.data(), b.size(), o) && o.data.size() == kMaxVoiceBytes);

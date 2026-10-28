@@ -83,6 +83,9 @@ static void TestCommands() {
     CHECK(c.kind == ModCommandKind::Ban && c.target == "30m");
     CHECK(ParseModCommand("/unban #1").kind == ModCommandKind::Unban && ParseModCommand("/bans").kind == ModCommandKind::Bans);
     CHECK(ParseModCommand("/vk bob").kind == ModCommandKind::VoteKick && ParseModCommand("/votekick #2").target == "#2");
+    CHECK(ParseModCommand("/VoteBan bob").kind == ModCommandKind::VoteBan && ParseModCommand("/vb #3").target == "#3");
+    CHECK(ParseModCommand("/voteban").kind == ModCommandKind::None);
+    CHECK(ParseModCommand("voteban #1", true).kind == ModCommandKind::VoteBan);
     CHECK(ParseModCommand("/yes").kind == ModCommandKind::Yes && ParseModCommand("/N").kind == ModCommandKind::No);
     CHECK(ParseModCommand("/players").kind == ModCommandKind::Players);
     for (const char* chat : {"", "kick bob", "/kick", "/kick   ", "/ban", "/bans x", "/yes please", "/say hi", "/report x", "hello /kick bob"})

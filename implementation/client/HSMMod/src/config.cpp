@@ -41,12 +41,17 @@ constexpr char kDefaultIni[] =
     "; 1: also send your HSMMod log (Steam IDs, IPs and your user name removed) when someone in your lobby files a bug report\n"
     "; or a crash is reported. The MULTIPLAYER page has the same switch. 0: off (default)\n"
     "help_improve=0\n"
-    "; proximity voice chat: voice=1 on, 0 off (the default; the host's 0 turns it off for everyone). voice_mode=level sends while you\n"
-    "; speak above voice_level_db (-60 picks up whispers, -30 only a firm voice); voice_mode=ptt sends while voice_key is\n"
-    "; held (a letter, a digit, f1..f12, mouse4 or mouse5). Full volume within voice_near_m, silent past voice_far_m.\n"
-    "; A fighter below voice_cutoff percent of full consciousness, knocked out or dead is cut off; the dead hear the dead.\n"
+    "; voice chat (the multiplayer page and the Esc menu in a match change these). The host's voice=1 turns it on for the\n"
+    "; session (0, the default: off for everyone); voice_reach=proximity fades voices with distance (full volume within\n"
+    "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one. Your microphone:\n"
+    "; voice_mode=ptt sends while voice_key is held (a letter, a digit, f1..f12, mouse4 or mouse5), level sends while you\n"
+    "; speak above voice_level_db (-60 picks up whispers, -30 only a firm voice), off never sends. voice_device: a\n"
+    "; recording device's name (empty: the Windows default). A fighter below voice_cutoff percent of full consciousness,\n"
+    "; knocked out or dead is cut off; the dead hear the dead. votekick=1 lets players vote a player out of your session.\n"
     "voice=0\n"
-    "voice_mode=level\n"
+    "voice_reach=proximity\n"
+    "voice_mode=ptt\n"
+    "voice_device=\n"
     "voice_level_db=-40\n"
     "voice_key=v\n"
     "voice_near_m=5\n"
@@ -58,7 +63,8 @@ constexpr char kDefaultIni[] =
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
     "; server_countdown_s=30, server_min_players=2 (1..8)\n"
     "; server_admins=Steam IDs (comma list) allowed to /kick, /ban and /unban from the chat; server_votekick=1 lets players\n"
-    "; vote a player out (15 min ban). The console takes kick, ban, unban, bans, players and say (HSMMod.cmd)\n"
+    "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players\n"
+    "; and say (HSMMod.cmd)\n"
     "server_transport=direct\n"
     "server_format=ffa\n"
     "server_maps=all\n"
@@ -67,20 +73,8 @@ constexpr char kDefaultIni[] =
     "server_countdown_s=30\n"
     "server_min_players=2\n"
     "server_admins=\n"
-    "server_votekick=1\n";
-
-// voice_key: a letter, a digit, f1..f12, mouse4 or mouse5 (case-insensitive). 0: not one of those.
-int ParseVoiceKey(std::string k) {
-    for (char& ch : k) ch = char(std::tolower(static_cast<unsigned char>(ch)));
-    if (k.size() == 1 && ((k[0] >= 'a' && k[0] <= 'z') || (k[0] >= '0' && k[0] <= '9'))) return std::toupper(static_cast<unsigned char>(k[0]));
-    if (k == "mouse4") return 0x05;   // VK_XBUTTON1
-    if (k == "mouse5") return 0x06;   // VK_XBUTTON2
-    if (k.size() >= 2 && k.size() <= 3 && k[0] == 'f') {
-        const int n = std::atoi(k.c_str() + 1);
-        if (n >= 1 && n <= 12 && std::to_string(n) == k.substr(1)) return 0x70 + n - 1;   // VK_F1..VK_F12
-    }
-    return 0;
-}
+    "server_votekick=1\n"
+    "votekick=1\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -104,7 +98,7 @@ static Role ParseRole(const std::string& r) {
 // Reads the whole ini, sets the key in the text, writes a sibling file and moves it over the ini (a crash in between
 // leaves the old file whole). A UTF-16 ini (a Notepad "Unicode" save) is left alone: GetPrivateProfileString reads it,
 // this rewrite would not.
-bool SaveHelpImprove(bool on) {
+bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys) {
     const std::wstring ini = ModFilePath(L"HSMMod.ini"), tmp = ini + L".tmp";
     std::string text;
     if (FILE* f = _wfopen(ini.c_str(), L"rb")) {
@@ -113,13 +107,16 @@ bool SaveHelpImprove(bool on) {
         std::fclose(f);
     }
     if (text.size() >= 2 && (text.compare(0, 2, "\xFF\xFE") == 0 || text.compare(0, 2, "\xFE\xFF") == 0)) return false;
-    const std::string next = util::SetIniValue(text, "net", "help_improve", on ? "1" : "0");
+    std::string next = text;
+    for (const auto& [key, value] : keys) next = util::SetIniValue(next, "net", key, value);
     FILE* f = _wfopen(tmp.c_str(), L"wb");
     if (!f) return false;
     const bool wrote = std::fwrite(next.data(), 1, next.size(), f) == next.size();
     if (std::fclose(f) != 0 || !wrote || !MoveFileExW(tmp.c_str(), ini.c_str(), MOVEFILE_REPLACE_EXISTING)) { DeleteFileW(tmp.c_str()); return false; }
     return true;
 }
+
+bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" : "0"}}); }
 
 Config LoadConfig() {
     std::wstring ini = ModFilePath(L"HSMMod.ini");
@@ -135,20 +132,24 @@ Config LoadConfig() {
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
     c.ownerSync = ReadString(ini, L"sync_mode", "owner") != "host";
-    c.mesh = ReadString(ini, L"mesh", "0") == "1";
+    c.mesh = ReadString(ini, L"mesh", "1") != "0";
+    c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
     c.voice = ReadString(ini, L"voice", "0") != "0";
     {
-        const std::string mode = ReadString(ini, L"voice_mode", "level");
-        if (mode == "off") c.voice = false;
-        else if (mode == "ptt") c.voiceMode = 1;
-        else if (mode != "level") HSM_LOG("config: voice_mode=%s is not level, ptt or off; using level", mode.c_str());
+        const std::string reach = ReadString(ini, L"voice_reach", "proximity");
+        c.voiceReach = voice::ReachFromIni(reach, voice::Reach::Proximity);
+        if (c.voiceReach == voice::Reach::Off) c.voiceReach = voice::Reach::Proximity;   // off is voice=0
+        if (reach != "proximity" && reach != "everyone") HSM_LOG("config: voice_reach=%s is not proximity or everyone; using proximity", reach.c_str());
+        const std::string mode = ReadString(ini, L"voice_mode", "ptt");
+        if (!voice::MicFromIni(mode, c.voiceMic)) HSM_LOG("config: voice_mode=%s is not ptt, level or off; using ptt", mode.c_str());
+        c.voiceDevice = ReadString(ini, L"voice_device", "");
     }
-    c.voiceLevelDb = float(Clamp(std::atoi(ReadString(ini, L"voice_level_db", "-40").c_str()), -80, -10));
+    c.voiceLevelDb = float(Clamp(std::atoi(ReadString(ini, L"voice_level_db", "-40").c_str()), voice::kLevelMinDb, voice::kLevelMaxDb));
     {
         const std::string key = ReadString(ini, L"voice_key", "v");
-        if (const int vk = ParseVoiceKey(key)) c.voiceKey = vk;
+        if (const int vk = voice::ParseVoiceKey(key)) c.voiceKey = vk;
         else HSM_LOG("config: voice_key=%s is not a letter, a digit, f1..f12, mouse4 or mouse5; using v", key.c_str());
     }
     c.voiceNearM = float(Clamp(std::atoi(ReadString(ini, L"voice_near_m", "5").c_str()), 1, 100));
@@ -173,7 +174,7 @@ Config LoadConfig() {
     c.serverCountdownS = Clamp(std::atoi(ReadString(ini, L"server_countdown_s", "30").c_str()), 0, 600);
     c.serverMinPlayers = Clamp(std::atoi(ReadString(ini, L"server_min_players", "2").c_str()), 1, kMaxPlayers);
     c.serverAdmins = ReadString(ini, L"server_admins", "");
-    c.serverVoteKick = ReadString(ini, L"server_votekick", "1") != "0";
+    c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags
@@ -190,15 +191,15 @@ Config LoadConfig() {
     HSM_LOG("config: role=%s host=%s port=%u snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
             c.hostAddress.c_str(), c.port, c.snapshotHz, c.inputHz, c.ownerSync ? "owner" : "host", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
-    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
-            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);
-    HSM_LOG("config: voice=%d mode=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%%", c.voice ? 1 : 0,
-            c.voiceMode ? "ptt" : "level", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f);
+    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
+            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);
+    HSM_LOG("config: voice=%d reach=%s mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
+            voice::ReachIni(c.voiceReach), voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)
         HSM_LOG("config: server transport=%s format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d", c.serverTransport.c_str(),
                 c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers);
     if (c.role == Role::Server)
-        HSM_LOG("config: server votekick=%d admins=%s", c.serverVoteKick ? 1 : 0, c.serverAdmins.empty() ? "none (console only)" : "set");
+        HSM_LOG("config: server admins=%s", c.serverAdmins.empty() ? "none (console only)" : "set");
     return c;
 }
 }  // namespace hsm

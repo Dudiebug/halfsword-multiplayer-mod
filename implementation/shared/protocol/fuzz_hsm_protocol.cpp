@@ -42,7 +42,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<PropStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
-    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<DeathReport>(d, n);
+    Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
 #ifdef HSM_FUZZ_NEGATIVE_CONTROL
@@ -68,6 +68,14 @@ std::vector<std::vector<uint8_t>> Seeds() {
     MeshHeardMsg mh; mh.mask = 0x06; s.push_back(Encode(mh));
     PingTableMsg pt; pt.entries = {{0, 40, 38, 0}, {2, 95, 0xFFFF, 12}}; s.push_back(Encode(pt));
     VoiceMsg vo; vo.entity = 4; vo.seq = 77; vo.flags = 1; vo.data = {9, 8, 7, 6, 5, 4}; s.push_back(Encode(vo));
+    vo.flags = kVoiceSpurt | kVoiceAdpcm; s.push_back(Encode(vo));
+    VoiceModeMsg vmm; vmm.reach = 2; s.push_back(Encode(vmm));
+    VoteStateMsg vs; vs.target = 3; vs.yes = 2; vs.no = 1; vs.needed = 3; vs.voters = 4; vs.secondsLeft = 20; vs.mine = 1; s.push_back(Encode(vs));
+    s.push_back(Encode(VoteStateMsg{}));
+    RouteTableMsg rt; rt.epoch = 3; rt.keys.resize(2); rt.keys[0].peer = 2; rt.keys[0].via = 3; rt.keys[0].key[5] = 0x55;
+    rt.keys[1].peer = 4; rt.keys[1].via = kRouteViaDirect; rt.relays = {{2, 5}}; s.push_back(Encode(rt));
+    ForwardMsg fw; fw.from = 1; fw.to = 2; fw.epoch = 3; fw.seq = 9; fw.tag = 0xFEEDFACEull; fw.payload = Encode(vo);
+    fw.payload[3] = uint8_t(MsgType::Pose); s.push_back(Encode(fw));
     DeathReport dr; dr.victim = 2; dr.killer = 1; dr.victimLife = 3; s.push_back(Encode(dr));
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
@@ -126,7 +134,7 @@ int main(int argc, char** argv) {
         if (Rand() % 4 == 0) {                       // pure random bytes, sometimes with a valid header
             buf.resize(Below(600));
             for (uint8_t& b : buf) b = uint8_t(Rand());
-            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::Voice))); }
+            if (buf.size() >= 4 && Rand() % 2) { buf[0] = 0x48; buf[1] = 0x4D; buf[2] = kProtocolRevision; buf[3] = uint8_t(1 + Below(uint8_t(MsgType::VoteState))); }
         } else {                                     // mutate a valid message
             buf = seeds[Below(seeds.size())];
             int edits = 1 + int(Below(4));

@@ -23,13 +23,14 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 ## New in 0.7.0 (pre-release)
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
-- **`mesh=1` under `[net]` (experimental, off by default):** in a Steam lobby the players also send their movement
-  straight to each other, which should cut the delay between two clients. Set it on the host and on every client that
-  should use it. The host stops relaying movement a client already receives directly and relays it again within a few
+- **Mesh (experimental, on by default from 0.7.0-pre6; `mesh=0` under `[net]` turns it off):** in a Steam lobby the
+  players also send their movement straight to each other, which should cut the delay between two clients. It is used
+  where the host and the client both have it on. The host stops relaying movement a client already receives directly and relays it again within a few
   seconds if the direct path breaks. From 0.7.0-pre5 hits, cuts, stuck blades, blood and wounds, drawn weapons, grabs
   and prop movement also go straight to the players they concern, with a copy to the host, which still checks, scores
   and relays everything; whichever copy arrives first is used and the second is dropped. Direct-IP (ENet) sessions
-  stay a star, and `mesh=0` is exactly the old behaviour.
+  stay a star, and `mesh=0` is exactly the old behaviour. With the mesh on, detours (`detour=0` turns them off) let the
+  host route a pair of players through a third when that is faster, from their measured pings.
 - **Hold G to give up** in FFA, team matches and Duel, downed or not: your fighter dies, and the last player who hit
   you within 60 s gets the kill (in a Duel, the round too); with none, nobody scores. The hold shows as a bar in the
   middle of the screen. Holding G with nothing to give up shows why.
@@ -38,7 +39,8 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
   and nobody's saved loadout is touched. Scoring, limits and respawns are free-for-all's. Weapons the level has lying
   around can still be picked up.
 - **Kick, ban and votekick:** the host types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat
-  (`/players`, `/bans`, `/unban`); on a `role=server` host players can `/votekick <name>`. See *Kick, ban and votekick*.
+  (`/players`, `/bans`, `/unban`); players can `/votekick <name>`, and on a `role=server` host also `/voteban <name>`
+  (7 days). See *Kick, ban and votekick*.
 - **Respawns retry** up to 5 times and log each attempt; a Duel always starts with both fighters alive.
 - **Leavers:** a fighter who quits mid-fight counts as dead; in a Duel the one left standing takes the rounds.
   A rejoin within the reservation keeps its team; a reused FFA slot starts at 0.
@@ -221,8 +223,11 @@ Chat commands, run by the session host (the console of a `role=server` host take
 - `/players`: the slots and names. `/kick <who>`: out now; they can join again straight away.
 - `/ban <who> [30m|2h|7d|perm]`: out and kept out (default permanent); written to `HSMMod.bans`. `/unban <who>`,
   `/bans`. `<who>` is `#slot`, a name or a unique start of one.
-- `role=server` only: `/votekick <who>` (`/vk`), `/yes`, `/no`. A passed vote keeps the player out for 15 minutes.
-  `server_admins=` (Steam IDs) may kick and ban from the chat; `server_votekick=0` turns votes off.
+- `/votekick <who>` (`/vk`), `/yes`, `/no`, in every hosted session (the Esc menu's VOTE KICK, YES and NO send the
+  same). A passed vote (more than half of the players besides the target) keeps the player out for 15 minutes.
+- `role=server` only: `/voteban <who>` (`/vb`, or VOTE BAN in the Esc menu). It passes with two thirds of the players
+  besides the target (rounded up) and bans the player for 7 days (in `HSMMod.bans`; `/unban` lifts it early).
+- `server_admins=` (Steam IDs) may kick and ban from the chat; `votekick=0` (or `server_votekick=0`) turns votes off.
 
 A kicked or banned player goes back to the main menu, and the multiplayer page opens with the reason in red.
 

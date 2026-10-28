@@ -19,7 +19,7 @@
 
 namespace hsm {
 
-enum class BudgetClass : uint8_t { Free, Stream, Prop, Lease, Combat, Fx, Blob, Control, Count };
+enum class BudgetClass : uint8_t { Free, Stream, Prop, Lease, Combat, Fx, Blob, Control, Detour, Count };
 
 inline BudgetClass BudgetClassOf(MsgType t) {
     switch (t) {
@@ -36,6 +36,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::BlobChunk: return BudgetClass::Blob;
         case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard: case MsgType::PingTable:
             return BudgetClass::Control;
+        case MsgType::Forward: return BudgetClass::Detour;
         default: return BudgetClass::Free;
     }
 }
@@ -50,9 +51,10 @@ struct BudgetRate { double perSec; double burst; };
 //   Fx      360/s burst 720   (legit at most 180/s: 6 kinds x kFxMaxPerSecond)
 //   Blob    200/s burst 600   (one loadout is 32 chunks; a joiner gets every fighter's: ~200 in one burst)
 //   Control  20/s burst 60    (Ready, ReportShare, MeshHeard, PingTable: a few per join, level load or 10 s)
+//   Detour 1200/s burst 2400  (a relay passes on up to 7 other clients' Pose + Vitals: ~840/s; hsm_detour.h caps each pair)
 constexpr BudgetRate kBudgetRates[size_t(BudgetClass::Count)] = {
     {0, 0},          // Free: never budgeted
-    {300, 600}, {1500, 3000}, {300, 600}, {600, 1200}, {360, 720}, {200, 600}, {20, 60},
+    {300, 600}, {1500, 3000}, {300, 600}, {600, 1200}, {360, 720}, {200, 600}, {20, 60}, {1200, 2400},
 };
 
 class MsgBudget {
@@ -86,7 +88,7 @@ public:
     static bool ShouldLog(uint64_t n) { return n >= 1 && (n <= 3 || n % 2000 == 0); }
 
     static const char* ClassName(BudgetClass c) {
-        static const char* const kNames[] = {"free", "stream", "prop", "lease", "combat", "fx", "blob", "control"};
+        static const char* const kNames[] = {"free", "stream", "prop", "lease", "combat", "fx", "blob", "control", "detour"};
         return kNames[size_t(c) < size_t(BudgetClass::Count) ? size_t(c) : 0];
     }
 

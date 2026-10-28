@@ -12,7 +12,7 @@ namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
-constexpr const char* kModVersion = "0.7.0-pre5";   // bump with every release tag
+constexpr const char* kModVersion = "0.7.0-pre6";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
@@ -60,6 +60,8 @@ public:
     void SetMapPick(const std::string& path);
     bool Progression() const;                       // the host chose the Progression card (hsm_prog)
     void SetProgression(bool on);
+    int VoiceReach() const;                         // the host's voice setting (hsm_voice: 0 off, 1 proximity, 2 everyone; -1 unknown)
+    void SetVoiceReach(int reach);
     void SetTeamPick(int team);
     void SetOverride(steam::SteamId member, int team);
     void ClearOverrides();

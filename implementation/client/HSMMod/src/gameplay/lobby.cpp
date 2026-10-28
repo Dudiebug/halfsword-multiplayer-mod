@@ -196,6 +196,12 @@ std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_,
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }
 bool Lobby::Progression() const { return InLobby() && steam::LobbyData(lobby_, "hsm_prog") == "1"; }
 void Lobby::SetProgression(bool on) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_prog", on ? "1" : "0"); }
+int Lobby::VoiceReach() const {
+    if (!InLobby()) return -1;
+    const std::string v = steam::LobbyData(lobby_, "hsm_voice");
+    return v == "0" ? 0 : v == "1" ? 1 : v == "2" ? 2 : -1;
+}
+void Lobby::SetVoiceReach(int reach) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_voice", std::to_string(reach)); }
 
 void Lobby::SetTeamPick(int team) { if (InLobby()) steam::SetMemberData(lobby_, "hsm_team", std::to_string(team)); }
 

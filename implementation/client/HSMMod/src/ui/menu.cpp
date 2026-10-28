@@ -1,6 +1,7 @@
 #include "ui/menu.h"
 #include "ui/chat.h"
 #include "ui/umg.h"
+#include "ui/mp_widgets.h"
 #include "util/hsm_names.h"
 #include "gameplay/session.h"
 #include "log.h"
@@ -89,6 +90,8 @@ struct State {
     uint32_t reportSeen = 0;   // Session::ReportStatusSeq last shown in reportNote
     bool reportOpenNow = false;
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF
+    mp::Maker voiceMaker;
+    mp::VoiceBlock voice;                    // VOICE CHAT: the session's reach (host), the microphone, the meter
     Text helpNote;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
@@ -374,6 +377,10 @@ void BuildLobbyColumn(Box& left) {
     g.balance = MakeFlat("Auto-balance teams", 17);
     g.leave = MakeFlat("Leave lobby", 17);
     AddFlat(left, g.invite, 14); AddFlat(left, g.readyUp, 6); AddFlat(left, g.balance, 6); AddFlat(left, g.leave, 6);
+
+    // VOICE CHAT: the same block as the in-match Esc menu (ui/mp_widgets.h); shown with or without a lobby.
+    g.voiceMaker = mp::Maker(&g.kit);
+    g.voice.Build(g.voiceMaker, left, 26);
 
     // REPORT A BUG: a text box with SEND and CANCEL; the text becomes a public GitHub issue (net/report_client).
     g.reportOpen = MakeFlat("REPORT A BUG", 17);
@@ -862,6 +869,7 @@ void HandleClicks(Session& session) {
         g.reportNote.Set(s.in ? std::string() : session.ReportStatus());
     }
     HandleChat(session, s.in);
+    g.voice.Tick(session);
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
     if (act(Clicked(g.hostPublic.card), s.idle)) lobby.Host(steam::LobbyType::Public);
     if (act(Clicked(g.find.card), s.idle)) lobby.RefreshList();
@@ -869,7 +877,7 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.readyUp.card), s.ready)) lobby.SetReady(!s.readyOn);
     if (act(Clicked(g.balance.card), s.balance)) lobby.ClearOverrides();
     if (act(Clicked(g.leave.card), s.in)) lobby.Leave();
-    if (Clicked(g.close.card)) { g.panelOpen = false; g.panel.Show(false); g.notice.Show(false); return; }
+    if (Clicked(g.close.card)) { g.panelOpen = false; g.panel.Show(false); g.notice.Show(false); g.voice.StopBinding(); return; }
 
     for (size_t i = 0; i < g.rows.size(); ++i) {
         Paint(g.rows[i].card);

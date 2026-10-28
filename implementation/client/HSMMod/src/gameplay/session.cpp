@@ -60,6 +60,9 @@
 #include "session/hsm_authority.h"
 #include "session/hsm_mesh.h"
 #include "session/hsm_peer_ping.h"
+#include "session/hsm_route.h"
+#include "session/hsm_detour.h"
+#include <random>
 #include "session/hsm_migration.h"
 #include "session/hsm_autoflow.h"
 #include "session/hsm_blob.h"
@@ -213,6 +216,10 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::ReportShare: { ReportShareMsg m; return Decode(d, n, m); }
         case MsgType::PeerMap: { PeerMapMsg m; return Decode(d, n, m); }
         case MsgType::Voice: { VoiceMsg m; return Decode(d, n, m); }
+        case MsgType::VoiceMode: { VoiceModeMsg m; return Decode(d, n, m); }
+        case MsgType::RouteTable: { RouteTableMsg m; return Decode(d, n, m); }
+        case MsgType::Forward: { ForwardMsg m; return Decode(d, n, m); }
+        case MsgType::VoteState: { VoteStateMsg m; return Decode(d, n, m); }
         default: return false;
     }
 }
@@ -386,11 +393,23 @@ public:
         lastPauseButton_ = now;
         if (!selfTestOk_ || !(lastGameMode_ && ObjectAt(lastGameModeIndex_) == lastGameMode_ && adapter_.World() == lastGameMode_)) return;
         UObject* menu = adapter_.PauseMenu();
-        if (!menu) { ui::PauseReportTick(nullptr, false); return; }
-        if (!ui::PauseReportTick(menu, report::Enabled() && net_ && InFightLevel())) return;
-        HSM_LOG("session: pause menu REPORT A BUG clicked");
-        adapter_.ContinueFromPauseMenu();
-        ui::ChatOpenWith("/bug ");
+        if (!menu) { ui::PauseMenuTick(nullptr, nullptr, false); return; }
+        const bool fight = InFightLevel();
+        switch (ui::PauseMenuTick(menu, InSession() && fight ? this : nullptr, report::Enabled() && net_ && fight)) {
+            case ui::PauseAction::None: return;
+            case ui::PauseAction::Resume:
+                adapter_.ContinueFromPauseMenu();
+                return;
+            case ui::PauseAction::ReportBug:
+                HSM_LOG("session: pause menu REPORT A BUG clicked");
+                adapter_.ContinueFromPauseMenu();
+                ui::ChatOpenWith("/bug ");
+                return;
+            case ui::PauseAction::Leave:
+                adapter_.ContinueFromPauseMenu();
+                LeaveSession();
+                return;
+        }
     }
 
     std::string WidgetsJson() {
@@ -466,7 +485,7 @@ public:
         if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && net_)
             if (!IsHost() || !ModerationLine(*line, 0, false)) SendChat(*line);
         if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
-        if (!net_) { ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
+        if (!net_) { if (localFighter_) VoiceIdleTick(); ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
         if (IsHost()) HostTick(dt); else ClientTick(dt);
         VoiceTick();
         TintTick();
@@ -559,6 +578,7 @@ public:
         }
         meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
         meshDirectTx_ = meshDupes_ = 0;
+        if (!IsHost()) LogDetourHealth(who);
     }
 
     static std::string PingCell(uint16_t rttMs, uint16_t steamMs, uint8_t lossPct) {
@@ -583,6 +603,7 @@ public:
                            PingCell(e.rttMs, e.steamMs, e.lossPct);
                 HSM_LOG("%s: ping: slot%u -> %s", who, from, row.empty() ? "(nothing measured)" : row.c_str());
             }
+            LogRoutePlan(who);
             return;
         }
         if (!peerPingOn_ || !net_) return;
@@ -592,6 +613,28 @@ public:
             row += std::string(row.empty() ? "" : "; ") + (e.slot == kHostSlot ? std::string("host") : "slot" + std::to_string(e.slot)) + " " +
                    PingCell(e.rttMs, e.steamMs, e.lossPct);
         HSM_LOG("%s: ping: slot%u -> %s", who, mySlot_, row.empty() ? "(nothing measured yet)" : row.c_str());
+    }
+
+    // Detour routing, step R0: every kPingTableGapMs the host plans each client pair's fastest path from the ping tables
+    // (session/hsm_route.h) and logs what changed. Nothing is sent differently.
+    void LogRoutePlan(const char* who) {
+        const uint32_t now = NowMs();
+        if (!DueAt(now, nextRoutePlan_)) return;
+        nextRoutePlan_ = now + kPingTableGapMs;
+        auto name = [](uint8_t r) { return r == kRouteDirect ? std::string("direct") : r == kRouteHost ? std::string("host") : "via slot" + std::to_string(r); };
+        auto ms = [](uint32_t v) { return v == kRouteNone ? std::string("-") : std::to_string(v); };
+        static const char* const kWhy[] = {"new pair", "faster", "path lost"};
+        const std::vector<RouteChange> changes = routePlanner_.Plan(routeLinks_, ConnectedSlots(), now);
+        if (!changes.empty() && DetourHost()) detourDirty_ = true;
+        for (const RouteChange& c : changes) {
+            if (!routeLogged_) {
+                routeLogged_ = true;
+                HSM_LOG("%s: route plan: %s (one-way ms)", who, DetourHost() ? "detours on: each client gets its routes" : "logged only, nothing is sent differently");
+            }
+            HSM_LOG("%s: route plan: slot%u <-> slot%u %s -> %s (direct %s, host %s, chosen %s; %s)", who, c.a, c.b,
+                    name(c.from).c_str(), name(c.to).c_str(), ms(c.directMs).c_str(), ms(c.hostMs).c_str(), ms(c.toMs).c_str(),
+                    kWhy[size_t(c.why)]);
+        }
     }
 
     // Owner sync: what this machine streamed, how every stand-in tracks its owner, and every claim's fate.
@@ -796,11 +839,12 @@ public:
         if (from && !peers_.count(from)) return true;
         if (cmd.kind == ModCommandKind::Say) { if (net_) ServerSay(cmd.target); else Reply(from, "Nobody is connected."); return true; }
         if (cmd.kind == ModCommandKind::Players) { ListPlayers(from); return true; }
-        if (cmd.kind == ModCommandKind::VoteKick || cmd.kind == ModCommandKind::Yes || cmd.kind == ModCommandKind::No) { VoteCommand(cmd, from); return true; }
+        if (cmd.kind == ModCommandKind::VoteKick || cmd.kind == ModCommandKind::VoteBan || cmd.kind == ModCommandKind::Yes || cmd.kind == ModCommandKind::No) { VoteCommand(cmd, from); return true; }
         if (!IsAdmin(from)) {
-            Reply(from, IsServer() ? (cfg_.serverVoteKick ? "Only the server's admins can do that. /votekick <name> starts a vote."
+            Reply(from, IsServer() ? (cfg_.serverVoteKick ? "Only the server's admins can do that. /votekick or /voteban <name> starts a vote."
                                                           : "Only the server's admins can do that.")
-                                   : "Only the host can kick or ban.");
+                                   : cfg_.serverVoteKick ? "Only the host can kick or ban. /votekick <name> starts a vote."
+                                                         : "Only the host can kick or ban.");
             return true;
         }
         LoadBans();
@@ -837,17 +881,24 @@ public:
         return true;
     }
 
-    // /votekick, /yes, /no: role=server only (a player host kicks directly).
+    // /votekick, /yes, /no (from the chat or the in-match menu), in every hosted session since 0.7.0-pre6; /voteban
+    // (7 days, two thirds) on role=server hosts only. The player host votes too (as kHostVoterKey) but kicks directly
+    // instead of starting one; it can't be voted out (not a peer).
+    static constexpr uint64_t kHostVoterKey = 1;
     void VoteCommand(const ModCommand& cmd, uint32_t from) {
-        if (!IsServer()) { Reply(from, "Votes are for servers; the host can /kick."); return; }
-        if (!cfg_.serverVoteKick) { Reply(from, "Votekick is off on this server (server_votekick=0)."); return; }
-        if (!from) { Reply(from, "The console kicks directly: kick <name>."); return; }
-        const uint64_t me = peers_.at(from).key;
-        if (cmd.kind != ModCommandKind::VoteKick) {
+        if (!cfg_.serverVoteKick) { Reply(from, IsServer() ? "Votekick is off on this server (votekick=0)." : "Votekick is off in this session (votekick=0)."); return; }
+        const bool start = cmd.kind == ModCommandKind::VoteKick || cmd.kind == ModCommandKind::VoteBan, ban = cmd.kind == ModCommandKind::VoteBan;
+        if (!from && (IsServer() || !localFighter_)) { Reply(from, "The console kicks and bans directly: kick <name>, ban <name> 7d."); return; }
+        if (!from && start) { Reply(from, "You're the host: kick or ban from the Esc menu, or type /kick <name> or /ban <name>."); return; }
+        if (ban && !IsServer()) { Reply(from, "Votebans are for servers only. /votekick <name> starts a vote to kick."); return; }
+        const uint64_t me = from ? peers_.at(from).key : kHostVoterKey;
+        const std::string meName = from ? NameOfSlot(peers_.at(from).slot) : MyName();
+        if (!start) {
             const bool yes = cmd.kind == ModCommandKind::Yes;
             if (!vote_.Active()) { Reply(from, "No vote is running."); return; }
             if (!vote_.Cast(me, yes)) { Reply(from, "You can't vote on this one."); return; }
-            ServerSay(NameOfSlot(peers_.at(from).slot) + " voted " + (yes ? "yes" : "no") + " (" + std::to_string(vote_.Yes()) + " of " +
+            voteDirty_ = true;
+            ServerSay(meName + " voted " + (yes ? "yes" : "no") + " (" + std::to_string(vote_.Yes()) + " of " +
                       std::to_string(vote_.Needed()) + " yes needed).");
             return;
         }
@@ -857,12 +908,15 @@ public:
         if (IsAdmin(peer)) { Reply(from, "Admins can't be voted out."); return; }
         std::vector<uint64_t> players;
         for (const auto& [pp, q] : peers_) players.push_back(q.key);
+        if (localFighter_ && !IsServer()) players.push_back(kHostVoterKey);
         const std::string target = NameOfSlot(peers_.at(peer).slot);
-        switch (vote_.Begin(me, peers_.at(peer).key, players, NowMs())) {
+        switch (vote_.Begin(me, peers_.at(peer).key, players, NowMs(), ban)) {
             case VoteKick::Start::Ok:
                 voteTargetName_ = target;
-                HSM_LOG("moderation: slot %u started a vote to kick slot %u", peers_.at(from).slot, peers_.at(peer).slot);
-                ServerSay(NameOfSlot(peers_.at(from).slot) + " votes to kick " + target + ": type /yes or /no (" + std::to_string(vote_.Needed()) +
+                voteDirty_ = true;
+                HSM_LOG("moderation: slot %u started a vote to %s slot %u", peers_.at(from).slot, ban ? "ban" : "kick", peers_.at(peer).slot);
+                ServerSay(meName + (ban ? " votes to ban " + target + " " + DurationText(kVoteBanOutSeconds) : " votes to kick " + target) +
+                          ": vote in the Esc menu, or type /yes or /no (" + std::to_string(vote_.Needed()) +
                           " yes needed, " + std::to_string(kVoteKickMs / 1000) + " s).");
                 break;
             case VoteKick::Start::Running: Reply(from, "A vote is already running: /yes or /no."); break;
@@ -888,20 +942,45 @@ public:
             if (peer) {
                 LoadBans();
                 const std::string key = BanKeyOf(peer);
-                if (!key.empty() && bans_.Add(key, voteTargetName_, UnixNow() + kVoteBanSeconds, false)) SaveBans();
-                HSM_LOG("moderation: the vote passed; slot %u is out %s (%s)", peers_.at(peer).slot, DurationText(kVoteBanSeconds).c_str(), key.c_str());
-                ServerSay("Vote passed: " + voteTargetName_ + " is kicked " + DurationText(kVoteBanSeconds) + ".");
-                DropMember(peer, RejectReason::Kicked);
+                const bool ban = vote_.Ban();
+                const int64_t secs = ban ? kVoteBanOutSeconds : kVoteKickOutSeconds;
+                if (!key.empty() && bans_.Add(key, voteTargetName_, UnixNow() + secs, false)) SaveBans();
+                HSM_LOG("moderation: the %s passed; slot %u is out %s (%s)", ban ? "voteban" : "vote", peers_.at(peer).slot, DurationText(secs).c_str(), key.c_str());
+                ServerSay("Vote passed: " + voteTargetName_ + (ban ? " is banned " : " is kicked ") + DurationText(secs) + ".");
+                DropMember(peer, ban ? RejectReason::Banned : RejectReason::Kicked);
             }
         } else if (o == VoteKick::Outcome::Failed) {
             ServerSay("Vote failed: " + voteTargetName_ + " stays.");
         } else if (o == VoteKick::Outcome::Cancelled) {
-            ServerSay("The vote to kick " + voteTargetName_ + " ended (a player left).");
+            ServerSay(std::string("The vote to ") + (vote_.Ban() ? "ban " : "kick ") + voteTargetName_ + " ended (a player left).");
         }
         if (DueAt(now, nextBanPrune_)) {
             nextBanPrune_ = now + 60000;
             if (bansLoaded_ && bans_.Prune(UnixNow())) SaveBans();
         }
+        VoteBroadcast(now);
+    }
+
+    // The running vote as `key` sees it (its own vote), for the clients' menus.
+    VoteStateMsg VoteStateFor(uint64_t key, uint32_t now) const {
+        VoteStateMsg m;
+        if (!vote_.Active()) return m;
+        for (const auto& [pp, q] : peers_) if (q.key == vote_.target()) m.target = q.slot;
+        if (m.target == kVoteNone) return VoteStateMsg{};
+        auto u8 = [](size_t v) { return uint8_t(std::min<size_t>(v, kMaxPeerMap)); };
+        m.voters = u8(vote_.Voters()); m.yes = u8(vote_.Yes()); m.no = u8(vote_.No()); m.needed = u8(vote_.Needed());
+        m.secondsLeft = uint8_t(std::min<uint32_t>(vote_.SecondsLeft(now), 60));
+        m.mine = int8_t(vote_.VoteOf(key));
+        m.ban = vote_.Ban() ? 1 : 0;
+        return m;
+    }
+    // Each client hears of the vote when it changes, once a second while it runs, and once when it ends.
+    void VoteBroadcast(uint32_t now) {
+        const bool active = vote_.Active();
+        if (!active && !voteWasActive_) return;
+        if (active && voteWasActive_ && !voteDirty_ && !DueAt(now, voteSentAt_ + 1000)) return;
+        voteDirty_ = false; voteSentAt_ = now; voteWasActive_ = active;
+        for (const auto& [peer, p] : peers_) net_->Send(peer, kChanReliable, Encode(VoteStateFor(p.key, now)), true);
     }
 
     // role=server: admin commands written to HSMMod.cmd (the Pelican egg forwards its console there), read each second.
@@ -1088,6 +1167,179 @@ public:
     }
 
     std::string TakeNotice() override { std::string n; n.swap(notice_); return n; }
+
+    // ------------------------------------------------------------------ the multiplayer menus (match/hsm_mp_scene.h)
+    bool InSession() const override { return net_ && (IsHost() || welcomed_); }
+
+    MpVoice VoiceView() override {
+        const uint32_t now = NowMs();
+        voiceMeterUntil_ = now + 1500;   // the menu is open: keep the microphone recording for the meter
+        MpVoice v;
+        const bool inLobby = steamMode() && lobby_.InLobby();
+        v.session = inLobby || net_;
+        v.host = net_ ? IsHost() : inLobby ? lobby_.IsHost() : true;
+        v.server = IsServer();
+        if (v.host) v.reach = HostReach();
+        else if (welcomed_) v.reach = hostReach_;
+        else { const int r = lobby_.VoiceReach(); v.reach = r == 1 ? voice::Reach::Proximity : r == 2 ? voice::Reach::Everyone : voice::Reach::Off; }
+        v.mic = cfg_.voiceMic; v.levelDb = int(std::lround(cfg_.voiceLevelDb)); v.key = cfg_.voiceKey;
+        v.volumePct = int(std::lround(cfg_.voiceVolume * 100.f)); v.device = cfg_.voiceDevice;
+        v.devices = voice_.Devices(now);
+        v.monitor = voice_.Monitor();
+        v.micDb = voice_.MicLevelDb(now);
+        v.gateOpen = voice_.GateOpen();
+        v.sending = voice_.MeTalking();
+        v.recording = voice_.Recording();
+        v.source = voice_.SourceName();
+        return v;
+    }
+
+    void SetVoiceReach(voice::Reach r) override {
+        const bool host = net_ ? IsHost() : !(steamMode() && lobby_.InLobby()) || lobby_.IsHost();
+        if (!host || IsServer() || r == HostReach()) return;
+        cfg_.voice = r != voice::Reach::Off;
+        if (r != voice::Reach::Off) cfg_.voiceReach = r;
+        HSM_LOG("voice: session voice chat set to %s from the menu", voice::ReachIni(r));
+        if (!SaveIniValues({{"voice", cfg_.voice ? "1" : "0"}, {"voice_reach", voice::ReachIni(cfg_.voiceReach)}}))
+            HSM_LOG("voice: could not write voice/voice_reach to HSMMod.ini");
+        BroadcastVoiceMode();
+        if (r == voice::Reach::Off) for (uint8_t e = 1; e < voice::kMaxSpeakers; ++e) voice_.Forget(e);
+    }
+
+    void SetVoicePrefs(const MpVoice& v) override {
+        cfg_.voiceMic = v.mic;
+        cfg_.voiceLevelDb = float(std::clamp(v.levelDb, voice::kLevelMinDb, voice::kLevelMaxDb));
+        if (v.key) cfg_.voiceKey = v.key;
+        cfg_.voiceVolume = float(std::clamp(v.volumePct, 0, voice::kVolumeMaxPct)) / 100.f;
+        cfg_.voiceDevice = v.device;
+        voice_.Configure(VoiceSettingsFromConfig());
+        voiceConfigured_ = true;
+        if (!SaveIniValues({{"voice_mode", voice::MicIni(cfg_.voiceMic)},
+                            {"voice_device", cfg_.voiceDevice},
+                            {"voice_level_db", std::to_string(int(cfg_.voiceLevelDb))},
+                            {"voice_key", voice::VoiceKeyIni(cfg_.voiceKey)},
+                            {"voice_volume", std::to_string(int(std::lround(cfg_.voiceVolume * 100.f)))}}))
+            HSM_LOG("voice: could not write the voice settings to HSMMod.ini");
+    }
+
+    void SetVoiceMonitor(bool on) override { voice_.SetMonitor(on); }
+
+    int PingOfSlot(uint8_t slot, uint32_t now) {
+        if (IsHost()) { const std::optional<uint32_t> p = PeerOfSlot(slot); return p ? int(net_->RoundTripMs(*p)) : -1; }
+        const PingSummary s = pings_.Summary(slot, now);
+        if (s.medianMs != kPingUnknown) return s.medianMs;
+        if (slot == kHostSlot && hostPeer_) return int(net_->RoundTripMs(hostPeer_));
+        return -1;
+    }
+    std::string RouteOfSlot(uint8_t slot) const {
+        if (IsHost()) return "direct";
+        if (slot == kHostSlot) return "direct";
+        if (const uint8_t via = DetourClientOn() ? detour_.RelayFor(slot) : 0) return "through " + NameOfSlot(via);
+        return meshOn_ && meshPeers_.PeerOfSlot(slot) ? "direct" : "through the host";
+    }
+    void FillListen(MpPlayer& p) const {
+        const auto it = listen_.find(p.name);
+        if (it != listen_.end()) { p.muted = it->second.muted; p.volumePct = it->second.volumePct; }
+    }
+
+    std::vector<MpPlayer> Players() override {
+        std::vector<MpPlayer> out;
+        if (!InSession()) return out;
+        const uint32_t now = NowMs();
+        auto add = [&](uint8_t slot) {
+            MpPlayer p;
+            p.slot = slot;
+            const uint8_t e = Roster::EntityForSlot(slot);
+            p.me = e == MyEntity();
+            p.host = slot == kHostSlot;
+            p.name = p.me ? MyName() : NameOfSlot(slot);
+            p.talking = p.me ? voice_.MeTalking() : voice_.Talking(e, now);
+            if (!p.me) { p.pingMs = PingOfSlot(slot, now); p.route = RouteOfSlot(slot); FillListen(p); }
+            p.canKick = IsHost() && !p.me && !p.host;
+            p.canVote = !IsHost() && !p.me && !p.host;
+            p.canVoteBan = p.canVote && !hostHasFighter_;   // a role=server session
+            out.push_back(std::move(p));
+        };
+        if (IsHost()) {
+            if (localFighter_) add(kHostSlot);
+            std::vector<uint8_t> slots;
+            for (const auto& [peer, q] : peers_) slots.push_back(q.slot);
+            std::sort(slots.begin(), slots.end());
+            for (uint8_t s : slots) add(s);
+        } else {
+            for (const FighterEntry& f : info_.fighters) {
+                if (f.entity < 1 || f.entity > kMaxFighters || NoSuchFighter(f.entity)) continue;
+                add(uint8_t(f.entity - 1));
+            }
+        }
+        return out;
+    }
+
+    void SetPlayerListen(uint8_t slot, bool muted, int volumePct) override {
+        const std::string name = NameOfSlot(slot);
+        if (name.empty()) return;
+        listen_[name] = voice::Listen{muted, std::clamp(volumePct, 0, voice::kVolumeMaxPct)};
+        HSM_LOG("voice: slot%u %s, volume %d%% (this machine only)", unsigned(slot), muted ? "muted" : "unmuted", volumePct);
+    }
+
+    void KickPlayer(uint8_t slot, bool ban) override {
+        if (!net_ || !IsHost() || slot == kHostSlot) return;
+        ModerationLine(std::string(ban ? "/ban #" : "/kick #") + std::to_string(slot), 0, false);
+    }
+    void MenuVoteLine(const std::string& line) {
+        if (!InSession()) return;
+        if (IsHost()) ModerationLine(line, 0, false); else SendChat(line);
+    }
+    void VoteKickPlayer(uint8_t slot) override { if (slot != kHostSlot) MenuVoteLine("/votekick #" + std::to_string(slot)); }
+    void VoteBanPlayer(uint8_t slot) override { if (slot != kHostSlot) MenuVoteLine("/voteban #" + std::to_string(slot)); }
+    void CastVote(bool yes) override { MenuVoteLine(yes ? "/yes" : "/no"); }
+
+    MpVote Vote() override {
+        MpVote v;
+        if (!InSession()) return v;
+        VoteStateMsg m = IsHost() ? VoteStateFor(kHostVoterKey, NowMs()) : voteState_;
+        if (m.target == kVoteNone) return v;
+        v.active = true; v.target = m.target; v.yes = m.yes; v.no = m.no; v.needed = m.needed; v.voters = m.voters;
+        v.secondsLeft = m.secondsLeft; v.mine = m.mine; v.ban = m.ban != 0;
+        v.name = IsHost() ? voteTargetName_ : NameOfSlot(m.target);
+        if (IsHost() && (!localFighter_ || IsServer())) v.mine = kVoteNotVoter;
+        return v;
+    }
+
+    std::vector<std::string> NetworkLines() override {
+        std::vector<std::string> out;
+        if (!InSession()) { out.push_back("Not in a session."); return out; }
+        const uint32_t now = NowMs();
+        out.push_back(std::string("Role: ") + (IsServer() ? "server host" : IsHost() ? "host" : "client") + (steamMode() ? " (Steam)" : " (direct IP)"));
+        out.push_back("Players: " + std::to_string(IsHost() ? ConnectedSlots().size() : info_.fighters.size()));
+        if (!IsHost()) {
+            const int ms = PingOfSlot(kHostSlot, now);
+            out.push_back("Ping to the host: " + (ms >= 0 ? std::to_string(ms) + " ms" : std::string("not measured")));
+        }
+        out.push_back(std::string("Direct client links (mesh): ") + (IsHost() ? (MeshHost() ? "offered" : "off") : (meshOn_ ? "on" : "off")));
+        if (IsHost()) {
+            out.push_back(std::string("Detours: ") + (DetourHost() ? "on, plan " + std::to_string(detourEpoch_) : "off (detour=1 with mesh=1)"));
+        } else if (DetourClientOn()) {
+            int via = 0;
+            for (uint8_t s = 1; s < kMaxFighters; ++s) if (detour_.RelayFor(s)) ++via;
+            out.push_back("Detours: plan " + std::to_string(detour_.Epoch()) + ", " + std::to_string(via) + " through a relay, relaying " +
+                          std::to_string(detour_.RelayPairs()));
+        } else {
+            out.push_back("Detours: off");
+        }
+        out.push_back("Voice chat: " + ReachLabel(SessionReach()));
+        return out;
+    }
+
+    void LeaveSession() override {
+        if (!net_ && !(steamMode() && lobby_.InLobby())) return;
+        HSM_LOG("session: leaving from the menu (%s)", net_ && IsHost() ? "host" : "client");
+        const bool fight = InFightLevel();
+        welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
+        if (steamMode()) lobby_.Leave();
+        if (net_) ResetNetwork("left from the menu");
+        if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
+    }
 
     bool HelpImprove() const override { return cfg_.helpImprove; }
     void SetHelpImprove(bool on) override {
@@ -1465,6 +1717,7 @@ private:
         if (lobby_.IsHost()) {
             for (const game::LobbyMember& m : lobby_.members()) if (m.id != steam::MySteamId()) steamNet_->AllowPeer(m.id);
             hostPending_ = true;
+            lobby_.SetVoiceReach(int(HostReach()));
         } else { hostSteam_ = lobby_.owner(); steamNet_->AllowPeer(hostSteam_); }
     }
 
@@ -1497,9 +1750,12 @@ private:
         hostPeer_ = 0; welcomed_ = false; haveSnapshot_ = false; snappedOwn_ = false; hellosSent_ = 0;
         hostSteam_ = 0; meshOn_ = false; meshPeers_.Clear(); meshHearing_.Clear(); meshMasks_.Clear(); peerMapDirty_ = false;
         peerPingOn_ = false; meshDedupe_.Clear(); pings_.Clear(); pongs_.Clear(); pingTables_.clear(); nextPingTable_ = 0;
+        routeLinks_.Clear(); routePlanner_.Clear(); nextRoutePlan_ = 0;
         for (MsgBudget& b : meshBudget_) b = MsgBudget{};
         meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
-        voice_.Stop(); voiceState_ = {}; hostVoice_ = false; voiceSeq_ = 0; voiceDrops_ = VoiceDrops{}; voiceRelayed_ = 0; voiceCutLogs_ = 0;
+        voice_.Stop(); voiceState_ = {}; hostReach_ = voice::Reach::Off; voiceWelcomeLogged_ = false; voiceSeq_ = 0; voiceDrops_ = VoiceDrops{}; voiceRelayed_ = 0; voiceCutLogs_ = 0;
+        voteState_ = VoteStateMsg{}; voteWasActive_ = voteDirty_ = false; voteSentAt_ = 0;
+        detour_.Clear(); pairKeys_.Clear(); detourEpoch_ = 0; detourDirty_ = false; detourStats_ = DetourStats{}; detourLoggedEpoch_ = -1;
         meshDirectTx_ = meshDupes_ = 0;
         reservations_.Clear(); jitter_.clear(); placed_.clear();
         RestoreFoes();
@@ -1801,6 +2057,7 @@ private:
             }
         });
         if (peerMapDirty_) SendPeerMap();
+        if (detourDirty_) SendRouteTables();
         // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (ENet times its own peers out) (N6).
         // Clients without the keep-alive are only timed in fight levels, while they have a live fighter (public #8, #9, #10).
         const auto streams = [this](uint32_t peer) {
@@ -1965,7 +2222,10 @@ private:
         if (!PeerMapHost()) return;
         meshMasks_.Reset(slot);
         pingTables_.erase(slot);
+        routeLinks_.Forget(slot); routePlanner_.Forget(slot);
+        pairKeys_.Forget(slot);   // a returning player gets new keys
         peerMapDirty_ = true;
+        if (DetourHost()) detourDirty_ = true;
     }
 
     // Every joined Steam client's slot and SteamID, to every joined client (each skips its own entry).
@@ -2512,6 +2772,8 @@ private:
         } else if (t == MsgType::PingTable) {
             PingTableMsg m;
             if (!PeerMapHost() || !cfg_.peerPing || !Decode(d, n, m)) return;
+            routeLinks_.ClearRow(peer.slot);
+            for (const PingTableEntry& e : m.entries) routeLinks_.Note(peer.slot, e.slot, e.rttMs, e.lossPct);
             pingTables_[peer.slot] = std::move(m);   // logged in the health window (LogPingHealth)
         } else if (t == MsgType::Input) {
             if (OwnerMode()) return;                    // every owner plays its own fighter
@@ -2616,7 +2878,8 @@ private:
         w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(syncMode_); w.modBuild = game::ModBuild();
         if (IsServer()) w.flags |= kWelcomeNoHostFighter;   // role=server: no host fighter to spectate or score
         if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
-        if (cfg_.voice) w.flags |= kWelcomeVoice;   // rev 22: this host relays proximity voice
+        if (HostReach() != voice::Reach::Off) w.flags |= kWelcomeVoice;   // rev 22: this host relays voice
+        if (HostReach() == voice::Reach::Everyone) w.flags |= kWelcomeVoiceAll;   // rev 23: ...to every living player
         if (PeerMapHost() && cfg_.peerPing) w.flags |= kWelcomePeerPing;   // rev 22: clients ping each other and report
         net_->Send(ev.peer, kChanReliable, Encode(w), true);
         SendAllBlobs(ev.peer);
@@ -3614,13 +3877,18 @@ private:
         return out;
     }
 
-    // ------------------------------------------------------------------ proximity voice (gameplay/voice.h, voice/hsm_voice.h)
-    // Steam records the microphone; a client sends its chunks to the host, which relays each one to the machines that
-    // may hear it (near the speaker, or dead with the dead). A fighter below voice_cutoff of full consciousness, knocked
-    // out or dead is cut off from the living: by its own machine, by the host and by each listener. With the mesh on,
-    // voice still goes through the host. A role=server host relays only: it records and plays nothing.
-    bool VoiceHostOn() const { return cfg_.voice && net_ && IsHost(); }
-    bool VoiceClientOn() const { return cfg_.voice && net_ && !IsHost() && welcomed_ && hostVoice_; }
+    // ------------------------------------------------------------------ voice chat (gameplay/voice.h, voice/hsm_voice.h)
+    // The host's setting (voice + voice_reach: Off / Proximity / Everyone) is the session's; clients learn it from
+    // Welcome.flags and VoiceMode, and every client hears what it allows (their own voice= no longer matters). Each
+    // player's microphone (push to talk by default, open, or off), device and volume are their own. A client sends its
+    // chunks to the host, which relays each one to the machines that may hear it (near the speaker, everyone living,
+    // or dead with the dead). A fighter below voice_cutoff of full consciousness, knocked out or dead is cut off from
+    // the living: by its own machine, by the host and by each listener. With the mesh on, voice still goes through the
+    // host. A role=server host relays only: it records and plays nothing.
+    voice::Reach HostReach() const { return cfg_.voice ? cfg_.voiceReach : voice::Reach::Off; }
+    voice::Reach SessionReach() const { return !net_ ? HostReach() : IsHost() ? HostReach() : welcomed_ ? hostReach_ : voice::Reach::Off; }
+    bool VoiceHostOn() const { return net_ && IsHost() && HostReach() != voice::Reach::Off; }
+    bool VoiceClientOn() const { return net_ && !IsHost() && welcomed_ && hostReach_ != voice::Reach::Off; }
     voice::Range VoiceRange() const { return {cfg_.voiceNearM * 100.f, cfg_.voiceFarM * 100.f}; }
 
     // Alive: in the match list, not marked dead there or (when known) by its vitals. Not listed (waiting, spectating):
@@ -3661,20 +3929,39 @@ private:
         UObject* a = IsHost() ? EntityActor(e) : ClientActor(e);
         return a && adapter_.BoneLocation(a, "head", out);
     }
+    // The game window in front and nobody typing: push to talk may read its key.
+    static bool VoiceKeyAllowed() {
+        DWORD pid = 0;
+        if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
+        return pid == GetCurrentProcessId() && !ui::Typing();
+    }
+    game::VoiceSettings VoiceSettingsFromConfig() const {
+        game::VoiceSettings s;
+        s.mic = cfg_.voiceMic; s.levelDb = cfg_.voiceLevelDb; s.key = cfg_.voiceKey; s.volume = cfg_.voiceVolume; s.device = cfg_.voiceDevice;
+        return s;
+    }
+    bool VoiceMeterWanted(uint32_t now) const { return voiceMeterUntil_ && int32_t(voiceMeterUntil_ - now) > 0; }
+
+    // No session: a menu's microphone meter and HEAR MYSELF still record; nothing is sent.
+    void VoiceIdleTick() {
+        const uint32_t now = NowMs();
+        if (!voiceConfigured_) { voiceConfigured_ = true; voice_.Configure(VoiceSettingsFromConfig()); }
+        const bool meter = VoiceMeterWanted(now);
+        if (!meter && !voice_.Recording()) { if (voice_.Monitor()) voice_.SetMonitor(false); return; }
+        if (meter && !steam::Ready() && !voiceSteamTried_) { voiceSteamTried_ = true; steam::Init(); }
+        voice_.Capture(false, VoiceKeyAllowed(), meter, now, voiceOut_);
+        if (!meter) { voice_.Stop(); voice_.SetMonitor(false); }
+    }
 
     // Each frame, after the host or client tick.
     void VoiceTick() {
-        if (!net_ || !cfg_.voice || !localFighter_) return;   // role=server: VoiceRelay only, nothing recorded or played
+        if (!net_ || !localFighter_) return;   // role=server: VoiceRelay only, nothing recorded or played
         const uint32_t now = NowMs();
         const bool on = VoiceHostOn() || VoiceClientOn();
-        if (!voiceConfigured_) {
-            voiceConfigured_ = true;
-            game::VoiceSettings s; s.mode = cfg_.voiceMode; s.levelDb = cfg_.voiceLevelDb; s.key = cfg_.voiceKey; s.volume = cfg_.voiceVolume;
-            voice_.Configure(s);
-        }
-        if (on && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam is still what records and decodes
+        if (!voiceConfigured_) { voiceConfigured_ = true; voice_.Configure(VoiceSettingsFromConfig()); }
+        if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam records the default microphone and decodes
             voiceSteamTried_ = true;
-            if (!steam::Init()) HSM_LOG("voice: Steam is not running here; proximity voice is off on this machine");
+            if (!steam::Init()) HSM_LOG("voice: Steam is not running here; the microphone is recorded by the mod, Steam-compressed voices cannot be played");
         }
         const uint8_t me = MyEntity();
         if (on && now >= voiceVitalsAt_) {   // 10 Hz: my own fighter's consciousness, read here; host sync: every body
@@ -3686,21 +3973,14 @@ private:
                     if (f.entity != me)
                         if (UObject* a = EntityActor(f.entity)) { VitalsMsg v; if (adapter_.ReadVitals(a, f.entity, v)) { v.entity = f.entity; VoiceVitals(v); } }
         }
-        bool mayTalk = false;
-        if (on && me && InFightLevel()) {
-            // The dead talk (to the dead); the living only while conscious enough. Push to talk: the game in front, not typing.
-            mayTalk = !VoiceAlive(me) || VoiceAwake(me);
-            if (mayTalk && cfg_.voiceMode == 1) {
-                DWORD pid = 0;
-                if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
-                mayTalk = pid == GetCurrentProcessId() && !ui::Typing();
-            }
-        }
-        bool spurt = false;
-        voice_.Capture(mayTalk, now, voiceOut_, &spurt);
-        for (size_t i = 0; i < voiceOut_.size(); ++i) {
-            if (voiceOut_[i].size() > kMaxVoiceBytes) { ++voiceDrops_.big; continue; }   // a long hitch: dropped, never cut
-            VoiceMsg m; m.entity = me; m.seq = ++voiceSeq_; m.flags = (i == 0 && spurt) ? 1 : 0; m.data = std::move(voiceOut_[i]);
+        // The dead talk (to the dead); the living only while conscious enough.
+        const bool mayTalk = on && me && InFightLevel() && (!VoiceAlive(me) || VoiceAwake(me));
+        voice_.Capture(mayTalk, VoiceKeyAllowed(), VoiceMeterWanted(now), now, voiceOut_);
+        for (size_t i = 0; i < voiceOut_.chunks.size(); ++i) {
+            if (voiceOut_.chunks[i].size() > kMaxVoiceBytes) { ++voiceDrops_.big; continue; }   // a long hitch: dropped, never cut
+            VoiceMsg m; m.entity = me; m.seq = ++voiceSeq_;
+            m.flags = uint8_t(((i == 0 && voiceOut_.spurt) ? kVoiceSpurt : 0) | (voiceOut_.adpcm ? kVoiceAdpcm : 0));
+            m.data = std::move(voiceOut_.chunks[i]);
             const std::vector<uint8_t> bytes = Encode(m);
             if (IsHost()) VoiceRelay(m, bytes);
             else if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, bytes, false);
@@ -3711,25 +3991,27 @@ private:
     // Host: a client's chunk, for its own fighter only and at most VoiceRate, then on to whoever may hear it.
     void VoiceFromClient(const NetEvent& ev, const Peer& peer) {
         VoiceMsg m;
-        if (!cfg_.voice || !Decode(ev.data.data(), ev.data.size(), m)) { ++voiceDrops_.off; return; }
+        if (HostReach() == voice::Reach::Off || !Decode(ev.data.data(), ev.data.size(), m)) { ++voiceDrops_.off; return; }
         if (m.entity != Roster::EntityForSlot(peer.slot) || m.entity >= voice::kMaxSpeakers) { ++voiceDrops_.sender; return; }
         if (!voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
         VoiceRelay(m, ev.data);
     }
 
     // Host: one chunk of speaker m.entity (a client's or the host's own) to every machine that may hear it, and to the
-    // host's own player. A living listener gets it only within voice_far_m (and a margin); a dead one wherever it is.
+    // host's own player. Proximity: a living listener gets it only within voice_far_m (and a margin); a dead one
+    // wherever it is. Everyone: every living listener.
     void VoiceRelay(const VoiceMsg& m, const std::vector<uint8_t>& bytes) {
         const uint8_t from = m.entity;
+        const voice::Reach reach = HostReach();
         const bool alive = VoiceAlive(from), awake = VoiceAwake(from);
         if (alive && !awake) { ++voiceDrops_.cut; return; }
         FVector at{};
-        const bool placed = VoiceHead(from, at);
+        const bool placed = reach == voice::Reach::Proximity && VoiceHead(from, at);
         for (const auto& [peerId, p] : peers_) {
             const uint8_t e = Roster::EntityForSlot(p.slot);
             if (e == from) continue;
             const bool listenerAlive = VoiceAlive(e);
-            const voice::Hear h = voice::Audible(alive, awake, listenerAlive);
+            const voice::Hear h = voice::AudibleIn(reach, alive, awake, listenerAlive);
             if (h == voice::Hear::None) { ++voiceDrops_.deaf; continue; }
             float dist = -1.f;
             FVector to{};
@@ -3746,18 +4028,27 @@ private:
 
     // A chunk this machine may play: checked again as this machine sees the speaker and itself, then decoded.
     void VoiceIn(const VoiceMsg& m) {
-        if (!localFighter_ || !cfg_.voice || !net_) { ++voiceDrops_.off; return; }
+        if (!localFighter_ || !(VoiceHostOn() || VoiceClientOn())) { ++voiceDrops_.off; return; }
         const uint8_t me = MyEntity();
         if (m.entity == 0 || m.entity > kMaxFighters || m.entity == me) { ++voiceDrops_.sender; return; }
         if (!IsHost() && !voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
         const bool alive = VoiceAlive(m.entity);
-        const voice::Hear h = voice::Audible(alive, VoiceAwake(m.entity), VoiceAlive(me));
+        const voice::Hear h = voice::AudibleIn(SessionReach(), alive, VoiceAwake(m.entity), VoiceAlive(me));
         if (h == voice::Hear::None) { ++(alive ? voiceDrops_.cut : voiceDrops_.deaf); return; }
-        voice_.Receive(m.entity, m.seq, m.data.data(), m.data.size(), NowMs());
+        voice_.Receive(m.entity, m.seq, (m.flags & kVoiceAdpcm) != 0, m.data.data(), m.data.size(), NowMs());
+    }
+
+    // This player's own mute and volume for a speaker, by name (kept while the game runs).
+    // By the same name the menu's SetPlayerListen keyed it under (NameOfSlot), so a rejoin keeps the setting.
+    voice::Listen ListenFor(uint8_t entity) const {
+        if (listen_.empty() || entity < 1 || entity > kMaxFighters) return {};
+        const auto it = listen_.find(NameOfSlot(uint8_t(entity - 1)));
+        return it == listen_.end() ? voice::Listen{} : it->second;
     }
 
     // Each frame: every speaker heard in the last second gets its left/right gain from this machine's camera (the
-    // living hear the living by distance and side; the dead hear the dead at full volume; a cut-off speaker goes silent).
+    // living hear the living by distance and side, or all at full volume under Everyone; the dead hear the dead at full
+    // volume; a cut-off speaker goes silent), times this player's own volume for that speaker (0 when muted).
     void VoiceGains(uint32_t now) {
         FVector eye{};
         bool haveEye = adapter_.CameraLocation(eye);
@@ -3766,10 +4057,11 @@ private:
         adapter_.ControlRotation(0, yaw, pitch);
         const uint8_t me = MyEntity();
         const bool meAlive = VoiceAlive(me);
+        const voice::Reach reach = SessionReach();
         for (uint8_t e = 1; e <= kMaxFighters; ++e) {
             if (e == me || !voice_.Talking(e, now, 1000)) continue;
             voice::Gains g{0.f, 0.f};
-            switch (voice::Audible(VoiceAlive(e), VoiceAwake(e), meAlive)) {
+            switch (voice::AudibleIn(reach, VoiceAlive(e), VoiceAwake(e), meAlive)) {
                 case voice::Hear::Flat: g = {1.f, 1.f}; break;
                 case voice::Hear::Spatial: {
                     FVector at{};
@@ -3780,13 +4072,29 @@ private:
                 }
                 case voice::Hear::None: break;
             }
+            const float mine = voice::ListenGain(ListenFor(e));
+            g.left *= mine; g.right *= mine;
             voice_.SetGains(e, g);
         }
     }
 
+    // Host: the setting changed mid-session. Clients follow at once (VoiceMode); the lobby shows it (hsm_voice).
+    void BroadcastVoiceMode() {
+        if (steamMode()) lobby_.SetVoiceReach(int(HostReach()));   // the lobby's members see it before they join
+        if (!net_ || !IsHost()) return;
+        VoiceModeMsg m; m.reach = uint8_t(HostReach());
+        net_->Broadcast(kChanReliable, Encode(m), true);
+    }
+    void ApplyHostReach(voice::Reach r, const char* why) {
+        if (r == hostReach_ && voiceWelcomeLogged_) return;
+        voiceWelcomeLogged_ = true;
+        HSM_LOG("client: voice chat %s at the host (%s)", voice::ReachIni(r), why);
+        hostReach_ = r;
+        if (r == voice::Reach::Off) for (uint8_t e = 1; e < voice::kMaxSpeakers; ++e) voice_.Forget(e);
+    }
+
     // With the health line, when anything happened: what was sent, heard, relayed and dropped, and why.
     void VoiceHealth() {
-        if (!cfg_.voice) return;
         const game::Voice::Stats s = voice_.TakeStats();
         const VoiceDrops d = voiceDrops_;
         voiceDrops_ = VoiceDrops{};
@@ -3801,10 +4109,11 @@ private:
             std::snprintf(b, sizeof b, " e%u=%.0f%s", unsigned(f.entity), double(voiceState_[f.entity].gate.peak()), voiceState_[f.entity].gate.ok() ? "" : "(cut)");
             full += b;
         }
-        HSM_LOG("voice: mic %s, sent %u chunks %.1f KB (gate open %u ms), heard %u chunks %.1f KB, relayed %u; dropped: cut off %u, "
+        HSM_LOG("voice: %s, mic %s (%s, %s), sent %u chunks %.1f KB (gate open %u ms), heard %u chunks %.1f KB, relayed %u; dropped: cut off %u, "
                 "out of range %u, not for this listener %u, rate %u, wrong sender %u, too big %u, voice off %u, late %u, undecodable %u; "
                 "mixer dropped %llu samples; output %s; full consciousness%s",
-                s.recording ? "on" : "off", s.sent, s.sentBytes / 1024.0, s.gateOpenMs, s.received, s.receivedBytes / 1024.0, relayed,
+                voice::ReachIni(SessionReach()), s.recording ? "on" : "off", voice::MicIni(cfg_.voiceMic), s.adpcm ? "own recording" : "Steam",
+                s.sent, s.sentBytes / 1024.0, s.gateOpenMs, s.received, s.receivedBytes / 1024.0, relayed,
                 d.cut, d.distant, d.deaf, d.rate, d.sender, d.big, d.off, s.late, s.badChunks, (unsigned long long)s.mixerDropped,
                 s.device ? "open" : "closed", full.empty() ? " unknown" : full.c_str());
     }
@@ -4192,6 +4501,7 @@ private:
             streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) {
                 if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false);
                 for (uint32_t p : meshSend_) net_->Send(p, kChanUnreliable, b, false);   // Pose and Vitals also go straight to the other clients
+                DetourSend(b);                                                            // ...and through a relay where the host planned one
             });
             ReportOwnDeath(me, now);
         });
@@ -4336,7 +4646,7 @@ private:
     void MeshEvent(const NetEvent& ev) {
         if (ev.kind == NetEvent::Connected) return;
         if (ev.kind == NetEvent::Disconnected) {
-            if (const uint8_t s = meshPeers_.SlotOfPeer(ev.peer); s < kMaxFighters) pings_.Forget(s);
+            if (const uint8_t s = meshPeers_.SlotOfPeer(ev.peer); s < kMaxFighters) { pings_.Forget(s); detour_.Forget(s); }
             meshPeers_.ForgetPeer(ev.peer); RefreshMeshSend(); return;
         }
         const uint8_t* d = ev.data.data(); size_t n = ev.data.size();
@@ -4344,24 +4654,137 @@ private:
         MsgType t;
         if (slot >= kMaxFighters || !PeekType(d, n, t)) { ++meshDropped_; return; }
         if (t == MsgType::Ping || t == MsgType::Pong) { if (peerPingOn_) MeshPing(ev.peer, slot, d, n); else ++meshDropped_; return; }
-        if (!meshOn_ || (t != MsgType::Pose && t != MsgType::Vitals && !MeshDirectType(t))) { ++meshDropped_; return; }
+        if (!meshOn_ || (t != MsgType::Pose && t != MsgType::Vitals && t != MsgType::Forward && !MeshDirectType(t))) { ++meshDropped_; return; }
         if (!meshBudget_[slot].Allow(t, NowMs())) { BudgetDropped(meshBudget_[slot], t, "client: mesh", slot); return; }
+        if (t == MsgType::Forward) { DetourEvent(ev, slot); return; }
         if (MeshDirectType(t)) {
             if (!ApplyEventMsg(t, d, n, slot)) { ++meshDropped_; return; }
-        } else if (t == MsgType::Pose) {
+            meshHearing_.Note(slot, NowMs());
+            ++meshRx_;
+            return;
+        }
+        if (!MeshStreamIn(t, d, n, slot, ArrivalMs(ev))) ++meshDropped_;
+    }
+
+    // A Pose or Vitals of the entity fromSlot owns, straight from that client or (a detour) passed on by a relay.
+    bool MeshStreamIn(MsgType t, const uint8_t* d, size_t n, uint8_t fromSlot, double arrivalMs) {
+        if (t == MsgType::Pose) {
             PoseMsg m; sync::PoseFrame frame;
-            if (!Decode(d, n, m, &frame) || !MayStream(slot, m.entity)) { ++meshDropped_; return; }
-            standIns_.OnPose(m, frame, ArrivalMs(ev));
-        } else {
+            if (!Decode(d, n, m, &frame) || !MayStream(fromSlot, m.entity)) return false;
+            standIns_.OnPose(m, frame, arrivalMs);
+        } else if (t == MsgType::Vitals) {
             VitalsMsg v;
-            if (!Decode(d, n, v) || !MayStream(slot, v.entity)) { ++meshDropped_; return; }
+            if (!Decode(d, n, v) || !MayStream(fromSlot, v.entity)) return false;
             standIns_.OnVitals(v);
             gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
             severs_.OnVitals(v, game::SteadyNowMs());
             VoiceVitals(v);
+        } else {
+            return false;
         }
-        meshHearing_.Note(slot, NowMs());
+        meshHearing_.Note(fromSlot, NowMs());   // heard without the host: the host stops relaying it (MeshHeard)
         ++meshRx_;
+        return true;
+    }
+
+    // ------------------------------------------------------------------ detours (session/hsm_detour.h, step R1)
+    // The host plans each client pair's path from the ping tables (LogRoutePlan) and sends every client its RouteTable:
+    // per other client the path and, for a detour, the pair's key; and the pairs it relays for. A client sends each Pose
+    // and Vitals direct (the mesh) and, where a detour is planned, also wrapped in a Forward through the relay, whose tag
+    // only the two ends can make. The receiver takes whichever copy comes first; the host relays only what it does not
+    // hear (MeshHeard counts forwarded arrivals too).
+    bool DetourHost() const { return cfg_.detour && MeshHost(); }
+    bool DetourClientOn() const { return cfg_.detour && meshOn_; }
+
+    // The system's secure random source (RtlGenRandom), for the pair keys.
+    static void SecureRandom(uint8_t* p, size_t n) {
+        using Gen = BOOLEAN(WINAPI*)(PVOID, ULONG);
+        static Gen gen = [] {
+            HMODULE m = LoadLibraryW(L"advapi32.dll");
+            return m ? reinterpret_cast<Gen>(reinterpret_cast<void*>(GetProcAddress(m, "SystemFunction036"))) : nullptr;
+        }();
+        if (gen && gen(p, ULONG(n))) return;
+        std::random_device rd;   // rand_s on this runtime: also the system's source
+        for (size_t i = 0; i < n; ++i) p[i] = uint8_t(rd());
+    }
+
+    // Host: a new epoch of tables to every client (the plan or the roster changed).
+    void SendRouteTables() {
+        detourDirty_ = false;
+        if (!DetourHost() || !net_) return;
+        ++detourEpoch_;
+        const std::vector<uint8_t> clients = ConnectedSlots();
+        int detours = 0;
+        for (const auto& [peer, p] : peers_) {
+            const RouteTableMsg t = MakeRouteTable(p.slot, clients, routePlanner_, pairKeys_, detourEpoch_, SecureRandom);
+            for (const RouteKey& k : t.keys) if (k.via != kRouteViaDirect && k.via != kRouteViaHost) ++detours;
+            net_->Send(peer, kChanReliable, Encode(t), true);
+        }
+        HSM_LOG("host: detour: route tables epoch %u to %zu clients, %d one-way detours", unsigned(detourEpoch_), peers_.size(), detours);
+    }
+
+    // Client: the host's table for this client.
+    void ApplyRouteTable(const RouteTableMsg& t) {
+        if (!DetourClientOn()) return;
+        detour_.SetTable(mySlot_, t);
+        if (detourLoggedEpoch_ != int(t.epoch)) {
+            detourLoggedEpoch_ = int(t.epoch);
+            int via = 0;
+            for (uint8_t s = 1; s < kMaxFighters; ++s) if (detour_.RelayFor(s)) ++via;
+            HSM_LOG("client: detour: table epoch %u, %d peer(s) through a relay, relaying %d pair(s)", unsigned(t.epoch), via, detour_.RelayPairs());
+        }
+    }
+
+    // Client: one encoded Pose/Vitals of mine, through each relay the table names.
+    void DetourSend(const std::vector<uint8_t>& b) {
+        if (!DetourClientOn() || !detour_.HasTable()) return;
+        for (uint8_t s : meshPeers_.Slots()) {
+            const uint8_t via = detour_.RelayFor(s);
+            const uint32_t p = via ? meshPeers_.PeerOfSlot(via) : 0;
+            ForwardMsg f;
+            if (!p || !detour_.MakeForward(s, b, f)) continue;
+            net_->Send(p, kChanUnreliable, Encode(f), false);
+            ++detourStats_.sent;
+        }
+    }
+
+    // Client: a Forward from mesh peer `slot`: passed on unchanged when this client relays the pair, taken as the sender's
+    // own stream when it is for this client and checks out, else dropped and counted by reason.
+    void DetourEvent(const NetEvent& ev, uint8_t slot) {
+        ForwardMsg m;
+        if (!DetourClientOn() || !Decode(ev.data.data(), ev.data.size(), m)) { ++meshDropped_; return; }
+        const RelayVerdict rv = detour_.MayRelay(slot, m, NowMs());
+        if (rv == RelayVerdict::Ok) {
+            const uint32_t p = meshPeers_.PeerOfSlot(m.to);
+            if (!p) { ++detourStats_.refused[size_t(RelayVerdict::NotListed)]; return; }
+            net_->Send(p, kChanUnreliable, ev.data, false);
+            ++detourStats_.relayed;
+            return;
+        }
+        if (rv != RelayVerdict::ForMe) { ++detourStats_.refused[size_t(rv)]; return; }
+        const DetourVerdict v = detour_.Accept(slot, m);
+        if (v != DetourVerdict::Ok) { ++detourStats_.rejected[size_t(v)]; return; }
+        MsgType inner;
+        if (!PeekType(m.payload.data(), m.payload.size(), inner) || !MeshStreamIn(inner, m.payload.data(), m.payload.size(), m.from, ArrivalMs(ev))) {
+            ++detourStats_.rejected[size_t(DetourVerdict::NotForMe)];
+            return;
+        }
+        ++detourStats_.accepted;
+    }
+
+    void LogDetourHealth(const char* who) {
+        if (!DetourClientOn()) return;
+        const DetourStats d = detourStats_;
+        detourStats_ = DetourStats{};
+        int via = 0;
+        for (uint8_t s = 1; s < kMaxFighters; ++s) if (detour_.RelayFor(s)) ++via;
+        if (!d.sent && !d.relayed && !d.accepted && !via && !detour_.RelayPairs()) return;
+        HSM_LOG("%s: detour: epoch %u, %d peer(s) through a relay, relaying %d pair(s); sent %u, relayed %u, accepted %u; rejected: "
+                "not for me %u, epoch %u, relay %u, tag %u, seq %u; not passed on: not listed %u, sender %u, budget %u",
+                who, unsigned(detour_.Epoch()), via, detour_.RelayPairs(), d.sent, d.relayed, d.accepted,
+                d.rejected[size_t(DetourVerdict::NotForMe)], d.rejected[size_t(DetourVerdict::Epoch)], d.rejected[size_t(DetourVerdict::Relay)],
+                d.rejected[size_t(DetourVerdict::Tag)], d.rejected[size_t(DetourVerdict::Seq)], d.refused[size_t(RelayVerdict::NotListed)],
+                d.refused[size_t(RelayVerdict::Sender)], d.refused[size_t(RelayVerdict::Budget)]);
     }
 
     // Tells the host which slots arrive directly (held 2 s after the last packet, at most one report a second), so it
@@ -4528,11 +4951,7 @@ private:
                 if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); HSM_LOG("client: host migration done"); }
                 meshOn_ = cfg_.mesh && steamNet_ && OwnerMode() && (w.flags & kWelcomeMesh);
                 peerPingOn_ = cfg_.peerPing && steamNet_ && OwnerMode() && (w.flags & kWelcomePeerPing);
-                if (hostVoice_ != ((w.flags & kWelcomeVoice) != 0) || !voiceWelcomeLogged_) {
-                    voiceWelcomeLogged_ = true;
-                    HSM_LOG("client: proximity voice %s", !(w.flags & kWelcomeVoice) ? "off at the host" : cfg_.voice ? "on" : "off here (voice=0)");
-                }
-                hostVoice_ = (w.flags & kWelcomeVoice) != 0;
+                ApplyHostReach(!(w.flags & kWelcomeVoice) ? voice::Reach::Off : (w.flags & kWelcomeVoiceAll) ? voice::Reach::Everyone : voice::Reach::Proximity, "welcome");
                 if (!meshOn_ && !peerPingOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});   // the host stopped offering it
                 RefreshMeshSend();
                 if (meshOn_ || peerPingOn_) HSM_LOG("client: mesh %s, per-player pings %s", meshOn_ ? "on" : "off", peerPingOn_ ? "on" : "off");
@@ -4542,6 +4961,9 @@ private:
             }
             case MsgType::PeerMap: { PeerMapMsg m; if ((meshOn_ || peerPingOn_) && Decode(d, n, m)) ApplyPeerMap(m); break; }
             case MsgType::Voice: { VoiceMsg m; if (Decode(d, n, m)) VoiceIn(m); break; }
+            case MsgType::VoiceMode: { VoiceModeMsg m; if (Decode(d, n, m)) ApplyHostReach(voice::Reach(m.reach), "changed"); break; }
+            case MsgType::VoteState: { VoteStateMsg m; if (Decode(d, n, m)) voteState_ = m; break; }
+            case MsgType::RouteTable: { RouteTableMsg m; if (Decode(d, n, m)) ApplyRouteTable(m); break; }
             case MsgType::Pong: { Ping p; bool pong = false; if (DecodePing(d, n, p, pong) && pong) pings_.OnPong(kHostSlot, p.timeMs, NowMs()); break; }
             case MsgType::Reject: { Reject r; Decode(d, n, r); rejected_ = r.reason; bodyWork_ = true; break; }   // handled after the poll loop
             case MsgType::Travel: {
@@ -4797,14 +5219,37 @@ private:
     game::Voice voice_;
     std::array<VoiceState, voice::kMaxSpeakers> voiceState_{};
     VoiceDrops voiceDrops_;
-    std::vector<std::vector<uint8_t>> voiceOut_;
+    game::Voice::CaptureOut voiceOut_;
     uint32_t voiceRelayed_ = 0, voiceVitalsAt_ = 0, voiceCutLogs_ = 0;
+    uint32_t voiceMeterUntil_ = 0;   // a menu shows the microphone meter until then
     uint16_t voiceSeq_ = 0;
-    bool hostVoice_ = false, voiceConfigured_ = false, voiceSteamTried_ = false, voiceWelcomeLogged_ = false;
+    voice::Reach hostReach_ = voice::Reach::Off;   // client: the host's setting (Welcome, VoiceMode)
+    bool voiceConfigured_ = false, voiceSteamTried_ = false, voiceWelcomeLogged_ = false;
+    std::map<std::string, voice::Listen> listen_;   // this player's own mute and volume per speaker, by name, while the game runs
+    // votekick: the client's view of the host's vote; the host's broadcast state
+    VoteStateMsg voteState_;
+    uint32_t voteSentAt_ = 0;
+    bool voteDirty_ = false, voteWasActive_ = false;
+    // detours: client tables and counters; host pair keys and the table epoch
+    struct DetourStats {
+        uint32_t sent = 0, relayed = 0, accepted = 0;
+        std::array<uint32_t, 6> rejected{};   // by DetourVerdict
+        std::array<uint32_t, 5> refused{};    // by RelayVerdict
+    };
+    DetourClient detour_;
+    PairKeys pairKeys_;
+    uint8_t detourEpoch_ = 0;
+    bool detourDirty_ = false;
+    int detourLoggedEpoch_ = -1;
+    DetourStats detourStats_;
     PeerPings pings_;
     PongLimiter pongs_;
     uint32_t nextPingTable_ = 0;
     std::map<uint8_t, PingTableMsg> pingTables_;
+    RouteLinks routeLinks_;              // host: every client's last ping table, for the route planner
+    RoutePlanner routePlanner_;
+    uint32_t nextRoutePlan_ = 0;
+    bool routeLogged_ = false;
 
     MsgBudget hostBudget_{double(kMaxWillies)};   // the client's budget for what the host sends (M3)
     bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;

@@ -51,7 +51,8 @@ static void TestWelcomeFlags() {
     CHECK(Decode(b.data(), b.size(), o) && o.flags == 3 && o.map == "m");
     w.flags = kWelcomePeerPing; b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 4);   // rev 22
     w.flags = kWelcomeVoice; b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 8);      // rev 22: voice
-    w.flags = 16; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));     // an unknown bit
+    w.flags = kWelcomeVoiceAll; b = Encode(w); CHECK(Decode(b.data(), b.size(), o) && o.flags == 16);   // rev 23: voice for everyone
+    w.flags = 32; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));     // an unknown bit
     w.flags = 0x80; b = Encode(w); CHECK(!Decode(b.data(), b.size(), o));
     w.flags = 1; b = Encode(w);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));

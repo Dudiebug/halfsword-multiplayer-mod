@@ -3,7 +3,7 @@
 //
 // Who may do what (session.cpp): a player host is the admin of its own session. A role=server host has no player: its
 // console (HSMMod.cmd, fed by the Pelican egg) is the admin, plus the Steam IDs in server_admins=, and the players can
-// start a votekick. A ban names a Steam ID ("steam:<id>") or, for a direct-IP player, an address ("ip:<a.b.c.d>").
+// start a votekick or (role=server only) a voteban. A ban names a Steam ID ("steam:<id>") or, for a direct-IP player, an address ("ip:<a.b.c.d>").
 #pragma once
 #include <algorithm>
 #include <cstdint>
@@ -16,7 +16,8 @@ namespace hsm {
 
 constexpr size_t kMaxBans = 512;                       // the file and the list stop growing here
 constexpr size_t kMaxBanName = 32;                     // a ban's remembered player name, bytes
-constexpr int64_t kVoteBanSeconds = 15 * 60;           // a passed votekick keeps the player out this long
+constexpr int64_t kVoteKickOutSeconds = 15 * 60;       // a passed votekick keeps the player out this long
+constexpr int64_t kVoteBanOutSeconds = 7ll * 86400;    // a passed voteban (role=server) bans the player this long
 constexpr int64_t kMaxBanSeconds = 10ll * 365 * 86400; // longer reads as permanent
 constexpr uint32_t kVoteKickMs = 30000;                // a vote runs this long
 constexpr uint32_t kVoteCooldownMs = 120000;           // one vote per player per 2 minutes
@@ -221,15 +222,16 @@ private:
 };
 
 // ---------------------------------------------------------------- commands
-enum class ModCommandKind { None, Kick, Ban, Unban, Bans, VoteKick, Yes, No, Players, Say };
+enum class ModCommandKind { None, Kick, Ban, Unban, Bans, VoteKick, VoteBan, Yes, No, Players, Say };
 
 struct ModCommand {
     ModCommandKind kind = ModCommandKind::None;
-    std::string target;      // kick/ban/votekick: "#slot" or a name; unban: see BanList::Resolve; say: the text
+    std::string target;      // kick/ban/votekick/voteban: "#slot" or a name; unban: see BanList::Resolve; say: the text
     int64_t seconds = 0;     // ban: 0 = permanent
 };
 
-// Chat: "/kick <who>", "/ban <who> [duration]", "/unban <who>", "/bans", "/votekick <who>" (or "/vk"), "/yes", "/no",
+// Chat: "/kick <who>", "/ban <who> [duration]", "/unban <who>", "/bans", "/votekick <who>" (or "/vk"), "/voteban <who>"
+// (or "/vb"), "/yes", "/no",
 // "/players". The server console takes the same words without the slash, plus "say <text>". Command word is
 // case-insensitive. A line that is none of these (or misses its argument) is None and stays chat.
 inline ModCommand ParseModCommand(const std::string& line, bool console = false) {
@@ -262,6 +264,7 @@ inline ModCommand ParseModCommand(const std::string& line, bool console = false)
     else if (word == "unban" && !rest.empty()) { c.kind = ModCommandKind::Unban; c.target = rest; }
     else if ((word == "bans" || word == "banlist") && rest.empty()) c.kind = ModCommandKind::Bans;
     else if ((word == "votekick" || word == "vk") && !rest.empty()) { c.kind = ModCommandKind::VoteKick; c.target = rest; }
+    else if ((word == "voteban" || word == "vb") && !rest.empty()) { c.kind = ModCommandKind::VoteBan; c.target = rest; }
     else if ((word == "yes" || word == "y") && rest.empty()) c.kind = ModCommandKind::Yes;
     else if ((word == "no" || word == "n") && rest.empty()) c.kind = ModCommandKind::No;
     else if ((word == "players" || word == "who") && rest.empty()) c.kind = ModCommandKind::Players;
@@ -299,15 +302,16 @@ inline TargetMatch FindTarget(const std::string& query, const std::vector<ModPla
 }
 
 // ---------------------------------------------------------------- votekick
-// Players are named by their stable session key (Steam ID, or the direct-IP peer key). The starter votes yes. It passes
-// once more than half of the voters (everyone but the target) said yes, fails once that can no longer happen or after
-// kVoteKickMs. One vote at a time; each player may start one per kVoteCooldownMs.
+// Players are named by their stable session key (Steam ID, or the direct-IP peer key). The starter votes yes. A kick
+// passes once more than half of the voters (everyone but the target) said yes, a ban (7 days, role=server) once two
+// thirds did; either fails once that can no longer happen or after kVoteKickMs. One vote at a time; each player may
+// start one per kVoteCooldownMs.
 class VoteKick {
 public:
     enum class Start { Ok, Running, Cooldown, TooFew, Self };
     enum class Outcome { None, Running, Passed, Failed, Cancelled };
 
-    Start Begin(uint64_t starter, uint64_t target, const std::vector<uint64_t>& players, uint32_t now) {
+    Start Begin(uint64_t starter, uint64_t target, const std::vector<uint64_t>& players, uint32_t now, bool ban = false) {
         if (running_) return Start::Running;
         if (starter == target) return Start::Self;
         for (const auto& [k, at] : started_)
@@ -316,7 +320,7 @@ public:
         for (uint64_t p : players) if (p != target && std::find(voters.begin(), voters.end(), p) == voters.end()) voters.push_back(p);
         if (std::find(voters.begin(), voters.end(), starter) == voters.end()) voters.push_back(starter);
         if (voters.size() < kMinVoters) return Start::TooFew;
-        running_ = true; target_ = target; startedAt_ = now; voters_ = voters; votes_.assign(voters.size(), 0);
+        running_ = true; ban_ = ban; target_ = target; startedAt_ = now; voters_ = voters; votes_.assign(voters.size(), 0);
         votes_[size_t(std::find(voters_.begin(), voters_.end(), starter) - voters_.begin())] = 1;
         std::erase_if(started_, [&](const std::pair<uint64_t, uint32_t>& s) { return s.first == starter || now - s.second >= kVoteCooldownMs; });
         started_.push_back({starter, now});
@@ -343,23 +347,31 @@ public:
         if (cancelled_) { cancelled_ = false; return Outcome::Cancelled; }
         if (!running_) return Outcome::None;
         if (voters_.size() < kMinVoters) { running_ = false; return Outcome::Cancelled; }
-        if (Yes() * 2 > voters_.size()) { running_ = false; return Outcome::Passed; }
-        if ((Yes() + Undecided()) * 2 <= voters_.size() || now - startedAt_ >= kVoteKickMs) { running_ = false; return Outcome::Failed; }
+        if (Yes() >= Needed()) { running_ = false; return Outcome::Passed; }
+        if (Yes() + Undecided() < Needed() || now - startedAt_ >= kVoteKickMs) { running_ = false; return Outcome::Failed; }
         return Outcome::Running;
     }
 
     void Clear() { running_ = false; cancelled_ = false; voters_.clear(); votes_.clear(); started_.clear(); }
 
     bool Active() const { return running_; }
+    bool Ban() const { return ban_; }               // the running (or last) vote is a voteban
     uint64_t target() const { return target_; }
     size_t Yes() const { return size_t(std::count(votes_.begin(), votes_.end(), int8_t(1))); }
     size_t No() const { return size_t(std::count(votes_.begin(), votes_.end(), int8_t(-1))); }
     size_t Undecided() const { return size_t(std::count(votes_.begin(), votes_.end(), int8_t(0))); }
-    size_t Needed() const { return voters_.size() / 2 + 1; }
+    size_t Needed() const { return ban_ ? (voters_.size() * 2 + 2) / 3 : voters_.size() / 2 + 1; }   // ban: two thirds, rounded up
     uint32_t SecondsLeft(uint32_t now) const { uint32_t el = now - startedAt_; return el >= kVoteKickMs ? 0 : (kVoteKickMs - el + 999) / 1000; }
+    size_t Voters() const { return voters_.size(); }
+    // 1 yes, -1 no, 0 not yet; -2: no vote running, or `who` is not a voter (the target, or joined after it began).
+    int VoteOf(uint64_t who) const {
+        if (!running_) return -2;
+        for (size_t i = 0; i < voters_.size(); ++i) if (voters_[i] == who) return votes_[i];
+        return -2;
+    }
 
 private:
-    bool running_ = false, cancelled_ = false;
+    bool running_ = false, cancelled_ = false, ban_ = false;
     uint64_t target_ = 0;
     uint32_t startedAt_ = 0;
     std::vector<uint64_t> voters_;

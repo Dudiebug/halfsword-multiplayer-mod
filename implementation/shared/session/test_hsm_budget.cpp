@@ -15,6 +15,8 @@ static void TestClasses() {
     CHECK(BudgetClassOf(MsgType::PaintFx) == BudgetClass::Fx);
     CHECK(BudgetClassOf(MsgType::HitClaim) == BudgetClass::Combat && BudgetClassOf(MsgType::GrabState) == BudgetClass::Combat);
     CHECK(BudgetClassOf(MsgType::BlobChunk) == BudgetClass::Blob && BudgetClassOf(MsgType::Ready) == BudgetClass::Control);
+    CHECK(BudgetClassOf(MsgType::Forward) == BudgetClass::Detour);
+    CHECK(std::string(MsgBudget::ClassName(BudgetClass::Detour)) == "detour");
     // Setup and already-bounded messages are never budgeted here.
     for (MsgType t : {MsgType::Hello, MsgType::Welcome, MsgType::Chat, MsgType::Ping, MsgType::Travel, MsgType::Spawn,
                       MsgType::MatchInfo, MsgType::Event, MsgType::PropCensus})
