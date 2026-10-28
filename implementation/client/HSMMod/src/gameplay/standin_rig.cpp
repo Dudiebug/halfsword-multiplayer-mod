@@ -177,7 +177,10 @@ void RearmFlail(UObject* weapon) {
     if (!flail) return;
     Call below(flail, "SetAllBodiesBelowSimulatePhysics");
     below.setName("InBoneName", MakeName("Joint1")).set<bool>("bNewSimulate", true).set<bool>("bIncludeSelf", true);
-    if (!below.invoke()) HSM_LOG("rig: %s: flail chain NOT re-armed", ObjectName(weapon).c_str());
+    if (!below.invoke()) { HSM_LOG("rig: %s: flail chain NOT re-armed", ObjectName(weapon).c_str()); return; }
+    // The chain wakes with whatever it carried while the root was off: it starts still, as Shift leaves it.
+    Call(flail, "SetAllPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
+    Call(flail, "SetAllPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
 }
 
 int ObjectType(UObject* c) {

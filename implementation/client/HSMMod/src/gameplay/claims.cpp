@@ -54,6 +54,27 @@ std::string StrikerName(const HitClaim& c) {
     return b;
 }
 
+// Which hand of fighter holds weapon (Body when neither does).
+StrikeSource HandOf(UObject* fighter, UObject* weapon) {
+    UObject** right = fighter ? Field<UObject*>(fighter, "Weapon R") : nullptr;
+    UObject** left = fighter ? Field<UObject*>(fighter, "Weapon L") : nullptr;
+    if (weapon && right && weapon == *right) return StrikeSource::WeaponRight;
+    if (weapon && left && weapon == *left) return StrikeSource::WeaponLeft;
+    return StrikeSource::Body;
+}
+
+// A Hit Box parameter's world frame and extent into in (hasHitBox stays false when it cannot be read).
+void ReadHitBox(UObject* box, DcdInputs& in) {
+    if (!box) return;
+    Call world(box, "K2_GetComponentToWorld");
+    Call extent(box, "GetUnscaledBoxExtent");
+    if (world.invoke() && extent.invoke()) {
+        in.hasHitBox = true;
+        in.hitBoxWorld = ToXform(world.get<FTransform>("ReturnValue"));
+        in.hitBoxExtent = ToV(extent.get<FVector>("ReturnValue"));
+    }
+}
+
 }  // namespace
 
 bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, Env env) {
@@ -150,6 +171,8 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
             return true;
         }
         MakeClaim(c, self, victim, attacker, striker, comp, isProp ? &prop : nullptr);
+        // The body leaves its outputs alone when it returns early (Damage Out read ~1e32): they start at zero.
+        if (pending_.standIn) c.ZeroOutputs();
         return false;
     }
     if (isProp && env_.ownedEntity(self) && combat::DecidePropContact(true, prop.streamedHere) == combat::PropContact::Block) {
@@ -165,27 +188,110 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
     return false;
 }
 
-// The stand-in's own run of a blow just claimed: its raw Damage Out, logged next to the claim so the victim's replay of
-// the same claim id (its "damage out", in the other machine's log) can be compared with what the blow did here. The
-// stand-in wears the victim's passport, so the two should be close; a large gap means the replay is not faithful.
+// The stand-in's own run of a blow just claimed. Its Damage Out scales with the hit velocity (a contact with no impulse
+// still did 700-840), so it, not the impulse, decides which contacts of one blow become claims (SendPending).
 void Claims::AfterDealComplexDamage(ScriptCall& c) {
     if (!pending_.standIn || c.self() != pending_.standIn) return;
-    const Pending p = pending_;
+    SendPending(c);
+}
+
+void Claims::SendPending(ScriptCall& c) {
+    Pending p = std::move(pending_);
     pending_ = {};
-    if (p.claimId <= kLogFirst)
-        HSM_LOG("claims: #%u e%u: damage out %.2f here on the stand-in", p.claimId, p.attacker, c.get<double>("Damage Out"));
+    const double damage = c.get<double>("Damage Out");
+    switch (coalescer_.Allow(p.key, damage, SteadyNowMs())) {
+    case combat::BlowCoalescer::Verdict::Send: break;
+    case combat::BlowCoalescer::Verdict::Coalesced: ++n_.coalesced; return;
+    case combat::BlowCoalescer::Verdict::ZeroImpulse: ++n_.zeroImpulse; return;
+    case combat::BlowCoalescer::Verdict::Capped:
+        if (++n_.capped <= 3)
+            HSM_LOG("claims: e%u -> e%u over %d claims in 1 s; bone %s not claimed", p.claim.attacker, p.claim.victim,
+                    combat::kClaimsPerSecond, p.claim.hitBone.c_str());
+        return;
+    }
+    HitClaim& claim = p.claim;
+    claim.claimId = ++nextClaimId_[claim.attacker];
+    env_.send(claim);
+    ++n_.sent;
+    if (p.prop) ++n_.propSent;
+    if (n_.sent <= kLogFirst || (p.prop && n_.propSent <= kLogFirst)) {
+        char speed[48] = "";
+        if (p.prop) {
+            const sync::V3& v = claim.propVelocity;
+            std::snprintf(speed, sizeof speed, " (prop at %.0f cm/s)", std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z));
+        }
+        const sync::V3& i = claim.hitImpulse;   // rotated into the bone's frame: its length is the world one
+        HSM_LOG("claims: sent #%u e%u -> e%u bone %s by %s '%s' |impulse| %.0f cut %.2f stab %.2f box %d at t=%u%s; damage out %.2f here on the stand-in",
+                claim.claimId, claim.attacker, claim.victim, claim.hitBone.c_str(), StrikerName(claim).c_str(), claim.strikeComponent.c_str(),
+                std::sqrt(i.x * i.x + i.y * i.y + i.z * i.z), claim.cuttingPower, claim.stabRate, claim.hasHitBox ? 1 : 0,
+                claim.attackerTsMs, speed, damage);
+    }
 }
 
 // Get Damage reached on a fighter simulated here from a stand-in's component by any path other than our own replay
 // (which runs under ScriptHookBypass): e.g. a stand-in's blade left stuck in the body. Blocked, outputs zeroed.
+// Get Damage reached on a stand-in is the other way round: my own blade lodged in it (OnStuckDamage), left to run (the
+// stand-in is Invulnerable: it returns at once).
 bool Claims::OnGetDamage(ScriptCall& c) {
-    if (!active_ || !env_.ownedEntity(c.self())) return false;
+    if (!active_) return false;
+    UObject* self = c.self();
+    if (const uint8_t victim = standIns_->EntityOf(self)) {
+        OnStuckDamage(c, self, victim);
+        return false;
+    }
+    if (!env_.ownedEntity(self)) return false;
     UObject* comp = nullptr;
     if (!c.get("Hit By Component", comp) || !comp) return false;
     if (!standIns_->IsStandIn(adapter_->FighterOf(OuterOf(comp)))) return false;
     c.ZeroOutputs();
     ++n_.getDamageBlocked;
     return true;
+}
+
+// Most of a stab's damage is Constraint_Weapon_Stuck_BP calling Get Damage on what its blade is lodged in (on the stick,
+// every tick from the constraint force, the head, the bone mass), with Inside = true; Deal Complex Damage's own call
+// passes false. The stand-in ignores it, so a blade of mine lodged in one becomes a claim of kind Stuck (rate-limited
+// per pair); the victim's owner replays it through its own Get Damage.
+void Claims::OnStuckDamage(ScriptCall& c, UObject* standIn, uint8_t victim) {
+    bool inside = false;
+    UObject* comp = nullptr;
+    if (!c.getBool("Inside", inside) || !inside || !c.get("Hit By Component", comp) || !comp) return;
+    UObject* fighter = adapter_->FighterOf(OuterOf(comp));
+    const uint8_t attacker = fighter ? env_.ownedEntity(fighter) : 0;
+    if (!attacker || attacker == victim) return;
+    const StrikeSource source = HandOf(fighter, OuterOf(comp));
+    if (source == StrikeSource::Body) return;   // a blade in neither hand (sheathed, thrown) is not a stab of mine
+    if (env_.allowed && !env_.allowed(attacker, victim)) { ++n_.friendly; return; }
+    double raw = 0, cut = 0;
+    c.get("Raw Damage", raw);
+    c.get("Cutting Power", cut);
+    if (!(raw > 0) || !(cut >= 0)) return;   // also NaN
+    if (!stuckLimiter_.Allow(attacker, victim, SteadyNowMs())) { ++n_.stuckLimited; return; }
+    DcdInputs in;
+    FName bone{};
+    c.get("Bone", bone);
+    in.hitBone = NameToString(bone);
+    FVector v{};
+    if (c.get("Location", v)) in.location = ToV(v);
+    if (c.get("Normal", v)) in.normal = ToV(v);
+    in.cuttingPower = std::fmin(cut, combat::kMaxStuckCuttingPower);
+    c.getBool("Lower Threshold", in.lowerThreshold);
+    UObject* box = nullptr;
+    if (c.get("Hit Box", box)) ReadHitBox(box, in);
+    Xform boneWorld;
+    if (in.hitBone.empty() || !BoneXform(adapter_->Mesh(standIn), bone, boneWorld)) {
+        ++n_.noBone;
+        if (n_.noBone <= 3) HSM_LOG("claims: no bone transform for '%s' on the stand-in of e%u; no stuck claim", in.hitBone.c_str(), victim);
+        return;
+    }
+    const uint32_t ts = streams_->ClockMs(SteadyNowMs());
+    HitClaim claim = combat::MakeClaim(in, boneWorld, ++nextClaimId_[attacker], attacker, victim, ts, source, ObjectName(comp), std::string{});
+    claim.striker = combat::StrikerKind::Stuck;
+    claim.rawDamage = std::fmin(raw, combat::kMaxStuckRawDamage);
+    env_.send(claim);
+    if (++n_.stuckSent <= kLogFirst)
+        HSM_LOG("claims: sent #%u e%u -> e%u stuck blade '%s' in bone %s: raw damage %.1f cut %.2f inside at t=%u", claim.claimId, attacker,
+                victim, claim.strikeComponent.c_str(), claim.hitBone.c_str(), claim.rawDamage, claim.cuttingPower, ts);
 }
 
 // ---------------------------------------------------------------- attacker side
@@ -211,66 +317,27 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
     c.getBool("Damage Parent Bone?", in.damageParentBone);
     c.getBool("Extra High Velocity", in.extraHighVelocity);
     UObject* box = nullptr;
-    if (c.get("Hit Box", box) && box) {
-        Call world(box, "K2_GetComponentToWorld");
-        Call extent(box, "GetUnscaledBoxExtent");
-        if (world.invoke() && extent.invoke()) {
-            in.hasHitBox = true;
-            in.hitBoxWorld = ToXform(world.get<FTransform>("ReturnValue"));
-            in.hitBoxExtent = ToV(extent.get<FVector>("ReturnValue"));
-        }
-    }
+    if (c.get("Hit Box", box)) ReadHitBox(box, in);
     Xform boneWorld;
     if (!BoneXform(adapter_->Mesh(standIn), bone, boneWorld)) {
         ++n_.noBone;
         if (n_.noBone <= 3) HSM_LOG("claims: no bone transform for '%s' on the stand-in of e%u; no claim", in.hitBone.c_str(), victim);
         return;
     }
-    StrikeSource source = StrikeSource::Body;
     UObject* weapon = OuterOf(comp);
-    UObject** right = attackerWillie ? Field<UObject*>(attackerWillie, "Weapon R") : nullptr;
-    UObject** left = attackerWillie ? Field<UObject*>(attackerWillie, "Weapon L") : nullptr;
-    if (weapon && right && weapon == *right) source = StrikeSource::WeaponRight;
-    else if (weapon && left && weapon == *left) source = StrikeSource::WeaponLeft;
-    const double impulseLen = std::sqrt(in.hitImpulse.x * in.hitImpulse.x + in.hitImpulse.y * in.hitImpulse.y +
-                                        in.hitImpulse.z * in.hitImpulse.z);
+    const StrikeSource source = HandOf(attackerWillie, weapon);
     // One blow touches several bones of one body part, frame after frame: only its first contact and at most one
-    // stronger one become claims (combat::BlowCoalescer).
+    // stronger one become claims (combat::BlowCoalescer). Which, the stand-in's own Damage Out decides once its body has
+    // run (SendPending); until then the claim waits here without an id.
     combat::BlowKey key;
     key.attacker = attacker;
     key.victim = victim;
     key.strikeComponent = ObjectName(comp);
     key.bodyPart = combat::BodyPartOfBone(in.hitBone);
-    switch (coalescer_.Allow(key, combat::DcdGateNewImpulse(impulseLen, in.cuttingPower), SteadyNowMs())) {
-    case combat::BlowCoalescer::Verdict::Send: break;
-    case combat::BlowCoalescer::Verdict::Coalesced: ++n_.coalesced; return;
-    case combat::BlowCoalescer::Verdict::ZeroImpulse: ++n_.zeroImpulse; return;
-    case combat::BlowCoalescer::Verdict::Capped:
-        if (++n_.capped <= 3)
-            HSM_LOG("claims: e%u -> e%u over %d claims in 1 s; bone %s not claimed", attacker, victim,
-                    combat::kClaimsPerSecond, in.hitBone.c_str());
-        return;
-    }
     const uint32_t ts = streams_->ClockMs(SteadyNowMs());
-    HitClaim claim = combat::MakeClaim(in, boneWorld, ++nextClaimId_[attacker], attacker, victim, ts, source,
-                                       key.strikeComponent, std::string{});
-    if (prop) {
-        combat::StruckByProp(claim, prop->id, prop->velocity, boneWorld);
-        ++n_.propSent;
-    }
-    env_.send(claim);
-    ++n_.sent;
-    pending_ = Pending{standIn, claim.claimId, attacker};
-    if (n_.sent <= kLogFirst || (prop && n_.propSent <= kLogFirst)) {
-        char speed[48] = "";
-        if (prop) {
-            const sync::V3& v = prop->velocity;
-            std::snprintf(speed, sizeof speed, " (prop at %.0f cm/s)", std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z));
-        }
-        HSM_LOG("claims: sent #%u e%u -> e%u bone %s by %s '%s' |impulse| %.0f cut %.2f stab %.2f box %d at t=%u%s", claim.claimId,
-                attacker, victim, claim.hitBone.c_str(), StrikerName(claim).c_str(), claim.strikeComponent.c_str(), impulseLen,
-                in.cuttingPower, in.stabRate, in.hasHitBox ? 1 : 0, ts, speed);
-    }
+    HitClaim claim = combat::MakeClaim(in, boneWorld, 0, attacker, victim, ts, source, key.strikeComponent, std::string{});
+    if (prop) combat::StruckByProp(claim, prop->id, prop->velocity, boneWorld);
+    pending_ = Pending{standIn, std::move(claim), std::move(key), prop != nullptr};
 }
 
 bool Claims::BoneXform(UObject* mesh, FName bone, Xform& out) const {
@@ -312,6 +379,7 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
 
 // A queued claim, at most kReplaysPerTick per victim per frame (Tick).
 void Claims::ReplayNow(const HitClaim& c, double nowMs) {
+    if (c.striker == combat::StrikerKind::Stuck) { ReplayStuck(c, nowMs); return; }   // a lodged blade is no swing: nothing to parry
     int32_t clashMs = 0;
     if (parry_.Cancels(c, &clashMs)) {
         ++n_.parried;
@@ -355,6 +423,39 @@ void Claims::ReplayNow(const HitClaim& c, double nowMs) {
         HSM_LOG("claims: replayed #%u e%u -> e%u bone %s by %s '%s'%s box %d: damage out %.2f", c.claimId, c.attacker,
                 c.victim, c.hitBone.c_str(), StrikerName(c).c_str(), c.strikeComponent.c_str(), striker ? "" : " (no striker)",
                 box ? 1 : 0, damage);
+}
+
+// A lodged blade's claim: my fighter's own Get Damage, called as Constraint_Weapon_Stuck_BP calls it (Inside, no
+// impulse, no velocity, no stab flag, full pain), so armour, wounds, bleeding and death follow as in a solo stab.
+void Claims::ReplayStuck(const HitClaim& c, double nowMs) {
+    UObject* victim = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;
+    UObject* mesh = victim ? adapter_->Mesh(victim) : nullptr;
+    if (!mesh) { ++n_.noVictim; return; }
+    if (!PeerBoneOk(c)) return;
+    const FName bone = MakeName(c.hitBone);
+    Call index(mesh, "GetBoneIndex");
+    index.setName("BoneName", bone).invoke();
+    Xform boneWorld;
+    if (!combat::ReplayBoneOk(c.hitBone, index.get<int32_t>("ReturnValue")) || !BoneXform(mesh, bone, boneWorld)) {
+        ++n_.noBone;
+        if (n_.noBone <= 3) HSM_LOG("claims: #%u from e%u names bone '%s', which my fighter lacks", c.claimId, c.attacker, c.hitBone.c_str());
+        return;
+    }
+    const DcdInputs in = combat::ReplayInputs(c, boneWorld);
+    UObject* striker = Striker(c);
+    if (!striker) ++n_.noStriker;   // the damage still lands; it is just not "by a weapon"
+    UObject* box = in.hasHitBox ? HitBox(victim, c, in) : nullptr;
+    double damage = 0;
+    if (!CallGetDamage(victim, mesh, striker, bone, in, c.rawDamage, box, &damage)) {
+        ++n_.failed;
+        if (n_.failed <= 3) HSM_LOG("claims: #%u from e%u: Get Damage could not be called", c.claimId, c.attacker);
+        return;
+    }
+    recent_[c.victim] = Recent{c.attacker, nowMs};
+    if (++n_.stuckReplayed <= kLogFirst)
+        HSM_LOG("claims: replayed #%u e%u -> e%u stuck blade '%s' in bone %s: raw damage %.1f cut %.2f%s box %d: damage out %.2f", c.claimId,
+                c.attacker, c.victim, c.strikeComponent.c_str(), c.hitBone.c_str(), c.rawDamage, c.cuttingPower,
+                striker ? "" : " (no striker)", box ? 1 : 0, damage);
 }
 
 // The claim's striking component here: on my copy of the prop that struck (the named component, else its root), or on
@@ -431,6 +532,37 @@ UObject* Claims::HitBox(UObject* victim, const HitClaim& c, const DcdInputs& in)
     return b.box;
 }
 
+bool Claims::CallGetDamage(UObject* victim, UObject* mesh, UObject* striker, FName bone, const DcdInputs& in, double rawDamage,
+                           UObject* hitBox, double* damageOut) {
+    Call call(victim, "Get Damage");
+    if (!call.valid()) return false;
+    call.set<FVector>("Impulse", FVector{})
+        .set<FVector>("Velocity", FVector{})
+        .set<FVector>("Location", ToF(in.location))
+        .set<FVector>("Normal", ToF(in.normal))
+        .setName("Bone", bone)
+        .set<double>("Raw Damage", rawDamage)
+        .set<double>("Cutting Power", in.cuttingPower)
+        .set<bool>("Inside", true)
+        .set<UObject*>("Damaged Mesh", mesh)
+        .set<int32_t>("Dism Blunt", 0)
+        .set<bool>("Lower Threshold", in.lowerThreshold)
+        .set<bool>("Shockwave", false)
+        .set<UObject*>("Hit By Component", striker)
+        .set<bool>("Stab?", false)
+        .set<UObject*>("Hit Box", hitBox)
+        .set<double>("Pain Rate", 1.0)
+        .set<bool>("Hit Flesh", false)
+        .set<double>("Draw Cut", 0.0);
+    bool ok = false;
+    {
+        ScriptHookBypass bypass;   // our own call passes the claims hooks
+        ok = call.invoke();
+    }
+    if (ok && damageOut) *damageOut = call.get<double>("Damage Out");
+    return ok;
+}
+
 bool Claims::CallDealComplexDamage(UObject* victim, UObject* mesh, UObject* striker, FName bone, const DcdInputs& in,
                                    UObject* hitBox, double* damageOut) {
     Call dcd(victim, "Deal Complex Damage");
@@ -466,7 +598,7 @@ bool Claims::CallDealComplexDamage(UObject* victim, UObject* mesh, UObject* stri
 // Someone else's blow between two fighters both simulated elsewhere: shown on my stand-in of the victim (cuts, paint)
 // through the same function; the stand-in is Invulnerable and its dismemberment is off, so nothing else happens.
 void Claims::Effect(const HitClaim& c) {
-    if (!active_) return;
+    if (!active_ || c.striker == combat::StrikerKind::Stuck) return;   // a lodged blade's damage has nothing to show
     UObject* standIn = standIns_->ActorOf(c.victim);
     UObject* mesh = standIn ? adapter_->Mesh(standIn) : nullptr;
     Xform boneWorld;
@@ -525,12 +657,12 @@ std::string Claims::HealthLine() {
     char line[1024];
     std::snprintf(line, sizeof line,
                   "claims: sent %llu (props %llu gated %llu limited %llu friendly %llu coalesced %llu zero-impulse %llu "
-                  "capped %llu) | replayed %llu (props %llu queued %llu dropped %llu dupes %llu stale %llu "
+                  "capped %llu, stuck %llu limited %llu) | replayed %llu (stuck %llu props %llu queued %llu dropped %llu dupes %llu stale %llu "
                   "age? %llu parried %llu novictim %llu nobone %llu nostriker %llu failed %llu) | blocked: on stand-ins %llu, "
                   "on mine %llu, driven props on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu) | bad bone names %llu",
                   d(a.sent, b.sent), d(a.propSent, b.propSent), d(a.gated, b.gated), d(a.limited, b.limited),
                   d(a.friendly, b.friendly), d(a.coalesced, b.coalesced), d(a.zeroImpulse, b.zeroImpulse), d(a.capped, b.capped),
-                  d(a.replayed, b.replayed), d(a.propReplayed, b.propReplayed), d(a.queued, b.queued), d(a.dropped, b.dropped),
+                  d(a.stuckSent, b.stuckSent), d(a.stuckLimited, b.stuckLimited), d(a.replayed, b.replayed), d(a.stuckReplayed, b.stuckReplayed), d(a.propReplayed, b.propReplayed), d(a.queued, b.queued), d(a.dropped, b.dropped),
                   d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.ageUnknown, b.ageUnknown),
                   d(a.parried, b.parried), d(a.noVictim, b.noVictim), d(a.noBone, b.noBone), d(a.noStriker, b.noStriker),
                   d(a.failed, b.failed), d(a.blockedStandIn, b.blockedStandIn), d(a.blockedOnMine, b.blockedOnMine),

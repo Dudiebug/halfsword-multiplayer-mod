@@ -95,6 +95,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     combat::HitClaim rock = hc;
     combat::StruckByProp(rock, MakeLevelPropId(14), sync::V3{ 300, 0, -50 }, combat::Xform{ {}, sync::Q4{ 0, 0, 0, 1 }, { 1, 1, 1 } });
     s.push_back(Encode(HitClaimMsg{ rock })); s.push_back(Encode(HitFxMsg{ rock }));
+    combat::HitClaim stab = hc; stab.striker = combat::StrikerKind::Stuck; stab.rawDamage = 3500; stab.hitBone = "spine_03";
+    s.push_back(Encode(HitClaimMsg{ stab })); s.push_back(Encode(HitFxMsg{ stab }));
     combat::SeverClaim sc; sc.claimId = 4; sc.victimLife = 2; sc.attacker = 1; sc.victim = 2; sc.part = 9; sc.masterMesh = "CharacterMesh0";
     sc.attachMarker = "DM Sphere Thigh_R 2"; sc.markers = {"DM Sphere Thigh_R 2", "DM Sphere Thigh_R 3"}; sc.frameBone = "thigh_r";
     sc.box1.local.rot = sync::Q4{ 0, 0, 0, 1 }; sc.box1.extent = sync::V3{ 100, 500, 100 }; sc.box1.local.pos = sync::V3{ 0, 500, 0 };

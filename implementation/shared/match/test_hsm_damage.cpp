@@ -34,6 +34,21 @@ static void TestStepStopsAtStock() {
     CHECK(DamageLabel(kDamageStock, r) == "50% (stock)" && DamageLabel(80, r) == "80%");
 }
 
+static void TestSliderSelectionAndClientClamp() {
+    CHECK(IsGameSettingsSlider("Slider /Game/UI/UI_GameSettings.UI_GameSettings_C:WidgetTree.Slider_DamagePlayer"));
+    CHECK(IsGameSettingsSlider("Slider /Game/UI/UI_GameSettings.Default__UI_GameSettings_C:WidgetTree.Slider_DamagePlayer"));
+    CHECK(IsGameSettingsSlider("UI_GameSettings_C:WidgetTree.Slider_DamagePlayer"));
+    CHECK(!IsGameSettingsSlider("Slider /Game/UI/UI_CameraSettings.UI_CameraSettings_C:WidgetTree.Slider_DamagePlayer"));   // negative control
+    CHECK(!IsGameSettingsSlider("Slider /Game/UI/UI_GameSettingsOld.UI_GameSettingsOld_C:WidgetTree.Slider_DamagePlayer"));
+    CHECK(!IsGameSettingsSlider("Slider /Game/UI/XUI_GameSettings.XUI_GameSettings_C:WidgetTree.Slider_DamagePlayer"));
+    CHECK(!IsGameSettingsSlider("") && !IsGameSettingsSlider("Slider_DamagePlayer"));
+    const DamageRange cam = DamageRangeFrom(0.0, 1.0, 0.1, 1.0);   // the wrong slider's 0..100%
+    CHECK(DamagePct(150, cam) == 100);                      // the host clamps to its slider
+    CHECK(DamagePct(150, cam, true) == 150 && DamageRate(150, cam, true) == 1.5);   // a client takes the host's value
+    CHECK(DamagePct(5000, cam, true) == kDamageMaxPct);     // still bounded
+    CHECK(DamagePct(kDamageStock, cam, true) == 100);
+}
+
 static void TestOwnBeforeSave() {
     double own = 0.2;                                      // the player's own slider, at the minimum
     CHECK(OwnBeforeSave(own, 1.0, 1.0) == 0.2 && own == 0.2);   // the forced value in the game instance: not theirs
@@ -46,6 +61,7 @@ static void TestOwnBeforeSave() {
 int main() {
     TestRangeFromSlider();
     TestStepStopsAtStock();
+    TestSliderSelectionAndClientClamp();
     TestOwnBeforeSave();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_damage: ok\n");

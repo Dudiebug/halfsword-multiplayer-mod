@@ -7,6 +7,7 @@
 // player's own values for it (OwnBeforeSave), and puts them back when the session is over.
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -39,9 +40,26 @@ inline DamageRange DamageRangeFrom(double sliderMin, double sliderMax, double sl
     return r;
 }
 
-// The value a stored percent stands for (kDamageStock: the stock one), inside the slider's range.
-inline int DamagePct(uint16_t stored, const DamageRange& r) {
+// Whether a slider's full name is the one in the game's settings screen (UI_GameSettings_C). UI_CameraSettings has a
+// slider of the same name with the range 0..1, which gave a host 0..100% and made a client cut the host's 150% to 100%.
+inline bool IsGameSettingsSlider(const std::string& fullName) {
+    static const std::string kOuter = "UI_GameSettings";
+    auto word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; };
+    for (size_t at = fullName.find(kOuter); at != std::string::npos; at = fullName.find(kOuter, at + 1)) {
+        const size_t end = at + kOuter.size();
+        const bool startOk = at == 0 || !word(fullName[at - 1]);
+        const bool endOk = end == fullName.size() || !(word(fullName[end]) || (fullName[end] == '_' && fullName.compare(end, 2, "_C") != 0));
+        const bool afterC = fullName.compare(end, 2, "_C") != 0 || end + 2 == fullName.size() || !word(fullName[end + 2]);
+        if ((startOk || (at >= 2 && fullName.compare(at - 2, 2, "__") == 0)) && endOk && afterC) return true;
+    }
+    return false;
+}
+
+// The value a stored percent stands for (kDamageStock: the stock one). The host's is inside the slider's range;
+// onlyMax (a client taking the host's value): as sent, up to kDamageMaxPct, whatever this machine's slider runs.
+inline int DamagePct(uint16_t stored, const DamageRange& r, bool onlyMax = false) {
     if (stored == kDamageStock) return r.stockPct;
+    if (onlyMax) return std::min(int(stored), int(kDamageMaxPct));
     return std::clamp(int(stored), r.minPct, r.maxPct);
 }
 
@@ -61,7 +79,7 @@ inline std::string DamageLabel(uint16_t stored, const DamageRange& r) {
 }
 
 // The rate the game instance runs while in a session.
-inline double DamageRate(uint16_t stored, const DamageRange& r) { return DamagePct(stored, r) / 100.0; }
+inline double DamageRate(uint16_t stored, const DamageRange& r, bool onlyMax = false) { return DamagePct(stored, r, onlyMax) / 100.0; }
 
 // The game's Save Settings is about to write the game instance's rate into the Settings save. If the rate is not
 // the forced one, the player moved their own slider (or a level load read their save back): that is their value from

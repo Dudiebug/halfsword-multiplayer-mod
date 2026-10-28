@@ -1,4 +1,5 @@
 #include "gameplay/fx_sync.h"
+#include "combat/hsm_paintgate.h"
 #include "log.h"
 #include "ue/script_hook.h"
 #include "util/hsm_sanitize.h"
@@ -403,6 +404,7 @@ void FxSync::Refuse(const char* why, const PaintFxMsg& m, uint64_t& counter) {
 void FxSync::Forget(uint8_t entity) {
     limiter_.Forget(entity);
     rxLimiter_.Forget(entity);
+    gate_.Forget(entity);
     held_.erase(std::remove_if(held_.begin(), held_.end(), [entity](const Held& h) { return h.m.entity == entity; }), held_.end());
 }
 
@@ -432,9 +434,19 @@ bool FxSync::PaintBusy(UObject* willie) {
 
 void FxSync::Apply(const PaintFxMsg& m) {
     if (!active_) return;
-    if (ChangesArmor(m) && held_.size() < kHeldMax) {
-        const bool queued = std::any_of(held_.begin(), held_.end(), [&m](const Held& h) { return h.m.entity == m.entity; });
-        if (queued || PaintBusy(ArmorTarget(m))) { held_.push_back({m, SteadyNowMs()}); return; }   // keeps the order per fighter
+    const double now = SteadyNowMs();
+    if (ChangesArmor(m)) {
+        gate_.NoteArmour(m.entity, now);
+        if (held_.size() < kHeldMax) {
+            const bool queued = std::any_of(held_.begin(), held_.end(), [&m](const Held& h) { return h.m.entity == m.entity; });
+            gate_.Observe(m.entity, PaintBusy(ArmorTarget(m)), now);
+            // Held until the paint component has been idle for a quarter second without a break, not just now (T5).
+            if (queued || !gate_.Quiet(m.entity, now)) { held_.push_back({m, now}); return; }   // keeps the order per fighter
+        }
+    } else if (m.kind == FxKind::Blood || m.kind == FxKind::Wound) {
+        // Blood and wound paint start the tasks that read the armour piece being swapped: dropped for a second after a change.
+        if (gate_.BloodHeld(m.entity, now) ||
+            std::any_of(held_.begin(), held_.end(), [&m](const Held& h) { return h.m.entity == m.entity; })) { ++n_.skipped; return; }
     }
     ApplyNow(m);
 }
@@ -449,10 +461,12 @@ void FxSync::Tick() {
     for (Held& h : todo) {
         if (waiting.count(h.m.entity)) { keep.push_back(std::move(h)); continue; }
         const bool timedOut = now - h.since >= kPaintWaitMs;
-        if (!timedOut && PaintBusy(ArmorTarget(h.m))) { waiting.insert(h.m.entity); keep.push_back(std::move(h)); continue; }
+        gate_.Observe(h.m.entity, PaintBusy(ArmorTarget(h.m)), now);
+        if (!timedOut && !gate_.Quiet(h.m.entity, now)) { waiting.insert(h.m.entity); keep.push_back(std::move(h)); continue; }
         if (paintWaitsLogged_ < kPaintLogFirst)
             HSM_LOG("fx: armour change (%s) on e%u waited %.0f ms for its paint tasks%s (%u)", KindName(h.m.kind), h.m.entity,
                     now - h.since, timedOut ? ", gave up waiting" : "", ++paintWaitsLogged_);
+        gate_.NoteArmour(h.m.entity, now);
         ApplyNow(h.m);
     }
     held_.swap(keep);

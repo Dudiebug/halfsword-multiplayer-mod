@@ -222,6 +222,14 @@ static void TestClientDisconnectAction() {
 }
 
 // M5: a connected peer with no Hello within kHelloMs is reported once; a Hello or a disconnect ends the watch.
+static void TestFightMsgsOpen() {
+    CHECK(FightMsgsOpen(false, true, true));      // a welcomed client in a fight
+    CHECK(FightMsgsOpen(true, false, true));      // the host is never "welcomed"
+    CHECK(!FightMsgsOpen(false, true, false));    // a StuckBlade after the menu level loaded does nothing
+    CHECK(!FightMsgsOpen(true, true, false));
+    CHECK(!FightMsgsOpen(false, false, true));    // before the Welcome
+}
+
 static void TestHelloWatch() {
     HelloWatch w;
     w.Connected(1, 1000); w.Connected(2, 1000); w.Connected(3, 1000);
@@ -321,7 +329,7 @@ static void TestPeerSilenceJoinAndSpectate() {
 }
 
 int main() {
-    TestClientDisconnectAction(); TestHelloWatch(); TestPeerSilence(); TestPeerSilenceLobby(); TestPeerSilenceJoinAndSpectate();
+    TestClientDisconnectAction(); TestFightMsgsOpen(); TestHelloWatch(); TestPeerSilence(); TestPeerSilenceLobby(); TestPeerSilenceJoinAndSpectate();
     TestClaimBeforeExpiryAndDoubleClaim(); TestClaimAfterExpiry(); TestWrongKey(); TestExpiryList();
     TestRefreshAndSameKeyRules(); TestRejections(); TestCap(); TestLapsedEvictedByReserve(); TestWrapAround();
     TestResendOrder(); TestMonitorSilenceToLostThenMenu(); TestMonitorPacketRecovers(); TestMonitorLateTickGoesToMenu();

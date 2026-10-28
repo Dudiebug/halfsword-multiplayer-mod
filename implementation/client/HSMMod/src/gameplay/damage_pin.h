@@ -6,12 +6,17 @@
 // Fails closed: without the VM hook nothing is pinned (a pinned value could then reach the save). Game thread only.
 #pragma once
 #include "match/hsm_damage.h"
+#include "ue/engine.h"
 #include <cstdint>
 
 namespace hsm::game {
 
-// Every tick. active: in a session (joined); stored: the host's MatchConfig::damagePct (kDamageStock: the stock rate).
-void TickDamagePin(bool active, uint16_t stored);
+// Every tick. active: in a session (joined); stored: the host's MatchConfig::damagePct (kDamageStock: the stock rate);
+// host: this machine chose it (inside its slider's range), a client takes it as sent.
+void TickDamagePin(bool active, uint16_t stored, bool host);
+// A fighter caches its damage rate (Damagr Rste Var) when it spawns, before its Player flag is right. Writes the
+// pinned one now (no-op outside a session); TickDamagePin also rewrites every fighter's twice a second and on a change.
+void RefreshDamageCache(ue::UObject* willie);
 // The game's own damage slider (UI_GameSettings' Slider_DamagePlayer), read from its template once it is loaded;
 // DamageRange's defaults until then.
 const DamageRange& VanillaDamageRange();

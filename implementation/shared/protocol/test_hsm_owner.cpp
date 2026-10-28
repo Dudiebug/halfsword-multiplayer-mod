@@ -179,6 +179,19 @@ static void TestClaims() {
     CHECK(Decode(rockFx.data(), rockFx.size(), fx) && fx.claim.propId == MakeLevelPropId(14));
     m = rock; m.source = combat::StrikeSource::WeaponRight; CHECK(bad(m));
     m = rock; m.propId = 0; CHECK(bad(m));
+    // Rev 25: a lodged blade's damage (stabs) is a claim of striker kind Stuck, carrying Get Damage's Raw Damage.
+    combat::HitClaim stab = c;
+    stab.striker = combat::StrikerKind::Stuck; stab.rawDamage = 3500; stab.hitBone = "spine_03";
+    const auto stabBytes = Encode(HitClaimMsg{ stab });
+    CHECK(Decode(stabBytes.data(), stabBytes.size(), hc));
+    CHECK(hc.claim.striker == combat::StrikerKind::Stuck && hc.claim.rawDamage == 3500 && hc.claim.hitBone == "spine_03");
+    CHECK(hc.claim.source == combat::StrikeSource::WeaponRight && hc.claim.cuttingPower == 1.5);
+    CHECK(!bad(stab));
+    for (size_t n = 0; n < stabBytes.size(); ++n) CHECK(!Decode(stabBytes.data(), n, hc));   // every truncation fails
+    m = stab; m.rawDamage = 0; CHECK(bad(m));                                   // nothing to apply
+    m = stab; m.rawDamage = combat::kMaxStuckRawDamage * 2; CHECK(bad(m));     // out of range
+    m = stab; m.source = combat::StrikeSource::Body; CHECK(bad(m));             // no blade
+    m = c; m.rawDamage = 100; CHECK(bad(m));                                    // only a Stuck claim has a damage
 }
 
 int main() {

@@ -1,6 +1,7 @@
 #include "gameplay/adapter.h"
 #include <windows.h>
 #include "gameplay/combat_sync.h"
+#include "gameplay/damage_pin.h"
 #include "hsm_owner.h"
 #include "log.h"
 #include "match/hsm_match.h"
@@ -395,23 +396,32 @@ void Adapter::DeleteSlot(const std::string& slot) {
 bool Adapter::SaveToMemory(UObject* saveGame, std::vector<uint8_t>& out) {
     std::wstring dir = SaveGamesDir();
     if (dir.empty()) { HSM_LOG("adapter: Saved directory unknown"); return false; }
-    std::string slot = TempSlot();
-    FStringArgHolder name(slot);
-    Call s(statics_, "SaveGameToSlot");
-    s.set<UObject*>("SaveGameObject", saveGame).set("SlotName", name.arg).set<int32_t>("UserIndex", 0);
-    bool ok = s.invoke() && s.get<bool>("ReturnValue");
-    std::wstring file = dir + std::wstring(slot.begin(), slot.end()) + L".sav";
-    if (ok) {
-        if (FILE* f = _wfopen(file.c_str(), L"rb")) {
-            std::fseek(f, 0, SEEK_END); long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
-            if (n > 0 && n <= 64L * 1024 * 1024) { out.resize(size_t(n)); ok = std::fread(out.data(), 1, out.size(), f) == out.size(); }
-            else ok = false;
-            std::fclose(f);
-        } else ok = false;
+    // Two tries, each on a fresh slot: the save writer can fail once (0.7.1 logs: twice in one session, and the peers
+    // then saw the default loadout); the step that failed is logged.
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+        out.clear();
+        std::string slot = TempSlot();
+        FStringArgHolder name(slot);
+        Call s(statics_, "SaveGameToSlot");
+        s.set<UObject*>("SaveGameObject", saveGame).set("SlotName", name.arg).set<int32_t>("UserIndex", 0);
+        const char* failed = !s.invoke() ? "call" : !s.get<bool>("ReturnValue") ? "the game's save" : nullptr;
+        std::wstring file = dir + std::wstring(slot.begin(), slot.end()) + L".sav";
+        if (!failed) {
+            if (FILE* f = _wfopen(file.c_str(), L"rb")) {
+                std::fseek(f, 0, SEEK_END); long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+                if (n > 0 && n <= 64L * 1024 * 1024) {
+                    out.resize(size_t(n));
+                    if (std::fread(out.data(), 1, out.size(), f) != out.size()) failed = "reading the file";
+                } else failed = "the file's size";
+                std::fclose(f);
+            } else failed = "opening the file";
+        }
+        DeleteSlot(slot);
+        if (!failed && !out.empty()) return true;
+        HSM_LOG("adapter: SaveGameToSlot(%s) failed (%s)%s", slot.c_str(), failed ? failed : "empty", attempt == 1 ? "; trying again" : "");
     }
-    DeleteSlot(slot);
-    if (!ok) HSM_LOG("adapter: SaveGameToSlot(%s) failed", slot.c_str());
-    return ok && !out.empty();
+    out.clear();
+    return false;
 }
 
 bool Adapter::ExportPassport(std::vector<uint8_t>& out) {
@@ -539,6 +549,26 @@ void Adapter::ApplyMuscle(UObject* willie, FProperty* passport) {
     HSM_LOG("adapter: %s built for tier %d (Weight %.2f -> %.2f)", ObjectName(willie).c_str(), muscleTier_, own, want);
 }
 
+// #36 evidence: how the spawned fighter's head is set up (Face Type, the passport's Weight, the head material's
+// 'Body Hidden' scalar: 1 hides the body texture on the head/neck), to read against a screenshot.
+static void LogAppearance(UObject* w) {
+    const int32_t* face = Field<int32_t>(w, "Face Type");
+    double weight = -1;
+    if (FProperty* passport = FindProperty(ClassOf(w), "Character Passport"))
+        if (UObject* st = FindObject(kPassportStruct, "UserDefinedStruct"))
+            if (FProperty* wp = FindPropertyPrefix(st, "Weight_"); wp && PropertySize(wp) == sizeof(double))
+                std::memcpy(&weight, reinterpret_cast<uint8_t*>(w) + PropertyOffset(passport) + PropertyOffset(wp), sizeof weight);
+    float hidden = -1;
+    UObject* const* head = Field<UObject*>(w, "Head Material");
+    if (head && *head) {
+        Call get(*head, "K2_GetScalarParameterValue");
+        get.setName("ParameterName", MakeName("Body Hidden"));
+        if (get.valid() && get.invoke()) hidden = get.get<float>("ReturnValue");
+    }
+    HSM_LOG("adapter: %s appearance: Face Type %d, Weight %.3f, head 'Body Hidden' %.2f", ObjectName(w).c_str(), face ? int(*face) : -1, weight,
+            double(hidden));
+}
+
 UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
     const auto t0 = std::chrono::steady_clock::now();   // the line below says what the spawn took (round restarts: one a frame)
     UClass* willie = FindClass(kWillieClass);
@@ -573,6 +603,7 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
     }
     HSM_LOG("adapter: spawned %s at (%.0f, %.0f, %.0f)%s in %.1f ms", o.stockBrain ? "bot" : o.brain ? "fighter" : "puppet", o.at.x, o.at.y, o.at.z,
             o.blob || o.passport ? "" : " with default loadout", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    LogAppearance(done);
     return done;
 }
 
@@ -583,6 +614,7 @@ UObject* Adapter::ControllerOf(UObject* pawn) {
 
 void Adapter::KeepRemoteFighter(UObject* willie, float yawDeg, float pitchDeg) {
     SetBool(willie, "Player", true);   // Willie computes Player once from local player 0/1; mod fighters are players too
+    game::RefreshDamageCache(willie);   // its cached damage rate was set before that (gameplay/damage_pin.h)
     if (UObject* ctrl = ControllerOf(willie)) Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitchDeg, yawDeg, 0}).invoke();
 }
 
@@ -639,6 +671,16 @@ std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
     return carried;
 }
 
+void Adapter::StopHair(UObject* willie, bool destroy) {
+    UObject** p = Field<UObject*>(willie, "Hair");
+    UObject* hair = p ? *p : nullptr;
+    if (!hair || IsGarbage(hair) || BeingDestroyed(hair)) return;   // none, or already going: the game's Destroy Hair skips it too
+    Call off(hair, "SetEnableSimulation");
+    const bool stopped = off.valid() && off.set<bool>("bEnable", false).invoke();
+    if (destroy) Call(hair, "K2_DestroyComponent").invoke();
+    HSM_LOG("adapter: hair of %s simulation %s%s", ObjectName(willie).c_str(), stopped ? "off" : "NOT turned off", destroy ? ", destroyed" : "");
+}
+
 void Adapter::DestroyFighter(UObject* willie, int32_t index) {
     if (!StillValid(willie, index)) return;
     const auto t0 = std::chrono::steady_clock::now();
@@ -651,6 +693,7 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
         ++destroyed;
     }
     const std::string name = ObjectName(willie);
+    StopHair(willie, true);
     DestroyActor(willie);
     HSM_LOG("adapter: destroyed %s and %d carried actor(s) in %.1f ms", name.c_str(), destroyed,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -1184,6 +1227,7 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     if (!ctrl) { HSM_LOG("adapter: local player respawn failed: no player controller (new body destroyed)"); DestroyActor(w); return nullptr; }
     Call(ctrl, "Possess").set<UObject*>("InPawn", w).invoke();
     SetBool(w, "Player", true);
+    game::RefreshDamageCache(w);   // as KeepRemoteFighter: the cached rate predates the Player flag
     if (old && old != w) {
         if (destroyAware_) DestroyFighter(old, ObjectIndex(old));   // owner sync: its feet and weapons go too (test 3 leaked them)
         else DestroyActor(old);

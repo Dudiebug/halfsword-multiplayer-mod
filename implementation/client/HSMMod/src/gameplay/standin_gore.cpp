@@ -187,7 +187,10 @@ StandInGore::Outcome StandInGore::ShowSeverFallback(UObject* willie, uint8_t par
     if (below.valid()) below.setName("InBoneName", name).set<bool>("bDisabled", true).set<bool>("bIncludeSelf", true).invoke();
     if (!HideBone(mesh, name)) return Outcome::Failed;
     for (UObject* child : PassChildren(mesh)) HideBone(child, name);
-    if (part <= 1) Call(willie, "Destroy Hair").invoke();   // the hair is attached to the head bone, which is hidden
+    if (part <= 1) {
+        if (adapter_) adapter_->StopHair(willie, false);   // the game's Destroy Hair does not stop the simulation itself
+        Call(willie, "Destroy Hair").invoke();   // the hair is attached to the head bone, which is hidden
+    }
     return Outcome::Done;
 }
 

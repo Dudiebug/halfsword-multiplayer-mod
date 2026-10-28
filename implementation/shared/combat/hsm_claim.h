@@ -93,7 +93,10 @@ struct Xform {
 enum class StrikeSource : uint8_t { Body = 0, WeaponRight = 1, WeaponLeft = 2 };
 // Whose: the attacker fighter's weapon or body, or a prop (a rock, a thrown weapon, debris) streamed by the claiming
 // machine, whose contact it decided for the attacker (DecidePropContact).
-enum class StrikerKind : uint8_t { Fighter = 0, Prop = 1 };
+// Stuck (rev 25): not a blow but the damage the game's Constraint_Weapon_Stuck_BP deals each tick through Get Damage while a
+// blade is lodged in a stand-in (stabs); the victim replays it through its own Get Damage (rawDamage, cuttingPower and
+// the bone say what to call it with; the blade is source, never Body).
+enum class StrikerKind : uint8_t { Fighter = 0, Prop = 1, Stuck = 2 };
 
 // A captured "Deal Complex Damage" call, in the hit bone's local frame (see Xform above).
 struct HitClaim {
@@ -115,7 +118,11 @@ struct HitClaim {
     uint64_t propId = 0;                // Prop: the prop (session/hsm_lease.h ids); 0 for a fighter
     V3 propVelocity;                    // Prop: its velocity at the contact, in the hit bone's frame; zero for a fighter
     uint8_t victimLife = 0;             // rev 19: the Spawn.life of the victim body the attacker saw (0 = unknown); a stale one is dropped
+    double rawDamage = 0;               // rev 25: Stuck only: Get Damage's Raw Damage; 0 for every other claim
 };
+
+constexpr double kMaxStuckRawDamage = 1e7;      // Stuck claims: Raw Damage above this is not a stuck blade's (Bone Mass * 1000 is ~1e5)
+constexpr double kMaxStuckCuttingPower = 1e6;   // and so is a Cutting Power above this (the game's own are a few thousand at most)
 
 // The world-space "Deal Complex Damage" call inputs, same fields as the decompiled signature
 // minus the two component pointers (Hit Component, Collided Component), which never cross the
@@ -264,6 +271,32 @@ private:
 // kClaimDedupeWindow ids relative to it (bit 0 = the high-water id itself). Memory is bounded by
 // the number of distinct attackers (uint8_t, so at most 256 entries) regardless of how many claim
 // ids are ever seen.
+// Stuck-blade damage (StrikerKind::Stuck) is sent at most once per kStuckClaimEveryMs per (attacker, victim): the game
+// calls Get Damage every physics tick, and the victim's own Get Damage only counts a stronger hit than the last one for
+// 0.2 s anyway (Last Damage Taken). A refused call sends nothing and starts no interval.
+constexpr double kStuckClaimEveryMs = 100;
+class StuckDamageLimiter {
+public:
+    bool Allow(uint8_t attacker, uint8_t victim, double nowMs) {
+        auto [it, fresh] = last_.try_emplace(Pair{attacker, victim}, nowMs);
+        if (fresh) return true;
+        if (nowMs - it->second < kStuckClaimEveryMs && nowMs >= it->second) return false;   // a clock that went back is a new start
+        it->second = nowMs;
+        return true;
+    }
+    void Forget(uint8_t entity) {   // left, respawned or rejoined
+        for (auto it = last_.begin(); it != last_.end();)
+            it = it->first.attacker == entity || it->first.victim == entity ? last_.erase(it) : std::next(it);
+    }
+
+private:
+    struct Pair {
+        uint8_t attacker, victim;
+        bool operator<(const Pair& o) const { return attacker != o.attacker ? attacker < o.attacker : victim < o.victim; }
+    };
+    std::map<Pair, double> last_;
+};
+
 class ClaimDedupe {
 public:
     // Returns true iff (attacker, claimId) has not been seen before (and should be processed).
@@ -406,23 +439,23 @@ struct BlowKey {
     }
 };
 
-// Decides, per contact, whether it becomes a claim. strength is the DCD gate's scaled impulse (DcdGateNewImpulse).
+// Decides, per contact, whether it becomes a claim. strength is the Damage Out of the stand-in's own run of the blow
+// (rev 25; it scales with the hit velocity, which the impulse does not: claims with no impulse still did 700-840).
+//   - A contact of strength 0 (a blade sliding, a graze the game turned into nothing) is never sent (ZeroImpulse) and
+//     opens no window.
 //   - The first contact of a key opens a kBlowWindowMs window and is sent.
 //   - Inside the window one more contact is sent, only when strictly stronger than every one sent in it (Coalesced
-//     otherwise); a contact of strength 0 (a blunt part sliding) is never that one (ZeroImpulse).
+//     otherwise).
 //   - At most kClaimsPerSecond are sent per (attacker, victim) in any kClaimCapWindowMs (Capped); a capped contact
 //     sends nothing and opens nothing.
 class BlowCoalescer {
 public:
     enum class Verdict : uint8_t { Send, Coalesced, ZeroImpulse, Capped };
     Verdict Allow(const BlowKey& key, double strength, double nowMs) {
-        if (!(strength > 0)) strength = 0;                       // NaN and negatives count as no impulse
+        if (!(strength > 0)) return Verdict::ZeroImpulse;        // NaN, negatives and 0: no damage, no claim
         Window& w = windows_[key];
         const bool open = w.open && nowMs - w.startMs < kBlowWindowMs;
-        if (open) {
-            if (strength == 0) return Verdict::ZeroImpulse;
-            if (w.extraSent || !(strength > w.strongest)) return Verdict::Coalesced;
-        }
+        if (open && (w.extraSent || !(strength > w.strongest))) return Verdict::Coalesced;
         std::deque<double>& sent = sent_[Pair{key.attacker, key.victim}];
         while (!sent.empty() && nowMs - sent.front() >= kClaimCapWindowMs) sent.pop_front();
         if (sent.size() >= size_t(kClaimsPerSecond)) return Verdict::Capped;
@@ -583,6 +616,7 @@ inline void PutClaim(hsm::Writer& w, const HitClaim& m) {
     w.u64(m.propId);
     PutV3(w, m.propVelocity);
     w.u8(m.victimLife);
+    PutF64(w, m.rawDamage);
 }
 
 inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
@@ -615,15 +649,25 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
     m.propId = r.u64();
     numOk &= GetV3(r, m.propVelocity);
     m.victimLife = r.u8();
+    numOk &= GetF64(r, m.rawDamage);
 
     if (!r.done() || !numOk) return false;
     if (lt > 1 || dpb > 1 || ehv > 1 || hasBox > 1) return false;
     if (srcRaw > uint8_t(StrikeSource::WeaponLeft)) return false;
-    if (strikerRaw > uint8_t(StrikerKind::Prop)) return false;
+    if (strikerRaw > uint8_t(StrikerKind::Stuck)) return false;
+    const bool noProp = m.propId == 0 && m.propVelocity.x == 0 && m.propVelocity.y == 0 && m.propVelocity.z == 0;
     if (strikerRaw == uint8_t(StrikerKind::Prop)) {
         if (!ValidPropId(m.propId) || srcRaw != uint8_t(StrikeSource::Body)) return false;   // a prop, never from a hand
-    } else if (m.propId != 0 || m.propVelocity.x != 0 || m.propVelocity.y != 0 || m.propVelocity.z != 0) {
+    } else if (!noProp) {
         return false;                                                                        // a fighter's names no prop
+    }
+    if (strikerRaw == uint8_t(StrikerKind::Stuck)) {
+        // A stuck blade: in a hand, in a named bone, with a damage a Get Damage can take (rev 25).
+        if (srcRaw == uint8_t(StrikeSource::Body) || m.hitBone.empty()) return false;
+        if (!(m.rawDamage > 0 && m.rawDamage <= kMaxStuckRawDamage)) return false;
+        if (!(m.cuttingPower >= 0 && m.cuttingPower <= kMaxStuckCuttingPower)) return false;
+    } else if (m.rawDamage != 0) {
+        return false;                                                                        // only a stuck blade has one
     }
 
     m.lowerThreshold = lt == 1;

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <set>
 #include <string>
@@ -326,24 +327,28 @@ static BlowKey Key(const char* bone, const char* comp = "Blade", uint8_t attacke
 }
 
 static void TestCoalescerNeckStorm() {
-    // Test 4: twenty zero-impulse contacts 73 ms apart, alternating neck_01 / neck_02. One send per 250 ms window: at
-    // 0, 292, 584, 876 and 1168 ms (contacts 0, 4, 8, 12, 16); the rest are the same sliding contact.
+    // Test 4: twenty contacts 73 ms apart, alternating neck_01 / neck_02 (one blow). Strength is the stand-in's Damage
+    // Out (rev 25): with damage, one send per 250 ms window: at 0, 292, 584, 876 and 1168 ms (contacts 0, 4, 8, 12,
+    // 16), the rest the same contact again.
     BlowCoalescer bc;
     int sent = 0;
     for (int i = 0; i < 20; ++i) {
-        const Verdict v = bc.Allow(Key(i % 2 ? "neck_02" : "neck_01"), 0.0, 1000.0 + 73.0 * i);
+        const Verdict v = bc.Allow(Key(i % 2 ? "neck_02" : "neck_01"), 700.0, 1000.0 + 73.0 * i);
         const bool expectSend = i % 4 == 0;
-        CHECK(v == (expectSend ? Verdict::Send : Verdict::ZeroImpulse));
+        CHECK(v == (expectSend ? Verdict::Send : Verdict::Coalesced));
         sent += v == Verdict::Send;
     }
     CHECK(sent == 5);
+    // Negative control: the same storm with no damage (a blade resting on the neck) sends nothing at all.
+    BlowCoalescer rest;
+    for (int i = 0; i < 20; ++i) CHECK(rest.Allow(Key(i % 2 ? "neck_02" : "neck_01"), 0.0, 1000.0 + 73.0 * i) == Verdict::ZeroImpulse);
 }
 
 static void TestCoalescerWindow() {
     BlowCoalescer bc;
-    CHECK(bc.Allow(Key("head"), 0.0, 0) == Verdict::Send);
-    CHECK(bc.Allow(Key("head"), 0.0, 249) == Verdict::ZeroImpulse);   // still the same blow
-    CHECK(bc.Allow(Key("head"), 0.0, 250) == Verdict::Send);          // a new window
+    CHECK(bc.Allow(Key("head"), 5.0, 0) == Verdict::Send);
+    CHECK(bc.Allow(Key("head"), 5.0, 249) == Verdict::Coalesced);     // still the same blow
+    CHECK(bc.Allow(Key("head"), 5.0, 250) == Verdict::Send);          // a new window
     BlowCoalescer two;                                                // two blows 300 ms apart both land
     CHECK(two.Allow(Key("spine_02"), 400.0, 0) == Verdict::Send);
     CHECK(two.Allow(Key("spine_02"), 400.0, 300) == Verdict::Send);
@@ -358,15 +363,45 @@ static void TestCoalescerStronger() {
     CHECK(bc.Allow(Key("thigh_l"), 500.0, 30) == Verdict::Coalesced);   // only one more per window
     CHECK(bc.Allow(Key("thigh_l"), 0.0, 40) == Verdict::ZeroImpulse);
     CHECK(bc.Allow(Key("thigh_l"), 100.0, 250) == Verdict::Send);       // the next window
-    BlowCoalescer z;                                                    // a sliding contact, then a real hit
-    CHECK(z.Allow(Key("hand_r"), 0.0, 0) == Verdict::Send);
+    BlowCoalescer z;                                                    // a graze that did nothing, then a real hit
+    CHECK(z.Allow(Key("hand_r"), 0.0, 0) == Verdict::ZeroImpulse);      // a zero-damage first contact is dropped and opens no window
     CHECK(z.Allow(Key("hand_r"), 0.0, 5) == Verdict::ZeroImpulse);
     CHECK(z.Allow(Key("hand_r"), 5.0, 10) == Verdict::Send);
-    CHECK(z.Allow(Key("hand_r"), 9.0, 20) == Verdict::Coalesced);
-    BlowCoalescer nan;                                                  // a non-number counts as zero
-    CHECK(nan.Allow(Key("head"), std::nan(""), 0) == Verdict::Send);
-    CHECK(nan.Allow(Key("head"), std::nan(""), 1) == Verdict::ZeroImpulse);
+    CHECK(z.Allow(Key("hand_r"), 9.0, 20) == Verdict::Send);            // the one more
+    CHECK(z.Allow(Key("hand_r"), 12.0, 30) == Verdict::Coalesced);
+    BlowCoalescer nan;                                                  // a non-number or negative counts as zero
+    CHECK(nan.Allow(Key("head"), std::nan(""), 0) == Verdict::ZeroImpulse);
+    CHECK(nan.Allow(Key("head"), -3.0, 1) == Verdict::ZeroImpulse);
     CHECK(nan.Allow(Key("head"), 1.0, 2) == Verdict::Send);
+    // Zero-damage contacts spend nothing of the per-second cap.
+    BlowCoalescer cap;
+    for (int i = 0; i < 40; ++i) CHECK(cap.Allow(Key("head", "Blade", 1, 2), 0.0, i) == Verdict::ZeroImpulse);
+    CHECK(cap.Allow(Key("head", "Blade", 1, 2), 3.0, 41) == Verdict::Send);
+}
+
+// Stuck-blade damage: one per 100 ms per (attacker, victim).
+static void TestStuckDamageLimiter() {
+    StuckDamageLimiter l;
+    CHECK(l.Allow(1, 2, 0));                          // the first is always sent (even at t = 0)
+    CHECK(!l.Allow(1, 2, 1));                         // a physics tick later: refused
+    CHECK(!l.Allow(1, 2, 99.9));
+    CHECK(l.Allow(1, 2, 100));                        // the interval has passed
+    CHECK(!l.Allow(1, 2, 150));                       // a refusal does not restart the interval...
+    CHECK(l.Allow(1, 2, 200));                        // ...so this is 100 ms after the last send
+    CHECK(l.Allow(1, 3, 201));                        // another victim
+    CHECK(l.Allow(4, 2, 201));                        // another attacker
+    CHECK(l.Allow(2, 1, 201));                        // the reverse pair is its own
+    l.Forget(2);                                      // entity 2 left: both directions start over
+    CHECK(l.Allow(1, 2, 202));
+    CHECK(l.Allow(4, 2, 202));
+    CHECK(!l.Allow(1, 3, 202));                       // others untouched
+    CHECK(l.Allow(1, 3, 100000));
+    CHECK(l.Allow(1, 3, 5));                          // a clock that went back restarts
+    // Negative control: 60 Hz ticks for a second send 10, not 60.
+    StuckDamageLimiter hz;
+    int sent = 0;
+    for (int i = 0; i < 60; ++i) sent += hz.Allow(1, 2, 1000.0 + i * (1000.0 / 60.0));
+    CHECK(sent == 10);
 }
 
 static void TestCoalescerKeys() {
@@ -509,7 +544,7 @@ static bool ClaimEq(const HitClaim& a, const HitClaim& b) {
            a.strikeComponent == b.strikeComponent && a.strikeBone == b.strikeBone &&
            a.hasHitBox == b.hasHitBox && EqXform(a.hitBoxLocal, b.hitBoxLocal) &&
            EqV3(a.hitBoxExtent, b.hitBoxExtent) && a.striker == b.striker && a.propId == b.propId &&
-           EqV3(a.propVelocity, b.propVelocity);
+           EqV3(a.propVelocity, b.propVelocity) && a.rawDamage == b.rawDamage;
 }
 
 static void TestSerializationRoundTrip() {
@@ -548,8 +583,8 @@ static void TestHostileDecode() {
     PutClaim(w0, ref);
     // Fixed wire layout for these string lengths: 10 (header) + 2 (hitBone) + 4*24 (vectors) +
     // 5*8 (doubles) + 4 (bluntDestruction) + 4 (bools+source) + 2 (strikeComponent) + 1 (strikeBone)
-    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) + 1 (striker) + 8 (propId) + 24 (propVelocity) + 1 (victimLife, rev 19) = 298.
-    CHECK(w0.buf.size() == 298);
+    // + 1 (hasHitBox) + 80 (hitBoxLocal) + 24 (hitBoxExtent) + 1 (striker) + 8 (propId) + 24 (propVelocity) + 1 (victimLife, rev 19) + 8 (rawDamage, rev 25) = 306.
+    CHECK(w0.buf.size() == 306);
 
     {
         HitClaim back;
@@ -642,7 +677,7 @@ static void TestHostileDecode() {
     // Bad enum: striker byte (offset 264) set to an undefined StrikerKind value.
     {
         std::vector<uint8_t> buf = w0.buf;
-        buf[264] = 2;
+        buf[264] = 3;
         hsm::Reader r(buf.data(), buf.size());
         HitClaim tmp;
         CHECK(!GetClaim(r, tmp));
@@ -746,9 +781,69 @@ static void TestPropClaimDecode() {
     }
     std::vector<uint8_t> buf = w.buf;
     const uint64_t nanBits = 0x7FF8000000000000ull;
-    std::memcpy(buf.data() + buf.size() - 25, &nanBits, 8);   // propVelocity.x
+    std::memcpy(buf.data() + buf.size() - 33, &nanBits, 8);   // propVelocity.x (victimLife and rawDamage follow)
     hsm::Reader r(buf.data(), buf.size());
     CHECK(!GetClaim(r, back));
+}
+
+// ---------------------------------------------------------------- stuck-blade damage (rev 25, StrikerKind::Stuck)
+static HitClaim StuckRef() {
+    HitClaim c;
+    c.claimId = 11; c.attacker = 1; c.victim = 2; c.attackerTsMs = 900; c.victimLife = 3;
+    c.hitBone = "spine_03"; c.location = {1, 2, 3}; c.normal = {0, 0, 1};
+    c.cuttingPower = 140; c.lowerThreshold = true;
+    c.source = StrikeSource::WeaponRight; c.strikeComponent = "Blade";
+    c.striker = StrikerKind::Stuck; c.rawDamage = 4200.5;
+    return c;
+}
+
+static void TestStuckClaimDecode() {
+    const HitClaim ref = StuckRef();
+    auto roundTrips = [](const HitClaim& c, HitClaim& back) {
+        hsm::Writer w;
+        PutClaim(w, c);
+        hsm::Reader r(w.buf.data(), w.buf.size());
+        return GetClaim(r, back);
+    };
+    HitClaim back;
+    CHECK(roundTrips(ref, back) && ClaimEq(ref, back) && back.rawDamage == 4200.5 && back.striker == StrikerKind::Stuck);
+    HitClaim m = ref; m.source = StrikeSource::WeaponLeft;   CHECK(roundTrips(m, back) && back.source == StrikeSource::WeaponLeft);
+    m = ref; m.rawDamage = kMaxStuckRawDamage;               CHECK(roundTrips(m, back));              // the edge of the range
+    m = ref; m.cuttingPower = 0;                             CHECK(roundTrips(m, back));
+    m = ref; m.cuttingPower = kMaxStuckCuttingPower;         CHECK(roundTrips(m, back));
+    m = ref; m.hasHitBox = true; m.hitBoxExtent = {5, 5, 5}; m.hitBoxLocal.rot = {0, 0, 0, 1}; CHECK(roundTrips(m, back));   // Box, when stuck
+    // Out of range or ill-formed: all rejected.
+    m = ref; m.rawDamage = 0;                                CHECK(!roundTrips(m, back));             // nothing to apply
+    m = ref; m.rawDamage = -1;                               CHECK(!roundTrips(m, back));
+    m = ref; m.rawDamage = kMaxStuckRawDamage * 1.001;       CHECK(!roundTrips(m, back));
+    m = ref; m.rawDamage = std::numeric_limits<double>::infinity();  CHECK(!roundTrips(m, back));
+    m = ref; m.rawDamage = std::nan("");                     CHECK(!roundTrips(m, back));
+    m = ref; m.cuttingPower = -0.5;                          CHECK(!roundTrips(m, back));
+    m = ref; m.cuttingPower = kMaxStuckCuttingPower * 1.001; CHECK(!roundTrips(m, back));
+    m = ref; m.source = StrikeSource::Body;                  CHECK(!roundTrips(m, back));             // a blade is in a hand
+    m = ref; m.hitBone = "";                                 CHECK(!roundTrips(m, back));             // it names a bone
+    m = ref; m.propId = hsm::MakeLevelPropId(14);            CHECK(!roundTrips(m, back));             // and no prop
+    m = ref; m.propVelocity = {0, 0, 1};                     CHECK(!roundTrips(m, back));
+    // Negative controls: a damage on any other kind of claim is garbage; so is a stuck kind with the byte flipped back.
+    m = ref; m.striker = StrikerKind::Fighter;               CHECK(!roundTrips(m, back));
+    m.rawDamage = 0;                                         CHECK(roundTrips(m, back));              // the plain claim it was
+    m = PropRef(); m.rawDamage = 5;                          CHECK(!roundTrips(m, back));
+    // Truncation and trailing bytes.
+    hsm::Writer w;
+    PutClaim(w, ref);
+    for (size_t n = 0; n < w.buf.size(); ++n) {
+        hsm::Reader r(w.buf.data(), n);
+        CHECK(!GetClaim(r, back));
+    }
+    std::vector<uint8_t> buf = w.buf;
+    const uint64_t nanBits = 0x7FF8000000000000ull;
+    std::memcpy(buf.data() + buf.size() - 8, &nanBits, 8);   // rawDamage is the last field
+    hsm::Reader r(buf.data(), buf.size());
+    CHECK(!GetClaim(r, back));
+    buf = w.buf;
+    buf.push_back(0);
+    hsm::Reader r2(buf.data(), buf.size());
+    CHECK(!GetClaim(r2, back));
 }
 
 // Who decides a contact between a fighter and a prop: the one machine that streams the prop. A stand-in struck by a
@@ -780,11 +875,13 @@ int main() {
     TestCoalescerKeys();
     TestCoalescerCap();
     TestCoalescerForget();
+    TestStuckDamageLimiter();
     TestReplayQueue();
     TestSerializationRoundTrip();
     TestHostileDecode();
     TestPropStriker();
     TestPropClaimDecode();
+    TestStuckClaimDecode();
     TestDecidePropContact();
     if (g_fail) { std::printf("test_hsm_claim: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_claim: all passed\n");

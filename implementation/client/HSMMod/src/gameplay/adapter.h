@@ -80,6 +80,10 @@ public:
     // "Weapon L") and quiver are actors of their own and its armour pieces are attached actors, none of which the
     // engine or Willie_BP removes with it. Attached fighters are never destroyed.
     void DestroyFighter(ue::UObject* willie, int32_t index);
+    // The game turns a Willie's hair simulation off before it destroys the groom (Willie_BP.cpp:16487-16488); destroying a
+    // live, simulating one left Niagara's hair-strands data interface reading freed buffers on a worker thread (public
+    // #28, #39, #44). Turns it off, and with `destroy` also destroys the component. Logged once per fighter.
+    void StopHair(ue::UObject* willie, bool destroy);
     bool StillValid(ue::UObject* o, int32_t index) const;  // index from ue::ObjectIndex at spawn time
     // Owner sync: StillValid and AllWillies also treat an object the game is destroying (BeingDestroyed) or has destroyed
     // (IsGarbage) as gone, instead of until garbage collection frees its slot. Off in host sync, which keeps its old behaviour.

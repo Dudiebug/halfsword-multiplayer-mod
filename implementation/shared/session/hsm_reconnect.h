@@ -157,6 +157,11 @@ inline DisconnectAction ClientDisconnectAction(bool steam, bool welcomed, bool i
     return steam ? DisconnectAction::Ignore : DisconnectAction::Leave;
 }
 
+// Public #43: sever, FX, grab, claim and stuck-blade messages name fighters of the fight this machine is in. A straggler
+// that arrives after the level changed (the menu after a fight), before the Welcome or in the Progression hub names a
+// world that is gone, and acting on it read a freed Willie. Only a fight level, and for a client only once welcomed.
+inline bool FightMsgsOpen(bool host, bool welcomed, bool fighterLevel) { return fighterLevel && (host || welcomed); }
+
 // N6, host side, Steam: Steam has no transport timeout, so a joined peer that sends nothing for kSilentMs is gone.
 // A peer loading a level (from its first message, and again from each level load of the host, until its Ready for that
 // level: Loaded) gets kLoadingMs, since it sends nothing while it loads; packets it queued before the load do not shorten

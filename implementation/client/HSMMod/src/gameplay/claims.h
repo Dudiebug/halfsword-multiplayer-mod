@@ -63,6 +63,7 @@ public:
     void Forget(uint8_t entity) {                                    // left, respawned or rejoined: its ids may restart
         dedupe_.Forget(entity);
         coalescer_.Forget(entity);
+        stuckLimiter_.Forget(entity);
         queue_.Forget(entity);                                       // blows queued against its old body are dropped
         parry_.Forget(entity);
         if (entity <= kMaxWillies) { lastClashMs_[entity] = {}; recent_[entity] = {}; }   // K4: a new body has no recent attacker
@@ -76,20 +77,26 @@ private:
         uint64_t sent = 0, gated = 0, limited = 0, friendly = 0, coalesced = 0, zeroImpulse = 0, capped = 0, replayed = 0,
                  queued = 0, dropped = 0, dupes = 0, stale = 0, ageUnknown = 0, parried = 0, noVictim = 0, noBone = 0,
                  noStriker = 0, failed = 0, blockedStandIn = 0, blockedOnMine = 0, getDamageBlocked = 0, effects = 0,
-                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0, badBone = 0;
+                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0, badBone = 0,
+                 stuckSent = 0, stuckLimited = 0, stuckReplayed = 0;
     };
     bool OnDealComplexDamage(ue::ScriptCall& c);
     bool OnGetDamage(ue::ScriptCall& c);
+    void OnStuckDamage(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim);   // a lodged blade of mine, on a stand-in
     void AfterDealComplexDamage(ue::ScriptCall& c);
+    void SendPending(ue::ScriptCall& c);                             // the claim made before the body ran, coalesced by its damage
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
                    const PropSync::Touch* prop);
     void ReplayNow(const combat::HitClaim& c, double nowMs);         // a queued claim, through my fighter's own DCD
+    void ReplayStuck(const combat::HitClaim& c, double nowMs);       // a lodged blade's damage, through my fighter's own Get Damage
     bool BoneXform(ue::UObject* mesh, ue::FName bone, combat::Xform& out) const;
     bool PeerBoneOk(const combat::HitClaim& c);   // M7: a peer's hitBone may be interned (MakeName) only if ValidBoneName
     ue::UObject* Striker(const combat::HitClaim& c) const;                          // the claim's striking component here
     ue::UObject* StrikerOn(ue::UObject* fighter, const combat::HitClaim& c) const;   // the claim's striking component on fighter
     ue::UObject* ComponentNamed(ue::UObject* actor, const std::string& name) const;  // a primitive component of actor by name
     ue::UObject* HitBox(ue::UObject* victim, const combat::HitClaim& c, const combat::DcdInputs& in);
+    bool CallGetDamage(ue::UObject* victim, ue::UObject* mesh, ue::UObject* striker, ue::FName bone, const combat::DcdInputs& in,
+                       double rawDamage, ue::UObject* hitBox, double* damageOut);
     bool CallDealComplexDamage(ue::UObject* victim, ue::UObject* mesh, ue::UObject* striker, ue::FName bone, const combat::DcdInputs& in,
                                ue::UObject* hitBox, double* damageOut);
 
@@ -105,11 +112,14 @@ private:
     combat::ClaimLimiter limiter_;
     combat::ClaimDedupe dedupe_;
     combat::BlowCoalescer coalescer_;
+    combat::StuckDamageLimiter stuckLimiter_;
     combat::ReplayQueue queue_;
     combat::ParryWindow parry_;
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
-    struct Pending { ue::UObject* standIn = nullptr; uint32_t claimId = 0; uint8_t attacker = 0; };
-    Pending pending_;   // the claim just made, until its stand-in's own body returns (its damage is logged next to it)
+    // The claim just made (no id yet), until its stand-in's own run of the blow returns: its Damage Out decides whether
+    // the claim is sent (combat::BlowCoalescer) and ranks it.
+    struct Pending { ue::UObject* standIn = nullptr; combat::HitClaim claim; combat::BlowKey key; bool prop = false; };
+    Pending pending_;
     std::array<Recent, kMaxWillies + 1> recent_{};
     std::array<std::array<double, 3>, kMaxWillies + 1> lastClashMs_{};   // per attacker and StrikeSource
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box

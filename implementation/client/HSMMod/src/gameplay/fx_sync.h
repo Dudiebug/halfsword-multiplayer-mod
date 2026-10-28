@@ -15,6 +15,7 @@
 // Game thread only.
 #pragma once
 #include "combat/hsm_fx.h"
+#include "combat/hsm_paintgate.h"
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
 #include "session/hsm_budget.h"
@@ -106,6 +107,7 @@ private:
     // under them frees what they read. Armour changes on a busy fighter wait here, in arrival order.
     struct Held { combat::PaintFxMsg m; double since = 0; };
     std::vector<Held> held_;
+    combat::PaintGate gate_;                                         // quiet time before an armour replay; no blood right after one
     ue::UClass* paintClass_ = nullptr;
     bool paintClassLooked_ = false;
     uint32_t paintWaitsLogged_ = 0, paintBusyOwnLogged_ = 0;
