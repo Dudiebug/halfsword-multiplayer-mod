@@ -169,6 +169,10 @@ void ObjectSync::Clear() {
     // Spawned objects: a new level, a new set. The reconciler and the minter start over (a host that took over reloaded the
     // level and announces what it finds again); the provisional ids of this machine go on from where they were.
     reconciler_ = ObjectReconciler(kHostSlot);
+    for (const ObjectAnnounceMsg& a : adopt_) reconciler_.Adopt(a);   // a migrated host keeps the ids it adopted across the reload
+    skippedLogged_.clear();
+    simCache_.Clear();
+    attach_.Clear();
     ghosts_.Clear();
     announced_.clear();
     refused_.clear();
@@ -179,6 +183,7 @@ void ObjectSync::Clear() {
     queuedEvents_.clear();
     history_.clear();
     recheckMs_ = eventMs_ = 0;
+    shatter_ = ShatterState{};
 }
 
 // ---------------------------------------------------------------- per frame
@@ -247,6 +252,9 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
         if (holding) p.toucher = holder;
         if (p.restoreTicks > 0) { --p.restoreTicks; if (!parent) RestorePhysics(p.root, p.rootIndex); }
 
+        // An object I put on another keeps my lease while it hangs there: I am the one that sees it let go of (PollEvents).
+        if (p.attachedSent && p.claim.sent != LeaseLevel::Free && view_.Streamer(id) == MySlot()) p.lastContactMs = nowMs;
+
         bool moving = false;   // only read when it decides anything: a let-go claim of mine waiting for rest
         if (!holding && p.claim.sent != LeaseLevel::Free && nowMs - p.lastContactMs >= kContactKeepMs) {
             BodyStateMsg s;
@@ -284,7 +292,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
     size_t budget = kLevelReadsPerTick;
     StreamLevel(dueMoving, movingCursor_, budget, true, me, nowMs);
     StreamLevel(dueIdle, idleCursor_, budget, false, me, nowMs);
-    if (nowMs >= eventMs_) { eventMs_ = nowMs + kEventPollMs; PollEvents(nowMs); }
+    if (nowMs >= eventMs_) { eventMs_ = nowMs + kEventPollMs; PollEvents(nowMs); ShatterPoll(nowMs); }
     if (idleDespawn_ && nowMs >= idleCheckMs_) { idleCheckMs_ = nowMs + kIdleCheckMs; DespawnIdle(nowMs); }
 }
 
@@ -297,6 +305,7 @@ size_t ObjectSync::StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8
     for (size_t b = 0; b < p.bodies.size(); ++b) {
         BodyRef& body = p.bodies[b];
         if (body.detached) continue;
+        if (IsGeometryCollection(body.comp)) { p.lastSentMs = nowMs; continue; }   // its breaks travel, not its transform
         if (b > 0) {   // the root is always streamed (as before); the others only while they simulate physics
             RootCalls* c = adapter_->StillValid(body.comp, body.index) ? CallsFor(body.comp) : nullptr;
             if (!c) continue;
@@ -314,6 +323,11 @@ size_t ObjectSync::StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8
         out.push_back(s);
     }
     p.moving = !atRest;
+    // The host's own reads keep the reconciler's place and velocity of a spawned object current, as a client's states do
+    // (OnBodyState): a proposal that reaches the host later is matched where the object has moved to.
+    if (env_.host && !p.sub && IsSpawnedId(propId))
+        for (const BodyStateMsg& s : out)
+            if (s.body == 0) reconciler_.UpdateMotion(propId, s.px, s.py, s.pz, s.vx, s.vy, s.vz, nowMs);
     if (out.empty() || !PropStreamDue(level, p.lastSentMs, atRest, nowMs)) return reads;
     for (const BodyStateMsg& s : out)
         if (env_.send) { env_.send(Encode(s), false); ++n_.statesSent; }
@@ -362,7 +376,25 @@ bool ObjectSync::MovableComp(UObject* comp) {
         FProperty* mp = FindProperty(ClassOf(comp), "Mobility");
         it = mobilityOff_.emplace(cls, mp && PropertySize(mp) == 1 ? PropertyOffset(mp) : -1).first;
     }
-    return it->second >= 0 && *(reinterpret_cast<const uint8_t*>(comp) + it->second) == kMovable;
+    return IsGeometryCollection(comp) || (it->second >= 0 && *(reinterpret_cast<const uint8_t*>(comp) + it->second) == kMovable);
+}
+
+// An actor class that is never an object: gore, blood, decals, effects, Niagara and particle actors, effect projectiles and the
+// mod's own helper actors (session/hsm_object_skip.h), by its name or any class it derives from. Logged once per level.
+bool ObjectSync::ClassSkipped(const UClass* actorClass) {
+    int depth = 0;
+    auto nameOf = [](const UClass* c) { return ObjectName(reinterpret_cast<const UObject*>(c)); };
+    for (const UClass* c = actorClass; c && depth < 32; c = SuperOf(c), ++depth) {
+        const std::string name = nameOf(c);
+        if (!ObjectClassSkipped(name.c_str())) continue;
+        ++n_.skippedClasses;
+        const std::string own = nameOf(actorClass);
+        if (skippedLogged_.insert(own).second)
+            HSM_LOG("objects: class %s is never synced (%s%s)", own.c_str(), c == actorClass ? "effect, gore or mod actor" : "derives from ",
+                    c == actorClass ? "" : name.c_str());
+        return true;
+    }
+    return false;
 }
 
 // The bodies of an object (session/hsm_object.h BodyIndex): the root first when it is a movable primitive, then the actor's
@@ -532,6 +564,7 @@ void ObjectSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     const uint8_t prevSlot = view_.Streamer(propId);
     const bool known = view_.Known(propId);   // before this Grant makes it known: only an id's first Grant can be its drop
     view_.OnGrant(propId, slot, level);
+    attach_.OnGrant(propId, level == LeaseLevel::Free ? kHostSlot : slot, level);   // another holder ends an attach latch
     if (level != LeaseLevel::Free) freeSince_.erase(propId);
     else if (IsWeaponId(propId)) freeSince_.emplace(propId, SteadyNowMs());   // the first FREE Grant starts the minute
     NoticeDrop(propId, prevLevel, prevSlot, level, level == LeaseLevel::Free ? kHostSlot : slot);
@@ -559,6 +592,9 @@ bool ObjectSync::OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot) {
     // Mesh v2: a state straight from another client must be that client's, for a prop the host granted it.
     if (!env_.host && fromSlot != kHostSlot && (m.lessee != fromSlot || view_.Streamer(m.objId) != fromSlot)) { ++n_.statesRejected; return false; }
     heardMs_[m.objId] = SteadyNowMs();
+    // An object put on another object is held there against the attacher's states still in flight (hsm_object_attach.h): a
+    // stale state must not read as "streamed again" and take it off its parent. Not applied, and not relayed.
+    if (attach_.Blocks(m.objId, m.lessee, SteadyNowMs())) { ++n_.attachHeld; return false; }
     if (!view_.Apply(m)) { ++n_.statesStale; return false; }
     ++n_.statesApplied;
     if (auto it = props_.find(m.objId); it != props_.end()) {
@@ -571,7 +607,8 @@ bool ObjectSync::OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot) {
         p.dirty = true;
         if (m.body < p.bodies.size()) p.bodies[m.body].dirty = true;
     }
-    if (env_.host && m.body == 0 && IsSpawnedId(m.objId)) reconciler_.UpdatePlace(m.objId, m.px, m.py, m.pz);   // a late proposal finds it where it is
+    // A late proposal finds it where it is: its place and velocity, read at this moment (the proposal is judged by the same clock).
+    if (env_.host && m.body == 0 && IsSpawnedId(m.objId)) reconciler_.UpdateMotion(m.objId, m.px, m.py, m.pz, m.vx, m.vy, m.vz, SteadyNowMs());
     return true;
 }
 
@@ -651,6 +688,12 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
     constexpr size_t kRejected = size_t(-1);
     std::unordered_map<const UObject*, size_t> seen;   // an owning actor -> its place in acc, or kRejected
     std::vector<LevelActor> acc;
+    // The cost of a walk is the reflected IsSimulatingPhysics call per component, so its answer is kept per component for a
+    // while (hsm_walk_cache.h; longest for a component of an object tracked here and at rest), and a pass asks at most
+    // kWalkQueriesPerPass fresh ones (the rest answer from what was last known, or "not simulating", and are asked on later passes).
+    const double startMs = SteadyNowMs();
+    if (startMs >= simPruneMs_) { simPruneMs_ = startMs + 10000.0; simCache_.Prune(startMs); }
+    size_t comps = 0, asked = 0, cached = 0, capped = 0;
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
         if (!o || IsDefaultObject(o) || IsGarbage(o)) continue;
@@ -665,14 +708,16 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
             size_t slot = kRejected;
             const UClass* ac = ClassOf(actor);
             auto ak = actorKind_.find(ac);
-            if (ak == actorKind_.end()) ak = actorKind_.emplace(ac, uint8_t(IsChildOf(ac, actorClass))).first;
-            if (ak->second && !adapter_->IsWillie(actor) && !adapter_->IsWeapon(actor) && !Adapter::BeingDestroyed(actor) && !ParentActorOf(actor)) {
+            if (ak == actorKind_.end()) ak = actorKind_.emplace(ac, uint8_t(!IsChildOf(ac, actorClass) ? 0 : ClassSkipped(ac) ? 2 : 1)).first;
+            if (ak->second == 1 && !adapter_->IsWillie(actor) && !adapter_->IsWeapon(actor) && !Adapter::BeingDestroyed(actor) && !ParentActorOf(actor)) {
                 slot = acc.size();
                 LevelActor la;
                 la.actor = actor;
                 la.index = ObjectIndex(actor);
                 la.classHash = ClassHashOf(actor);
                 la.at = adapter_->ActorLocation(actor);
+                if (auto tracked = byActor_.find(actor); tracked != byActor_.end())
+                    if (auto tp = props_.find(tracked->second); tp != props_.end()) la.asleep = !tp->second.moving && !tp->second.provisional;
                 acc.push_back(la);
             }
             st = seen.emplace(actor, slot).first;
@@ -682,14 +727,32 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
         RootCalls* c = CallsFor(o);
         if (!c) continue;
         if (la.bodies < kMaxObjectBodies) ++la.bodies;
+        ++comps;
         if (la.anySim) continue;
-        c->simulating.put(0, FName{});
-        if (c->simulating.invoke(o) && c->simulating.take<bool>(1)) { la.anySim = true; la.simComp = o; }
+        bool sim = false;
+        const uint64_t key = uint64_t(reinterpret_cast<uintptr_t>(o));
+        const int32_t oi = ObjectIndex(o);
+        if (simCache_.Lookup(key, oi, la.asleep, startMs, sim)) {
+            ++cached;
+        } else if (asked < kWalkQueriesPerPass) {
+            ++asked;
+            c->simulating.put(0, FName{});
+            sim = c->simulating.invoke(o) && c->simulating.take<bool>(1);
+            simCache_.Store(key, oi, sim, startMs);
+        } else {
+            ++capped;
+            if (!simCache_.Stale(key, oi, sim)) sim = false;   // never asked: on a later pass
+        }
+        if (sim || IsGeometryCollection(o)) { la.anySim = true; la.simComp = o; }   // a geometry collection is synced by its breaks (shatter_sync.cpp)
     }
     for (LevelActor& la : acc) {
         if (la.bodies == 0) continue;
         if (la.anySim) out.push_back(la); else ++notSimulating;
     }
+    n_.simAsked += asked; n_.simCached += cached; n_.simCapped += capped;
+    // The walk's cost, every census (the cache and the cap are tuned from this line).
+    HSM_LOG("objects: walk %zu comps, %zu actors, %.1f ms (%zu asked, %zu cached, %zu capped)", comps, acc.size(), SteadyNowMs() - startMs,
+            asked, cached, capped);
     return out;
 }
 
@@ -721,6 +784,7 @@ void ObjectSync::HostCensus(double nowMs) {
         seen.push_back({LevelKey{a.actor, a.index}, a.classHash, float(a.at.x), float(a.at.y), float(a.at.z)});
     }
     if (!first) {
+        BindAdopted(unnamed, nowMs);     // objects the previous host announced (host migration): same ids, this host's actors
         BindAnnounced(unnamed, nowMs);   // a client's object the host has named and not found a copy of yet
         size_t spawns = 0;
         for (const LevelActor& a : unnamed)
@@ -872,6 +936,15 @@ void ObjectSync::NoteContact(UObject* a, UObject* b) {
                 !adapter_->IsWillie(x) && !adapter_->IsWeapon(x) && !byActor_.count(other)) {
                 UObject* fighter = adapter_->IsWillie(other) ? other : ObjectField(other, 0);
                 if (fighter && env_.ownedEntity(fighter)) {
+                    // Blood, gore, decals, effects and the mod's own actors are never objects, whatever touched them.
+                    static UClass* actorBase = nullptr;
+                    if (!actorBase) actorBase = FindClass("Actor");
+                    if (actorBase) {
+                        const UClass* xc = ClassOf(x);
+                        auto xk = actorKind_.find(xc);
+                        if (xk == actorKind_.end()) xk = actorKind_.emplace(xc, uint8_t(!IsChildOf(xc, actorBase) ? 0 : ClassSkipped(xc) ? 2 : 1)).first;
+                        if (xk->second == 2) { touched_[x] = -1.0; continue; }
+                    }
                     Call rc(x, "K2_GetRootComponent");
                     UObject* root = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
                     RootCalls* c = root && MovableComp(root) ? CallsFor(root) : nullptr;
@@ -986,7 +1059,7 @@ bool ObjectSync::Drive(uint64_t id, Prop& p) {
 // only on a body that simulates physics.
 bool ObjectSync::DriveBody(Prop& p, size_t b, const BodyStateMsg& s) {
     BodyRef& r = p.bodies[b];
-    if (!adapter_->StillValid(r.comp, r.index)) return false;
+    if (!adapter_->StillValid(r.comp, r.index) || IsGeometryCollection(r.comp)) return false;
     const bool whole = b == 0 && p.rootBody;
     if (!(whole ? ApplyPropPose(p.actor, s.px, s.py, s.pz, s.rot, s.vx, s.vy, s.vz) : ApplyBodyPose(r.comp, s.px, s.py, s.pz, s.rot))) return false;
     if (b == 0) ++n_.driven; else ++n_.bodyDriven;
@@ -1108,8 +1181,15 @@ std::string ObjectSync::HealthLine() {
                   d(a.eventsSent, b.eventsSent), d(a.eventsApplied, b.eventsApplied), queuedEvents_.size(),
                   d(a.eventsRejected, b.eventsRejected), d(a.jointsBroken, b.jointsBroken), d(a.bodiesDetached, b.bodiesDetached),
                   d(a.destroyedSent, b.destroyedSent), d(a.destroyedApplied, b.destroyedApplied));
+    char fixes[384];
+    std::snprintf(fixes, sizeof fixes,
+                  " | pre2: skippedClasses %llu attachHeld %llu letGo sent %llu applied %llu | adopt known %llu bound %llu expired %llu | "
+                  "walk asked %llu cached %llu capped %llu",
+                  d(a.skippedClasses, b.skippedClasses), d(a.attachHeld, b.attachHeld), d(a.letGoSent, b.letGoSent), d(a.letGoApplied, b.letGoApplied),
+                  d(a.adoptKnown, b.adoptKnown), d(a.adoptBound, b.adoptBound), d(a.adoptExpired, b.adoptExpired),
+                  d(a.simAsked, b.simAsked), d(a.simCached, b.simCached), d(a.simCapped, b.simCapped));
     reported_ = n_;
-    return std::string(line) + objects;
+    return std::string(line) + objects + fixes;
 }
 
 }  // namespace hsm::game

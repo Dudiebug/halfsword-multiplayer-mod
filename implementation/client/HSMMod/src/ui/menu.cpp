@@ -4,8 +4,10 @@
 #include "ui/mp_widgets.h"
 #include "util/hsm_names.h"
 #include "gameplay/damage_pin.h"
+#include "gameplay/mod_maps.h"
 #include "gameplay/session.h"
 #include "log.h"
+#include "ue4ss_load.h"
 #include "net/report_client.h"
 #include "net/update_check.h"
 #include "match/hsm_hud_style.h"
@@ -473,6 +475,18 @@ void BuildMapColumn() {
             if (v.card) list.Add(v.card.button).Padding({0, 3, 0, 3});
             g.maps.push_back(v);                // kept even if empty: g.maps[j] is s.maps[j] (the pickable maps, kMaps order)
         }
+        // Modded maps follow the stock cards (BuildLobbyScene appends them in the same order); hidden until a map fills them.
+        for (size_t i = 0; i < kMaxModMaps; ++i) {
+            MapView v;
+            Box body = g.kit.MakeColumn();
+            v.name = NewText("", 18, style::kBone); v.tag = NewText("", 13, style::kIron);
+            if (body && v.name && v.tag) {
+                AddToVerticalBox(body, v.name, 0); AddToVerticalBox(body, v.tag, 1);
+                v.card = MakeCard(body, {12, 6, 12, 7});
+            }
+            if (v.card) list.Add(v.card.button).Padding({0, 3, 0, 3});
+            g.maps.push_back(v);
+        }
     }
     g.startLabel = NewText("START MATCH", 26, style::kBone);
     g.start = MakeCard(g.startLabel, {0, 12, 0, 12});
@@ -601,6 +615,11 @@ LobbyLocal Local(game::Lobby& lobby) {
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
+        for (const ModMapEntry& e : game::modmaps::Maps()) {
+            const auto& paks = game::modmaps::Paks();
+            l.modMaps.push_back({e.path, e.display, e.pak >= 0 && size_t(e.pak) < paks.size() ? paks[size_t(e.pak)].name : std::string()});
+        }
+        l.modPickPending = l.host && game::modmaps::PickPending(l.mapPick);
         l.progression = lobby.Progression();
         const bool server = lobby.ServerLobby();
         for (const game::LobbyMember& m : lobby.members()) {
@@ -707,6 +726,7 @@ void Draw(const LobbyScene& s) {
         v.card.button.Show(i < s.maps.size());          // none while Progression is the choice
         if (i >= s.maps.size()) continue;
         const MapCard& m = s.maps[i];
+        if (m.modded) v.name.Set(m.name);
         v.name.Color(m.selected ? style::kBloodInk : style::kBone);
         v.tag.Set(m.allowed ? m.tag : m.reason);
         v.tag.Color(m.allowed ? style::kIron : style::kWarn);
@@ -790,7 +810,8 @@ void UpdatePanel(Session& session) {
     for (size_t i = 0; i < g.memberIds.size(); ++i) g.memberIds[i] = lobby.InLobby() && i < mem.size() ? mem[i].id : 0;
     Draw(BuildLobbyScene(Local(lobby)));
     DrawChat(lobby.InLobby());
-    const std::string notice = update::Notice();
+    std::string notice = update::Notice();
+    if (const std::string proxy = ue4ss::Notice(); !proxy.empty()) notice += (notice.empty() ? "" : "\n") + proxy;
     g.updateNote.Set(notice);
     g.updateNote.Show(!notice.empty());
     ULONGLONG now = GetTickCount64();
@@ -835,7 +856,7 @@ void HandleClicks(Session& session) {
     game::Lobby& lobby = session.lobby();
     const bool openClicked = Clicked(g.openButton);
     Paint(g.openButton.card);
-    if (openClicked) { g.panelOpen = !g.panelOpen; g.panel.Show(g.panelOpen); if (g.panelOpen) g.nextText = 0; }
+    if (openClicked) { g.panelOpen = !g.panelOpen; g.panel.Show(g.panelOpen); if (g.panelOpen) { g.nextText = 0; game::modmaps::Rescan(); } }
     if (!g.panelOpen) { SetLobbyTyping(false); return; }
     const LobbyScene& s = g.scene;
     bool acted = false;
@@ -921,7 +942,8 @@ void HandleClicks(Session& session) {
     }
     for (size_t i = 0; i < g.maps.size(); ++i) {
         Paint(g.maps[i].card);
-        if (act(Clicked(g.maps[i].card), i < s.maps.size() && s.maps[i].enabled)) lobby.SetMapPick(MapAt(s.maps[i].index).path);
+        if (act(Clicked(g.maps[i].card), i < s.maps.size() && s.maps[i].enabled))
+            lobby.SetMapPick(s.maps[i].modded ? s.maps[i].path : std::string(MapAt(s.maps[i].index).path));
     }
     if (g.start) {
         bool hover = g.start.button.Hovered();
@@ -931,8 +953,11 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.start), s.start)) {
         if (s.modes.size() == kModeCardCount && s.modes.back().selected) session.StartProgression();
         else {
+            const MapCard* custom = nullptr;                 // a modded map is the pick: it is open by its package path
+            for (const MapCard& mc : s.maps) if (mc.modded && mc.selected) custom = &mc;
             size_t m = EffectiveMap(c.format, lobby.MapPick());
-            if (m < MapCount()) session.StartOnMap(MapAt(m).path);
+            if (custom) session.StartOnMap(custom->path);
+            else if (m < MapCount()) session.StartOnMap(MapAt(m).path);
         }
     }
     if (acted) g.nextText = 0;                  // redraw now, not at the next quarter second
@@ -941,6 +966,7 @@ void HandleClicks(Session& session) {
 
 void Tick(Session& session, UObject* worldContext) {
     if (!session.steamMode()) return;
+    game::modmaps::Tick();                       // the modded-map scan (worker results, asset registry); cheap when idle
     if (worldContext != g.worldContext) { Reset(); g.worldContext = worldContext; }
     ULONGLONG now = GetTickCount64();
     const bool alive = StillAlive(g.menu, g.menuIndex, g.menuClass);

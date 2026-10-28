@@ -150,13 +150,24 @@ void ObjectSync::OnObjectAnnounce(const uint8_t* d, size_t n, uint8_t fromSlot) 
 void ObjectSync::HostPropose(const ObjectAnnounceMsg& m, uint8_t fromSlot, double nowMs) {
     if (!ValidSpawnedId(m.objId) || SpawnedIdSlot(m.objId) != fromSlot) { ++n_.announceRejected; return; }
     uint64_t existing = 0;
-    double best = double(kCensusMatchUu) * double(kCensusMatchUu);
-    for (const auto& [id, p] : props_) {
+    double best = -1.0;
+    // The proposal was made from the proposer's view some network trips ago; a moving object has travelled since. Its match
+    // tolerance grows with its speed (ProposalTolUu, capped) so one object proposed by two clients, or by a client after
+    // the host announced it, stays one object. The nearest in reach wins (ties: the lower id, the map's order).
+    const double reach = double(kCensusMatchUu) + double(kMotionTolCapUu);
+    for (auto& [id, p] : props_) {
         if (IsWeaponId(id) || p.provisional || p.sub || p.classHash != m.classHash || !adapter_->StillValid(p.actor, p.index)) continue;
         const FVector at = adapter_->ActorLocation(p.actor);
         const double dx = at.x - m.px, dy = at.y - m.py, dz = at.z - m.pz;
         const double d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 <= best) { best = d2; existing = id; }
+        if (d2 > reach * reach) continue;                         // too far whatever its speed: no need to read it
+        float speed = 0.f;
+        if (d2 > double(kCensusMatchUu) * double(kCensusMatchUu) && !p.bodies.empty()) {   // only a candidate that depends on its speed is read
+            BodyStateMsg s;
+            if (Read(p, 0, s)) speed = SpeedOf(s.vx, s.vy, s.vz);
+        }
+        const double tol = double(ProposalTolUu(kCensusMatchUu, speed));
+        if (d2 <= tol * tol && (best < 0.0 || d2 < best)) { best = d2; existing = id; }
     }
     ObjectAnnounceMsg out;
     if (existing) {
@@ -169,7 +180,7 @@ void ObjectSync::HostPropose(const ObjectAnnounceMsg& m, uint8_t fromSlot, doubl
         out.py = float(at.y);
         out.pz = float(at.z);
     } else {
-        const ObjectReconciler::Result r = reconciler_.Propose(m, fromSlot);
+        const ObjectReconciler::Result r = reconciler_.Propose(m, fromSlot, nowMs);   // the object's last velocity carries its place to now
         if (!r.objId) { ++n_.announceRejected; return; }
         out = r.announce;
         if (r.created) {   // the host's own actor for it, if it has one; else a ghost until it does
@@ -283,7 +294,10 @@ void ObjectSync::Bound(uint64_t id, double nowMs) {
     if (it == props_.end()) return;
     it->second.dirty = view_.Find(id) != nullptr;
     for (size_t i = 0; i < queuedEvents_.size();) {
-        if (queuedEvents_[i].msg.objId == id && ReplayNow(queuedEvents_[i].msg, nowMs)) queuedEvents_.erase(queuedEvents_.begin() + long(i));
+        // Also an Attached that waited for this object as its parent (it names it in otherId).
+        const ObjectEventMsg& q = queuedEvents_[i].msg;
+        const bool mine = q.objId == id || (q.kind == ObjectEventKind::Attached && q.otherId == id);
+        if (mine && ReplayNow(queuedEvents_[i].msg, nowMs)) queuedEvents_.erase(queuedEvents_.begin() + long(i));
         else ++i;
     }
 }
@@ -293,7 +307,91 @@ std::vector<std::vector<uint8_t>> ObjectSync::ObjectsForJoiner() const {
     if (!active_ || !env_.host) return out;
     for (const ObjectAnnounceMsg& a : reconciler_.AnnounceAll()) out.push_back(Encode(a));
     for (const std::vector<uint8_t>& h : history_) out.push_back(h);
+    for (std::vector<uint8_t>& f : shatter_.log.ForJoiner()) out.push_back(std::move(f));   // breaks of geometry collections, in order
     return out;
+}
+
+// ---------------------------------------------------------------- host migration (0.8.0-pre2)
+
+std::vector<ObjectAnnounceMsg> ObjectSync::ExportKnown() const {
+    std::vector<ObjectAnnounceMsg> out;
+    if (!active_) return out;
+    if (env_.host) return reconciler_.AnnounceAll();
+    for (const auto& [id, p] : props_) {   // the objects bound here under their canonical ids
+        if (!IsSpawnedId(id) || p.provisional || p.sub || p.classHash == 0 || !adapter_->StillValid(p.actor, p.index)) continue;
+        const FVector at = adapter_->ActorLocation(p.actor);
+        if (!PlaceOk(at)) continue;
+        ObjectAnnounceMsg m;
+        m.objId = id; m.flags = kAnnounceCanonical; m.classHash = p.classHash;
+        m.px = float(at.x); m.py = float(at.y); m.pz = float(at.z);
+        m.bodyCount = uint8_t(std::clamp<size_t>(p.bodies.size(), 1, kMaxAnnounceBodies));
+        out.push_back(m);
+        if (out.size() >= kMaxKnownObjects) return out;
+    }
+    for (const auto& [id, a] : announced_)   // heard, no actor here yet
+        if (out.size() < kMaxKnownObjects) out.push_back(a.msg);
+    return out;
+}
+
+void ObjectSync::AdoptKnown(const std::vector<ObjectAnnounceMsg>& known) {
+    if (!active_ || !env_.host) return;
+    for (const ObjectAnnounceMsg& a : known) {
+        ObjectAnnounceMsg c = a;
+        c.flags = kAnnounceCanonical;
+        c.proposalId = 0;
+        if (!reconciler_.Adopt(c)) continue;
+        adopt_.push_back(c);
+        ++n_.adoptKnown;
+    }
+    adoptUntilMs_ = 0;   // the clock starts at the first census of the level (HostCensus)
+    HSM_LOG("props: adopted %zu objects of the previous host", adopt_.size());
+}
+
+// Host: the adopted announces whose object has an actor here, by class and place (the same match a client makes): that
+// actor is the object. What nothing matches waits (the object may not have been created yet) until adoptUntilMs_.
+void ObjectSync::BindAdopted(std::vector<LevelActor>& unnamed, double nowMs) {
+    if (adopt_.empty()) return;
+    if (adoptUntilMs_ == 0) {   // the first pass of this level: tell everyone the ids again, and start the wait
+        adoptUntilMs_ = nowMs + 30000.0;
+        for (const ObjectAnnounceMsg& a : reconciler_.AnnounceAll())
+            if (env_.send) env_.send(Encode(a), true);
+    } else if (nowMs >= adoptUntilMs_) {
+        n_.adoptExpired += adopt_.size();
+        HSM_LOG("props: %zu adopted objects found no actor here; they are not synced from this host", adopt_.size());
+        adopt_.clear();
+        return;
+    }
+    if (unnamed.empty()) return;
+    std::vector<CensusEntry> open;
+    for (size_t i = 0; i < adopt_.size(); ++i) {
+        CensusEntry e;
+        e.index = uint16_t(i);
+        e.classHash = adopt_[i].classHash;
+        e.px = adopt_[i].px; e.py = adopt_[i].py; e.pz = adopt_[i].pz;
+        open.push_back(e);
+    }
+    std::vector<CensusCandidate> locals;
+    for (const LevelActor& a : unnamed) locals.push_back(CensusCandidate{a.classHash, float(a.at.x), float(a.at.y), float(a.at.z)});
+    const std::vector<int> match = MatchCensus(open, locals);
+    std::vector<bool> used(unnamed.size(), false), done(adopt_.size(), false);
+    for (size_t i = 0; i < open.size(); ++i) {
+        if (match[i] < 0) continue;
+        const LevelActor& a = unnamed[size_t(match[i])];
+        Prop* p = Track(adopt_[i].objId, a.actor);
+        if (!p) continue;
+        p->spawned = true;
+        used[size_t(match[i])] = true;
+        done[i] = true;
+        reconciler_.UpdatePlace(adopt_[i].objId, float(a.at.x), float(a.at.y), float(a.at.z));
+        ++n_.adoptBound;
+        HSM_LOG("props: adopted object %016llx is %s", static_cast<unsigned long long>(adopt_[i].objId), ObjectName(a.actor).c_str());
+    }
+    std::vector<ObjectAnnounceMsg> restAdopt;
+    for (size_t i = 0; i < adopt_.size(); ++i) if (!done[i]) restAdopt.push_back(adopt_[i]);
+    adopt_ = std::move(restAdopt);
+    std::vector<LevelActor> rest;
+    for (size_t j = 0; j < unnamed.size(); ++j) if (!used[j]) rest.push_back(unnamed[j]);
+    unnamed = std::move(rest);
 }
 
 // ---------------------------------------------------------------- events
@@ -302,7 +400,8 @@ void ObjectSync::SendEvent(const ObjectEventMsg& m) {
     std::vector<uint8_t> bytes = Encode(m);
     if (env_.send) env_.send(bytes, true);
     ++n_.eventsSent;
-    if (env_.host && m.kind != ObjectEventKind::Custom) {
+    if (env_.host && m.kind == ObjectEventKind::Fracture) shatter_.log.Record(m);   // its own bounded log (ObjectsForJoiner)
+    else if (env_.host && m.kind != ObjectEventKind::Custom) {
         if (history_.size() >= kMaxHistory) history_.erase(history_.begin());
         history_.push_back(std::move(bytes));
     }
@@ -310,8 +409,12 @@ void ObjectSync::SendEvent(const ObjectEventMsg& m) {
 
 // The objects I stream: a joint that broke, a body that left its parent, an object that was attached to another or worn.
 void ObjectSync::PollEvents(double nowMs) {
-    for (auto it = queuedEvents_.begin(); it != queuedEvents_.end();)
-        it = nowMs - it->atMs > kEventKeepMs ? queuedEvents_.erase(it) : std::next(it);
+    // Events waiting for an object (or the parent they name) are tried again: the object may have been bound by a census or
+    // an announce that did not go through Bound, or its parent may have come after it.
+    for (size_t i = 0; i < queuedEvents_.size();) {
+        if (nowMs - queuedEvents_[i].atMs > kEventKeepMs || ReplayNow(queuedEvents_[i].msg, nowMs)) queuedEvents_.erase(queuedEvents_.begin() + long(i));
+        else ++i;
+    }
     const uint8_t me = MySlot();
     std::vector<uint64_t> gone;
     for (auto& [id, p] : props_) {
@@ -350,11 +453,31 @@ void ObjectSync::PollEvents(double nowMs) {
             TrackSub(other, p, b, nowMs, true);
             ++n_.bodiesDetached;
         }
-        if (p.attachedSent || !(p.spawned || p.level)) continue;
+        if (p.attachedSent) {
+            // Attach is two-way: an object I stream that was put on another and has been let go of (taken off, knocked off)
+            // streams again from here, and everyone takes it off its parent: Detached on body 0 (a rev 26 receiver ignores a
+            // Detached of body 0), naming the parent it left.
+            if (p.attachParent && adapter_->StillValid(p.actor, p.index) && !ParentActorOf(p.actor)) {
+                ObjectEventMsg e;
+                e.objId = id;
+                e.body = 0;
+                e.kind = ObjectEventKind::Detached;
+                e.otherId = p.attachParent;
+                p.attachedSent = false;
+                p.attachParent = 0;
+                attach_.OnDetached(id);
+                p.lastSentMs = -1e18;
+                SendEvent(e);
+                ++n_.letGoSent;
+            }
+            continue;
+        }
+        if (!(p.spawned || p.level)) continue;
         UObject* parent = ParentActorOf(p.actor);
         if (!parent) continue;
         if (auto q = byActor_.find(parent); q != byActor_.end() && q->second != id) {   // put on another tracked object
             p.attachedSent = true;
+            p.attachParent = q->second;
             ObjectEventMsg e;
             e.objId = id;
             e.kind = ObjectEventKind::Attached;
@@ -386,11 +509,13 @@ bool ObjectSync::OnObjectEvent(const uint8_t* d, size_t n, uint8_t fromSlot) {
         // Only the object's streamer speaks for it, and only about objects the host knows.
         if (m.kind != ObjectEventKind::Custom && table_.Streamer(m.objId) != fromSlot) { ++n_.eventsRejected; return false; }
         if (IsSpawnedId(m.objId) && !reconciler_.Knows(m.objId) && !detached_.count(m.objId)) { ++n_.eventsRejected; return false; }
-        if (m.kind == ObjectEventKind::Detached) {
+        if (m.kind == ObjectEventKind::Detached && m.body != 0) {   // body 0: the whole object let go of its parent; otherId is the parent
             if (!ValidSpawnedId(m.otherId) || SpawnedIdSlot(m.otherId) != fromSlot || detached_.size() >= kMaxKnownObjects) { ++n_.eventsRejected; return false; }
             detached_.insert(m.otherId);
         }
-        if (m.kind != ObjectEventKind::Custom) {
+        if (m.kind == ObjectEventKind::Fracture) {
+            if (m.body >= kMaxObjectBodies || !shatter_.log.Record(m)) return false;   // a second report of the same break is not relayed again
+        } else if (m.kind != ObjectEventKind::Custom) {
             if (history_.size() >= kMaxHistory) history_.erase(history_.begin());
             history_.emplace_back(d, d + n);
         }
@@ -417,6 +542,7 @@ bool ObjectSync::ReplayNow(const ObjectEventMsg& m, double nowMs) {
         case ObjectEventKind::Destroyed: {
             if (!IsSpawnedId(m.objId)) return true;
             if (destroyed_.size() < 4 * kMaxKnownObjects) destroyed_.insert(m.objId);
+            attach_.OnDetached(m.objId);
             announced_.erase(m.objId);
             ghosts_.Resolve(m.objId);
             if (it == props_.end()) return true;
@@ -445,7 +571,19 @@ bool ObjectSync::ReplayNow(const ObjectEventMsg& m, double nowMs) {
         case ObjectEventKind::Detached: {
             if (it == props_.end()) return false;
             Prop& p = it->second;
-            if (m.body == 0 || m.body >= p.bodies.size()) return true;
+            if (m.body == 0) {   // the whole object let go of the parent it was attached to: it is loose and streamed again
+                attach_.OnDetached(m.objId);
+                if (!p.attachedSent) return true;
+                p.attachedSent = false;
+                p.attachParent = 0;
+                p.dirty = view_.Find(m.objId) != nullptr;
+                if (adapter_->StillValid(p.actor, p.index))
+                    Call(p.actor, "K2_DetachFromActor").set<uint8_t>("LocationRule", 1).set<uint8_t>("RotationRule", 1).set<uint8_t>("ScaleRule", 1).invoke();
+                ++n_.letGoApplied;
+                ++n_.eventsApplied;
+                return true;
+            }
+            if (m.body >= p.bodies.size()) return true;
             BodyRef& r = p.bodies[m.body];
             if (r.detached) return true;
             r.detached = true;
@@ -466,6 +604,9 @@ bool ObjectSync::ReplayNow(const ObjectEventMsg& m, double nowMs) {
             Prop& p = it->second;
             if (p.attachedSent) return true;
             p.attachedSent = true;
+            p.attachParent = m.otherId;
+            // States of the attacher still in flight must not read as "streamed again" and undo this (hsm_object_attach.h).
+            attach_.OnAttached(m.objId, view_.Streamer(m.objId), view_.Level(m.objId), nowMs);
             if (adapter_->StillValid(p.actor, p.index) && adapter_->StillValid(parent->second.actor, parent->second.index))
                 Call(p.actor, "K2_AttachToActor")
                     .set<UObject*>("ParentActor", parent->second.actor).set<FName>("SocketName", FName{})
@@ -474,6 +615,8 @@ bool ObjectSync::ReplayNow(const ObjectEventMsg& m, double nowMs) {
             ++n_.eventsApplied;
             return true;
         }
+        case ObjectEventKind::Fracture:
+            return ShatterReplay(m, nowMs);   // shatter_sync.cpp
         case ObjectEventKind::Custom:
             return true;   // a mod's own event (M5): relayed, nothing replays it here
     }

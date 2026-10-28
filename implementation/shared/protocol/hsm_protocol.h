@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 26;         // 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 27;         // 27: ModMap 53 (host -> client: the picked modded map's package path and the pak it comes from, name + size + SHA-256; session/hsm_modmaps.h), a client without that pak leaves with a line saying what to install; 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -21,7 +21,7 @@ constexpr size_t kMaxWillies = 19;           // 9 fighter slots (host + 8 client
 constexpr size_t kMaxBodies = 64;
 constexpr size_t kMaxPacket = 16 * 1024;
 
-// ENet channels: reliable-ordered control/events, unreliable-sequenced input/state.
+// Channels: reliable-ordered control/events, unreliable-sequenced input/state.
 enum Channel : uint8_t { kChanReliable = 0, kChanUnreliable = 1, kChanCount = 2 };
 
 enum class MsgType : uint8_t {
@@ -72,7 +72,18 @@ enum class MsgType : uint8_t {
     ObjectAnnounce = 45, // spawner -> host -> all, reliable: an object appeared (a client's is a proposal; only the host's relay is canonical; session/hsm_object.h)
     BodyState = 46,   // streamer -> host -> others, unreliable: one body of an object (replaces PropState; session/hsm_lease.h)
     ObjectEvent = 47, // owner -> host -> all, reliable: a joint broke, a body detached/attached, an object destroyed, a mod event (session/hsm_object_event.h)
+    // Reserved for later 0.8.0 mod support. No decoder yet: every validator rejects them (the default
+    // case) until the milestone that owns them adds the layout. Do not renumber.
+    ModList = 48,     // client -> host, reliable (M4): the mods this player runs (names, versions, hashes)
+    SessionMods = 49, // host -> all, reliable (M4): the session's mod list and each player's match
+    ModMsg = 50,      // any -> host -> targets, per flags (M5): a message between mods, relayed
+    PackList = 51,    // host -> client, reliable (M6): the .pak packs the host lists (SHA-256, size)
+    PackStatus = 52,  // client -> host, reliable (M6): download, cache and mount progress
+    ModMap = 53,      // host -> client, reliable (rev 27): the modded map the host picked and the pak it comes from (name, size, SHA-256; session/hsm_modmaps.h); empty path = a stock map. Not 48-52: those belong to the mod relay
 };
+// The highest type that has a decoder (ModMap); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
+constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::ModMap);
+constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::ModMap);
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
 enum class Axis : uint8_t {
@@ -123,6 +134,7 @@ constexpr uint8_t kWelcomeMesh = 2;            // mesh offered: clients send Pos
 constexpr uint8_t kWelcomePeerPing = 4;        // rev 22: the PeerMap follows so clients can ping each other (mesh on or off)
 constexpr uint8_t kWelcomeVoice = 8;           // rev 22: the host relays proximity voice (voice=1 in its HSMMod.ini)
 constexpr uint8_t kWelcomeVoiceAll = 16;       // rev 23: with kWelcomeVoice: every living player hears every living one (voice_reach=everyone)
+// kWelcomeMods = 32 is reserved for M4 (the host runs the mod relay and sends SessionMods); Decode(Welcome) rejects it until then.
 struct Reject { RejectReason reason = RejectReason::Malformed; };
 
 struct InputFrame {

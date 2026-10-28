@@ -5,22 +5,30 @@
 //   Attached    the body re-parented (a helmet put back on): otherId is the new parent object.
 //   Destroyed   the object is gone.
 //   Custom      a mod's own event under its modId (M5): up to kMaxCustomEventBytes of opaque data.
+//   Fracture    a geometry collection (Chaos) of the object broke: body is the collection's body index, item the cluster
+//               (transform) index that broke, then where (world cm) and with what radius and strain; every machine breaks
+//               the same cluster. Replay log and rate cap: session/hsm_fracture.h.
 // Wire: 4 header + 8 objId + 1 body + 1 kind, then by kind:
 //   JointBroke +1 (constraint index)           = 15 bytes
 //   Detached / Attached +8 (otherId)           = 22 bytes
 //   Destroyed +0                               = 14 bytes
 //   Custom +4 (modId) +1 (length) +length      = 19 + length bytes (up to 51)
+//   Fracture +2 (item) +12 (x y z) +4 (radius) +4 (strain) = 36 bytes
 #pragma once
 #include "session/hsm_object.h"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
 namespace hsm {
 
-enum class ObjectEventKind : uint8_t { JointBroke = 1, Detached = 2, Attached = 3, Destroyed = 4, Custom = 5 };
-constexpr uint8_t kMaxObjectEventKind = 5;
+enum class ObjectEventKind : uint8_t { JointBroke = 1, Detached = 2, Attached = 3, Destroyed = 4, Custom = 5, Fracture = 6 };
+constexpr uint8_t kMaxObjectEventKind = 6;
 constexpr uint8_t kMaxConstraintIndex = 63;        // constraints per object, as many as bodies
 constexpr size_t kMaxCustomEventBytes = 32;
+constexpr uint16_t kMaxFractureItem = 16383;       // cluster (transform) index of a geometry collection
+constexpr float kMaxFractureRadius = 5000.0f;      // cm
+constexpr float kMaxFractureStrain = 1.0e9f;
 
 struct ObjectEventMsg {
     uint64_t objId = 0;
@@ -30,6 +38,10 @@ struct ObjectEventMsg {
     uint64_t otherId = 0;                          // Detached: the new object's id; Attached: the parent's id
     uint32_t modId = 0;                            // Custom only, never 0
     std::vector<uint8_t> data;                     // Custom only, at most kMaxCustomEventBytes
+    uint16_t item = 0;                             // Fracture only: the cluster that broke, <= kMaxFractureItem
+    float x = 0, y = 0, z = 0;                     // Fracture only: world cm, |v| <= kMaxPropCoord
+    float radius = 0;                              // Fracture only: [0, kMaxFractureRadius] cm
+    float strain = 0;                              // Fracture only: (0, kMaxFractureStrain]
 };
 
 inline std::vector<uint8_t> Encode(const ObjectEventMsg& m) {
@@ -39,6 +51,7 @@ inline std::vector<uint8_t> Encode(const ObjectEventMsg& m) {
         case ObjectEventKind::JointBroke: w.u8(m.constraint); break;
         case ObjectEventKind::Detached: case ObjectEventKind::Attached: w.u64(m.otherId); break;
         case ObjectEventKind::Destroyed: break;
+        case ObjectEventKind::Fracture: w.u16(m.item); w.f32(m.x); w.f32(m.y); w.f32(m.z); w.f32(m.radius); w.f32(m.strain); break;
         case ObjectEventKind::Custom: {
             const size_t n = m.data.size() < kMaxCustomEventBytes ? m.data.size() : kMaxCustomEventBytes;
             w.u32(m.modId); w.u8(uint8_t(n)); w.buf.insert(w.buf.end(), m.data.begin(), m.data.begin() + long(n));
@@ -57,6 +70,7 @@ inline bool Decode(const uint8_t* d, size_t n, ObjectEventMsg& m) {
         case ObjectEventKind::JointBroke: m.constraint = r.u8(); break;
         case ObjectEventKind::Detached: case ObjectEventKind::Attached: m.otherId = r.u64(); break;
         case ObjectEventKind::Destroyed: break;
+        case ObjectEventKind::Fracture: m.item = r.u16(); m.x = r.f32(); m.y = r.f32(); m.z = r.f32(); m.radius = r.f32(); m.strain = r.f32(); break;
         case ObjectEventKind::Custom: {
             m.modId = r.u32(); const size_t len = r.u8();
             if (!r.ok() || len > kMaxCustomEventBytes) return false;
@@ -72,6 +86,10 @@ inline bool Decode(const uint8_t* d, size_t n, ObjectEventMsg& m) {
         case ObjectEventKind::Attached: return ValidObjectId(m.otherId) && m.otherId != m.objId;
         case ObjectEventKind::Destroyed: return true;
         case ObjectEventKind::Custom: return m.modId != 0;
+        case ObjectEventKind::Fracture:
+            return m.item <= kMaxFractureItem && std::fabs(m.x) <= kMaxPropCoord && std::fabs(m.y) <= kMaxPropCoord &&
+                   std::fabs(m.z) <= kMaxPropCoord && m.radius >= 0.0f && m.radius <= kMaxFractureRadius && m.strain > 0.0f &&
+                   m.strain <= kMaxFractureStrain;
     }
     return false;
 }

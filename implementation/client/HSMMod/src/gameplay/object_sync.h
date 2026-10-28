@@ -15,11 +15,15 @@
 #pragma once
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
+#include "gameplay/shatter_sync.h"
 #include "gameplay/weapon_hands.h"
 #include "session/hsm_lease.h"
 #include "session/hsm_object.h"
+#include "session/hsm_object_attach.h"
 #include "session/hsm_object_event.h"
+#include "session/hsm_object_skip.h"
 #include "session/hsm_prop_census.h"
+#include "session/hsm_walk_cache.h"
 #include "sync/hsm_handmatch.h"
 #include "ue/engine.h"
 #include <array>
@@ -84,6 +88,13 @@ public:
     void NoteSpawn();
     // Host: every announced object as canonical announces, then the event history, for a machine that has just joined.
     std::vector<std::vector<uint8_t>> ObjectsForJoiner() const;
+    // Host migration (0.8.0-pre2). ExportKnown: every spawned object this machine knows by its canonical id, as announces (the
+    // host's reconciler table; a client's bound objects and announces waiting for an actor). The machine that becomes the host
+    // gives them to AdoptKnown after Start: its reconciler is seeded with them (so a late proposal matches an adopted id and
+    // new ids never repeat one), they are announced again to everyone (AnnounceAll), and the host's census binds its own
+    // actors to them by class and place instead of naming those objects anew.
+    std::vector<ObjectAnnounceMsg> ExportKnown() const;
+    void AdoptKnown(const std::vector<ObjectAnnounceMsg>& known);
     void SlotLeft(uint8_t slot);                                     // host: every lease the slot held goes FREE
     std::vector<std::vector<uint8_t>> GrantsForJoiner() const;       // host: every current lease, as Grants
     void ForgetEntity(uint8_t entity);                               // the entity's fighter is gone (left, respawned, removed)
@@ -135,6 +146,7 @@ private:
         bool rootBody = true;              // bodies[0] is the actor's root component (else every body is placed by its component)
         bool sub = false;                 // a detached body: its own object on its old actor (not in byActor_)
         bool attachedSent = false;         // attached to another tracked object: not streamed or driven any more
+        uint64_t attachParent = 0;         // the object it is attached to (Detached on body 0 names it when it is let go of)
         double provisionalMs = 0;          // when it was proposed
         LeaseClaim claim;
         double lastContactMs = -1e18;
@@ -161,6 +173,7 @@ private:
         bool anySim = false;               // some movable primitive of it simulates physics
         ue::UObject* simComp = nullptr;    // the first one that does
         uint8_t bodies = 0;                // movable primitives it has (capped at kMaxObjectBodies)
+        bool asleep = false;               // tracked here and at rest: its components' physics flags are kept longest (SimCache)
     };
     struct Announced {                     // a canonical announce with no actor here yet
         ObjectAnnounceMsg msg;
@@ -178,7 +191,9 @@ private:
                  despawned = 0,
                  announced = 0, proposed = 0, refused = 0, rekeyed = 0, bound = 0, ghostsExpired = 0, announceRejected = 0,
                  eventsSent = 0, eventsApplied = 0, eventsQueued = 0, eventsRejected = 0, jointsBroken = 0, bodiesDetached = 0,
-                 destroyedSent = 0, destroyedApplied = 0, rechecks = 0, bodyDriven = 0;
+                 destroyedSent = 0, destroyedApplied = 0, rechecks = 0, bodyDriven = 0,
+                 skippedClasses = 0, attachHeld = 0, letGoSent = 0, letGoApplied = 0, adoptKnown = 0, adoptBound = 0, adoptExpired = 0,
+                 simAsked = 0, simCached = 0, simCapped = 0;
     };
 
     static constexpr double kCensusRefreshMs = 5000.0;  // the host walks again this often; a client retries its misses this often
@@ -227,6 +242,8 @@ private:
     bool BuildBodies(Prop& p, bool multi);                           // BodyIndex over the actor's movable primitives
     std::vector<ue::UObject*> ComponentsOf(ue::UObject* actor, const ue::UClass* cls);
     bool MovableComp(ue::UObject* comp);
+    bool ClassSkipped(const ue::UClass* actorClass);                 // an effect, gore or mod actor class (or a child of one)
+    void BindAdopted(std::vector<LevelActor>& unnamed, double nowMs);   // host: bind the adopted announces to actors found
     // Level props (session/hsm_prop_census.h).
     std::vector<LevelActor> WalkLevel(size_t& notSimulating);       // every physics object of the level here
     void HostCensus(double nowMs);                                   // walk, index, track, and send when it changed
@@ -248,6 +265,14 @@ private:
     bool ReplayNow(const ObjectEventMsg& m, double nowMs);          // false: the object is not here (yet)
     Prop* TrackSub(uint64_t id, Prop& from, size_t body, double nowMs, bool mine);
     bool CompMoving(ue::UObject* comp);
+    // Shattering objects (shatter_sync.cpp): geometry collections break on the machine that streams them and the break is
+    // an ObjectEvent Fracture everywhere else.
+    void ShatterPoll(double nowMs);                                  // every kEventPollMs: detect, set up, verify, log breakables
+    bool ShatterReplay(const ObjectEventMsg& m, double nowMs);       // false: the object is not here (yet)
+    ShatterObject& ShatterScan(uint64_t id, Prop& p);
+    void ShatterStep(uint64_t id, ShatterBody& b, bool streams, double nowMs);
+    void ShatterBreak(uint64_t id, ShatterBody& b, double nowMs);
+    void LogBreakables();
     ue::UObject* ParentActorOf(ue::UObject* actor);
     bool InCensus(uint64_t propId) const;                            // a level id of the current census
     bool TaggedRandomDelete(ue::UObject* actor);
@@ -310,7 +335,15 @@ private:
     bool randomDeleteKnown_ = false;
     std::unordered_map<const ue::UClass*, int32_t> rootOff_, mobilityOff_;   // WalkLevel: "RootComponent", "Mobility"
     std::unordered_map<const ue::UClass*, uint8_t> classKind_;      // WalkLevel: 1 a primitive component class
-    std::unordered_map<const ue::UClass*, uint8_t> actorKind_;      // WalkLevel: 1 an actor class
+    std::unordered_map<const ue::UClass*, uint8_t> actorKind_;      // WalkLevel: 1 an actor class, 2 one never synced (ObjectClassSkipped)
+    std::set<std::string> skippedLogged_;                           // class names skipped, logged once per level
+    SimCache simCache_;                                             // WalkLevel: IsSimulatingPhysics per component, kept for a while
+    double simPruneMs_ = 0;
+    AttachLatch attach_;                                            // attached objects held against states in flight
+    // Host after a migration: objects the old host announced (every machine heard them), not yet bound to an actor of the new
+    // host's own. Kept across a level change; ones nothing matched by adoptUntilMs_ are given up.
+    std::vector<ObjectAnnounceMsg> adopt_;
+    double adoptUntilMs_ = 0;
     // Spawned objects (object_events.cpp). reconciler_: host only. minter_: this machine's provisional ids (client).
     ObjectReconciler reconciler_;
     SpawnedIdMinter minter_;
@@ -323,6 +356,7 @@ private:
     std::set<uint64_t> destroyed_;                                   // spawned ids destroyed (a late announce is not bound)
     std::vector<QueuedEvent> queuedEvents_;                          // events for objects not found here yet
     std::vector<std::vector<uint8_t>> history_;                      // host: events relayed, for a joiner
+    ShatterState shatter_;                                           // geometry collections (shatter_sync.cpp)
     double recheckMs_ = 0, eventMs_ = 0, hintMs_ = -1e18;
     ue::UClass* primitiveClass_ = nullptr;
     ue::UClass* constraintClass_ = nullptr;

@@ -36,6 +36,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::BlobChunk: return BudgetClass::Blob;
         case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard: case MsgType::PingTable:
             return BudgetClass::Control;
+        case MsgType::ModMap: return BudgetClass::Control;   // rev 27: a host sends one per map pick (and one to each joiner)
         case MsgType::Forward: return BudgetClass::Detour;
         default: return BudgetClass::Free;
     }

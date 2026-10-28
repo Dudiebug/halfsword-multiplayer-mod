@@ -1,7 +1,9 @@
 // Generic objects (session/hsm_object.h, rev 26): the three id spaces never collide, minting, body index, ObjectAnnounce
 // and BodyState wire (round trip, every truncation, rejections), the host's proposal reconciler (two proposers, one id), ghosts.
 #include "session/hsm_object.h"
+#include <cmath>
 #include <cstdio>
+#include <limits>
 #include <set>
 
 static int g_fail = 0;
@@ -270,9 +272,126 @@ static void TestGhosts() {
     g.Clear(); CHECK(g.Size() == 0);
 }
 
+static void TestMotionHelpers() {
+    CHECK(SpeedOf(3, 4, 0) == 5.f && SpeedOf(0, 0, 0) == 0.f);
+    CHECK(SpeedOf(std::nanf(""), 0, 0) == 0.f);
+    CHECK(SpeedOf(1e9f, 0, 0) == kMaxPropSpeed);
+    CHECK(ProposalTolUu(100.f, 0.f) == 100.f && ProposalTolUu(100.f, -5.f) == 100.f);
+    CHECK(ProposalTolUu(100.f, 500.f) == 100.f + 500.f * kMotionSlackS);
+    CHECK(ProposalTolUu(100.f, 1e6f) == 100.f + kMotionTolCapUu);
+    float x = 0, y = 0, z = 0;
+    ExtrapolatePlace(x, y, z, 1000.f, 0, -500.f, 200.0);
+    CHECK(std::fabs(x - 200.f) < 0.01f && y == 0.f && std::fabs(z + 100.f) < 0.01f);
+    x = y = z = 0; ExtrapolatePlace(x, y, z, 1000.f, 0, 0, 5000.0);          // bounded
+    CHECK(std::fabs(x - 1000.f * float(kExtrapolateMaxMs / 1000.0)) < 0.01f);
+    x = y = z = 0; ExtrapolatePlace(x, y, z, 1000.f, 0, 0, 0.0); CHECK(x == 0.f);
+    ExtrapolatePlace(x, y, z, 1000.f, 0, 0, -50.0); CHECK(x == 0.f);
+    ExtrapolatePlace(x, y, z, 1e30f, 0, 0, 500.0); CHECK(x == 0.f);          // off the map: unchanged
+}
+
+static void TestReconcilerMotion() {
+    const uint32_t kCls = 0x1111u;
+    // Two clients propose one fast object: the host's copy is 200 cm/s along x, last read at t=1000.
+    ObjectReconciler r;
+    const uint64_t id = r.SpawnLocal(kCls, 0, 0, 0, 1);
+    r.UpdateMotion(id, 0, 0, 0, 2000.f, 0, 0, 1000.0);
+    // At t=1400 it is 800 cm on; a proposal there matches, with and without the trip's own error.
+    CHECK(r.Propose(Proposal(2, 1, kCls, 800, 0, 0), 2, 1400.0).objId == id);
+    CHECK(r.Propose(Proposal(3, 1, kCls, 700, 0, 0), 3, 1400.0).objId == id);   // within 100 + 0.4*2000 capped at 500
+    CHECK(r.Size() == 1);
+    // Without a clock nothing is carried forward: the old behaviour (a miss at 800).
+    ObjectReconciler r2; const uint64_t i2 = r2.SpawnLocal(kCls, 0, 0, 0, 1); r2.UpdateMotion(i2, 0, 0, 0, 2000.f, 0, 0, 1000.0);
+    CHECK(r2.Propose(Proposal(2, 1, kCls, 800, 0, 0), 2).created);
+    // Extrapolation is bounded: ten seconds later the object is not assumed to be 20000 cm away.
+    ObjectReconciler r3; const uint64_t i3 = r3.SpawnLocal(kCls, 0, 0, 0, 1); r3.UpdateMotion(i3, 0, 0, 0, 2000.f, 0, 0, 0.0);
+    CHECK(r3.Propose(Proposal(2, 1, kCls, 20000, 0, 0), 2, 10000.0).created);
+    CHECK(r3.Propose(Proposal(2, 2, kCls, 1200, 0, 0), 2, 10000.0).objId == i3);   // the bounded 600 ms of travel
+    // The tolerance growth is capped: a far miss stays a miss.
+    ObjectReconciler r4; const uint64_t i4 = r4.SpawnLocal(kCls, 0, 0, 0, 1); r4.UpdateMotion(i4, 0, 0, 0, 3000.f, 0, 0, 0.0);
+    CHECK(r4.Propose(Proposal(2, 1, kCls, 1800.f + kCensusMatchUu + kMotionTolCapUu + 10.f, 0, 0), 2, 600.0).created);
+    // A resting object keeps the plain tolerance whatever the clock.
+    ObjectReconciler r5; const uint64_t i5 = r5.SpawnLocal(kCls, 0, 0, 0, 1); r5.UpdateMotion(i5, 0, 0, 0, 0, 0, 0, 0.0);
+    CHECK(r5.Propose(Proposal(2, 1, kCls, kCensusMatchUu + 1.f, 0, 0), 2, 100.0).created);
+    // Nearest wins when two moving objects are in reach.
+    ObjectReconciler r6;
+    const uint64_t a = r6.SpawnLocal(kCls, 0, 0, 0, 1), b = r6.SpawnLocal(kCls, 300, 0, 0, 1);
+    r6.UpdateMotion(a, 0, 0, 0, 1000.f, 0, 0, 0.0); r6.UpdateMotion(b, 300, 0, 0, 1000.f, 0, 0, 0.0);
+    CHECK(r6.Propose(Proposal(2, 1, kCls, 460, 0, 0), 2, 300.0).objId == b);     // a at 300, b at 600
+    CHECK(r6.Propose(Proposal(2, 2, kCls, 320, 0, 0), 2, 300.0).objId == a);
+    // Another class never matches however close.
+    CHECK(r6.Propose(Proposal(2, 3, 0x9999u, 300, 0, 0), 2, 300.0).created);
+    // UpdatePlace drops the velocity; UpdateMotion refuses unknown ids, bad places, non-finite velocity.
+    ObjectReconciler r7; const uint64_t i7 = r7.SpawnLocal(kCls, 0, 0, 0, 1);
+    r7.UpdateMotion(i7, 0, 0, 0, 2000.f, 0, 0, 0.0);
+    r7.UpdatePlace(i7, 0, 0, 0);
+    CHECK(r7.Propose(Proposal(2, 1, kCls, 800, 0, 0), 2, 400.0).created);
+    ObjectReconciler r8; const uint64_t i8 = r8.SpawnLocal(kCls, 0, 0, 0, 1);
+    r8.UpdateMotion(MakeSpawnedId(0, 99), 5, 5, 5, 1, 1, 1, 0.0);
+    r8.UpdateMotion(i8, std::nanf(""), 0, 0, 1, 0, 0, 0.0);
+    r8.UpdateMotion(i8, 0, 0, 0, std::nanf(""), 0, 0, 0.0);
+    r8.UpdateMotion(i8, 0, 0, 0, 0, std::numeric_limits<float>::infinity(), 0, 0.0);
+    ObjectAnnounceMsg out; CHECK(r8.AnnounceOf(i8, out) && out.px == 0 && out.py == 0 && !r8.Knows(MakeSpawnedId(0, 99)));
+    CHECK(r8.Propose(Proposal(2, 1, kCls, 300, 0, 0), 2, 400.0).created);       // nothing moving was recorded
+}
+
+static void TestAdopt() {
+    const uint32_t kCls = 0x1111u;
+    // An old host's canonical announces, as every machine heard them.
+    ObjectAnnounceMsg a1; a1.objId = MakeSpawnedId(0, 7); a1.flags = kAnnounceCanonical; a1.classHash = kCls;
+    a1.px = 100; a1.py = 0; a1.pz = 0; a1.bodyCount = 2; a1.proposalId = MakeSpawnedId(2, 1);
+    ObjectAnnounceMsg a2 = a1; a2.objId = MakeSpawnedId(3, 4); a2.px = 5000; a2.proposalId = 0;   // minted in a client slot
+    ObjectReconciler r(1);                                  // the new host's slot
+    CHECK(r.Adopt(a1) && r.Adopt(a2) && r.Size() == 2 && r.Knows(a1.objId));
+    // A late proposal for an adopted object gets its id, not a new one.
+    auto m = r.Propose(Proposal(2, 5, kCls, 130, 0, 0), 2);
+    CHECK(m.objId == a1.objId && !m.created && r.Size() == 2);
+    // A retransmit of the proposal that was answered by the old host gets that answer.
+    CHECK(r.Propose(Proposal(2, 1, kCls, 9999, 9999, 0), 2).objId == a1.objId);
+    // New mints do not collide with anything adopted, in any slot.
+    ObjectReconciler s(0);
+    ObjectAnnounceMsg h = a1; h.objId = MakeSpawnedId(0, 40); h.proposalId = 0;
+    CHECK(s.Adopt(h));
+    CHECK(s.SpawnLocal(kCls, 9000, 0, 0, 1) == MakeSpawnedId(0, 41));
+    ObjectReconciler t(2);
+    ObjectAnnounceMsg own = a1; own.objId = MakeSpawnedId(2, 12); own.proposalId = 0;   // an id of the new host's own slot
+    CHECK(t.Adopt(own) && t.SpawnLocal(kCls, 9000, 0, 0, 1) == MakeSpawnedId(2, 13));
+    ObjectAnnounceMsg others = a1; others.objId = MakeSpawnedId(3, 90); others.proposalId = 0;
+    t.Adopt(others);
+    CHECK(t.SpawnLocal(kCls, 9500, 0, 0, 1) == MakeSpawnedId(2, 14));              // another slot's ids do not move the minter
+    // AnnounceAll re-announces the adopted ids.
+    const auto all = r.AnnounceAll();
+    CHECK(all.size() == 2);
+    bool seen1 = false, seen2 = false;
+    for (const auto& x : all) { seen1 |= x.objId == a1.objId; seen2 |= x.objId == a2.objId; CHECK(x.flags == kAnnounceCanonical && x.proposalId == 0); }
+    CHECK(seen1 && seen2);
+    // Adopting an id again replaces it.
+    ObjectAnnounceMsg moved = a1; moved.px = 700; CHECK(r.Adopt(moved) && r.Size() == 2);
+    CHECK(r.Propose(Proposal(3, 8, kCls, 650, 0, 0), 3).objId == a1.objId);
+    // Refusals.
+    ObjectReconciler u;
+    ObjectAnnounceMsg bad = a1;
+    bad.flags = kAnnounceProposal; CHECK(!u.Adopt(bad));
+    bad = a1; bad.objId = MakeLevelPropId(3); CHECK(!u.Adopt(bad));
+    bad = a1; bad.objId = 0; CHECK(!u.Adopt(bad));
+    bad = a1; bad.classHash = 0; CHECK(!u.Adopt(bad));
+    bad = a1; bad.bodyCount = 0; CHECK(!u.Adopt(bad));
+    bad = a1; bad.bodyCount = kMaxAnnounceBodies + 1; CHECK(!u.Adopt(bad));
+    bad = a1; bad.px = std::nanf(""); CHECK(!u.Adopt(bad));
+    bad = a1; bad.parentId = bad.objId; CHECK(!u.Adopt(bad));
+    bad = a1; bad.parentId = 12345; CHECK(!u.Adopt(bad));
+    CHECK(u.Size() == 0);
+    // A full table refuses a new object but still replaces a known one.
+    ObjectReconciler full;
+    for (size_t i = 0; i < kMaxKnownObjects; ++i) CHECK(full.SpawnLocal(9, float(i) * 1000.f, 0, 0, 1) != 0);
+    CHECK(!full.Adopt(a2));
+    ObjectAnnounceMsg known = a1; known.objId = MakeSpawnedId(0, 1); known.classHash = 9; known.proposalId = 0;
+    CHECK(full.Adopt(known) && full.Size() == kMaxKnownObjects);
+}
+
 int main() {
     TestIdSpaces(); TestMinter(); TestBodyIndex(); TestAnnounceWire(); TestBodyStateWire(); TestBodyStateViewPerBody();
     TestReconciler(); TestGhosts();
+    TestMotionHelpers(); TestReconcilerMotion(); TestAdopt();
     if (g_fail) { std::printf("%d FAILED\n", g_fail); return 1; }
     std::printf("all object tests passed\n");
     return 0;

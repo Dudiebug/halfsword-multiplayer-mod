@@ -26,9 +26,11 @@
 #include "gameplay/gear.h"
 #include "gameplay/grab_sync.h"
 #include "gameplay/mirror.h"
+#include "gameplay/mod_maps.h"
 #include "gameplay/owner_sync.h"
 #include "gameplay/object_sync.h"
 #include "gameplay/damage_pin.h"
+#include "gameplay/paint_defer.h"
 #include "gameplay/save_guard.h"
 #include "gameplay/severs.h"
 #include "gameplay/standin_gore.h"
@@ -41,6 +43,7 @@
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "log.h"
+#include "ue4ss_load.h"
 #include "ue/profiler.h"
 #include "match/hsm_draw.h"
 #include "match/hsm_hud_scene.h"
@@ -108,7 +111,7 @@ using namespace hsm::ue;
 namespace {
 
 constexpr const char* kGameModeClass = "BP_HalfSwordGameMode_C";
-constexpr uint64_t kHostKey = 0;                 // roster key of the host itself (SteamIDs and ENet keys are never 0)
+constexpr uint64_t kHostKey = 0;                 // roster key of the host itself (SteamIDs are never 0)
 constexpr double kNoSpawnerRingCm = 400.0;       // spawner-less maps: candidates on a ring this far around the host
 constexpr double kSideRingCm = 900.0;            // spawner-less maps: team sides on a ring this far around the host
 constexpr double kTeleportDistance = 300.0;
@@ -189,6 +192,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Snapshot: { Snapshot m; return Decode(d, n, m); }
         case MsgType::Event: { Event m; return Decode(d, n, m); }
         case MsgType::Travel: { Travel m; return Decode(d, n, m); }
+        case MsgType::ModMap: { ModMapMsg m; return Decode(d, n, m); }
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
@@ -248,22 +252,13 @@ public:
                 adapter_.CaptureInput(on); if (!on && !InFightLevel()) adapter_.ShowPauseCursor(); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
     }
 
-    bool Start() {
-        if (steamMode()) return true;   // transport is created when a lobby is entered (role=server over Steam: ServerLobbyTick)
-        auto enet = std::make_unique<ENetTransport>();
-        bool ok = cfg_.role == Role::Host || cfg_.role == Role::Server ? enet->StartHost(cfg_.port, cfg_.role == Role::Server ? kMaxPlayers : kMaxPlayers - 1, ValidateForHost)
-                                          : enet->StartClient(cfg_.hostAddress, cfg_.port, ValidateForClient);
-        if (ok) { net_ = std::move(enet); ++sessionGen_; }
-        if (ok && (cfg_.role == Role::Host || cfg_.role == Role::Server)) hostPending_ = true;
-        if (ok && cfg_.role != Role::Server) ui::ShowLine("HSMMod", style::kBone, "Direct IP is deprecated and will be removed in 0.8.0. Use Steam lobbies (role=steam).");
-        return ok;
-    }
+    bool Start() { return true; }   // the transport is created when a Steam lobby is entered (role=server: ServerLobbyTick)
 
     game::Lobby& lobby() override { return lobby_; }
-    bool steamMode() const override { return cfg_.role == Role::Steam || SteamServer(); }
-    // role=server with server_transport=steam: the server opens a public Steam lobby itself; players find it in the
-    // lobby browser and Steam relays the traffic (no port forwarding). Needs Steam running and signed in on that machine.
-    bool SteamServer() const { return cfg_.role == Role::Server && cfg_.serverTransport == "steam"; }
+    bool steamMode() const override { return true; }   // 0.8.0: Steam is the only transport (direct IP was removed)
+    // role=server: the server opens a public Steam lobby itself; players find it in the lobby browser and Steam relays the
+    // traffic (no port forwarding). Needs Steam running and signed in on that machine.
+    bool SteamServer() const { return cfg_.role == Role::Server; }
     void StartOnMap(const std::string& path) override {
         if (!lastGameMode_ || (net_ && !IsHost())) return;
         if (net_ && !BuildsAllowStart()) return;
@@ -315,22 +310,26 @@ public:
     template <class F> void Timed(PumpPart part, F&& f) {
         ue::prof::Scope scope(kPumpScopes[part], ue::prof::Kind::kMod);
         if (!sampling_ || tickMs_.size() >= kFrameSamples) { f(); return; }
+        const ReflectionCacheStats r0 = GetReflectionCacheStats();
         const auto t0 = std::chrono::steady_clock::now();
         f();
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const ReflectionCacheStats r1 = GetReflectionCacheStats();
+        pumpLookups_[part] += (r1.hits + r1.misses) - (r0.hits + r0.misses);
         pumpMs_[part] += ms;
         pumpMaxMs_[part] = std::max(pumpMaxMs_[part], ms);
     }
-    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); }
+    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); pumpLookups_.fill(0); }
 
     // " | pump ms/frame: net A streams B ... (max P x ms)": P is the part with the longest single run in the window.
     std::string PumpLine(double frames) const {
         const auto& kNames = kPumpNames;
-        std::string line = " | pump ms/frame:";
-        char b[48];
+        std::string line = " | pump ms/frame (and lookups/frame):";
+        char b[64];
         size_t worst = 0;
         for (size_t i = 0; i < kPumpParts; ++i) {
-            std::snprintf(b, sizeof b, " %s %.2f", kNames[i], pumpMs_[i] / frames);
+            // "/N": reflection lookups per frame made inside that part (FindFunction/FindProperty/Call by name).
+            std::snprintf(b, sizeof b, " %s %.2f/%.0f", kNames[i], pumpMs_[i] / frames, double(pumpLookups_[i]) / frames);
             line += b;
             if (pumpMaxMs_[i] > pumpMaxMs_[worst]) worst = i;
         }
@@ -445,7 +444,11 @@ public:
             game::InstallTravelHook([this](const std::string& l, bool a, const std::string& o) { return OnOpenLevel(l, a, o); });
             // Blueprint-to-Blueprint calls (hits, damage) never reach ProcessEvent; this hooks the VM's executor.
             // Fails closed: on an unverified build the hooks stay inert and the log says why.
-            HSM_LOG("session: script VM hook %s", InstallScriptHook() ? "installed" : "unavailable");
+            const bool vmHook = InstallScriptHook();
+            HSM_LOG("session: script VM hook %s", vmHook ? "installed" : "unavailable");
+            // Swapped-out armour outlives the paint tasks that read it (T5), in single player too; paint_defer=0 turns it off.
+            if (vmHook && cfg_.paintDefer) game::InstallPaintDefer();
+            else if (!cfg_.paintDefer) HSM_LOG("session: armour paint guard off (paint_defer=0)");
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
@@ -477,6 +480,7 @@ public:
         mirror_.Tick(adapter_, dt);
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
+        game::TickPaintDefer();
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
         adapter_.SetDestroyAware(net_ != nullptr);
@@ -631,6 +635,7 @@ public:
         if (std::string line = standIns_.HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, claims_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, fx_.HealthLine().c_str());
+        if (std::string line = game::PaintDeferHealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, equip_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, severs_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, gore_.HealthLine().c_str());
@@ -995,7 +1000,7 @@ public:
         if (!from) return true;                        // the player host, or the server console
         if (!IsServer()) return false;
         auto it = peers_.find(from);
-        if (it == peers_.end() || (it->second.key >> 63)) return false;   // direct-IP players have no Steam ID to check
+        if (it == peers_.end() || (it->second.key >> 63)) return false;   // a key with the top bit has no Steam ID to check
         if (!adminsParsed_) { admins_ = ParseAdminList(cfg_.serverAdmins); adminsParsed_ = true; }
         return std::find(admins_.begin(), admins_.end(), it->second.key) != admins_.end();
     }
@@ -1005,13 +1010,11 @@ public:
         return IsServer() ? std::string("the server") : MyName();
     }
 
-    // What a ban names: the Steam ID, else the direct-IP address; empty when neither is known.
+    // What a ban names: the Steam ID; empty when it is not known.
     std::string BanKeyOf(uint32_t peer) {
         auto it = peers_.find(peer);
         if (it == peers_.end()) return {};
-        if (!(it->second.key >> 63)) return SteamBanKey(it->second.key);
-        const std::string addr = net_ ? net_->PeerAddress(peer) : std::string();
-        return ValidIpv4(addr) ? IpBanKey(addr) : std::string();
+        return (it->second.key >> 63) ? std::string() : SteamBanKey(it->second.key);
     }
 
     // "#slot" or a name; false (and the issuer told why) when no single connected player matches.
@@ -1091,12 +1094,10 @@ public:
         pendingDrops_.push_back({peer, NowMs() + kRejectLingerMs});
     }
 
-    // A banned (or just kicked) Steam ID or address; null when this peer may join.
+    // A banned (or just kicked) Steam ID; null when this peer may join.
     const BanEntry* BannedEntry(const NetEvent& ev) {
         LoadBans();
-        if (ev.steamId) return bans_.Find(SteamBanKey(ev.steamId), UnixNow());
-        const std::string addr = net_->PeerAddress(ev.peer);
-        return ValidIpv4(addr) ? bans_.Find(IpBanKey(addr), UnixNow()) : nullptr;
+        return ev.steamId ? bans_.Find(SteamBanKey(ev.steamId), UnixNow()) : nullptr;
     }
 
     static int64_t UnixNow() { return int64_t(std::time(nullptr)); }
@@ -1288,7 +1289,7 @@ public:
         std::vector<std::string> out;
         if (!InSession()) { out.push_back("Not in a session."); return out; }
         const uint32_t now = NowMs();
-        out.push_back(std::string("Role: ") + (IsServer() ? "server host" : IsHost() ? "host" : "client") + (steamMode() ? " (Steam)" : " (direct IP)"));
+        out.push_back(std::string("Role: ") + (IsServer() ? "server host" : IsHost() ? "host" : "client") + " (Steam)");
         out.push_back("Players: " + std::to_string(IsHost() ? ConnectedSlots().size() : info_.fighters.size()));
         if (!IsHost()) {
             const int ms = PingOfSlot(kHostSlot, now);
@@ -1455,13 +1456,15 @@ public:
         char key[32]; std::snprintf(key, sizeof key, "%016llx", (unsigned long long)BuildKey()); f.gameBuild = key;
         f.protocol = kProtocolRevision;
         f.role = !net_ ? "solo" : IsHost() ? "host" : "client";
-        f.transport = !net_ ? "none" : steamMode() ? "steam" : "direct ip";
+        f.transport = !net_ ? "none" : "steam";
         f.syncMode = "owner";
         f.level = currentLevel_ + (progressionHub_ ? " (progression hub)" : "");
         f.matchFormat = ModeName(info_.format, info_.gear);
         f.matchPhase = info_.phase < std::size(kPhases) ? kPhases[info_.phase] : "?";
         f.players = !net_ ? 1 : IsHost() ? int(ConnectedSlots().size()) : int(info_.fighters.size());   // a client knows the fighters
         f.os = report::OsName();
+        f.ue4ss = ue4ss::ReportVersion();
+        f.ue4ssMods = ue4ss::ReportMods();
         return f;
     }
 
@@ -1482,7 +1485,7 @@ public:
     }
 
 private:
-    bool IsHost() const { return steamMode() ? lobby_.IsHost() : cfg_.role == Role::Host || cfg_.role == Role::Server; }
+    bool IsHost() const { return lobby_.IsHost(); }
     // role=server: no fighter of its own. Slot 0 / entity 1 is never used; every host path that looks at the host fighter
     // either iterates roster_ (which does not hold it) or checks localFighter_.
     bool IsServer() const { return cfg_.role == Role::Server; }
@@ -1504,7 +1507,7 @@ private:
     bool CombatEnabled() const {
         return !MatchLevel() || CombatPhase(IsHost() ? match_.phase() : MatchPhase(info_.phase));
     }
-    std::string MyName() const { return steamMode() ? steam::PersonaName(steam::MySteamId()) : cfg_.playerName; }
+    std::string MyName() const { return steam::PersonaName(steam::MySteamId()); }
 
     // ------------------------------------------------------------------ agent bridge (sensors/actuators)
     static constexpr const char* kAxisNames[kAxisCount] = {"MoveForward", "MoveRight", "TurnMouse", "LookMouse", "TurnGamepad",
@@ -1698,7 +1701,7 @@ private:
     }
 
     void ResetNetwork(const char* why) {
-        if (!migration_.Active()) migrateBoard_ = ScoreCarry{};
+        if (!migration_.Active()) { migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); }
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
         steamNet_ = nullptr; net_.reset();
         ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
@@ -1723,6 +1726,7 @@ private:
             adapter_.DestroyFighter(ref.obj, ref.index);   // a stand-in: its weapons go too
         }
         puppets_.clear(); world_ = ClientWorld{}; clientBlobs_.Clear(); clientAssembler_ = BlobAssembler{}; lastUpload_.clear();
+        modMapHost_.reset(); modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
         hostPeer_ = 0; welcomed_ = false; snappedOwn_ = false; hellosSent_ = 0;
         hostSteam_ = 0; meshOn_ = false; meshPeers_.Clear(); meshHearing_.Clear(); meshMasks_.Clear(); peerMapDirty_ = false;
         peerPingOn_ = false; meshDedupe_.Clear(); pings_.Clear(); pongs_.Clear(); pingTables_.clear(); nextPingTable_ = 0;
@@ -1742,7 +1746,7 @@ private:
         standIns_.Clear(); grabs_.Clear(); streams_.Clear(); lives_.clear(); respawnQueue_.clear();
         ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
         lifeBook_.Clear(); clientLife_.fill(0); staleLife_ = 0;
-        vote_.Clear(); pendingDrops_.clear(); rejected_.reset(); hostUnreachable_ = hostWasThere_ = false;
+        vote_.Clear(); pendingDrops_.clear(); rejected_.reset();
     }
 
     // ------------------------------------------------------------------ travel / levels
@@ -1751,6 +1755,54 @@ private:
     void HostTravel(const std::string& level) {
         OnOpenLevel(level, true, "");
         game::OpenLevel(lastGameMode_, level, true, "");
+    }
+
+    // Modded maps: what clients are told about the level the host opens (empty path for a stock map). Nothing is sent but
+    // the map path and the pak's name, size and SHA-256.
+    static ModMapMsg HostModMapFor(const std::string& level) {
+        const HostModMapResult r = game::modmaps::HostMessage(level);
+        if (r.state == HostModMap::Stock) return ModMapMsg{};
+        if (r.state == HostModMap::HashPending) HSM_LOG("maps: the pak of %s is still being hashed; clients get the map path only", level.c_str());
+        return r.msg;
+    }
+
+    // Client: the host's modded-map message, and the check of it against the paks on this machine.
+    void ModMapTick() {
+        if (!modMapHost_ || modMapChecked_) return;
+        const ModMapVerdict v = game::modmaps::Decide(*modMapHost_);
+        if (v == ModMapVerdict::Pending) return;
+        modMapChecked_ = true;
+        if (v == ModMapVerdict::NoMap) { modMapApproved_.clear(); pendingTravel_.reset(); return; }
+        if (v == ModMapVerdict::Ok) {
+            modMapApproved_ = modMapHost_->path;
+            HSM_LOG("maps: host's modded map %s is available here", modMapHost_->path.c_str());
+            if (pendingTravel_) { Travel tr = *pendingTravel_; pendingTravel_.reset(); FollowTravel(tr); }
+            return;
+        }
+        const std::string line = ModMapJoinLine(*modMapHost_, v);
+        HSM_LOG("maps: cannot join, %s", line.c_str());
+        pendingTravel_.reset(); modMapApproved_.clear(); modMapHost_.reset();
+        const bool fight = InFightLevel();
+        welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
+        if (steamMode()) lobby_.Leave();
+        ResetNetwork("modded map missing");
+        ui::ShowLine("HSMMod", style::kBone, line);
+        notice_ = line;
+        if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
+    }
+
+    void FollowTravel(const Travel& tr) {
+        if (tr.seq == travelSeq_ && !currentLevel_.empty() && tr.level.find(currentLevel_) != std::string::npos) {
+            // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
+            if (hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
+            return;
+        }
+        RememberFoes();
+        size_t applied = game::ApplyGameSettings(tr.settings);
+        fightSettings_ = tr.settings;
+        travelSeq_ = tr.seq; pendingLevel_ = tr.level;
+        HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
+        game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
     }
 
     bool OnOpenLevel(const std::string& level, bool absolute, const std::string& options) {
@@ -1766,7 +1818,10 @@ private:
         if (IsHost()) {
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
             fightSettings_ = t.settings;
-            if (net_) net_->Broadcast(kChanReliable, Encode(t), true);
+            if (net_) {
+                net_->Broadcast(kChanReliable, Encode(HostModMapFor(level)), true);   // modded maps: before the Travel, so a client can refuse in time
+                net_->Broadcast(kChanReliable, Encode(t), true);
+            }
             const MatchConfig shown = lobby_.config();
             lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1),
                                   lobby_.Progression() ? "" : ModeName(shown.format, shown.gear));
@@ -1790,6 +1845,7 @@ private:
         agent::VmHookFlush();
         mirror_.OnLevel();
         mirrorDone_ = false; mirrorSince_ = 0;
+        game::PaintDeferLevelChanged();
         if (ScriptHookActive()) ResolveScriptHooks();   // the level's Blueprint classes and overrides are loaded now
         snappedOwn_ = false; picksValid_ = false;
         held_.fill(Held{});                          // agent-held axes do not carry into the next level
@@ -1991,7 +2047,10 @@ private:
         penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
         // Level props: the host censuses a fight level from its first tick in it; a client matches once its level gate is open.
         penv.fightLevel = [this] { return FighterLevel() && (IsHost() || levelGate_.Open()); };
+        const bool hostNow = penv.host;
         props_.Start(adapter_, standIns_, std::move(penv));
+        // The new host after a migration: the objects the old host announced (every machine heard them) keep their ids.
+        if (hostNow && !migrateObjects_.empty()) { props_.AdoptKnown(migrateObjects_); migrateObjects_.clear(); }
     }
 
     // Owner sync: the game's single-player win/lose flow must not run in a session match. "Event Lose Match" on a
@@ -2060,14 +2119,14 @@ private:
                 if (ev.kind == NetEvent::Connected) { HSM_LOG("host: peer %u connected", ev.peer); helloWatch_.Connected(ev.peer, NowMs()); }
                 else if (ev.kind == NetEvent::Disconnected) {
                     helloWatch_.Forget(ev.peer);
-                    std::erase_if(pendingDrops_, [&](const auto& d) { return d.first == ev.peer; });   // ENet reuses the id
+                    std::erase_if(pendingDrops_, [&](const auto& d) { return d.first == ev.peer; });
                     OnClientLeft(ev.peer);
                 } else HostReceive(ev);
             }
         });
         if (peerMapDirty_) SendPeerMap();
         if (detourDirty_) SendRouteTables();
-        // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (ENet times its own peers out) (N6).
+        // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (N6).
         // Clients without the keep-alive are only timed in fight levels, while they have a live fighter (public #8, #9, #10).
         const auto streams = [this](uint32_t peer) {
             auto it = peers_.find(peer);
@@ -2192,7 +2251,7 @@ private:
     }
 
     // ------------------------------------------------------------------ mesh (host side)
-    // Offered only on a Steam lobby with owner sync; ENet (direct IP) stays a star.
+    // Offered only on a Steam lobby with owner sync.
     bool MeshHost() const { return cfg_.mesh && steamNet_; }
     // The PeerMap goes out for the mesh and for per-player pings (peer_ping=1, on with the mesh off).
     bool PeerMapHost() const { return steamNet_ && (cfg_.mesh || cfg_.peerPing); }
@@ -2842,6 +2901,7 @@ private:
             if (lastTravel_ && lastTravel_->level.find(currentLevel_) != std::string::npos) t = *lastTravel_;
             else { t.level = currentLevel_; t.settings = game::CaptureGameSettings(); }   // short map name resolves too
             if (!t.seq) t.seq = ++travelSeq_;
+            net_->Send(ev.peer, kChanReliable, Encode(HostModMapFor(t.level)), true);   // modded maps: the pak it needs, before the Travel
             net_->Send(ev.peer, kChanReliable, Encode(t), true);
         }
         HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxPlayers);
@@ -3045,7 +3105,7 @@ private:
         return cfg;
     }
 
-    // The identity a player's score follows (FighterInfo::id): their SteamID, the host's own included; 0 for a direct-IP peer.
+    // The identity a player's score follows (FighterInfo::id): their SteamID, the host's own included; 0 when unknown.
     uint64_t ScoreId(uint8_t entity) const {
         const RosterMember* m = steamMode() ? roster_.ByEntity(entity) : nullptr;
         return !m ? 0 : m->key == kHostKey ? steam::MySteamId() : (m->key >> 63) ? 0 : m->key;
@@ -3883,7 +3943,7 @@ private:
         const uint32_t now = NowMs();
         const bool on = VoiceOn();
         if (!voiceConfigured_) { voiceConfigured_ = true; voice_.Configure(VoiceSettingsFromConfig()); }
-        if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam records the default microphone and decodes
+        if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // Steam records the default microphone and decodes
             voiceSteamTried_ = true;
             if (!steam::Init()) HSM_LOG("voice: Steam is not running here; the microphone is recorded by the mod, Steam-compressed voices cannot be played");
         }
@@ -4201,6 +4261,7 @@ private:
             // The map to open again (the new host) or to wait in (the others): the fight level the old host had open.
             migrateLevel_ = InFightLevel() ? currentLevel_ : std::string();
             migrateBoard_ = ScoreCarryFrom(info_);   // the last MatchInfo heard: the new host restores these scores
+            migrateObjects_ = props_.ExportKnown();  // the spawned objects this machine knows by id: the new host adopts them
         }
         ResetNetwork("host migration");
     }
@@ -4226,7 +4287,7 @@ private:
             case MigrationStep::GiveUp:
                 HSM_LOG("session: host migration gave up (%s); returning to the main menu",
                         !cfg_.hostMigration ? "off" : !lobby_.InLobby() ? "left the lobby" : "no new host in time");
-                migrateLevel_.clear(); migrateBoard_ = ScoreCarry{};
+                migrateLevel_.clear(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear();
                 if (lobby_.InLobby() || net_ || InFightLevel()) ReturnToMenuAfterHostLoss();
                 return;
             default: break;
@@ -4252,17 +4313,6 @@ private:
         game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
-    // N3: a direct-IP client whose host closed, timed out or never answered, outside a fight level: leave the session
-    // (the netcode, the "joined" state) and say why on the multiplayer page.
-    void LeaveUnreachableHost() {
-        const char* msg = hostWasThere_ ? "The host is gone. You left the session." : "Could not reach the host.";
-        HSM_LOG("client: %s", msg);
-        hostUnreachable_ = hostWasThere_ = false;
-        ResetNetwork("host gone");
-        ui::ShowLine("HSMMod", style::kBone, msg);
-        notice_ = msg;
-    }
-
     void ClientTick(float dt) {
         bool hostGone = false;
         bodyWork_ = false;
@@ -4277,9 +4327,8 @@ private:
                     SendHello();
                 } else if (ev.kind == NetEvent::Disconnected) {
                     HSM_LOG("client: disconnected from host");
-                    const DisconnectAction act = ClientDisconnectAction(steamMode(), welcomed_, InFightLevel());
+                    const DisconnectAction act = ClientDisconnectAction(true, welcomed_, InFightLevel());
                     if (act == DisconnectAction::HostLossMonitor) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
-                    else if (act == DisconnectAction::Leave) { hostUnreachable_ = true; hostWasThere_ = welcomed_; }
                     welcomed_ = false; hostPeer_ = 0;
                 } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
             }
@@ -4293,9 +4342,9 @@ private:
             hostGone = hostGone || a == HostLossAction::ReturnToMenu;
         } else hostLoss_.OnPacket(NowMs());
         if (rejected_) { const RejectReason why = *rejected_; rejected_.reset(); OnRejected(why); return; }
+        if (modMapHost_ && !modMapChecked_) { ModMapTick(); if (!net_) return; }   // modded maps: the scan or a hash finished
         if (refuseNoHook_) { refuseNoHook_ = false; if (!ScriptHookMissing()) { HSM_LOG("client: refusing a host whose sync mode this build removed"); LeaveSession(); } return; }
         if (hostGone) { if (!MigrateAfterHostLoss()) ReturnToMenuAfterHostLoss(); return; }
-        if (hostUnreachable_) { LeaveUnreachableHost(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
         if (welcomed_ && hostPeer_ && DueAt(NowMs(), nextKeepAlive_)) {   // in every level: the host's silence check (public #9)
             const uint32_t now = NowMs();
@@ -4467,7 +4516,7 @@ private:
 
     // ------------------------------------------------------------------ mesh (client side)
     // Whether an event is the host's session or stream. Only the lobby owner's Steam ID is the host; every other peer a
-    // Steam client has is a mesh peer the host's PeerMap named. ENet clients have the host alone.
+    // Steam client has is a mesh peer the host's PeerMap named.
     bool FromHost(const NetEvent& ev) const { return !steamNet_ || ev.steamId == hostSteam_; }
 
     // Pose and Vitals go direct only with the mesh on; with per-player pings alone the peers are only pinged.
@@ -4799,7 +4848,7 @@ private:
                     HSM_LOG("client: host on mod build '%s', ours '%s' - update; the host will not start a match until both match",
                             w.modBuild.c_str(), game::ModBuild().c_str());
                 if (!streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
-                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); migrateBoard_ = ScoreCarry{}; HSM_LOG("client: host migration done"); }
+                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); HSM_LOG("client: host migration done"); }
                 meshOn_ = cfg_.mesh && steamNet_ && (w.flags & kWelcomeMesh);
                 peerPingOn_ = cfg_.peerPing && steamNet_ && (w.flags & kWelcomePeerPing);
                 if (!meshOn_ && !peerPingOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});   // the host stopped offering it
@@ -4817,21 +4866,22 @@ private:
             case MsgType::Reject: { Reject r; Decode(d, n, r); rejected_ = r.reason; bodyWork_ = true; break; }   // handled after the poll loop
             case MsgType::Travel: {
                 Travel tr; Decode(d, n, tr);
-                if (!TravelAllowed(tr.level, tr.options)) {   // H2: only catalog/menu levels, no options
+                if (!TravelAllowedWithModMap(tr.level, tr.options, modMapApproved_)) {   // H2: only catalog/menu levels (or the host's checked modded map), no options
+                    if (modMapHost_ && !modMapChecked_ && TravelAllowedWithModMap(tr.level, tr.options, modMapHost_->path)) {
+                        pendingTravel_ = tr;   // the pak check is still running: follow once it passes
+                        break;
+                    }
                     HSM_LOG("client: refused travel to '%.64s' (level or options not allowed)", TravelLogText(tr.level).c_str());
                     break;
                 }
-                if (tr.seq == travelSeq_ && !currentLevel_.empty() && tr.level.find(currentLevel_) != std::string::npos) {
-                    // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
-                    if (hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
-                    break;
-                }
-                RememberFoes();
-                size_t applied = game::ApplyGameSettings(tr.settings);
-                fightSettings_ = tr.settings;
-                travelSeq_ = tr.seq; pendingLevel_ = tr.level;
-                HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
-                game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
+                FollowTravel(tr);
+                break;
+            }
+            case MsgType::ModMap: {
+                ModMapMsg m; if (!Decode(d, n, m)) break;
+                modMapHost_ = m; modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
+                bodyWork_ = true;
+                ModMapTick();
                 break;
             }
             case MsgType::Spawn: {
@@ -4939,6 +4989,7 @@ private:
     HostMigration migration_;      // survives ResetNetwork: it spans the old session and the new one
     std::string migrateLevel_;     // the fight level open when the old host left
     ScoreCarry migrateBoard_;      // its scores by SteamID, until the new host's match starts (ResetNetwork drops it outside a migration)
+    std::vector<ObjectAnnounceMsg> migrateObjects_;   // the spawned objects this machine knew when the host left (the new host adopts them)
     bool serverReadyLogged_ = false;
     uint32_t serverLobbyAt_ = 0, serverConfigAt_ = 0;   // role=server over Steam: next lobby open try, next settings push
     // role=server
@@ -5089,6 +5140,10 @@ private:
     static constexpr uint32_t kRejectLingerMs = 1000;
     uint32_t nextConsolePoll_ = 0, nextBanPrune_ = 0;
     std::optional<RejectReason> rejected_;
+    std::optional<ModMapMsg> modMapHost_;      // client: the host's modded map (empty path for a stock one) and its pak
+    bool modMapChecked_ = false;
+    std::string modMapApproved_;               // the host's map path once this machine has the pak: the one non-catalog level a Travel may open
+    std::optional<Travel> pendingTravel_;      // a Travel that waits for the pak check
     uint32_t bugHintAt_ = 0;   // when to show the /bug hint (0: not due)
     bool bugHintShown_ = false;
     std::string notice_;   // why the host turned this player away, for the multiplayer page (TakeNotice)        // client: the host's Reject, acted on after the poll loop
@@ -5127,7 +5182,6 @@ private:
     SpawnIgnoreState spawnIgnoreState_ = SpawnIgnoreState::Outside;
     bool inFight_ = false;          // InFightLevel() cached per tick for the hit hook
     HostLossMonitor hostLoss_{0};
-    bool hostUnreachable_ = false, hostWasThere_ = false;   // N3: a direct-IP host that is gone outside a fight level
     PeerSilenceMonitor peerSilence_;
     HelloWatch helloWatch_;
     ReservationTable reservations_;
@@ -5177,6 +5231,7 @@ private:
     uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
     std::vector<double> frameMs_, tickMs_;
+    std::array<uint64_t, kPumpParts> pumpLookups_{};
     std::array<double, kPumpParts> pumpMs_{}, pumpMaxMs_{};   // Timed: per part, this window
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;

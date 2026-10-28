@@ -125,6 +125,35 @@ inline bool Decode(const uint8_t* d, size_t n, ObjectAnnounceMsg& m) {
     return true;
 }
 
+// ---------------------------------------------------------------- moving objects (0.8.0-pre2)
+// A proposal is made from the proposer's view of a moving object, and reaches the host a network trip later; the host's own
+// copy of the object has moved on by then. The announce carries no time (rev 26 is fixed), so the host judges the proposal by
+// when it RECEIVES it: it moves the known object's place on by its last velocity to that moment (bounded, a body does not
+// fly straight for long) and widens the match tolerance with the object's speed (capped), covering the trip itself.
+constexpr double kExtrapolateMaxMs = 600.0;     // a known place is carried forward by its velocity for at most this long
+constexpr float kMotionSlackS = 0.4f;           // seconds of travel two machines' views of one moving object may differ by
+constexpr float kMotionTolCapUu = 500.0f;       // the most the tolerance grows by, cm
+
+inline float SpeedOf(float vx, float vy, float vz) {
+    const double s = std::sqrt(double(vx) * vx + double(vy) * vy + double(vz) * vz);
+    if (!(s >= 0.0)) return 0.f;                 // NaN
+    return s > double(kMaxPropSpeed) ? kMaxPropSpeed : float(s);
+}
+// The match tolerance for an object moving at speedUuS: the base, plus the distance it covers in kMotionSlackS, capped.
+inline float ProposalTolUu(float baseUu, float speedUuS) {
+    if (!(speedUuS > 0.f)) return baseUu;
+    const float extra = speedUuS * kMotionSlackS;
+    return baseUu + (extra > kMotionTolCapUu ? kMotionTolCapUu : extra);
+}
+// Where a body last seen at (x, y, z) moving at v is ageMs later: a straight line for at most kExtrapolateMaxMs. A result
+// no census can carry leaves the place as it was.
+inline void ExtrapolatePlace(float& x, float& y, float& z, float vx, float vy, float vz, double ageMs) {
+    if (!(ageMs > 0.0)) return;
+    const double dt = (ageMs > kExtrapolateMaxMs ? kExtrapolateMaxMs : ageMs) / 1000.0;
+    const float nx = float(double(x) + double(vx) * dt), ny = float(double(y) + double(vy) * dt), nz = float(double(z) + double(vz) * dt);
+    if (CensusPlaceOk(nx, ny, nz)) { x = nx; y = ny; z = nz; }
+}
+
 // ---------------------------------------------------------------- the host reconciles proposals
 // What the host knows of every spawned (or adopted) object: class and last known place. A proposal that matches a
 // known object (same class, within tolUu of its place: the census's rule, MatchCensus) is that object; otherwise the host
@@ -139,7 +168,9 @@ public:
     explicit ObjectReconciler(uint8_t hostSlot = kHostSlot, float tolUu = kCensusMatchUu) : minter_(hostSlot), tol_(tolUu) {}
 
     // fromSlot: the roster slot the proposal arrived from. A proposal must carry a provisional id minted in that slot.
-    Result Propose(const ObjectAnnounceMsg& p, uint8_t fromSlot) {
+    // nowMs: the host's clock when the proposal arrived (negative: unknown, no motion is allowed for). A known object with a
+    // velocity (UpdateMotion) is first carried forward to nowMs and matched with a tolerance that grows with its speed.
+    Result Propose(const ObjectAnnounceMsg& p, uint8_t fromSlot, double nowMs = -1.0) {
         Result out;
         if (p.flags != kAnnounceProposal || !ValidSpawnedId(p.objId) || SpawnedIdSlot(p.objId) != fromSlot) return out;
         if (p.classHash == 0 || p.bodyCount == 0 || p.bodyCount > kMaxAnnounceBodies || !CensusPlaceOk(p.px, p.py, p.pz)) return out;
@@ -147,20 +178,27 @@ public:
         if (const auto answered = answers_.find(p.objId); answered != answers_.end()) {
             out.objId = answered->second; out.announce = Announce(answered->second, p.objId); return out;
         }
-        // Same object, seen earlier (by another machine's proposal or the host's own spawn)?
-        std::vector<uint64_t> ids; std::vector<CensusCandidate> locals;
-        for (const auto& [id, k] : known_) { ids.push_back(id); locals.push_back(CensusCandidate{k.classHash, k.px, k.py, k.pz}); }
-        const CensusEntry probe{0, p.classHash, p.px, p.py, p.pz};
-        const std::vector<int> match = MatchCensus({probe}, locals, tol_);
-        if (!match.empty() && match[0] >= 0) {
-            const uint64_t id = ids[size_t(match[0])];
-            if (answers_.size() < 4 * kMaxKnownObjects) answers_[p.objId] = id;
-            out.objId = id; out.announce = Announce(id, p.objId); return out;
+        // Same object, seen earlier (by another machine's proposal or the host's own spawn)? The nearest of the same class
+        // within its own tolerance, as MatchCensus picks for one entry (ties: the lower id).
+        uint64_t found = 0;
+        float bestD2 = 0.f;
+        for (const auto& [id, k] : known_) {
+            if (k.classHash != p.classHash) continue;
+            float kx = k.px, ky = k.py, kz = k.pz;
+            if (nowMs >= 0.0 && k.atMs >= 0.0) ExtrapolatePlace(kx, ky, kz, k.vx, k.vy, k.vz, nowMs - k.atMs);
+            const float tol = nowMs >= 0.0 ? ProposalTolUu(tol_, SpeedOf(k.vx, k.vy, k.vz)) : tol_;
+            const float dx = p.px - kx, dy = p.py - ky, dz = p.pz - kz;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= tol * tol && (!found || d2 < bestD2)) { found = id; bestD2 = d2; }
+        }
+        if (found) {
+            if (answers_.size() < 4 * kMaxKnownObjects) answers_[p.objId] = found;
+            out.objId = found; out.announce = Announce(found, p.objId); return out;
         }
         if (known_.size() >= kMaxKnownObjects) return out;
         const uint64_t id = minter_.Mint();
         if (!id) return out;
-        known_[id] = Known{p.classHash, p.px, p.py, p.pz, p.bodyCount, p.parentId};
+        known_[id] = Known{p.classHash, p.px, p.py, p.pz, p.bodyCount, p.parentId, 0.f, 0.f, 0.f, nowMs};
         if (answers_.size() < 4 * kMaxKnownObjects) answers_[p.objId] = id;
         out.objId = id; out.created = true; out.announce = Announce(id, p.objId);
         return out;
@@ -174,9 +212,32 @@ public:
         return id;
     }
     // Keep a known object's place current (from its BodyState stream), so a late proposal still finds it where it moved to.
+    // This form carries no velocity: the place is exact and nothing is carried forward from it.
     void UpdatePlace(uint64_t objId, float px, float py, float pz) {
         auto it = known_.find(objId);
-        if (it != known_.end() && CensusPlaceOk(px, py, pz)) { it->second.px = px; it->second.py = py; it->second.pz = pz; }
+        if (it == known_.end() || !CensusPlaceOk(px, py, pz)) return;
+        Known& k = it->second;
+        k.px = px; k.py = py; k.pz = pz; k.vx = k.vy = k.vz = 0.f; k.atMs = -1.0;
+    }
+    // The same with the body's velocity and the host's clock when it was read: Propose carries the place forward from atMs.
+    void UpdateMotion(uint64_t objId, float px, float py, float pz, float vx, float vy, float vz, double atMs) {
+        auto it = known_.find(objId);
+        if (it == known_.end() || !CensusPlaceOk(px, py, pz) || !std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)) return;
+        Known& k = it->second;
+        k.px = px; k.py = py; k.pz = pz; k.vx = vx; k.vy = vy; k.vz = vz; k.atMs = atMs;
+    }
+    // Host migration: the new host seeds its table from an announce every machine already heard (the canonical ids), instead
+    // of minting fresh ones. Only a canonical announce of a valid spawned id is taken; the minter moves past the id when it
+    // is one of this host's slot, so a later mint never repeats it. An announce for an id already known replaces it. False
+    // when it is refused (not canonical, malformed, or the table is full).
+    bool Adopt(const ObjectAnnounceMsg& a) {
+        if (a.flags != kAnnounceCanonical || !ValidSpawnedId(a.objId) || a.classHash == 0 || a.bodyCount == 0 || a.bodyCount > kMaxAnnounceBodies) return false;
+        if (!CensusPlaceOk(a.px, a.py, a.pz) || (a.parentId != 0 && (!ValidObjectId(a.parentId) || a.parentId == a.objId))) return false;
+        if (!known_.count(a.objId) && known_.size() >= kMaxKnownObjects) return false;
+        minter_.Observe(a.objId);
+        known_[a.objId] = Known{a.classHash, a.px, a.py, a.pz, a.bodyCount, a.parentId, 0.f, 0.f, 0.f, -1.0};
+        if (a.proposalId != 0 && ValidSpawnedId(a.proposalId) && answers_.size() < 4 * kMaxKnownObjects) answers_[a.proposalId] = a.objId;
+        return true;
     }
     void Remove(uint64_t objId) {
         known_.erase(objId);
@@ -198,7 +259,10 @@ public:
     SpawnedIdMinter& Minter() { return minter_; }
 
 private:
-    struct Known { uint32_t classHash = 0; float px = 0, py = 0, pz = 0; uint8_t bodyCount = 1; uint64_t parentId = 0; };
+    struct Known {
+        uint32_t classHash = 0; float px = 0, py = 0, pz = 0; uint8_t bodyCount = 1; uint64_t parentId = 0;
+        float vx = 0, vy = 0, vz = 0; double atMs = -1.0;   // the last velocity and the host clock it was read at (negative: none)
+    };
     ObjectAnnounceMsg Announce(uint64_t id, uint64_t proposalId) const {
         const Known& k = known_.at(id);
         ObjectAnnounceMsg a; a.objId = id; a.flags = kAnnounceCanonical; a.classHash = k.classHash;
