@@ -506,7 +506,7 @@ public:
             const bool typing = ui::Typing();
             const bool menu = FighterLevel() && adapter_.PauseMenuOpen();
             InputModeState ms;
-            ms.typing = typing; ms.menuOpen = menu; ms.wasMenuOpen = pauseMenuWas_;
+            ms.typing = typing; ms.menuOpen = menu; ms.wasMenuOpen = pauseMenuWas_; ms.fightLevel = FighterLevel();
             ms.delayedFixDue = inputFixAt_ && NowMs() >= inputFixAt_;
             if (ms.delayedFixDue && !typing) { inputFixAt_ = inputFixRepeat_ ? 0 : NowMs() + 3000; inputFixRepeat_ = !inputFixRepeat_; }
             switch (ChooseInputMode(ms)) {

@@ -21,10 +21,12 @@ struct InputModeState {
     bool wasMenuOpen = false;       // ... as of the previous decision
     bool respawnHappened = false;   // a new body was just possessed
     bool delayedFixDue = false;     // the 1.5 s / 4.5 s after-load input fix is due
+    bool fightLevel = true;         // the loaded level is a fight: the menus and lobby set their own input mode
 };
 
 inline InputMode ChooseInputMode(const InputModeState& s) {
     if (s.typing) return InputMode::Leave;
+    if (!s.fightLevel) return InputMode::Leave;   // a stock Quit to menu loads the menu level with the pause menu just gone: not ours to restore
     if (s.menuOpen) return s.wasMenuOpen ? InputMode::Leave : InputMode::GameAndUI;
     if (s.wasMenuOpen || s.respawnHappened || s.delayedFixDue) return InputMode::GameOnly;
     return InputMode::Leave;

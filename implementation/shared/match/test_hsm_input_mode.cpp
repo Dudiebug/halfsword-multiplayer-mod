@@ -32,6 +32,15 @@ static void TestNormalRestores() {
     CHECK(ChooseInputMode(S(false, false, false, false, true)) == InputMode::GameOnly);
 }
 
+static InputModeState Off(InputModeState s) { s.fightLevel = false; return s; }
+
+static void TestOffFightLevelLeaves() {
+    CHECK(ChooseInputMode(Off(S(false, false, true, false, false))) == InputMode::Leave);  // pause menu open, then the stock quit loaded the menu level
+    CHECK(ChooseInputMode(Off(S(false, false, false, true, true))) == InputMode::Leave);   // respawn / delayed fix flags do not apply there
+    CHECK(ChooseInputMode(Off(S(false, true, false, false, false))) == InputMode::Leave);
+    CHECK(ChooseInputMode(S(false, false, true, false, false)) == InputMode::GameOnly);    // on a fight level it still restores once
+}
+
 static void TestTypingWins() {
     CHECK(ChooseInputMode(S(true, false, false, true, true)) == InputMode::Leave);
     CHECK(ChooseInputMode(S(true, true, false, false, false)) == InputMode::Leave);
@@ -39,7 +48,7 @@ static void TestTypingWins() {
 }
 
 int main() {
-    TestMenuOpens(); TestMenuBlocksRestores(); TestMenuCloses(); TestNormalRestores(); TestTypingWins();
+    TestMenuOpens(); TestMenuBlocksRestores(); TestMenuCloses(); TestNormalRestores(); TestOffFightLevelLeaves(); TestTypingWins();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("hsm_input_mode ok");
     return 0;
