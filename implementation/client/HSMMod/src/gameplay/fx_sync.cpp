@@ -305,6 +305,7 @@ void FxSync::OnRemoveArmor(ScriptCall& c) {
     m.local = ToXform(t);   // world for now
     if (strip) stripped_.insert({entity, slot});   // the owner's report of it is not replayed again here
     if (Send(m, self, MakeName(kArmorBone), false)) ++n_.armor;
+    if (env_.noteSpawn) env_.noteSpawn();   // the loose piece is a new object: the object sync looks for it now
 }
 
 // Strip Armor From Bone (Willie_BP.cpp:7291) strips only a Fallen fighter, and a stand-in's Fallen never follows its
@@ -649,6 +650,7 @@ void FxSync::ApplyArmor(const PaintFxMsg& m, UObject* standIn, UObject* mesh, co
         replaying_ = false;
     }
     HSM_LOG("fx: armour slot %u removed from the stand-in of e%u (#%u)%s", unsigned(m.rate), m.entity, m.seq, ok ? "" : ": FAILED");
+    if (ok && env_.noteSpawn) env_.noteSpawn();   // the same loose piece, on this machine
     Count(ok, m);
 }
 

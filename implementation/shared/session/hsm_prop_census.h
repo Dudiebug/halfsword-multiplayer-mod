@@ -35,7 +35,7 @@ struct CensusEntry {
     uint32_t classHash = 0;       // sync::WeaponClassHash of the actor's class name; never 0
     float px = 0, py = 0, pz = 0; // home: where the host first saw the prop, cm
 };
-// A place a census can carry: finite and inside kMaxPropCoord on every axis (what PropState accepts). NaN compares
+// A place a census can carry: finite and inside kMaxPropCoord on every axis (what BodyState accepts). NaN compares
 // false and an infinity is out of range, so the bound alone refuses both.
 inline bool CensusPlaceOk(float x, float y, float z) {
     return std::fabs(x) <= kMaxPropCoord && std::fabs(y) <= kMaxPropCoord && std::fabs(z) <= kMaxPropCoord;

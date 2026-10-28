@@ -8,8 +8,8 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre2 tries out object and shatter sync, modded maps and UE4SS loading. It connects only to
-> 0.8.0-pre2.
+> **Prerelease:** v0.8.0-pre3 tries out object and shatter sync, modded maps and UE4SS loading, with the 0.7.3 grab and
+> strip fixes. It connects only to 0.8.0-pre3.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 
@@ -33,7 +33,16 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
    ```
    WINEDLLOVERRIDES="dwmapi=n,b" %command%
    ```
-4. Start the game and click **MULTIPLAYER** on the main menu. `HSMMod.ini` is created next to the DLL on first run.
+4. **UE4SS (optional).** HSMMod loads UE4SS itself, so UE4SS mods keep working next to it:
+   1. Install UE4SS as usual (its `dwmapi.dll` goes next to the game exe, the rest in a `ue4ss` folder).
+   2. Copy HSMMod's `dwmapi.dll` over UE4SS's `dwmapi.dll` (HSMMod becomes the proxy and loads `ue4ss/UE4SS.dll`).
+   3. Updating UE4SS later overwrites HSMMod's `dwmapi.dll` again: copy ours back. The multiplayer page warns when the
+      `dwmapi.dll` next to the exe is not HSMMod's.
+
+   UE4SS mods are never synced or sent: each player installs their own. Bug reports carry the UE4SS version and the
+   names of the enabled UE4SS mods. An older UE4SS 2.x install (proxy `xinput1_3.dll`) keeps working without any of
+   this.
+5. Start the game and click **MULTIPLAYER** on the main menu. `HSMMod.ini` is created next to the DLL on first run.
 
 Every player needs the same mod version and the same game build (Steam build 24185754). On any other game build the
 mod logs "unsupported build" and does nothing.
@@ -66,6 +75,10 @@ mod logs "unsupported build" and does nothing.
   not an iron grip.
 - **Stripping downed players:** a downed player's armour and clothes come off as on a downed NPC: grab the piece and
   press grab again.
+- **Loose objects (from 0.8.0-pre1):** anything that starts moving mid-match (a thrown helmet, armour knocked off, a
+  bridge pulled down, a snapped plank) gets the same name on every machine, each of its parts moves the same
+  everywhere, and a joint that breaks on one screen breaks on all of them.
+- **Shattering (from 0.8.0-pre2):** planks, crates and other breakables break the same way on every screen.
 
 ### Voice chat
 
@@ -101,6 +114,10 @@ tag shows who is talking. Steam must be running.
 - **Hosting without playing:** `role=server` runs matches and rotates maps with no fighter of its own; players spawn at
   the map's start points. It runs a normal copy of the game and opens a public Steam lobby that players find in the
   game's lobby browser.
+- **Modded maps:** put a custom map's `.pak` file in `HalfSwordUE5\Content\Paks\~mods` (create the folder if needed)
+  and restart the game. The host's map picker lists the map after the stock ones, marked as modded. Everyone who joins
+  needs the same pak file in their own `~mods` folder: a player without it (or with a different version) is told which
+  pak to install and goes back to the menu. HSMMod never sends or downloads pak files.
 
 ### Crashes
 
@@ -111,7 +128,7 @@ written next to the log in the game's `Binaries\Win64` folder. Please attach bot
 
 ## Settings
 
-All settings live under `[net]` in `HSMMod.ini`, next to the DLL. The defaults are fine for most players.
+Settings live in `HSMMod.ini`, next to the DLL, under `[net]` unless noted. The defaults are fine for most players.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -123,14 +140,15 @@ All settings live under `[net]` in `HSMMod.ini`, next to the DLL. The defaults a
 | `help_improve` | `0` | `1`: same as HELP IMPROVE THE MOD on the multiplayer page (see below). |
 | `reports` | `on` | `off`: no bug reports, log uploads or crash reports at all. |
 | `update_check` | `1` | `0`: no update check. |
-| `sync_mode` | `owner` | `host` (host only): the older sync where the host simulates every fighter. |
+| `ue4ss` (`[mod]`) | `1` | `0`: do not load UE4SS. |
+| `ue4ss_order` (`[mod]`) | `after` | `before`: load UE4SS before HSMMod's own hooks. |
 
 ## Known limitations
 
 - **Time of day follows the map.** You cannot pick day or night in a lobby yet; a lobby setting is planned.
 - **Brawl:** weapons on the level's own racks and floors can still be picked up.
-- **Direct IP is deprecated and will be removed in 0.8.0.** Use Steam lobbies. Direct-IP sessions have no lobby, so
-  they play Free-for-all with default settings.
+- **Direct IP was removed in 0.8.0.** Play through Steam lobbies; an old `role=host` or `role=client` in `HSMMod.ini`
+  is ignored.
 - Loadouts with no fabric armour show no team colour.
 
 ## Bug reports and privacy
@@ -191,7 +209,6 @@ license notice.
 ### Third-party code
 
 Parts of the sync design are ported from [Cyrex0/HalfSword-MP](https://github.com/Cyrex0/HalfSword-MP),
-Copyright (c) 2026 Cyrex0 and the HalfSword-MP contributors, MIT. MinHook and ENet are vendored under their own
-licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Copyright (c) 2026 Cyrex0 and the HalfSword-MP contributors, MIT. MinHook is vendored under its own license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Half Sword is a game by Half Sword Games. This is an unofficial fan mod, not affiliated with or endorsed by them.

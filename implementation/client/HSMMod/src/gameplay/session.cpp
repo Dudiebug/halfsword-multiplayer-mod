@@ -13,8 +13,8 @@
 //   machine simulates its own fighter natively (the host also its bots) and streams it (game::OwnerStreams); every
 //   fighter owned elsewhere is a neutralised stand-in servoed to that stream (game::StandIns). Blows on a stand-in
 //   become hit claims replayed by the victim's owner through the game's own damage code (game::Claims). The host
-//   relays the streams, routes the claims and referees the match. sync_mode=host (or a host without the script VM
-//   hook) keeps the host-simulates-all flow above, unchanged.
+//   relays the streams, routes the claims and referees the match. It is the only mode: the host-simulates-all flow
+//   (sync_mode=host) was removed in 0.8.0, and a machine without the script VM hook refuses to start a session.
 #include "config.h"
 #include "util/hsm_names.h"
 #include "util/hsm_sanitize.h"
@@ -26,9 +26,11 @@
 #include "gameplay/gear.h"
 #include "gameplay/grab_sync.h"
 #include "gameplay/mirror.h"
+#include "gameplay/mod_maps.h"
 #include "gameplay/owner_sync.h"
-#include "gameplay/prop_sync.h"
+#include "gameplay/object_sync.h"
 #include "gameplay/damage_pin.h"
+#include "gameplay/paint_defer.h"
 #include "gameplay/save_guard.h"
 #include "gameplay/severs.h"
 #include "gameplay/standin_gore.h"
@@ -37,13 +39,11 @@
 #include "gameplay/session.h"
 #include "gameplay/travel.h"
 #include "gameplay/voice.h"
-#include "gameplay/world_sync.h"
 #include "hsm_chat.h"
-#include "hsm_input.h"
-#include "hsm_jitter.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
 #include "log.h"
+#include "ue4ss_load.h"
 #include "ue/profiler.h"
 #include "match/hsm_draw.h"
 #include "match/hsm_hud_scene.h"
@@ -80,7 +80,6 @@
 #include "session/hsm_spawn_anchor.h"
 #include "session/hsm_spawn.h"
 #include "session/hsm_travel_gate.h"
-#include "session/hsm_world.h"
 #include "agent/bridge.h"
 #include "agent/vmhook.h"
 #include "paths.h"
@@ -112,11 +111,10 @@ using namespace hsm::ue;
 namespace {
 
 constexpr const char* kGameModeClass = "BP_HalfSwordGameMode_C";
-constexpr uint64_t kHostKey = 0;                 // roster key of the host itself (SteamIDs and ENet keys are never 0)
+constexpr uint64_t kHostKey = 0;                 // roster key of the host itself (SteamIDs are never 0)
 constexpr double kNoSpawnerRingCm = 400.0;       // spawner-less maps: candidates on a ring this far around the host
 constexpr double kSideRingCm = 900.0;            // spawner-less maps: team sides on a ring this far around the host
 constexpr double kTeleportDistance = 300.0;
-constexpr size_t kHitImpactPointOffset = 40;     // FHitResult: FaceIndex, Time, Distance, Location(24) then ImpactPoint
 static_assert(game::kMaxLobbyMembers == kMaxPlayers, "a Steam lobby holds exactly the players a session can seat (a server lobby one more)");
 constexpr uint8_t kFirstBotEntity = kMaxFighters + 1, kLastBotEntity = uint8_t(kMaxWillies);
 static_assert(Match::kMaxBotsAlive <= kLastBotEntity - kFirstBotEntity + 1, "every live bot needs an entity");
@@ -173,7 +171,9 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::SeverNotice: { combat::SeverNoticeMsg m; return Decode(d, n, m); }
         case MsgType::StuckBlade: { combat::StuckBladeMsg m; return Decode(d, n, m); }
         case MsgType::GrabState: { GrabStateMsg m; return Decode(d, n, m); }
-        case MsgType::PropState: { PropStateMsg m; return Decode(d, n, m); }
+        case MsgType::BodyState: { BodyStateMsg m; return Decode(d, n, m); }
+        case MsgType::ObjectAnnounce: { ObjectAnnounceMsg m; return Decode(d, n, m) && m.flags == kAnnounceProposal; }   // clients only propose
+        case MsgType::ObjectEvent: { ObjectEventMsg m; return Decode(d, n, m); }
         case MsgType::PropLease: { PropLeaseMsg m; return Decode(d, n, m) && m.action != LeaseAction::Grant; }
         case MsgType::PaintFx: { combat::PaintFxMsg m; return Decode(d, n, m); }
         case MsgType::Equip: { combat::EquipStateMsg m; return Decode(d, n, m); }
@@ -192,6 +192,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Snapshot: { Snapshot m; return Decode(d, n, m); }
         case MsgType::Event: { Event m; return Decode(d, n, m); }
         case MsgType::Travel: { Travel m; return Decode(d, n, m); }
+        case MsgType::ModMap: { ModMapMsg m; return Decode(d, n, m); }
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
@@ -199,7 +200,6 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Kill: { Kill m; return Decode(d, n, m); }
         case MsgType::Chat: { ChatLine m; return Decode(d, n, m); }
         case MsgType::CombatEvent: { CombatEvent m; return Decode(d, n, m); }
-        case MsgType::WorldState: { WorldState m; return Decode(d, n, m); }
         case MsgType::Ping: case MsgType::Pong: { Ping m; bool p; return DecodePing(d, n, m, p); }
         case MsgType::Pose: { PoseMsg m; return Decode(d, n, m); }
         case MsgType::Vitals: { VitalsMsg m; return Decode(d, n, m); }
@@ -209,7 +209,9 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::SeverNotice: { combat::SeverNoticeMsg m; return Decode(d, n, m); }
         case MsgType::StuckBlade: { combat::StuckBladeMsg m; return Decode(d, n, m); }
         case MsgType::GrabState: { GrabStateMsg m; return Decode(d, n, m); }
-        case MsgType::PropState: { PropStateMsg m; return Decode(d, n, m); }
+        case MsgType::BodyState: { BodyStateMsg m; return Decode(d, n, m); }
+        case MsgType::ObjectAnnounce: { ObjectAnnounceMsg m; return Decode(d, n, m) && m.flags == kAnnounceCanonical; }   // only the host's binds
+        case MsgType::ObjectEvent: { ObjectEventMsg m; return Decode(d, n, m); }
         case MsgType::PropLease: { PropLeaseMsg m; return Decode(d, n, m) && m.action == LeaseAction::Grant; }
         case MsgType::PropCensus: { PropCensusMsg m; return Decode(d, n, m); }
         case MsgType::PaintFx: { combat::PaintFxMsg m; return Decode(d, n, m); }
@@ -250,22 +252,13 @@ public:
                 adapter_.CaptureInput(on); if (!on && !InFightLevel()) adapter_.ShowPauseCursor(); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
     }
 
-    bool Start() {
-        if (steamMode()) return true;   // transport is created when a lobby is entered (role=server over Steam: ServerLobbyTick)
-        auto enet = std::make_unique<ENetTransport>();
-        bool ok = cfg_.role == Role::Host || cfg_.role == Role::Server ? enet->StartHost(cfg_.port, cfg_.role == Role::Server ? kMaxPlayers : kMaxPlayers - 1, ValidateForHost)
-                                          : enet->StartClient(cfg_.hostAddress, cfg_.port, ValidateForClient);
-        if (ok) { net_ = std::move(enet); ++sessionGen_; }
-        if (ok && (cfg_.role == Role::Host || cfg_.role == Role::Server)) hostPending_ = true;
-        if (ok && cfg_.role != Role::Server) ui::ShowLine("HSMMod", style::kBone, "Direct IP is deprecated and will be removed in 0.8.0. Use Steam lobbies (role=steam).");
-        return ok;
-    }
+    bool Start() { return true; }   // the transport is created when a Steam lobby is entered (role=server: ServerLobbyTick)
 
     game::Lobby& lobby() override { return lobby_; }
-    bool steamMode() const override { return cfg_.role == Role::Steam || SteamServer(); }
-    // role=server with server_transport=steam: the server opens a public Steam lobby itself; players find it in the
-    // lobby browser and Steam relays the traffic (no port forwarding). Needs Steam running and signed in on that machine.
-    bool SteamServer() const { return cfg_.role == Role::Server && cfg_.serverTransport == "steam"; }
+    bool steamMode() const override { return true; }   // 0.8.0: Steam is the only transport (direct IP was removed)
+    // role=server: the server opens a public Steam lobby itself; players find it in the lobby browser and Steam relays the
+    // traffic (no port forwarding). Needs Steam running and signed in on that machine.
+    bool SteamServer() const { return cfg_.role == Role::Server; }
     void StartOnMap(const std::string& path) override {
         if (!lastGameMode_ || (net_ && !IsHost())) return;
         if (net_ && !BuildsAllowStart()) return;
@@ -317,22 +310,26 @@ public:
     template <class F> void Timed(PumpPart part, F&& f) {
         ue::prof::Scope scope(kPumpScopes[part], ue::prof::Kind::kMod);
         if (!sampling_ || tickMs_.size() >= kFrameSamples) { f(); return; }
+        const ReflectionCacheStats r0 = GetReflectionCacheStats();
         const auto t0 = std::chrono::steady_clock::now();
         f();
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const ReflectionCacheStats r1 = GetReflectionCacheStats();
+        pumpLookups_[part] += (r1.hits + r1.misses) - (r0.hits + r0.misses);
         pumpMs_[part] += ms;
         pumpMaxMs_[part] = std::max(pumpMaxMs_[part], ms);
     }
-    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); }
+    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); pumpLookups_.fill(0); }
 
     // " | pump ms/frame: net A streams B ... (max P x ms)": P is the part with the longest single run in the window.
     std::string PumpLine(double frames) const {
         const auto& kNames = kPumpNames;
-        std::string line = " | pump ms/frame:";
-        char b[48];
+        std::string line = " | pump ms/frame (and lookups/frame):";
+        char b[64];
         size_t worst = 0;
         for (size_t i = 0; i < kPumpParts; ++i) {
-            std::snprintf(b, sizeof b, " %s %.2f", kNames[i], pumpMs_[i] / frames);
+            // "/N": reflection lookups per frame made inside that part (FindFunction/FindProperty/Call by name).
+            std::snprintf(b, sizeof b, " %s %.2f/%.0f", kNames[i], pumpMs_[i] / frames, double(pumpLookups_[i]) / frames);
             line += b;
             if (pumpMaxMs_[i] > pumpMaxMs_[worst]) worst = i;
         }
@@ -447,7 +444,11 @@ public:
             game::InstallTravelHook([this](const std::string& l, bool a, const std::string& o) { return OnOpenLevel(l, a, o); });
             // Blueprint-to-Blueprint calls (hits, damage) never reach ProcessEvent; this hooks the VM's executor.
             // Fails closed: on an unverified build the hooks stay inert and the log says why.
-            HSM_LOG("session: script VM hook %s", InstallScriptHook() ? "installed" : "unavailable");
+            const bool vmHook = InstallScriptHook();
+            HSM_LOG("session: script VM hook %s", vmHook ? "installed" : "unavailable");
+            // Swapped-out armour outlives the paint tasks that read it (T5), in single player too; paint_defer=0 turns it off.
+            if (vmHook && cfg_.paintDefer) game::InstallPaintDefer();
+            else if (!cfg_.paintDefer) HSM_LOG("session: armour paint guard off (paint_defer=0)");
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
@@ -460,7 +461,7 @@ public:
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
         if (levelChanged) { lastGameMode_ = gameMode; lastGameModeIndex_ = ObjectIndex(gameMode); OnLevelLoaded(); }
         inFight_ = InFightLevel();
-        if (hostPending_) { hostPending_ = false; BecomeHost(); }
+        if (hostPending_) { hostPending_ = false; if (!ScriptHookMissing()) BecomeHost(); }
         agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
         AutoRun();
         if (!inFight_ && menuInputAt_ && NowMs() >= menuInputAt_) {   // twice: after the menu level's own setup, then once more
@@ -479,13 +480,14 @@ public:
         mirror_.Tick(adapter_, dt);
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
+        game::TickPaintDefer();
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
-        adapter_.SetDestroyAware(net_ && OwnerMode());
-        adapter_.SetSubclassWeapons(OwnerMode());   // offline too, so the mirror bench sees the weapons owner sync sees
-        stockFlowGuard_ = joined && MatchLevel() && OwnerMode();
+        adapter_.SetDestroyAware(net_ != nullptr);
+        adapter_.SetSubclassWeapons(true);   // offline too, so the mirror bench sees the weapons owner sync sees
+        stockFlowGuard_ = joined && MatchLevel();
         pauseLiftArmed_ = stockFlowGuard_;
-        adapter_.SuppressStockScreens(joined && MatchLevel(), OwnerMode());
+        adapter_.SuppressStockScreens(joined && MatchLevel(), true);
         if (stockFlowGuard_ && adapter_.GamePaused()) {   // owner sync: a paused game stops this player's stream
             adapter_.SetGamePaused(false);
             if (++unpaused_ % 100 == 1) HSM_LOG("session: game was paused during an owner-sync match; unpaused (%u time(s))", unpaused_);
@@ -535,37 +537,8 @@ public:
         ui::ChatTick(hud);
     }
 
-    // One line every 5 s in a session fight: enough to tell "no input arriving" from "input arriving, nothing moves".
-    void LogHealth() {
-        uint32_t now = NowMs();
-        if (OwnerMode()) { LogOwnerHealth(); return; }
-        if (IsHost()) {
-            std::string line;
-            for (const RosterMember& m : roster_.members()) {
-                if (m.slot == 0) continue;
-                const Fighter& f = fighters_[m.slot];
-                line += " slot" + std::to_string(m.slot) + ": " + std::to_string(f.inputsRx) + " inputs, last " +
-                        (f.inputsRx ? std::to_string(now - f.lastInputAt) + " ms ago" : "never") + (FighterActor(m.slot) ? ", fighter ok" : ", NO FIGHTER") + ";";
-            }
-            HSM_LOG("host: health%s bots %zu, match phase %d; blood sent %u applied %u, hits blocked %u", line.empty() ? " (no clients)" : line.c_str(),
-                    bots_.size(), int(match_.phase()), bloodSent_, bloodApplied_, hitsBlocked_);
-            bloodSent_ = bloodApplied_ = hitsBlocked_ = 0;
-        } else {
-            size_t alive = 0;
-            for (auto& [e, ref] : puppets_) alive += adapter_.StillValid(ref.obj, ref.index);
-            std::string desync;
-            for (auto& [e, m] : desync_) {
-                if (!m.n) continue;
-                char b[96]; std::snprintf(b, sizeof b, " e%u%s avg %.0f max %.0f cm;", e, e == world_.myEntity() ? "(me)" : "", m.sum / m.n, m.max);
-                desync += b;
-            }
-            desync_.clear();
-            HSM_LOG("client: health %u snapshots, %u inputs sent, puppets %zu/%zu, own entity %u, own fighter %s; blood applied %u, hits blocked %u; desync%s",
-                    snapsRx_, inputsTx_, alive, puppets_.size(), world_.myEntity(), adapter_.PlayerWillie(0) ? "ok" : "MISSING",
-                    bloodApplied_, hitsBlocked_, desync.empty() ? " n/a" : desync.c_str());
-            bloodSent_ = bloodApplied_ = hitsBlocked_ = 0;
-        }
-    }
+    // One line every 5 s in a session fight (see LogOwnerHealth).
+    void LogHealth() { LogOwnerHealth(); }
 
     // Mesh: off prints nothing. Host: what each client says it hears directly and how many relays that saved. Client: the
     // direct peers, streams that arrived and were used, anything else from a non-host peer that was dropped.
@@ -662,6 +635,7 @@ public:
         if (std::string line = standIns_.HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, claims_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, fx_.HealthLine().c_str());
+        if (std::string line = game::PaintDeferHealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, equip_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, severs_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, gore_.HealthLine().c_str());
@@ -1026,7 +1000,7 @@ public:
         if (!from) return true;                        // the player host, or the server console
         if (!IsServer()) return false;
         auto it = peers_.find(from);
-        if (it == peers_.end() || (it->second.key >> 63)) return false;   // direct-IP players have no Steam ID to check
+        if (it == peers_.end() || (it->second.key >> 63)) return false;   // a key with the top bit has no Steam ID to check
         if (!adminsParsed_) { admins_ = ParseAdminList(cfg_.serverAdmins); adminsParsed_ = true; }
         return std::find(admins_.begin(), admins_.end(), it->second.key) != admins_.end();
     }
@@ -1036,13 +1010,11 @@ public:
         return IsServer() ? std::string("the server") : MyName();
     }
 
-    // What a ban names: the Steam ID, else the direct-IP address; empty when neither is known.
+    // What a ban names: the Steam ID; empty when it is not known.
     std::string BanKeyOf(uint32_t peer) {
         auto it = peers_.find(peer);
         if (it == peers_.end()) return {};
-        if (!(it->second.key >> 63)) return SteamBanKey(it->second.key);
-        const std::string addr = net_ ? net_->PeerAddress(peer) : std::string();
-        return ValidIpv4(addr) ? IpBanKey(addr) : std::string();
+        return (it->second.key >> 63) ? std::string() : SteamBanKey(it->second.key);
     }
 
     // "#slot" or a name; false (and the issuer told why) when no single connected player matches.
@@ -1110,7 +1082,7 @@ public:
         peerSilence_.Forget(peer);
         peers_.erase(it);
         MeshRosterChanged(slot);
-        if (OwnerMode()) props_.SlotLeft(slot);
+        props_.SlotLeft(slot);
         RemoveMember(slot, key);                       // no rejoin reservation for a kicked player
     }
 
@@ -1122,12 +1094,10 @@ public:
         pendingDrops_.push_back({peer, NowMs() + kRejectLingerMs});
     }
 
-    // A banned (or just kicked) Steam ID or address; null when this peer may join.
+    // A banned (or just kicked) Steam ID; null when this peer may join.
     const BanEntry* BannedEntry(const NetEvent& ev) {
         LoadBans();
-        if (ev.steamId) return bans_.Find(SteamBanKey(ev.steamId), UnixNow());
-        const std::string addr = net_->PeerAddress(ev.peer);
-        return ValidIpv4(addr) ? bans_.Find(IpBanKey(addr), UnixNow()) : nullptr;
+        return ev.steamId ? bans_.Find(SteamBanKey(ev.steamId), UnixNow()) : nullptr;
     }
 
     static int64_t UnixNow() { return int64_t(std::time(nullptr)); }
@@ -1319,7 +1289,7 @@ public:
         std::vector<std::string> out;
         if (!InSession()) { out.push_back("Not in a session."); return out; }
         const uint32_t now = NowMs();
-        out.push_back(std::string("Role: ") + (IsServer() ? "server host" : IsHost() ? "host" : "client") + (steamMode() ? " (Steam)" : " (direct IP)"));
+        out.push_back(std::string("Role: ") + (IsServer() ? "server host" : IsHost() ? "host" : "client") + " (Steam)");
         out.push_back("Players: " + std::to_string(IsHost() ? ConnectedSlots().size() : info_.fighters.size()));
         if (!IsHost()) {
             const int ms = PingOfSlot(kHostSlot, now);
@@ -1486,13 +1456,15 @@ public:
         char key[32]; std::snprintf(key, sizeof key, "%016llx", (unsigned long long)BuildKey()); f.gameBuild = key;
         f.protocol = kProtocolRevision;
         f.role = !net_ ? "solo" : IsHost() ? "host" : "client";
-        f.transport = !net_ ? "none" : steamMode() ? "steam" : "direct ip";
-        f.syncMode = OwnerMode() ? "owner" : "host";
+        f.transport = !net_ ? "none" : "steam";
+        f.syncMode = "owner";
         f.level = currentLevel_ + (progressionHub_ ? " (progression hub)" : "");
         f.matchFormat = ModeName(info_.format, info_.gear);
         f.matchPhase = info_.phase < std::size(kPhases) ? kPhases[info_.phase] : "?";
         f.players = !net_ ? 1 : IsHost() ? int(ConnectedSlots().size()) : int(info_.fighters.size());   // a client knows the fighters
         f.os = report::OsName();
+        f.ue4ss = ue4ss::ReportVersion();
+        f.ue4ssMods = ue4ss::ReportMods();
         return f;
     }
 
@@ -1513,7 +1485,7 @@ public:
     }
 
 private:
-    bool IsHost() const { return steamMode() ? lobby_.IsHost() : cfg_.role == Role::Host || cfg_.role == Role::Server; }
+    bool IsHost() const { return lobby_.IsHost(); }
     // role=server: no fighter of its own. Slot 0 / entity 1 is never used; every host path that looks at the host fighter
     // either iterates roster_ (which does not hold it) or checks localFighter_.
     bool IsServer() const { return cfg_.role == Role::Server; }
@@ -1521,7 +1493,6 @@ private:
     // Client: the host's Welcome said it plays no fighter (kWelcomeNoHostFighter), so its entity is never one to spectate,
     // list or wait for, whatever a roster says.
     bool NoSuchFighter(uint8_t e) const { return !hostHasFighter_ && e == Roster::EntityForSlot(kHostSlot); }
-    bool OwnerMode() const { return syncMode_ == SyncMode::Owner; }
     int SnapshotHz() const { return std::max(cfg_.snapshotHz, 60); }   // older ini files say 30
     bool InFightLevel() const { return !currentLevel_.empty() && !IsMenuLevel(currentLevel_); }
     // Matches run in fight levels, not in the Tavern hub where players walk around between fights.
@@ -1536,7 +1507,7 @@ private:
     bool CombatEnabled() const {
         return !MatchLevel() || CombatPhase(IsHost() ? match_.phase() : MatchPhase(info_.phase));
     }
-    std::string MyName() const { return steamMode() ? steam::PersonaName(steam::MySteamId()) : cfg_.playerName; }
+    std::string MyName() const { return steam::PersonaName(steam::MySteamId()); }
 
     // ------------------------------------------------------------------ agent bridge (sensors/actuators)
     static constexpr const char* kAxisNames[kAxisCount] = {"MoveForward", "MoveRight", "TurnMouse", "LookMouse", "TurnGamepad",
@@ -1645,7 +1616,7 @@ private:
     void EnsureLocalFighter() {
         if (!localFighter_ || !(net_ || automated_) || !FighterLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
         double graceMs = 0;
-        if (!LocalFighterGrace(net_ && !IsHost() && OwnerMode(), levelGate_.Open(), graceMs)) { noPawnSince_ = 0; return; }
+        if (!LocalFighterGrace(net_ && !IsHost(), levelGate_.Open(), graceMs)) { noPawnSince_ = 0; return; }
         uint32_t now = NowMs();
         if (!noPawnSince_) { noPawnSince_ = now; return; }
         if (double(now - noPawnSince_) < graceMs) return;
@@ -1730,7 +1701,7 @@ private:
     }
 
     void ResetNetwork(const char* why) {
-        if (!migration_.Active()) migrateBoard_ = ScoreCarry{};
+        if (!migration_.Active()) { migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); }
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
         steamNet_ = nullptr; net_.reset();
         ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
@@ -1752,11 +1723,11 @@ private:
         mirrorBlob_.clear(); ownBlob_ = 0;
         // client
         for (auto& [e, ref] : puppets_) {
-            if (OwnerMode()) adapter_.DestroyFighter(ref.obj, ref.index);   // a stand-in: its weapons go too
-            else if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
+            adapter_.DestroyFighter(ref.obj, ref.index);   // a stand-in: its weapons go too
         }
         puppets_.clear(); world_ = ClientWorld{}; clientBlobs_.Clear(); clientAssembler_ = BlobAssembler{}; lastUpload_.clear();
-        hostPeer_ = 0; welcomed_ = false; haveSnapshot_ = false; snappedOwn_ = false; hellosSent_ = 0;
+        modMapHost_.reset(); modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
+        hostPeer_ = 0; welcomed_ = false; snappedOwn_ = false; hellosSent_ = 0;
         hostSteam_ = 0; meshOn_ = false; meshPeers_.Clear(); meshHearing_.Clear(); meshMasks_.Clear(); peerMapDirty_ = false;
         peerPingOn_ = false; meshDedupe_.Clear(); pings_.Clear(); pongs_.Clear(); pingTables_.clear(); nextPingTable_ = 0;
         routeLinks_.Clear(); routePlanner_.Clear(); nextRoutePlan_ = 0;
@@ -1766,16 +1737,16 @@ private:
         voteState_ = VoteStateMsg{}; voteWasActive_ = voteDirty_ = false; voteSentAt_ = 0;
         detour_.Clear(); pairKeys_.Clear(); detourEpoch_ = 0; detourDirty_ = false; detourStats_ = DetourStats{}; detourLoggedEpoch_ = -1;
         meshDirectTx_ = meshDupes_ = 0;
-        reservations_.Clear(); jitter_.clear(); placed_.clear();
+        reservations_.Clear();
         RestoreFoes();
         SetMyWillie(nullptr);                    // the permanent input hooks must stop swallowing this pawn's look
         held_.fill(Held{});
         hostLoss_ = HostLossMonitor(NowMs());
         // owner sync
         standIns_.Clear(); grabs_.Clear(); streams_.Clear(); lives_.clear(); respawnQueue_.clear();
-        syncMode_ = SyncMode::Host; ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
+        ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
         lifeBook_.Clear(); clientLife_.fill(0); staleLife_ = 0;
-        vote_.Clear(); pendingDrops_.clear(); rejected_.reset(); hostUnreachable_ = hostWasThere_ = false;
+        vote_.Clear(); pendingDrops_.clear(); rejected_.reset();
     }
 
     // ------------------------------------------------------------------ travel / levels
@@ -1784,6 +1755,54 @@ private:
     void HostTravel(const std::string& level) {
         OnOpenLevel(level, true, "");
         game::OpenLevel(lastGameMode_, level, true, "");
+    }
+
+    // Modded maps: what clients are told about the level the host opens (empty path for a stock map). Nothing is sent but
+    // the map path and the pak's name, size and SHA-256.
+    static ModMapMsg HostModMapFor(const std::string& level) {
+        const HostModMapResult r = game::modmaps::HostMessage(level);
+        if (r.state == HostModMap::Stock) return ModMapMsg{};
+        if (r.state == HostModMap::HashPending) HSM_LOG("maps: the pak of %s is still being hashed; clients get the map path only", level.c_str());
+        return r.msg;
+    }
+
+    // Client: the host's modded-map message, and the check of it against the paks on this machine.
+    void ModMapTick() {
+        if (!modMapHost_ || modMapChecked_) return;
+        const ModMapVerdict v = game::modmaps::Decide(*modMapHost_);
+        if (v == ModMapVerdict::Pending) return;
+        modMapChecked_ = true;
+        if (v == ModMapVerdict::NoMap) { modMapApproved_.clear(); pendingTravel_.reset(); return; }
+        if (v == ModMapVerdict::Ok) {
+            modMapApproved_ = modMapHost_->path;
+            HSM_LOG("maps: host's modded map %s is available here", modMapHost_->path.c_str());
+            if (pendingTravel_) { Travel tr = *pendingTravel_; pendingTravel_.reset(); FollowTravel(tr); }
+            return;
+        }
+        const std::string line = ModMapJoinLine(*modMapHost_, v);
+        HSM_LOG("maps: cannot join, %s", line.c_str());
+        pendingTravel_.reset(); modMapApproved_.clear(); modMapHost_.reset();
+        const bool fight = InFightLevel();
+        welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
+        if (steamMode()) lobby_.Leave();
+        ResetNetwork("modded map missing");
+        ui::ShowLine("HSMMod", style::kBone, line);
+        notice_ = line;
+        if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
+    }
+
+    void FollowTravel(const Travel& tr) {
+        if (tr.seq == travelSeq_ && !currentLevel_.empty() && tr.level.find(currentLevel_) != std::string::npos) {
+            // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
+            if (hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
+            return;
+        }
+        RememberFoes();
+        size_t applied = game::ApplyGameSettings(tr.settings);
+        fightSettings_ = tr.settings;
+        travelSeq_ = tr.seq; pendingLevel_ = tr.level;
+        HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
+        game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
     }
 
     bool OnOpenLevel(const std::string& level, bool absolute, const std::string& options) {
@@ -1799,7 +1818,10 @@ private:
         if (IsHost()) {
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
             fightSettings_ = t.settings;
-            if (net_) net_->Broadcast(kChanReliable, Encode(t), true);
+            if (net_) {
+                net_->Broadcast(kChanReliable, Encode(HostModMapFor(level)), true);   // modded maps: before the Travel, so a client can refuse in time
+                net_->Broadcast(kChanReliable, Encode(t), true);
+            }
             const MatchConfig shown = lobby_.config();
             lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1),
                                   lobby_.Progression() ? "" : ModeName(shown.format, shown.gear));
@@ -1823,8 +1845,9 @@ private:
         agent::VmHookFlush();
         mirror_.OnLevel();
         mirrorDone_ = false; mirrorSince_ = 0;
+        game::PaintDeferLevelChanged();
         if (ScriptHookActive()) ResolveScriptHooks();   // the level's Blueprint classes and overrides are loaded now
-        haveSnapshot_ = false; snappedOwn_ = false; picksValid_ = false;
+        snappedOwn_ = false; picksValid_ = false;
         held_.fill(Held{});                          // agent-held axes do not carry into the next level
         groundValid_ = false; foesStopped_ = false;
         if (FighterLevel() && !fightSettings_.empty()) {   // a session fight: the mode its travel set, whatever the load did
@@ -1842,11 +1865,10 @@ private:
         menuInputAt_ = InFightLevel() ? 0 : NowMs() + 500; menuInputRepeat_ = false;
         if (net_ && MatchLevel() && !bugHintShown_ && !bugHintAt_) bugHintAt_ = NowMs() + 8000;   // once the fight is under way
         probeSince_ = FighterLevel() ? std::max(NowMs(), 1u) : 0;
-        severedSent_.clear(); worldTracker_ = WorldTracker{}; worldView_ = WorldView{}; jitter_.clear(); placed_.clear();
         hitKind_.clear(); fighterOfFrame_.clear(); otherActorOffset_.clear();   // the old level's classes and functions are gone
         spawnIgnore_.clear();
         // Host side: every actor of the old level is gone.
-        for (Fighter& f : fighters_) { f.actor.Clear(); f.input.ReleaseAll(); f.wasDead = false; }
+        for (Fighter& f : fighters_) f.actor.Clear();
         director_.OnLevel(FighterLevel(), NowMs(), travelSeq_);
         serverTravelling_ = false; serverAnchor_.reset(); serverPawnSeenAt_ = serverStripAt_ = 0; serverStripped_ = 0; anchorSearch_.OnLevel(NowMs());
         if (net_ && !IsHost()) hostLoss_.Reset(NowMs());   // the load itself froze the loop: that silence is not the host's (N1)
@@ -1858,7 +1880,7 @@ private:
         levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
         // Owner sync, client: the stock pawn the level gives player 0 is replaced by the dressed fighter the host
         // announces, once the level's own start-up cleanup is over (ClientGateOpen).
-        if (net_ && !IsHost() && OwnerMode() && FighterLevel()) ownDeadPending_ = true;
+        if (net_ && !IsHost() && FighterLevel()) ownDeadPending_ = true;
         // Owner sync: every stand-in died with the level (the feeds stay: their owners keep streaming).
         for (uint8_t e = 1; e <= kMaxWillies; ++e) { standIns_.Detach(e); severs_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); }
         gore_.Clear();
@@ -1872,7 +1894,7 @@ private:
     }
 
     // ------------------------------------------------------------------ host
-    struct Fighter { ActorRef actor; InputApplier input; bool wasDead = false; uint32_t inputsRx = 0, lastInputAt = 0; };
+    struct Fighter { ActorRef actor; };
     struct Peer { uint8_t slot = 0; uint64_t key = 0; BlobAssembler blobs; uint32_t helloAt = 0; ChatRateLimiter chat; MsgBudget budget; std::string name, modBuild;
                    uint32_t reportShareAt = 0; bool reportShared = false; };
     static constexpr uint32_t kHelloRepeatMs = 5000;
@@ -1884,13 +1906,26 @@ private:
         director_ = HostDirector{}; if (localFighter_) director_.OnJoin(0, NowMs());
         director_.OnLevel(InFightLevel(), NowMs(), 0);
         hostExport_.clear(); ShareHostLoadout();
-        // Owner sync needs the script VM hook (claims); without it the host falls back to simulating everyone.
-        syncMode_ = cfg_.ownerSync && ScriptHookActive() ? SyncMode::Owner : SyncMode::Host;
-        if (cfg_.ownerSync && !OwnerMode()) HSM_LOG("host: owner sync needs the script VM hook, which is unavailable; using host sync");
-        if (localFighter_) HSM_LOG("host: hosting as slot 0 (up to %d fighters), %s sync", kMaxPlayers, OwnerMode() ? "owner" : "host");
-        else HSM_LOG("server: no local fighter, slot 0 reserved (up to %d clients), %s sync", kMaxPlayers, OwnerMode() ? "owner" : "host");
+        if (localFighter_) HSM_LOG("host: hosting as slot 0 (up to %d fighters), owner sync", kMaxPlayers);
+        else HSM_LOG("server: no local fighter, slot 0 reserved (up to %d clients), owner sync", kMaxPlayers);
         if (!localFighter_ && !serverReadyLogged_) { serverReadyLogged_ = true; HSM_LOG("hsm: server ready"); }
-        if (OwnerMode()) StartOwner();
+        StartOwner();
+    }
+
+    // Owner sync is the only sync mode and it needs the script VM hook (claims, the stock flow guard). Without it no
+    // session starts: the host leaves its lobby / closes the transport, a joiner leaves the host's.
+    bool ScriptHookMissing() {
+        if (ScriptHookActive()) return false;
+        HSM_LOG("session: the script VM hook is unavailable; multiplayer needs it (host sync was removed in 0.8.0), leaving the session");
+        const char* msg = "Multiplayer cannot start: this game build is not supported by HSMMod (script VM hook unavailable). Update HSMMod.";
+        ui::ShowLine("HSMMod", style::kBone, msg);
+        notice_ = msg;
+        const bool fight = InFightLevel();
+        welcomed_ = false;
+        if (steamMode()) lobby_.Leave();
+        ResetNetwork("no script VM hook");
+        if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
+        return true;
     }
 
     // Owner sync on this machine: a fresh stream clock, and the claims hooks with what they need to know of the session.
@@ -1913,7 +1948,7 @@ private:
             return CombatEnabled() &&
                    HitAllowed(true, KnownTeam(attacker), KnownTeam(victim), IsHost() ? match_.config().friendlyFire : info_.friendlyFire);
         };
-        env.prop = [this](UObject* actor, game::PropSync::Touch& out) { return props_.PropOf(actor, out); };
+        env.prop = [this](UObject* actor, game::ObjectSync::Touch& out) { return props_.PropOf(actor, out); };
         env.propActor = [this](uint64_t id) { return props_.ActorOf(id); };
         env.myEntity = [this]() { return IsHost() ? HostEntity() : world_.myEntity(); };
         if (!claims_.Start(adapter_, standIns_, streams_, std::move(env)))
@@ -1922,6 +1957,7 @@ private:
         game::FxSync::Env fenv;
         fenv.ownedEntity = [this](const UObject* w) { return OwnedEntityOf(w); };
         fenv.ownedActor = [this](uint8_t e) { return OwnedActorOf(e); };
+        fenv.noteSpawn = [this] { props_.NoteSpawn(); };   // armour came off: the loose piece is looked for now, not at the next census
         fenv.send = [this](const combat::PaintFxMsg& m) {
             if (!net_) return;
             if (IsHost() && combat::IsStripRequest(m)) {   // to the fallen fighter's owner only
@@ -1988,7 +2024,7 @@ private:
             else if (hostPeer_) { net_->Send(hostPeer_, chan, b, reliable); MeshCopy(MsgType::GrabState, 0, b, reliable); }
         };
         grabs_.Start(adapter_, std::move(genv));
-        game::PropSync::Env penv;
+        game::ObjectSync::Env penv;
         penv.host = IsHost();
         penv.mySlot = [this] { return IsHost() ? kHostSlot : mySlot_; };
         penv.ownedEntity = [this](const UObject* w) { return OwnedEntityOf(w); };
@@ -1999,7 +2035,8 @@ private:
             else if (hostPeer_) {
                 net_->Send(hostPeer_, chan, b, reliable);
                 MsgType t;
-                if (PeekType(b.data(), b.size(), t) && t == MsgType::PropState) MeshCopy(t, 0, b, reliable);   // leases stay with the host
+                // States and events also go straight to the mesh peers; leases and announces stay with the host.
+                if (PeekType(b.data(), b.size(), t) && (t == MsgType::BodyState || t == MsgType::ObjectEvent)) MeshCopy(t, 0, b, reliable);
             }
         };
         // Stand-in hands matched to their owners' poses (pickups, leftover weapons): Equip's view of each hand, gore's cut-off hands.
@@ -2010,7 +2047,10 @@ private:
         penv.handsChanged = [this](uint8_t e) { equip_.Replan(e); };
         // Level props: the host censuses a fight level from its first tick in it; a client matches once its level gate is open.
         penv.fightLevel = [this] { return FighterLevel() && (IsHost() || levelGate_.Open()); };
+        const bool hostNow = penv.host;
         props_.Start(adapter_, standIns_, std::move(penv));
+        // The new host after a migration: the objects the old host announced (every machine heard them) keep their ids.
+        if (hostNow && !migrateObjects_.empty()) { props_.AdoptKnown(migrateObjects_); migrateObjects_.clear(); }
     }
 
     // Owner sync: the game's single-player win/lose flow must not run in a session match. "Event Lose Match" on a
@@ -2079,14 +2119,14 @@ private:
                 if (ev.kind == NetEvent::Connected) { HSM_LOG("host: peer %u connected", ev.peer); helloWatch_.Connected(ev.peer, NowMs()); }
                 else if (ev.kind == NetEvent::Disconnected) {
                     helloWatch_.Forget(ev.peer);
-                    std::erase_if(pendingDrops_, [&](const auto& d) { return d.first == ev.peer; });   // ENet reuses the id
+                    std::erase_if(pendingDrops_, [&](const auto& d) { return d.first == ev.peer; });
                     OnClientLeft(ev.peer);
                 } else HostReceive(ev);
             }
         });
         if (peerMapDirty_) SendPeerMap();
         if (detourDirty_) SendRouteTables();
-        // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (ENet times its own peers out) (N6).
+        // Steam peers have no transport timeout: a joined peer silent for 15 s is gone (N6).
         // Clients without the keep-alive are only timed in fight levels, while they have a live fighter (public #8, #9, #10).
         const auto streams = [this](uint32_t peer) {
             auto it = peers_.find(peer);
@@ -2112,42 +2152,13 @@ private:
         ModerationTick();
         if (IsServer()) { ServerFlowTick(); ServerAnchorTick(); }
         if (director_.fight()) SpawnDue();
-        if (!OwnerMode()) for (uint8_t slot = 1; slot < kMaxFighters; ++slot) DriveRemoteFighter(slot, dt);
         Timed(kPumpMatch, [&] { HostMatchTick(); });
-        if (OwnerMode()) { OwnerHostTick(dt); return; }
-        sendAccum_ += dt;
-        if (peers_.empty() || sendAccum_ < 1.f / float(SnapshotHz())) return;
-        sendAccum_ = 0;
-        Snapshot snap; snap.tick = ++tick_;
-        for (uint8_t slot = 0; slot < kMaxFighters; ++slot) {
-            UObject* w = FighterActor(slot);
-            WillieState st;
-            if (!w || !adapter_.ReadState(w, Roster::EntityForSlot(slot), st)) continue;
-            bool dead = st.flags & 1;
-            if (dead && !fighters_[slot].wasDead) SendEvent(EventKind::Died, st.entity, 0);
-            fighters_[slot].wasDead = dead;
-            snap.willies.push_back(std::move(st));
-        }
-        for (auto& [e, ref] : bots_) {
-            WillieState st;
-            if (adapter_.StillValid(ref.obj, ref.index) && adapter_.ReadState(ref.obj, e, st)) snap.willies.push_back(std::move(st));
-        }
-        if (!snap.willies.empty()) net_->Broadcast(kChanUnreliable, Encode(snap), false);
-        SeveredMasks now;
-        for (const WillieState& st : snap.willies)
-            if (UObject* w = EntityActor(st.entity)) if (uint32_t m = game::ReadSeveredMask(w)) now[st.entity] = m;
-        for (CombatEvent& e : DismemberDiff(severedSent_, now)) net_->Broadcast(kChanReliable, Encode(e), true);
-        if (++worldEvery_ % 3 == 0) {                // loose weapons at a third of the snapshot rate: the scan walks every actor
-            std::vector<WorldPos> players;
-            for (const WillieState& st : snap.willies) if (!st.bodies.empty()) players.push_back({st.bodies[0].px, st.bodies[0].py, st.bodies[0].pz});
-            WorldState ws = worldTracker_.Update(tick_, game::CollectLooseWeapons(adapter_, [this](UObject* w) { return EntityOf(w); }), players);
-            if (!ws.objects.empty()) net_->Broadcast(kChanUnreliable, Encode(ws), false);
-        }
+        OwnerHostTick(dt);
     }
 
     // Owner sync, host side: stream its own fighter and its bots, drive every client's stand-in, keep the line warm.
     // Severs, stuck blades and gore (phase 4a) ride on claims and vitals; grabs and dropped weapons (phase 4b) ride on
-    // GrabState and PropSync's leases; level props on the host's census and the same leases.
+    // GrabState and ObjectSync's leases; level props on the host's census and the same leases.
     void OwnerHostTick(float dt) {
         const double now = game::SteadyNowMs();
         std::vector<std::pair<uint8_t, UObject*>> owned;
@@ -2189,7 +2200,7 @@ private:
             o.at = {sp->x, sp->y, sp->z}; o.yawDeg = sp->yaw; o.teamInt = TeamIntFor(sp->team, e); o.brain = false;
             UObject* w = SpawnFighterNow(o);
             if (!w) { HSM_LOG("host: re-creating entity %u's stand-in failed; retrying", e); ++it; continue; }
-            fighters_[slot].actor.Set(w); fighters_[slot].wasDead = false;
+            fighters_[slot].actor.Set(w);
             standIns_.Detach(e); standIns_.Attach(e, w);
             QueueTint(w, sp->team);
             HSM_LOG("host: entity %u's stand-in was destroyed by the game; re-created", e);
@@ -2240,10 +2251,10 @@ private:
     }
 
     // ------------------------------------------------------------------ mesh (host side)
-    // Offered only on a Steam lobby with owner sync; ENet (direct IP) stays a star.
-    bool MeshHost() const { return cfg_.mesh && steamNet_ && OwnerMode(); }
+    // Offered only on a Steam lobby with owner sync.
+    bool MeshHost() const { return cfg_.mesh && steamNet_; }
     // The PeerMap goes out for the mesh and for per-player pings (peer_ping=1, on with the mesh off).
-    bool PeerMapHost() const { return steamNet_ && OwnerMode() && (cfg_.mesh || cfg_.peerPing); }
+    bool PeerMapHost() const { return steamNet_ && (cfg_.mesh || cfg_.peerPing); }
 
     // A client joined, left or was dropped: its own report is void, nobody hears it any more, and the clients get a new map.
     void MeshRosterChanged(uint8_t slot) {
@@ -2339,25 +2350,9 @@ private:
         if (a.obj && !adapter_.StillValid(a.obj, a.index)) {
             HSM_LOG("host: fighter in slot %u was destroyed by the game", slot);
             a.Clear();
-            if (OwnerMode()) lostSlots_.insert(slot);   // its stand-in is spawned again (RecoverLostStandIns)
+            lostSlots_.insert(slot);   // its stand-in is spawned again (RecoverLostStandIns)
         }
         return a.obj;
-    }
-
-    // Host authority: the host simulates every fighter; a remote fighter is driven by its player's input frames
-    // (mouse deltas spread over host frames, see InputApplier::Tick).
-    void ApplyInputs(UObject* w, InputApplier& in, float dtMs) {
-        InputApplier::Step s = in.Tick(dtMs);
-        for (Action a : s.released) adapter_.FireAction(w, a, false);
-        for (Action a : s.pressed) adapter_.FireAction(w, a, true);
-        for (size_t i = 0; i < kAxisCount; ++i) adapter_.ApplyAxis(w, Axis(i), s.axes[i]);
-        adapter_.KeepRemoteFighter(w, in.latest().controlYaw, in.latest().controlPitch);
-    }
-
-    void DriveRemoteFighter(uint8_t slot, float dt) {
-        UObject* w = FighterActor(slot);
-        if (!w || !adapter_.BindInputs(w)) return;
-        ApplyInputs(w, fighters_[slot].input, dt * 1000.f);
     }
 
     // The game's lock-on and "pal" checks compare Team Int (equal and non-zero = allies). Allies get the local
@@ -2639,12 +2634,11 @@ private:
                 const std::vector<uint8_t>* blob = hostBlobs_.Get(id);
                 sp.blobId = blob ? id : 0;
                 game::Adapter::SpawnOptions o; o.blob = blob; o.at = at; o.yawDeg = yaw; o.teamInt = TeamIntFor(sp.team, sp.entity);
-                o.brain = !OwnerMode();                 // owner sync: a stand-in, moved by its owner's stream
+                o.brain = false;                        // a stand-in, moved by its owner's stream
                 UObject* w = SpawnFighterNow(o);
                 if (!w) HSM_LOG("host: spawning slot %u failed; it stays empty until the next level", slot);
                 fighters_[slot].actor.Set(w);
-                if (w && OwnerMode()) standIns_.Attach(sp.entity, w);
-                fighters_[slot].wasDead = false;
+                if (w) standIns_.Attach(sp.entity, w);
                 if (w) QueueTint(w, sp.team);
             }
             if (match_.phase() != MatchPhase::Idle && !match_.Has(sp.entity)) { match_.AddFighter({sp.entity, sp.team, true, ScoreId(sp.entity)}); infoDirty_ = true; }
@@ -2657,18 +2651,11 @@ private:
     }
 
     void DespawnFighter(uint8_t slot) {
-        Fighter& f = fighters_[slot];
-        if (OwnerMode()) {                              // a stand-in: unbound first, its weapons go with it
-            standIns_.Detach(Roster::EntityForSlot(slot));
-            props_.ForgetEntity(Roster::EntityForSlot(slot));
-            adapter_.DestroyFighter(f.actor.obj, f.actor.index);
-            f.actor.Clear(); f.wasDead = false;
-            return;
-        }
-        UObject* w = f.actor.obj && adapter_.StillValid(f.actor.obj, f.actor.index) ? f.actor.obj : nullptr;
-        InputApplier::Step s = f.input.ReleaseAll();
-        if (w) { for (Action a : s.released) adapter_.FireAction(w, a, false); adapter_.DestroyActor(w); }
-        f.actor.Clear(); f.wasDead = false;
+        Fighter& f = fighters_[slot];                   // a stand-in: unbound first, its weapons go with it
+        standIns_.Detach(Roster::EntityForSlot(slot));
+        props_.ForgetEntity(Roster::EntityForSlot(slot));
+        adapter_.DestroyFighter(f.actor.obj, f.actor.index);
+        f.actor.Clear();
     }
 
     // The host's own passport, shared like any client's (slot 0).
@@ -2729,22 +2716,22 @@ private:
         if (IsFightMsg(t) && !FightMsgsOpen()) { ++streamsDropped_; return; }   // a straggler from the last fight, in a menu
         if (t == MsgType::Voice) {
             VoiceFromClient(ev, peer);
-        } else if (OwnerMode() && (t == MsgType::Pose || t == MsgType::Vitals)) {
+        } else if (t == MsgType::Pose || t == MsgType::Vitals) {
             HostOwnerStream(ev, peer, t);
-        } else if (OwnerMode() && t == MsgType::HitClaim) {
+        } else if (t == MsgType::HitClaim) {
             HitClaimMsg m; Decode(d, n, m);
             RouteHostClaim(peer.slot, m.claim);
-        } else if (OwnerMode() && t == MsgType::SeverClaim) {
+        } else if (t == MsgType::SeverClaim) {
             combat::SeverClaimMsg m; Decode(d, n, m);
             RouteHostSever(peer.slot, m.claim);
-        } else if (OwnerMode() && t == MsgType::SeverNotice) {
+        } else if (t == MsgType::SeverNotice) {
             combat::SeverNoticeMsg m;
             if (!Decode(d, n, m) || !MayStream(peer.slot, m.claim.victim)) { ++streamsDropped_; return; }
             RouteHostNotice(peer.slot, m.claim);
-        } else if (OwnerMode() && t == MsgType::StuckBlade) {
+        } else if (t == MsgType::StuckBlade) {
             combat::StuckBladeMsg m; Decode(d, n, m);
             RouteHostStuck(peer.slot, m);
-        } else if (OwnerMode() && t == MsgType::PaintFx) {
+        } else if (t == MsgType::PaintFx) {
             combat::PaintFxMsg m;
             if (!Decode(d, n, m) || !fx_.Accept(m)) { ++streamsDropped_; return; }   // names and rate (M1, M2, M7): before it is applied or relayed
             if (combat::IsStripRequest(m)) {
@@ -2759,30 +2746,37 @@ private:
             fx_.Apply(m);
             for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                 if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, ev.data, true);
-        } else if (OwnerMode() && t == MsgType::Equip) {
+        } else if (t == MsgType::Equip) {
             combat::EquipStateMsg m;
             if (!Decode(d, n, m) || !MayStream(peer.slot, m.entity)) { ++streamsDropped_; return; }
             equip_.Apply(m);
             for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                 if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, ev.data, true);
-        } else if (OwnerMode() && t == MsgType::GrabState) {
+        } else if (t == MsgType::GrabState) {
             GrabStateMsg m;
             if (!Decode(d, n, m) || !MayStream(peer.slot, m.grabber)) { ++streamsDropped_; return; }
             grabs_.OnGrabState(m, game::SteadyNowMs());
             for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                 if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, ev.channel, ev.data, ev.channel == kChanReliable);
-        } else if (OwnerMode() && t == MsgType::PropState) {
-            if (props_.OnPropState(d, n, peer.slot))      // only the granted streamer's newer state is relayed
+        } else if (t == MsgType::BodyState) {
+            if (props_.OnBodyState(d, n, peer.slot))      // only the granted streamer's newer state is relayed
                 for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
                     if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanUnreliable, ev.data, false);
-        } else if (OwnerMode() && t == MsgType::PropLease) {
+        } else if (t == MsgType::ObjectAnnounce || t == MsgType::ObjectEvent) {
+            // Same gate as a lease: what a client says before it reported Ready for this travel belongs to the previous level.
+            if (!LeaseSeqCurrent(peer.slot, director_.ReadySeq(peer.slot), travelSeq_)) { ++streamsDropped_; }
+            else if (t == MsgType::ObjectAnnounce) props_.OnObjectAnnounce(d, n, peer.slot);   // the canonical answer goes to everyone
+            else if (props_.OnObjectEvent(d, n, peer.slot))                                     // the streamer's, about an object the host knows
+                for (uint8_t slot : RelayTargets(peer.slot, ConnectedSlots()))
+                    if (std::optional<uint32_t> to = PeerOfSlot(slot)) net_->Send(*to, kChanReliable, ev.data, true);
+        } else if (t == MsgType::PropLease) {
             // A client that has not reported Ready for this travel is still in the previous level: what it asked for there
             // is not granted here (W6; LeaseSeqCurrent).
             if (LeaseSeqCurrent(peer.slot, director_.ReadySeq(peer.slot), travelSeq_))
                 props_.OnPropLease(d, n, peer.slot);      // LeaseFromPeerOk inside; Grants go out reliable to everyone
             else
                 ++streamsDropped_;
-        } else if (OwnerMode() && t == MsgType::DeathReport) {
+        } else if (t == MsgType::DeathReport) {
             DeathReport r; Decode(d, n, r);
             if (MayStream(peer.slot, r.victim) && StaleLife(r.victim, r.victimLife)) return;   // F3: a late report must not kill the next body
             if (!MayStream(peer.slot, r.victim) || !match_.Alive(r.victim) || RespawnQueued(r.victim)) return;
@@ -2804,11 +2798,6 @@ private:
             routeLinks_.ClearRow(peer.slot);
             for (const PingTableEntry& e : m.entries) routeLinks_.Note(peer.slot, e.slot, e.rttMs, e.lossPct);
             pingTables_[peer.slot] = std::move(m);   // logged in the health window (LogPingHealth)
-        } else if (t == MsgType::Input) {
-            if (OwnerMode()) return;                    // every owner plays its own fighter
-            InputFrame f; Decode(d, n, f);
-            Fighter& fr = fighters_[peer.slot];
-            fr.input.Receive(f); ++fr.inputsRx; fr.lastInputAt = NowMs();
         } else if (t == MsgType::Ready) {
             Ready r; Decode(d, n, r);
             director_.OnReady(peer.slot, r.travelSeq, NowMs(), travelSeq_);
@@ -2816,10 +2805,9 @@ private:
             for (const Spawn& sp : director_.LiveSpawns()) net_->Send(ev.peer, kChanReliable, Encode(sp), true);
             // The level props' census, then every current lease (a client refuses a level prop's Grant its census lacks),
             // after the level load that cleared the joiner's view (props_.Clear).
-            if (OwnerMode()) {
-                for (const std::vector<uint8_t>& c : props_.CensusForJoiner()) net_->Send(ev.peer, kChanReliable, c, true);
-                for (const std::vector<uint8_t>& g : props_.GrantsForJoiner()) net_->Send(ev.peer, kChanReliable, g, true);
-            }
+            for (const std::vector<uint8_t>& c : props_.CensusForJoiner()) net_->Send(ev.peer, kChanReliable, c, true);
+            for (const std::vector<uint8_t>& o : props_.ObjectsForJoiner()) net_->Send(ev.peer, kChanReliable, o, true);   // announces, then events
+            for (const std::vector<uint8_t>& g : props_.GrantsForJoiner()) net_->Send(ev.peer, kChanReliable, g, true);
             HSM_LOG("host: slot %u ready in %s (travel #%u)", peer.slot, r.level.c_str(), r.travelSeq);
         } else if (t == MsgType::Chat) {
             ChatLine c; Decode(d, n, c);
@@ -2879,11 +2867,10 @@ private:
             rejoined = true; match_.Return(Roster::EntityForSlot(*slot));   // it stays down until the next respawn / round (K2)
             DespawnFighter(*slot);
             const uint8_t e = Roster::EntityForSlot(*slot);
-            director_.Forget(e);   // not live any more (either sync mode): SpawnDue respawns it and sends everyone a fresh Spawn
-            if (OwnerMode()) {   // a restarted machine: its stream, claim ids, gore and holds start afresh, here and everywhere
-                standIns_.Forget(e); severs_.Forget(e); gore_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e); lives_.erase(e);
-            }
-            Despawn dp; dp.entity = e;   // the others drop its old body, whichever sync mode
+            director_.Forget(e);   // not live any more: SpawnDue respawns it and sends everyone a fresh Spawn
+            // A restarted machine: its stream, claim ids, gore and holds start afresh, here and everywhere.
+            standIns_.Forget(e); severs_.Forget(e); gore_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e); lives_.erase(e);
+            Despawn dp; dp.entity = e;   // the others drop its old body
             for (const auto& [peer, p] : peers_)
                 if (peer != ev.peer && p.key != key) net_->Send(peer, kChanReliable, Encode(dp), true);
         }
@@ -2900,11 +2887,10 @@ private:
         MeshRosterChanged(*slot);
         if (h.modBuild != game::ModBuild())
             HSM_LOG("host: slot %u (%s) runs mod build '%s', ours '%s'", *slot, h.name.c_str(), h.modBuild.c_str(), game::ModBuild().c_str());
-        fighters_[*slot].input.ReleaseAll();
         director_.OnJoin(*slot, NowMs());
         if (match_.phase() != MatchPhase::Idle && !(rejoined && slotTeam_.count(*slot))) AssignLateTeam(*slot);   // K6: a rejoiner keeps its team
         Welcome w; w.sessionId = sessionId_; w.slot = *slot; w.entity = Roster::EntityForSlot(*slot);
-        w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(syncMode_); w.modBuild = game::ModBuild();
+        w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(SyncMode::Owner); w.modBuild = game::ModBuild();
         if (IsServer()) w.flags |= kWelcomeNoHostFighter;   // role=server: no host fighter to spectate or score
         if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
         if (PeerMapHost() && cfg_.peerPing) w.flags |= kWelcomePeerPing;   // rev 22: clients ping each other and report
@@ -2915,6 +2901,7 @@ private:
             if (lastTravel_ && lastTravel_->level.find(currentLevel_) != std::string::npos) t = *lastTravel_;
             else { t.level = currentLevel_; t.settings = game::CaptureGameSettings(); }   // short map name resolves too
             if (!t.seq) t.seq = ++travelSeq_;
+            net_->Send(ev.peer, kChanReliable, Encode(HostModMapFor(t.level)), true);   // modded maps: the pak it needs, before the Travel
             net_->Send(ev.peer, kChanReliable, Encode(t), true);
         }
         HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxPlayers);
@@ -2930,10 +2917,9 @@ private:
         vote_.Left(key);
         peers_.erase(it);
         MeshRosterChanged(slot);
-        if (OwnerMode()) props_.SlotLeft(slot);
+        props_.SlotLeft(slot);
         bool steamKey = !(key >> 63);
         if (match_.phase() != MatchPhase::Idle && steamKey && reservations_.Reserve(key, slot, NowMs())) {
-            fighters_[slot].input.ReleaseAll();
             LeaverFalls(slot);   // K1: the held body can't be hit (claims to a gone owner are dropped), so the fall is recorded now
             HSM_LOG("host: slot %u dropped mid-match; holding it for a rejoin", slot);
             return;
@@ -2960,16 +2946,11 @@ private:
         claims_.Forget(Roster::EntityForSlot(slot)); fx_.Forget(Roster::EntityForSlot(slot)); equip_.Forget(Roster::EntityForSlot(slot));
         grabs_.Forget(Roster::EntityForSlot(slot));
         VoiceForget(Roster::EntityForSlot(slot));
-        if (OwnerMode()) { props_.SlotLeft(slot); props_.ForgetEntity(Roster::EntityForSlot(slot)); }
+        props_.SlotLeft(slot); props_.ForgetEntity(Roster::EntityForSlot(slot));
         hostBlobs_.DropSlot(slot);
         if (uint8_t e = director_.OnLeave(slot)) { Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true); }
         match_.RemoveFighter(Roster::EntityForSlot(slot)); infoDirty_ = true;
         HSM_LOG("host: slot %u left", slot);
-    }
-
-    void SendEvent(EventKind k, uint32_t a, uint32_t b) {
-        Event e; e.seq = ++eventSeq_; e.kind = k; e.a = a; e.b = b;
-        net_->Broadcast(kChanReliable, Encode(e), true);
     }
 
     // ------------------------------------------------------------------ match (host)
@@ -2989,41 +2970,33 @@ private:
         return it != bots_.end() && adapter_.StillValid(it->second.obj, it->second.index) ? it->second.obj : nullptr;
     }
 
-    // Host authority for hits: clients never resolve a contact (their bodies follow the host); the host resolves
-    // them all with the friendly-fire rule, records kill credit and sends the blood.
     // Owner sync: every machine resolves contacts between the fighters it simulates itself, natively, with the same
     // rule; a contact with a stand-in runs on to Deal Complex Damage, where game::Claims decides it. A clash of my
     // weapon with a stand-in's weapon is noted for the parry rule.
     bool HitHook(UObject* obj, UFunction* fn, void* params) {
         if (!net_ || !params || !inFight_) return false;
-        const bool owner = OwnerMode();
-        if (!IsHost() && !owner) { if (!welcomed_) return false; ++hitsBlocked_; return true; }
         int32_t off = OtherActorOffset(fn);
         if (off < 0) return false;
         UObject* other = *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off);
-        if (owner) props_.NoteContact(obj, other);
+        props_.NoteContact(obj, other);
         // Cheap first (test 5: bodies against the ground were most of the 8970 calls of one Abyss frame): a contact
-        // with no weapon on either side has no attacker, so it is never blocked, credited or bled for; what a class
+        // with no weapon on either side has no attacker, so it is never blocked or credited; what a class
         // is gets looked up once per class, whom an actor belongs to once per frame.
         const HitKind selfKind = HitKindOf(obj), otherKind = HitKindOf(other);
         const bool selfWeapon = selfKind == HitKind::Weapon, otherWeapon = otherKind == HitKind::Weapon;
-        if (selfWeapon && otherWeapon) { if (owner) NoteWeaponClash(obj, other); return false; }
+        if (selfWeapon && otherWeapon) { NoteWeaponClash(obj, other); return false; }
         if (!selfWeapon && !otherWeapon) return false;
         UObject* weapon = selfWeapon ? obj : other;
         UObject* victim = selfWeapon ? (otherKind == HitKind::Willie ? other : FighterOfThisFrame(other)) : obj;
         if (!victim || HitKindOf(victim) != HitKind::Willie) return false;
         UObject* attacker = FighterOfThisFrame(weapon);
-        uint8_t ve = owner ? OwnedEntityOf(victim) : LocalEntityOf(victim);
-        uint8_t ae = !attacker ? 0 : owner ? OwnedEntityOf(attacker) : LocalEntityOf(attacker);
+        uint8_t ve = OwnedEntityOf(victim);
+        uint8_t ae = attacker ? OwnedEntityOf(attacker) : 0;
         if (!ve) return false;                        // not a session fighter (e.g. a stock foe being removed), or a stand-in
         if (!CombatEnabled()) { ++hitsBlocked_; return true; }
         bool ff = IsHost() ? match_.config().friendlyFire : info_.friendlyFire;
         if (!HitAllowed(true, ae ? KnownTeam(ae) : kNoTeam, KnownTeam(ve), ff)) { ++hitsBlocked_; return true; }
-        if (ae && ae != ve) {
-            if (IsHost()) kills_.OnHit(ve, ae, NowMs());
-            if (IsHost() && !owner) draw_.OnHit(ae, NowMs());   // owner sync: the claim's route counts it
-            if (!owner) SendBlood(ve, victim, fn, params);
-        }
+        if (ae && ae != ve && IsHost()) kills_.OnHit(ve, ae, NowMs());
         return false;
     }
 
@@ -3036,13 +3009,10 @@ private:
     }
 
     // What a contact's actor is, per class: hit events fire thousands of times a frame. Not remembered while the
-    // fighter class is not known yet (a Willie would read as other); dropped on a level change and when owner sync
-    // (which decides what counts as a weapon) is switched.
+    // fighter class is not known yet (a Willie would read as other); dropped on a level change.
     enum class HitKind : uint8_t { Other, Willie, Weapon };
     HitKind HitKindOf(UObject* o) {
         if (!o) return HitKind::Other;
-        const bool owner = OwnerMode();
-        if (owner != hitKindOwner_) { hitKind_.clear(); hitKindOwner_ = owner; }
         UClass* c = ClassOf(o);
         auto it = hitKind_.find(c);
         if (it != hitKind_.end()) return it->second;
@@ -3070,49 +3040,10 @@ private:
         return off;
     }
 
-    uint8_t LocalEntityOf(UObject* w) {
-        if (!w) return 0;
-        if (IsHost()) return EntityOf(w);
-        if (w == myWillie_.load()) return world_.myEntity();
-        for (auto& [e, ref] : puppets_) if (ref.obj == w) return e;
-        return 0;
-    }
     int8_t KnownTeam(uint8_t e) {
         if (IsHost()) return match_.TeamOf(e);
         for (const FighterEntry& f : info_.fighters) if (f.entity == e) return f.team;
         return kNoTeam;
-    }
-
-    void ApplyCombat(const CombatEvent& e) {
-        UObject* w = IsHost() ? EntityActor(e.entity) : ClientActor(e.entity);
-        if (!w) return;
-        bool ok = e.kind == kCombatDismember ? game::ApplyDismember(w, e.partsMask) : game::ApplyBlood(w, e);
-        if (ok) ++bloodApplied_;
-    }
-
-    // Blood for a hit on a body this machine owns, for every other screen: at the impact point, max one per victim
-    // every 150 ms. Clients send it to the host, which relays it.
-    void SendBlood(uint8_t victim, UObject* target, UFunction* fn, void* params) {
-        if (!net_ || (IsHost() ? peers_.empty() : !hostPeer_)) return;
-        uint32_t now = NowMs();
-        auto last = lastBloodAt_.find(victim);
-        if (last != lastBloodAt_.end() && now - last->second < 150) return;
-        FProperty* hit = FindProperty(fn, "Hit");
-        FProperty* imp = FindProperty(fn, "NormalImpulse");
-        if (!hit) return;
-        const uint8_t* h = static_cast<const uint8_t*>(params) + PropertyOffset(hit);
-        FVector at; std::memcpy(&at, h + kHitImpactPointOffset, sizeof at);   // FHitResult::ImpactPoint
-        UObject* body = adapter_.FighterOf(target) ? adapter_.FighterOf(target) : target;
-        if (!std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z) || Dist(at, adapter_.ActorLocation(body)) > 400.0) return;
-        double strength = 0;
-        if (imp) { FVector n; std::memcpy(&n, static_cast<const uint8_t*>(params) + PropertyOffset(imp), sizeof n); strength = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z); }
-        if (imp && strength < 50.0) return;            // resting contact, not a blow
-        lastBloodAt_[victim] = now;
-        CombatEvent e; e.kind = kCombatBlood; e.entity = victim; e.x = float(at.x); e.y = float(at.y); e.z = float(at.z);
-        e.bone = game::NearestPartBone(body, at); e.size = uint8_t(std::min(255.0, strength / 100.0)); e.sharp = 1;
-        if (IsHost()) net_->Broadcast(kChanReliable, Encode(e), true);
-        else net_->Send(hostPeer_, kChanReliable, Encode(e), true);
-        ++bloodSent_;
     }
 
     // A player joining a running match keeps everyone else's team and goes to their pick or the smallest team.
@@ -3174,7 +3105,7 @@ private:
         return cfg;
     }
 
-    // The identity a player's score follows (FighterInfo::id): their SteamID, the host's own included; 0 for a direct-IP peer.
+    // The identity a player's score follows (FighterInfo::id): their SteamID, the host's own included; 0 when unknown.
     uint64_t ScoreId(uint8_t entity) const {
         const RosterMember* m = steamMode() ? roster_.ByEntity(entity) : nullptr;
         return !m ? 0 : m->key == kHostKey ? steam::MySteamId() : (m->key >> 63) ? 0 : m->key;
@@ -3279,7 +3210,7 @@ private:
                         int(wanted), hostWillie_ ? "yes" : localFighter_ ? "MISSING" : "none", notLive.empty() ? " none" : notLive.c_str(),
                         BuildsAllowStart() ? "ok" : "BLOCK");
             }
-            if (!(wanted && (hostWillie_ || !localFighter_) && allIn)) { if (wanted && OwnerMode()) MakeStartGearAhead(now); return; }
+            if (!(wanted && (hostWillie_ || !localFighter_) && allIn)) { if (wanted) MakeStartGearAhead(now); return; }
             if (!BuildsAllowStart()) return;
             StartMatch();
         }
@@ -3314,8 +3245,7 @@ private:
             infoDirty_ = true;
         }
         for (uint8_t e : ev.respawn)
-            if (!OwnerMode()) RespawnEntity(e);
-            else if (!RespawnQueued(e)) respawnQueue_.push_back(e);
+            if (!RespawnQueued(e)) respawnQueue_.push_back(e);
         if (ev.rematch) RespawnAll();
         if (!respawnQueue_.empty()) { const uint8_t e = respawnQueue_.front(); respawnQueue_.pop_front(); RespawnEntity(e); }
         if (progression_ && !bots_.empty() && match_.phase() == MatchPhase::Live) {
@@ -3345,7 +3275,7 @@ private:
         for (auto& [e, ref] : bots_) entities.push_back(e);
         for (uint8_t e : entities) {
             if (!match_.Alive(e) || RespawnQueued(e)) continue;   // its old body is still dead until its respawn
-            if (OwnerMode() && e >= 2 && e <= kMaxFighters) {   // a client's fighter: its DeathReport, else its vitals
+            if (e >= 2 && e <= kMaxFighters) {   // a client's fighter: its DeathReport, else its vitals
                 auto it = lives_.find(e);
                 if (it != lives_.end() && it->second.deadSince && now - it->second.deadSince >= kVitalsDeathMs) {
                     HSM_LOG("host: entity %u reported dead by its vitals only", e);
@@ -3440,7 +3370,7 @@ private:
             !adapter_.BoneLocation(w, "hand_l", handL)) return false;
         VitalsMsg own;
         const VitalsMsg* v = nullptr;
-        if (OwnerMode() && e != MyEntity()) v = standIns_.Vitals(e);
+        if (e != MyEntity()) v = standIns_.Vitals(e);
         else if (adapter_.ReadVitals(w, e, own)) v = &own;
         if (!v) return false;
         d.entity = e;
@@ -3499,7 +3429,7 @@ private:
     // (weapons piled up 5 -> 36 in test 13). Every machine clears its own copies; the prop sync lets go of the ones it
     // was moving. Armour the level had at the match start stays (LooseTimer's baseline).
     void ClearDroppedWeapons() {
-        if (!OwnerMode() || !MatchLevel()) return;
+        if (!MatchLevel()) return;
         const int weapons = adapter_.DestroyDroppedWeapons();
         int armor = 0;
         if (looseOn_) {
@@ -3524,7 +3454,7 @@ private:
     // minute after they went FREE (the prop sync), loose armour a minute after it was first seen loose here. The timer's
     // baseline is taken when a match starts in this level, so armour the level had stays.
     void DropsTick() {
-        const bool running = OwnerMode() && MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle);
+        const bool running = MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle);
         const bool idle = running && DropClearFor(Format(info_.format)) == DropClear::AfterIdle;
         props_.SetIdleDespawn(idle);
         if (!running) { if (looseOn_) { looseTimer_.Reset(); looseOn_ = false; } return; }
@@ -3621,7 +3551,6 @@ private:
     }
 
     void RespawnEntity(uint8_t e) {
-        severedSent_.erase(e);                       // a fresh body: its cuts are reported again
         if (e < 1 || e > kMaxFighters) return;            // bots come back as waves, not respawns
         uint8_t slot = uint8_t(e - 1);
         if (!roster_.BySlot(slot)) { match_.MarkRespawned(e); return; }
@@ -3629,7 +3558,7 @@ private:
         double yaw = 0;
         FVector at = SidePoint(team, e, yaw);
         game::Adapter::SpawnOptions o; o.at = at; o.yawDeg = yaw; o.teamInt = slot == 0 ? 1 : TeamIntFor(team, e);
-        o.brain = slot == 0 || !OwnerMode();
+        o.brain = slot == 0;
         uint32_t id = slot == 0 ? hostBlobs_.LatestFor(0) : director_.BlobFor(slot);
         o.blob = hostBlobs_.Get(id);
         UObject* w = nullptr;
@@ -3638,11 +3567,9 @@ private:
         if (slot == 0) { w = RespawnLocalNow(o); hostWillie_ = w; }
         else {
             DespawnFighter(slot);
-            if (OwnerMode()) {                           // the new body's stream starts afresh
-                standIns_.Forget(e); gore_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e); lives_.erase(e);
-            }
+            standIns_.Forget(e); gore_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e); lives_.erase(e);   // the new body's stream starts afresh
             w = SpawnFighterNow(o); fighters_[slot].actor.Set(w);
-            if (w && OwnerMode()) standIns_.Attach(e, w);
+            if (w) standIns_.Attach(e, w);
         }
         Spawn sp; sp.entity = e; sp.ownerSlot = slot; sp.kind = EntityKind::Fighter; sp.team = team; sp.blobId = o.blob ? id : 0; sp.life = lifeBook_.Bump(e);
         sp.x = float(at.x); sp.y = float(at.y); sp.z = float(at.z); sp.yaw = float(yaw);
@@ -3734,7 +3661,7 @@ private:
         adapter_.DestroyFighter(it->second.obj, it->second.index);   // its armour and weapons too (DestroyActor left them)
         looted_.erase(e);
         Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true);
-        director_.Forget(e); match_.RemoveFighter(e); kills_.Forget(e); kills_.ForgetAttacker(e); severedSent_.erase(e); severs_.Forget(e); gore_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e);
+        director_.Forget(e); match_.RemoveFighter(e); kills_.Forget(e); kills_.ForgetAttacker(e); severs_.Forget(e); gore_.Forget(e); claims_.Forget(e); fx_.Forget(e); equip_.Forget(e); grabs_.Forget(e); props_.ForgetEntity(e);
         bots_.erase(it);
         infoDirty_ = true;
     }
@@ -3961,7 +3888,7 @@ private:
     bool VoiceAwake(uint8_t e) const {
         if (e == 0 || e >= voice::kMaxSpeakers) return false;
         const VoiceState& s = voiceState_[e];
-        if (!s.vitalsAt) return !OwnerMode() && !IsHost();
+        if (!s.vitalsAt) return false;
         return s.gate.ok();
     }
     void VoiceVitals(const VitalsMsg& v) {
@@ -4016,19 +3943,15 @@ private:
         const uint32_t now = NowMs();
         const bool on = VoiceOn();
         if (!voiceConfigured_) { voiceConfigured_ = true; voice_.Configure(VoiceSettingsFromConfig()); }
-        if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam records the default microphone and decodes
+        if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // Steam records the default microphone and decodes
             voiceSteamTried_ = true;
             if (!steam::Init()) HSM_LOG("voice: Steam is not running here; the microphone is recorded by the mod, Steam-compressed voices cannot be played");
         }
         const uint8_t me = MyEntity();
-        if (on && now >= voiceVitalsAt_) {   // 10 Hz: my own fighter's consciousness, read here; host sync: every body
+        if (on && now >= voiceVitalsAt_) {   // 10 Hz: my own fighter's consciousness, read here
             voiceVitalsAt_ = now + 100;
-            if (me && (OwnerMode() || IsHost()))
+            if (me)
                 if (UObject* own = adapter_.PlayerWillie(0)) { VitalsMsg v; if (adapter_.ReadVitals(own, me, v)) { v.entity = me; VoiceVitals(v); } }
-            if (IsHost() && !OwnerMode())
-                for (const FighterEntry& f : info_.fighters)
-                    if (f.entity != me)
-                        if (UObject* a = EntityActor(f.entity)) { VitalsMsg v; if (adapter_.ReadVitals(a, f.entity, v)) { v.entity = f.entity; VoiceVitals(v); } }
         }
         // The dead talk (to the dead); the living only while conscious enough (or whatever, with voice_cut=0).
         const bool mayTalk = on && me && InFightLevel() && (!VoiceAlive(me) || VoiceAwake(me) || !cfg_.voiceCut);
@@ -4253,11 +4176,10 @@ private:
 
     // ------------------------------------------------------------------ client
     void OnOwnSpawn(const Spawn& sp) {
-        if (OwnerMode() && !levelGate_.Open()) return;   // the level would wipe it; ClientGateOpen applies it later
+        if (!levelGate_.Open()) return;   // the level would wipe it; ClientGateOpen applies it later
         if (!ownDeadPending_) { if (UObject* me = adapter_.PlayerWillie(0)) QueueTint(me, sp.team); return; }
         const bool retry = ownRespawn_.Active();       // a later attempt: the first one did the one-time work
         ownRespawn_.Begin();
-        placed_.erase(world_.myEntity());
         const std::vector<uint8_t>* assigned = sp.blobId ? clientBlobs_.Get(sp.blobId) : nullptr;   // e.g. generated gear
         bool generated = info_.gear != uint8_t(Gear::Own) && info_.gear != uint8_t(Gear::Fists);   // own gear (and Brawl, stripped at the spawn): the Spawn names this client's upload, never relayed back
         if (generated && sp.blobId && !assigned)
@@ -4339,6 +4261,7 @@ private:
             // The map to open again (the new host) or to wait in (the others): the fight level the old host had open.
             migrateLevel_ = InFightLevel() ? currentLevel_ : std::string();
             migrateBoard_ = ScoreCarryFrom(info_);   // the last MatchInfo heard: the new host restores these scores
+            migrateObjects_ = props_.ExportKnown();  // the spawned objects this machine knows by id: the new host adopts them
         }
         ResetNetwork("host migration");
     }
@@ -4364,7 +4287,7 @@ private:
             case MigrationStep::GiveUp:
                 HSM_LOG("session: host migration gave up (%s); returning to the main menu",
                         !cfg_.hostMigration ? "off" : !lobby_.InLobby() ? "left the lobby" : "no new host in time");
-                migrateLevel_.clear(); migrateBoard_ = ScoreCarry{};
+                migrateLevel_.clear(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear();
                 if (lobby_.InLobby() || net_ || InFightLevel()) ReturnToMenuAfterHostLoss();
                 return;
             default: break;
@@ -4390,17 +4313,6 @@ private:
         game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
-    // N3: a direct-IP client whose host closed, timed out or never answered, outside a fight level: leave the session
-    // (the netcode, the "joined" state) and say why on the multiplayer page.
-    void LeaveUnreachableHost() {
-        const char* msg = hostWasThere_ ? "The host is gone. You left the session." : "Could not reach the host.";
-        HSM_LOG("client: %s", msg);
-        hostUnreachable_ = hostWasThere_ = false;
-        ResetNetwork("host gone");
-        ui::ShowLine("HSMMod", style::kBone, msg);
-        notice_ = msg;
-    }
-
     void ClientTick(float dt) {
         bool hostGone = false;
         bodyWork_ = false;
@@ -4415,9 +4327,8 @@ private:
                     SendHello();
                 } else if (ev.kind == NetEvent::Disconnected) {
                     HSM_LOG("client: disconnected from host");
-                    const DisconnectAction act = ClientDisconnectAction(steamMode(), welcomed_, InFightLevel());
+                    const DisconnectAction act = ClientDisconnectAction(true, welcomed_, InFightLevel());
                     if (act == DisconnectAction::HostLossMonitor) hostGone = hostLoss_.OnDisconnect(NowMs()) == HostLossAction::ReturnToMenu;
-                    else if (act == DisconnectAction::Leave) { hostUnreachable_ = true; hostWasThere_ = welcomed_; }
                     welcomed_ = false; hostPeer_ = 0;
                 } else { hostLoss_.OnPacket(NowMs()); ClientReceive(ev); }
             }
@@ -4431,8 +4342,9 @@ private:
             hostGone = hostGone || a == HostLossAction::ReturnToMenu;
         } else hostLoss_.OnPacket(NowMs());
         if (rejected_) { const RejectReason why = *rejected_; rejected_.reset(); OnRejected(why); return; }
+        if (modMapHost_ && !modMapChecked_) { ModMapTick(); if (!net_) return; }   // modded maps: the scan or a hash finished
+        if (refuseNoHook_) { refuseNoHook_ = false; if (!ScriptHookMissing()) { HSM_LOG("client: refusing a host whose sync mode this build removed"); LeaveSession(); } return; }
         if (hostGone) { if (!MigrateAfterHostLoss()) ReturnToMenuAfterHostLoss(); return; }
-        if (hostUnreachable_) { LeaveUnreachableHost(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
         if (welcomed_ && hostPeer_ && DueAt(NowMs(), nextKeepAlive_)) {   // in every level: the host's silence check (public #9)
             const uint32_t now = NowMs();
@@ -4441,8 +4353,8 @@ private:
             net_->Send(hostPeer_, kChanUnreliable, EncodePing(now, false), false);
         }
         if (!welcomed_ || !FighterLevel()) { SetMyWillie(nullptr); return; }
-        if (OwnerMode() && !ClientGateOpen()) { SetMyWillie(adapter_.PlayerWillie(0)); return; }
-        if (OwnerMode()) RecoverLostPuppets();
+        if (!ClientGateOpen()) { SetMyWillie(adapter_.PlayerWillie(0)); return; }
+        RecoverLostPuppets();
         CreatePuppets();
         if (MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle) && DueAt(NowMs(), nextScan_)) { nextScan_ = NowMs() + kScanIntervalMs; PurgeForeignClient(); }
         RetryOwnRespawn();
@@ -4452,27 +4364,9 @@ private:
             else if (DueAt(t, dropClearDue_)) { dropClearPending_ = false; ClearDroppedWeapons(); }
         }
         UObject* me = adapter_.PlayerWillie(0);
-        if (OwnerMode()) {
-            SetMyWillie(me);
-            if (me) StopStockFoes();
-            ClientOwnerTick(me, dt);
-            return;
-        }
-        if (me && !hooksBound_ && adapter_.BindInputs(me)) BindClientInputHooks();
         SetMyWillie(me);
         if (me) StopStockFoes();
-        SendInputs(dt);
-        if (!haveSnapshot_) return;
-        bool fresh = latest_.tick != measuredTick_;
-        measuredTick_ = latest_.tick;
-        for (const WillieState& s : latest_.willies) {
-            UObject* w = ClientActor(s.entity);
-            if (!w) continue;
-            PlacePuppetOnce(w, s);
-            if (fresh) MeasureDesync(w, s);
-            adapter_.DriveTowards(w, s, dt);
-            adapter_.ApplyVitals(w, s);
-        }
+        ClientOwnerTick(me, dt);
     }
 
     // Owner sync, client: nothing is spawned before the level's own start-up is over (BP_LevelManager's Clean Up Map
@@ -4496,7 +4390,7 @@ private:
             if (delay) HSM_LOG("client: level manager found; Level Load Delay %.2f s, Player Spawned %d, pawn %d", *delay, p.playerSpawned, p.pawn);
             else HSM_LOG("client: level manager found; Level Load Delay unreadable, Player Spawned %d, pawn %d", p.playerSpawned, p.pawn);
             // Level props: 0.1 s into the level its manager destroys each prop tagged 'Random Delete' on a RandomBool of
-            // this machine's own when "Purge Map" is set; the host's census decides which stay (PropSync purges the
+            // this machine's own when "Purge Map" is set; the host's census decides which stay (ObjectSync purges the
             // rest), so the manager's own purge is turned off here. Best effort: the world time says whether in time.
             bool purge = false;
             const bool purgeRead = GetBool(managers.front(), "Purge Map", purge);
@@ -4574,57 +4468,6 @@ private:
         HSM_LOG("client: my fighter died; reported to the host (last blow from entity %u)", r.killer);
     }
 
-    void SendInputs(float dt) {
-        sendAccum_ += dt;
-        if (sendAccum_ < 1.f / float(cfg_.inputHz)) return;
-        sendAccum_ = 0;
-        InputFrame f = capture_.Take(NowMs());
-        adapter_.ControlRotation(0, f.controlYaw, f.controlPitch);
-        net_->Send(hostPeer_, kChanUnreliable, Encode(f), false);
-        ++inputsTx_;
-    }
-
-    // How far each body here is from the host's latest pose (hip bone), per fighter, reported every 5 s.
-    void MeasureDesync(UObject* w, const WillieState& s) {
-        FVector here;
-        if (s.bodies.empty() || !adapter_.FirstBodyPosition(w, here)) return;
-        const BodyState& b = s.bodies[0];
-        double d = Dist(here, {b.px, b.py, b.pz});
-        Desync& m = desync_[s.entity];
-        m.sum += d; m.max = std::max(m.max, d); ++m.n;
-    }
-
-    // Movement and actions go to the host instead of the local body (it follows the host's simulation of it);
-    // looking around stays local, and so does the camera lock.
-    void BindClientInputHooks() {
-        hooksBound_ = true;
-        for (const auto& [fn, b] : adapter_.Bindings()) {
-            game::InputBinding bind = b;
-            HookFunction(fn, [this, bind](UObject* obj, UFunction* f, void* params) {
-                if (OwnerMode() || obj != myWillie_.load()) return false;   // owner sync: my input drives my fighter here
-                if (bind.isAxis) {
-                    Axis a = Axis(bind.index);
-                    capture_.OnAxis(a, game::Adapter::ReadAxisParam(f, params));
-                    return !(a == Axis::TurnMouse || a == Axis::LookMouse || a == Axis::TurnGamepad || a == Axis::LookGamepad);
-                }
-                capture_.OnAction(Action(bind.index), bind.pressed);
-                return Action(bind.index) != Action::ToggleCameraLock;
-            });
-        }
-        HSM_LOG("client: input capture hooks installed");
-    }
-
-    // A puppet's first snapshot can be metres from where it was created: move it there once, hip to hip.
-    void PlacePuppetOnce(UObject* w, const WillieState& s) {
-        if (s.bodies.empty() || !placed_.insert(s.entity).second) return;
-        WillieState here;
-        if (!adapter_.ReadState(w, s.entity, here) || here.bodies.empty()) return;
-        const BodyState& a = here.bodies[0]; const BodyState& b = s.bodies[0];
-        if (Dist({a.px, a.py, a.pz}, {b.px, b.py, b.pz}) <= kTeleportDistance) return;
-        FVector at = adapter_.ActorLocation(w);
-        adapter_.Teleport(w, {at.x + b.px - a.px, at.y + b.py - a.py, at.z + b.pz - a.pz});
-    }
-
     UObject* ClientActor(uint8_t entity) {
         if (entity == world_.myEntity()) return adapter_.PlayerWillie(0);
         auto it = puppets_.find(entity);
@@ -4642,7 +4485,7 @@ private:
             o.at = {sp.x, sp.y, sp.z}; o.yawDeg = sp.yaw; o.teamInt = TeamIntFor(sp.team, sp.entity); o.brain = false;   // follows its owner's pose
             UObject* w = SpawnFighterNow(o);
             if (w) {
-                puppets_[sp.entity].Set(w); QueueTint(w, sp.team); if (OwnerMode()) standIns_.Attach(sp.entity, w);
+                puppets_[sp.entity].Set(w); QueueTint(w, sp.team); standIns_.Attach(sp.entity, w);
                 if (sp.entity >= kFirstBotEntity) HSM_LOG("client: puppet created for bot entity %u", sp.entity);   // #37
             }
             else HSM_LOG("client: puppet for entity %u failed to spawn", sp.entity);
@@ -4656,8 +4499,7 @@ private:
         auto it = puppets_.find(entity);
         if (it == puppets_.end()) return;
         bodyWork_ = true;
-        if (OwnerMode()) { standIns_.Detach(entity); adapter_.DestroyFighter(it->second.obj, it->second.index); }
-        else if (adapter_.StillValid(it->second.obj, it->second.index)) adapter_.DestroyActor(it->second.obj);
+        standIns_.Detach(entity); adapter_.DestroyFighter(it->second.obj, it->second.index);
         puppets_.erase(it);
     }
 
@@ -4674,7 +4516,7 @@ private:
 
     // ------------------------------------------------------------------ mesh (client side)
     // Whether an event is the host's session or stream. Only the lobby owner's Steam ID is the host; every other peer a
-    // Steam client has is a mesh peer the host's PeerMap named. ENet clients have the host alone.
+    // Steam client has is a mesh peer the host's PeerMap named.
     bool FromHost(const NetEvent& ev) const { return !steamNet_ || ev.steamId == hostSteam_; }
 
     // Pose and Vitals go direct only with the mesh on; with per-player pings alone the peers are only pinged.
@@ -4901,7 +4743,7 @@ private:
     // second copy of anything is dropped (MeshDedupe; grab and prop states keep the newest on their own). False: a direct
     // copy refused.
     bool ApplyEventMsg(MsgType t, const uint8_t* d, size_t n, uint8_t fromSlot) {
-        if (!OwnerMode() || !FightMsgsOpen()) return false;
+        if (!FightMsgsOpen()) return false;
         const bool direct = fromSlot != kHostSlot;
         const uint8_t me = world_.myEntity();
         const double now = game::SteadyNowMs();
@@ -4971,13 +4813,18 @@ private:
                 if (m.entity != me && first(MeshStream::Equip, m.entity, m.seq)) equip_.Apply(m);
                 return true;
             }
-            case MsgType::PropState: {
+            case MsgType::BodyState: {
                 if (direct) {
-                    PropStateMsg m;
+                    BodyStateMsg m;
                     if (!Decode(d, n, m) || m.lessee != fromSlot || !sender(Roster::EntityForSlot(fromSlot), 0, false)) return false;
                 }
-                props_.OnPropState(d, n, fromSlot);   // a direct one must come from the prop's granted streamer
+                props_.OnBodyState(d, n, fromSlot);   // a direct one must come from the object's granted streamer
                 return true;
+            }
+            case MsgType::ObjectEvent: {
+                // Reliable and replayed idempotently, so a second copy (the host's relay of a direct one) does nothing.
+                if (direct && !sender(Roster::EntityForSlot(fromSlot), 0, false)) return false;
+                return props_.OnObjectEvent(d, n, fromSlot);   // a direct one must come from the object's granted streamer
             }
             default:
                 return false;
@@ -4991,18 +4838,19 @@ private:
         switch (t) {
             case MsgType::Welcome: {
                 Welcome w; Decode(d, n, w);
-                welcomed_ = true; mySlot_ = w.slot; world_.SetMyEntity(w.entity); snapshotHz_ = w.snapshotHz; jitter_.clear();
-                syncMode_ = SyncMode(w.syncMode);
+                welcomed_ = true; mySlot_ = w.slot; world_.SetMyEntity(w.entity);
+                if (SyncMode(w.syncMode) != SyncMode::Owner) { HSM_LOG("client: the host runs a sync mode this build removed (%u); leaving", unsigned(w.syncMode)); refuseNoHook_ = true; break; }
+                if (!ScriptHookActive()) { refuseNoHook_ = true; break; }   // handled after the pump (ScriptHookMissing / OnRejected)
                 hostHasFighter_ = !(w.flags & kWelcomeNoHostFighter);
                 if (!hostHasFighter_) HSM_LOG("client: the host plays no fighter of its own (hosted server): nothing to watch, score or wait for from it");
-                HSM_LOG("client: joined session %u as slot %u (entity %u), %s sync", w.sessionId, w.slot, w.entity, OwnerMode() ? "owner" : "host");
+                HSM_LOG("client: joined session %u as slot %u (entity %u), owner sync", w.sessionId, w.slot, w.entity);
                 if (w.modBuild != game::ModBuild())
                     HSM_LOG("client: host on mod build '%s', ours '%s' - update; the host will not start a match until both match",
                             w.modBuild.c_str(), game::ModBuild().c_str());
-                if (OwnerMode() && !streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
-                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); migrateBoard_ = ScoreCarry{}; HSM_LOG("client: host migration done"); }
-                meshOn_ = cfg_.mesh && steamNet_ && OwnerMode() && (w.flags & kWelcomeMesh);
-                peerPingOn_ = cfg_.peerPing && steamNet_ && OwnerMode() && (w.flags & kWelcomePeerPing);
+                if (!streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
+                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); HSM_LOG("client: host migration done"); }
+                meshOn_ = cfg_.mesh && steamNet_ && (w.flags & kWelcomeMesh);
+                peerPingOn_ = cfg_.peerPing && steamNet_ && (w.flags & kWelcomePeerPing);
                 if (!meshOn_ && !peerPingOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});   // the host stopped offering it
                 RefreshMeshSend();
                 if (meshOn_ || peerPingOn_) HSM_LOG("client: mesh %s, per-player pings %s", meshOn_ ? "on" : "off", peerPingOn_ ? "on" : "off");
@@ -5018,30 +4866,22 @@ private:
             case MsgType::Reject: { Reject r; Decode(d, n, r); rejected_ = r.reason; bodyWork_ = true; break; }   // handled after the poll loop
             case MsgType::Travel: {
                 Travel tr; Decode(d, n, tr);
-                if (!TravelAllowed(tr.level, tr.options)) {   // H2: only catalog/menu levels, no options
+                if (!TravelAllowedWithModMap(tr.level, tr.options, modMapApproved_)) {   // H2: only catalog/menu levels (or the host's checked modded map), no options
+                    if (modMapHost_ && !modMapChecked_ && TravelAllowedWithModMap(tr.level, tr.options, modMapHost_->path)) {
+                        pendingTravel_ = tr;   // the pak check is still running: follow once it passes
+                        break;
+                    }
                     HSM_LOG("client: refused travel to '%.64s' (level or options not allowed)", TravelLogText(tr.level).c_str());
                     break;
                 }
-                if (tr.seq == travelSeq_ && !currentLevel_.empty() && tr.level.find(currentLevel_) != std::string::npos) {
-                    // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
-                    if (hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
-                    break;
-                }
-                RememberFoes();
-                size_t applied = game::ApplyGameSettings(tr.settings);
-                fightSettings_ = tr.settings;
-                travelSeq_ = tr.seq; pendingLevel_ = tr.level;
-                HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
-                game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
+                FollowTravel(tr);
                 break;
             }
-            case MsgType::Snapshot: {
-                Snapshot s; Decode(d, n, s);
-                ++snapsRx_;
-                int64_t at = int64_t(GetTickCount64());
-                for (const WillieState& w : s.willies)       // remote fighters render ~100 ms behind, interpolated
-                    if (w.entity != world_.myEntity()) jitter_.try_emplace(w.entity, 1000.0 / double(snapshotHz_)).first->second.Push(s.tick, at, w);
-                if (!haveSnapshot_ || SeqNewer(s.tick, latest_.tick)) { latest_ = std::move(s); haveSnapshot_ = true; }
+            case MsgType::ModMap: {
+                ModMapMsg m; if (!Decode(d, n, m)) break;
+                modMapHost_ = m; modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
+                bodyWork_ = true;
+                ModMapTick();
                 break;
             }
             case MsgType::Spawn: {
@@ -5055,9 +4895,7 @@ private:
             }
             case MsgType::Despawn: {
                 Despawn dp; Decode(d, n, dp);
-                jitter_.erase(dp.entity);                  // a respawn must not slide over from where it died
-                placed_.erase(dp.entity);
-                if (OwnerMode() && dp.entity != world_.myEntity()) {
+                if (dp.entity != world_.myEntity()) {
                     standIns_.Forget(dp.entity); severs_.Forget(dp.entity); gore_.Forget(dp.entity); claims_.Forget(dp.entity); fx_.Forget(dp.entity); equip_.Forget(dp.entity);
                     grabs_.Forget(dp.entity); props_.ForgetEntity(dp.entity);
                 }
@@ -5083,21 +4921,6 @@ private:
                 break;
             }
             case MsgType::ReportShare: { ReportShareMsg m; Decode(d, n, m); if (m.fromSlot != mySlot_) OfferLog(m); break; }
-            case MsgType::WorldState: {
-                WorldState ws; Decode(d, n, ws);
-                worldView_.Apply(ws);
-                for (const WorldObject& o : ws.objects) {
-                    if ((o.flags & kWorldRemoved) || !o.owner) continue;
-                    if (UObject* w = game::FindClientWeapon(adapter_, o.owner, o.slot, [this](uint8_t e) { return ClientActor(e); }))
-                        game::ApplyWorldObject(adapter_, w, o);
-                }
-                break;
-            }
-            case MsgType::CombatEvent: {
-                CombatEvent e; Decode(d, n, e);
-                ApplyCombat(e);                                      // clients resolve no hits: all blood comes from the host
-                break;
-            }
             case MsgType::BlobChunk: {
                 BlobChunk c; Decode(d, n, c);
                 std::vector<uint8_t> blob;
@@ -5113,12 +4936,12 @@ private:
             }
             case MsgType::Pose: {
                 PoseMsg m; sync::PoseFrame frame;
-                if (OwnerMode() && Decode(d, n, m, &frame) && m.entity != world_.myEntity()) standIns_.OnPose(m, frame, ArrivalMs(ev));
+                if (Decode(d, n, m, &frame) && m.entity != world_.myEntity()) standIns_.OnPose(m, frame, ArrivalMs(ev));
                 break;
             }
             case MsgType::Vitals: {
                 VitalsMsg v;
-                if (OwnerMode() && Decode(d, n, v) && v.entity != world_.myEntity()) {
+                if (Decode(d, n, v) && v.entity != world_.myEntity()) {
                     standIns_.OnVitals(v);
                     gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
                     severs_.OnVitals(v, game::SteadyNowMs());
@@ -5127,17 +4950,12 @@ private:
                 break;
             }
             case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim: case MsgType::SeverNotice: case MsgType::StuckBlade:
-            case MsgType::GrabState: case MsgType::PaintFx: case MsgType::Equip: case MsgType::PropState:
+            case MsgType::GrabState: case MsgType::PaintFx: case MsgType::Equip: case MsgType::BodyState: case MsgType::ObjectEvent:
                 ApplyEventMsg(t, d, n, kHostSlot);
                 break;
-            case MsgType::PropLease: { if (OwnerMode()) props_.OnPropLease(d, n, kHostSlot); break; }
-            case MsgType::PropCensus: { if (OwnerMode()) props_.OnPropCensus(d, n); break; }
-            case MsgType::Event: {
-                Event e; Decode(d, n, e);
-                if (e.kind == EventKind::Died && e.a <= 0xFF)
-                    if (UObject* w = ClientActor(uint8_t(e.a))) adapter_.TriggerDeath(w);
-                break;
-            }
+            case MsgType::ObjectAnnounce: { props_.OnObjectAnnounce(d, n, kHostSlot); break; }
+            case MsgType::PropLease: { props_.OnPropLease(d, n, kHostSlot); break; }
+            case MsgType::PropCensus: { props_.OnPropCensus(d, n); break; }
             default: break;
         }
     }
@@ -5164,14 +4982,14 @@ private:
     int32_t lastGameModeIndex_ = -1;
     std::string currentLevel_;
     bool progressionHub_ = false;   // currentLevel_ is the Tavern outside Free Mode (FighterLevel)
-    float sendAccum_ = 0;
     uint32_t travelSeq_ = 0;
     std::string pendingLevel_;
     // host
-    bool hostPending_ = false;
+    bool hostPending_ = false, refuseNoHook_ = false;
     HostMigration migration_;      // survives ResetNetwork: it spans the old session and the new one
     std::string migrateLevel_;     // the fight level open when the old host left
     ScoreCarry migrateBoard_;      // its scores by SteamID, until the new host's match starts (ResetNetwork drops it outside a migration)
+    std::vector<ObjectAnnounceMsg> migrateObjects_;   // the spawned objects this machine knew when the host left (the new host adopts them)
     bool serverReadyLogged_ = false;
     uint32_t serverLobbyAt_ = 0, serverConfigAt_ = 0;   // role=server over Steam: next lobby open try, next settings push
     // role=server
@@ -5197,7 +5015,7 @@ private:
     SpawnArea spawnArea_;                     // AreaOf the spawn candidates (picksValid_)
     std::string spawnersLogged_;              // the level SpawnerPoints last logged its count for
     std::vector<Point3> spawnSpots_;           // SpreadPositions per slot (picksValid_)
-    uint32_t tick_ = 0, eventSeq_ = 0, sessionId_ = NowMs();
+    uint32_t sessionId_ = NowMs();
     // match (host)
     struct Tint { ActorRef actor; int8_t team = kNoTeam; int tries = 0; uint32_t next = 0; };
     Match match_;
@@ -5306,7 +5124,7 @@ private:
     bool routeLogged_ = false;
 
     MsgBudget hostBudget_{double(kMaxWillies)};   // the client's budget for what the host sends (M3)
-    bool welcomed_ = false, haveSnapshot_ = false, snappedOwn_ = false;
+    bool welcomed_ = false, snappedOwn_ = false;
     bool hostHasFighter_ = true;   // client: false when the Welcome carried kWelcomeNoHostFighter
     // A fighter was destroyed or spawned this tick (about 60 ms each): the next one waits for the next frame. A Duel
     // round reset did four in one tick (two-player logs 8 and 9: 250 ms).
@@ -5322,6 +5140,10 @@ private:
     static constexpr uint32_t kRejectLingerMs = 1000;
     uint32_t nextConsolePoll_ = 0, nextBanPrune_ = 0;
     std::optional<RejectReason> rejected_;
+    std::optional<ModMapMsg> modMapHost_;      // client: the host's modded map (empty path for a stock one) and its pak
+    bool modMapChecked_ = false;
+    std::string modMapApproved_;               // the host's map path once this machine has the pak: the one non-catalog level a Travel may open
+    std::optional<Travel> pendingTravel_;      // a Travel that waits for the pak check
     uint32_t bugHintAt_ = 0;   // when to show the /bug hint (0: not due)
     bool bugHintShown_ = false;
     std::string notice_;   // why the host turned this player away, for the multiplayer page (TakeNotice)        // client: the host's Reject, acted on after the poll loop
@@ -5349,43 +5171,28 @@ private:
     uint32_t stockFlowBlocked_ = 0, unpaused_ = 0;
     RecreateLimiter recreate_;                   // owner sync: lost stand-ins, both sides
     std::set<uint8_t> lostSlots_;                // host, owner sync: client stand-ins the game destroyed
-    InputCapture capture_;
-    Snapshot latest_;
     std::atomic<UObject*> myWillie_{nullptr};
     std::atomic<int32_t> myWillieIndex_{-1};   // ue::ObjectIndex of myWillie_ when it was stored (MyWillieLive)
-    std::set<uint8_t> placed_;                 // client: bodies already moved to their first snapshot
-    struct Desync { double sum = 0, max = 0; uint32_t n = 0; };
-    std::map<uint8_t, Desync> desync_;
-    uint32_t inputsTx_ = 0, measuredTick_ = 0, bloodSent_ = 0, bloodApplied_ = 0, hitsBlocked_ = 0;
-    bool hooksBound_ = false;
-    std::map<uint8_t, uint32_t> lastBloodAt_;
+    uint32_t hitsBlocked_ = 0;
     std::unordered_map<UFunction*, int32_t> otherActorOffset_;
     std::unordered_map<UClass*, HitKind> hitKind_;
-    bool hitKindOwner_ = false;
     std::unordered_map<UObject*, UObject*> fighterOfFrame_;
     enum class SpawnIgnoreState : uint8_t { Outside, InTick, Cached };
     std::vector<UObject*> spawnIgnore_;     // SpawnIgnore, this Tick only
     SpawnIgnoreState spawnIgnoreState_ = SpawnIgnoreState::Outside;
     bool inFight_ = false;          // InFightLevel() cached per tick for the hit hook
     HostLossMonitor hostLoss_{0};
-    bool hostUnreachable_ = false, hostWasThere_ = false;   // N3: a direct-IP host that is gone outside a fight level
     PeerSilenceMonitor peerSilence_;
     HelloWatch helloWatch_;
     ReservationTable reservations_;
-    SeveredMasks severedSent_;
-    WorldTracker worldTracker_;
-    WorldView worldView_;
-    uint32_t worldEvery_ = 0;
     double groundOffset_ = 0;
     bool groundValid_ = false, foesStopped_ = false;
     int savedFoes_ = -1;
     uint32_t probeSince_ = 0;   // InputProbeTick: when the fight level loaded, 0 once logged
     uint32_t levelLoadedAt_ = 0;
-    uint32_t inputFixAt_ = 0, nextHealth_ = 0, snapsRx_ = 0, nextHello_ = 0, hellosSent_ = 0;
+    uint32_t inputFixAt_ = 0, nextHealth_ = 0, nextHello_ = 0, hellosSent_ = 0;
     uint32_t menuInputAt_ = 0;
     bool inputFixRepeat_ = false, pauseMenuWas_ = false, menuInputRepeat_ = false;
-    std::map<uint8_t, JitterBuffer<32>> jitter_;
-    uint16_t snapshotHz_ = 30;
     SpectateCycler spectate_;
     uint8_t spectating_ = 0;
     UObject* spectateActor_ = nullptr;
@@ -5403,14 +5210,13 @@ private:
     bool mirrorDone_ = false;                       // the mirror came on in this level (turning it off keeps it off)
     uint32_t mirrorSince_ = 0, nextMirror_ = 0;
     // owner sync (both roles)
-    SyncMode syncMode_ = SyncMode::Host;
     game::OwnerStreams streams_;
     game::StandIns standIns_;
     game::Claims claims_;
     game::FxSync fx_;
     game::EquipSync equip_;
     game::GrabSync grabs_;
-    game::PropSync props_;
+    game::ObjectSync props_;
     game::Severs severs_;
     game::StandInGore gore_;
     struct OwnerLife { bool aliveSeen = false; uint32_t deadSince = 0; };
@@ -5425,6 +5231,7 @@ private:
     uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
     std::vector<double> frameMs_, tickMs_;
+    std::array<uint64_t, kPumpParts> pumpLookups_{};
     std::array<double, kPumpParts> pumpMs_{}, pumpMaxMs_{};   // Timed: per part, this window
     bool sampling_ = false;
     uint64_t vmNsAtWindow_ = 0;

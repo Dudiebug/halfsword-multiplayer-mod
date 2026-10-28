@@ -64,7 +64,6 @@ Built into `dwmapi.dll`; each keeps its license file in its directory.
 
 | Library | Directory | License |
 |---|---|---|
-| ENet | `implementation/client/HSMMod/third_party/enet` | MIT (`LICENSE`) |
 | MinHook | `implementation/client/HSMMod/third_party/minhook` | BSD 2-Clause (`LICENSE.txt`) |
 
 ## Not used

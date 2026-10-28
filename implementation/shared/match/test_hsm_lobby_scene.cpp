@@ -550,6 +550,45 @@ static void TestDamage() {
     CHECK(Ids(BuildLobbyScene(prog)) == (std::vector<LobbyRow>{LobbyRow::Damage}));   // co-op takes damage too
 }
 
+static void TestModdedMaps() {
+    LobbyLocal l = InLobby(true, Format::FreeForAll);
+    l.modMaps = {{"/Game/Maps/Custom/Arena_Bog", "Arena Bog", "BogMap_P.pak"}, {"/Game/Maps/Custom/Plain", "Plain", ""}};
+    l.mapPick = "/Game/Maps/Arenas/Map_Arena_Yard";
+    LobbyScene s = BuildLobbyScene(l);
+    CHECK(s.maps.size() == PickableCount() + 2);
+    if (s.maps.size() != PickableCount() + 2) return;
+    const MapCard& bog = s.maps[PickableCount()];
+    const MapCard& plain = s.maps[PickableCount() + 1];
+    CHECK(bog.modded && bog.index == MapCount() && bog.path == "/Game/Maps/Custom/Arena_Bog" && bog.name == "Arena Bog");
+    CHECK(bog.tag == "Modded map \xC2\xB7 BogMap_P.pak" && plain.tag == "Modded map" && plain.index == MapCount() + 1);
+    CHECK(bog.allowed && bog.enabled && !bog.selected && !plain.selected);
+    size_t selectedStock = 0;
+    for (const MapCard& m : s.maps) if (!m.modded && m.selected) ++selectedStock;
+    CHECK(selectedStock == 1);                                     // the stock pick stays marked while no custom map is picked
+    // Picking a custom map: it alone is selected (the object-name form of the pick counts), and START waits for the hash.
+    l.mapPick = "/game/maps/custom/arena_bog.Arena_Bog";
+    s = BuildLobbyScene(l);
+    CHECK(s.maps[PickableCount()].selected && !s.maps[PickableCount() + 1].selected);
+    selectedStock = 0;
+    for (const MapCard& m : s.maps) if (!m.modded && m.selected) ++selectedStock;
+    CHECK(selectedStock == 0);
+    CHECK(s.start);
+    l.modPickPending = true; s = BuildLobbyScene(l);
+    CHECK(!s.start && s.waiting == "Checking the map pack");
+    l.mapPick = "/Game/Maps/Arenas/Map_Arena_Yard"; s = BuildLobbyScene(l);   // a stock pick ignores the flag
+    CHECK(s.start);
+    // A member sees them, disabled; Zombies refuses them (the Abyss is its map); Progression shows no maps.
+    LobbyLocal m = InLobby(false); m.modMaps = l.modMaps; m.mapPick = "/Game/Maps/Custom/Plain";
+    s = BuildLobbyScene(m);
+    CHECK(s.maps.size() == PickableCount() + 2 && !s.maps[PickableCount()].enabled && s.maps[PickableCount() + 1].selected);
+    LobbyLocal z = InLobby(true, Format::Zombies); z.modMaps = l.modMaps; z.mapPick = "/Game/Maps/Custom/Plain";
+    s = BuildLobbyScene(z);
+    CHECK(s.maps.size() == PickableCount() + 2 && !s.maps[PickableCount()].allowed && !s.maps[PickableCount()].enabled &&
+          !s.maps[PickableCount()].reason.empty() && !s.maps[PickableCount() + 1].selected);
+    LobbyLocal pr = InLobby(true); pr.modMaps = l.modMaps; pr.progression = true;
+    CHECK(BuildLobbyScene(pr).maps.empty());
+}
+
 int main() {
     TestPrevNext();
     TestStepSetting();
@@ -570,6 +609,7 @@ int main() {
     TestModes();
     TestBrawl();
     TestMaps();
+    TestModdedMaps();
     TestBuildMismatch();
     TestDamage();
     if (g_fail) { std::printf("%d lobby scene checks failed\n", g_fail); return 1; }

@@ -10,11 +10,13 @@ using namespace hsm;
 
 static void TestClasses() {
     CHECK(BudgetClassOf(MsgType::Pose) == BudgetClass::Stream && BudgetClassOf(MsgType::Vitals) == BudgetClass::Stream);
-    CHECK(BudgetClassOf(MsgType::PropState) == BudgetClass::Prop);
+    CHECK(BudgetClassOf(MsgType::BodyState) == BudgetClass::Prop);
     CHECK(BudgetClassOf(MsgType::PropLease) == BudgetClass::Lease);
+    CHECK(BudgetClassOf(MsgType::ObjectAnnounce) == BudgetClass::Lease && BudgetClassOf(MsgType::ObjectEvent) == BudgetClass::Lease);
     CHECK(BudgetClassOf(MsgType::PaintFx) == BudgetClass::Fx);
     CHECK(BudgetClassOf(MsgType::HitClaim) == BudgetClass::Combat && BudgetClassOf(MsgType::GrabState) == BudgetClass::Combat);
     CHECK(BudgetClassOf(MsgType::BlobChunk) == BudgetClass::Blob && BudgetClassOf(MsgType::Ready) == BudgetClass::Control);
+    CHECK(BudgetClassOf(MsgType::ModMap) == BudgetClass::Control);
     CHECK(BudgetClassOf(MsgType::Forward) == BudgetClass::Detour);
     CHECK(std::string(MsgBudget::ClassName(BudgetClass::Detour)) == "detour");
     // Setup and already-bounded messages are never budgeted here.
@@ -42,7 +44,7 @@ static void TestNormalPlayNeverDrops() {
         const double now = frame * (1000.0 / 60.0);
         CHECK(b.Allow(MsgType::Pose, now));
         CHECK(b.Allow(MsgType::Vitals, now));
-        for (int p = 0; p < 20; ++p) CHECK(b.Allow(MsgType::PropState, now));
+        for (int p = 0; p < 20; ++p) CHECK(b.Allow(MsgType::BodyState, now));
         if (frame % 2 == 0) for (int k = 0; k < 6; ++k) CHECK(b.Allow(MsgType::PaintFx, now));   // 180/s
         if (frame % 36 == 0) CHECK(b.Allow(MsgType::HitClaim, now));
     }
@@ -53,7 +55,7 @@ static void TestClassesIndependent() {
     MsgBudget b;
     for (int i = 0; i < 5000; ++i) b.Allow(MsgType::Pose, 0.0);
     CHECK(b.Dropped(BudgetClass::Stream) > 0);
-    CHECK(b.Allow(MsgType::PropState, 0.0) && b.Allow(MsgType::PaintFx, 0.0) && b.Allow(MsgType::HitClaim, 0.0));
+    CHECK(b.Allow(MsgType::BodyState, 0.0) && b.Allow(MsgType::PaintFx, 0.0) && b.Allow(MsgType::HitClaim, 0.0));
     CHECK(b.Dropped(BudgetClass::Prop) == 0 && b.Dropped(BudgetClass::Fx) == 0);
     for (int i = 0; i < 5000; ++i) CHECK(b.Allow(MsgType::Hello, 0.0) && b.Allow(MsgType::Chat, 0.0));   // free
     CHECK(b.DroppedTotal() == b.Dropped(BudgetClass::Stream));

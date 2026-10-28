@@ -634,13 +634,22 @@ bool Adapter::BeingDestroyed(UObject* o) {
     static UClass* componentClass = nullptr;
     static UFunction* actorFn = nullptr;
     static UFunction* componentFn = nullptr;
-    if (!actorFn && (actorClass = FindClass("Actor"))) actorFn = FindFunction(actorClass, "IsActorBeingDestroyed");
-    if (!componentFn && (componentClass = FindClass("ActorComponent"))) componentFn = FindFunction(componentClass, "IsBeingDestroyed");
+    // Prepared once (native classes, they outlive every level): this runs for each carried actor of each fighter every frame
+    // (StillValid), and a Call looks its function and parameter up by name on every use.
+    static PreparedCall actorCall, componentCall;
+    if (!actorFn && (actorClass = FindClass("Actor"))) {
+        actorFn = FindFunction(actorClass, "IsActorBeingDestroyed");
+        if (actorFn) actorCall = PreparedCall(actorClass, "IsActorBeingDestroyed", {"ReturnValue"});
+    }
+    if (!componentFn && (componentClass = FindClass("ActorComponent"))) {
+        componentFn = FindFunction(componentClass, "IsBeingDestroyed");
+        if (componentFn) componentCall = PreparedCall(componentClass, "IsBeingDestroyed", {"ReturnValue"});
+    }
     if (!o) return false;
-    UFunction* fn = actorFn && IsA(o, actorClass) ? actorFn : componentFn && IsA(o, componentClass) ? componentFn : nullptr;
-    if (!fn) return false;
-    Call c(o, fn);
-    return c.invoke() && c.get<bool>("ReturnValue");
+    PreparedCall* pc = actorFn && actorCall.valid() && IsA(o, actorClass) ? &actorCall
+                     : componentFn && componentCall.valid() && IsA(o, componentClass) ? &componentCall : nullptr;
+    if (!pc) return false;
+    return pc->invoke(o) && pc->take<bool>(0);
 }
 
 bool Adapter::StillValid(UObject* o, int32_t index) const {

@@ -130,7 +130,7 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
     c.get("Collided Component", comp);
     // A prop a hand holds is no prop here (PropOf): its blow is its holder's. A thrown weapon is a prop before it is its
     // Last Parent's (FighterOf).
-    PropSync::Touch prop;
+    ObjectSync::Touch prop;
     const bool isProp = comp && env_.prop && env_.propActor && env_.prop(OuterOf(comp), prop);
     UObject* striker = comp && !isProp ? adapter_->FighterOf(OuterOf(comp)) : nullptr;
     if (const uint8_t victim = standIns_->EntityOf(self)) {
@@ -297,7 +297,7 @@ void Claims::OnStuckDamage(ScriptCall& c, UObject* standIn, uint8_t victim) {
 // ---------------------------------------------------------------- attacker side
 
 void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t attacker, UObject* attackerWillie, UObject* comp,
-                       const PropSync::Touch* prop) {
+                       const ObjectSync::Touch* prop) {
     DcdInputs in;
     FName bone{};
     c.get("Hit Bone", bone);
