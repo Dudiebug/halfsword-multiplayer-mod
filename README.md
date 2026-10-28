@@ -3,8 +3,8 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: pre-release.** The current build is v0.7.0-pre6. Expect rough edges, and please report what you find
-> with `/bug` in the game. Everyone in a session needs the same version (0.7.0-pre6 connects only to 0.7.0-pre6).
+> **Status: release.** The current build is v0.7.0. Expect rough edges, and please report what you find
+> with `/bug` in the game. Everyone in a session needs the same version (0.7.0 connects only to 0.7.0).
 
 ## What it does
 

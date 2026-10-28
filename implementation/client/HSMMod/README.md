@@ -20,7 +20,7 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
 `.agents/workflow/tools/workflowctl.py verify`.
 
-## New in 0.7.0 (pre-release)
+## New in 0.7.0
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
 - **Mesh (experimental, on by default from 0.7.0-pre6; `mesh=0` under `[net]` turns it off):** in a Steam lobby the
