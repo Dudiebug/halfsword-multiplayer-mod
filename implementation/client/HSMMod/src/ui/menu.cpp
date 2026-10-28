@@ -3,6 +3,7 @@
 #include "ui/umg.h"
 #include "ui/mp_widgets.h"
 #include "util/hsm_names.h"
+#include "gameplay/damage_pin.h"
 #include "gameplay/session.h"
 #include "log.h"
 #include "net/report_client.h"
@@ -91,7 +92,7 @@ struct State {
     bool reportOpenNow = false;
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF
     mp::Maker voiceMaker;
-    mp::VoiceBlock voice;                    // VOICE CHAT: the session's reach (host), the microphone, the meter
+    mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
@@ -595,6 +596,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     l.version = game::kModVersion;
     l.myBuild = game::ModBuild();
     l.allowBuildMismatch = game::AllowBuildMismatch();
+    l.damage = game::VanillaDamageRange();
     l.maxPlayers = game::kMaxLobbyMembers;
     if (lobby.InLobby()) {
         l.config = lobby.config();
@@ -913,7 +915,7 @@ void HandleClicks(Session& session) {
             for (const game::LobbyMember& m : lobby.members()) if (m.id == steam::MySteamId()) mine = m.team;
             lobby.SetTeamPick(StepTeamPick(int8_t(mine), teams, dir));
         } else {
-            c = StepSetting(c, row->id, dir);
+            c = StepSetting(c, row->id, dir, game::VanillaDamageRange());
             lobby.SetConfig(c);
         }
     }

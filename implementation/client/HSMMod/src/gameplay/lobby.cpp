@@ -178,6 +178,7 @@ MatchConfig Lobby::config() const {
     c.friendlyFire = steam::LobbyData(lobby_, "hsm_ff") == "1";
     c.gear = Gear(IntOr(steam::LobbyData(lobby_, "hsm_gear"), 0));
     c.tier = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tier"), 2), 0, 7));
+    c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
     return Sanitize(c);
 }
 
@@ -191,17 +192,12 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_ff", c.friendlyFire ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_gear", std::to_string(int(c.gear)));
     steam::SetLobbyData(lobby_, "hsm_tier", std::to_string(int(c.tier)));
+    steam::SetLobbyData(lobby_, "hsm_dmg", std::to_string(c.damagePct));
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }
 bool Lobby::Progression() const { return InLobby() && steam::LobbyData(lobby_, "hsm_prog") == "1"; }
 void Lobby::SetProgression(bool on) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_prog", on ? "1" : "0"); }
-int Lobby::VoiceReach() const {
-    if (!InLobby()) return -1;
-    const std::string v = steam::LobbyData(lobby_, "hsm_voice");
-    return v == "0" ? 0 : v == "1" ? 1 : v == "2" ? 2 : -1;
-}
-void Lobby::SetVoiceReach(int reach) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_voice", std::to_string(reach)); }
 
 void Lobby::SetTeamPick(int team) { if (InLobby()) steam::SetMemberData(lobby_, "hsm_team", std::to_string(team)); }
 

@@ -52,9 +52,14 @@ public:
     bool ContinueFromPauseMenu();
     // Game-and-UI input with the mouse cursor shown, so the pause menu can be clicked (the game's own menus do the same).
     void ShowPauseCursor();
+    // A menu level loaded after the mod took the cursor: game-and-UI input, cursor shown, as ShowPauseCursor. Leaving a
+    // session skips the stock flow that gives the menus their input (#19, #23). Does nothing when the mod never touched it.
+    bool MenuInputBack();
     // The chat's keyboard: on, UI-only input with the pressed keys flushed (the game's own UI_DeathDoor on open), so the
     // viewport ignores keys while the player types; off, RestoreGameInput.
     void CaptureInput(bool on);
+    // The mod has set a game-only or UI-only input mode this run (RestoreGameInput, CaptureInput): the next menu level
+    // needs its cursor and clicks given back (MenuInputBack).
     // First hit straight down from just above `at`, looking through `ignore`; `hitName` gets the hit actor's name.
     bool FloorZ(const ue::FVector& at, const std::vector<ue::UObject*>& ignore, double& z, std::string* hitName = nullptr);
     // Nothing between `from` and `to` (a fence, a wall), looking through `ignore`; `hitName` gets what is in the way.
@@ -194,6 +199,7 @@ private:
     ue::UObject* pauseWidget_ = nullptr;           // with its object-array slot: the widget PauseMenuOpen last found on screen
     int32_t pauseWidgetIndex_ = -1;
     uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)
+    bool inputTouched_ = false;    // RestoreGameInput or CaptureInput ran since the last MenuInputBack
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;
     ue::FName weaponName_{};                       // ModularWeaponBP_C, once a class chain has shown it

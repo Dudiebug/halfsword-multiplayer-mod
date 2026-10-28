@@ -10,6 +10,8 @@
 #pragma once
 #include "sync/hsm_pose.h"
 #include "sync/hsm_pose_codec.h"
+#include <algorithm>
+#include <cmath>
 
 namespace hsm::sync {
 
@@ -41,6 +43,11 @@ constexpr double kHeldMinGapMs = 1000.0;    // the locked joint needs time to ca
 // (the joint is made again and the chain re-armed), so a flail is re-seated later and less often.
 struct HeldTolerance {
     double deg, uu, minGapMs;
+    // A weapon gripped mid-shaft (spear, staff): the owner's hand slides along it and the stand-in's cannot follow, so
+    // the seat may be off by up to slideUu along `axis` (unit, hand frame); `uu` still holds across the shaft. Logs,
+    // 0.7.0: spears and staffs re-seated at 35-55 uu, each re-seat jumping the weapon and breaking the off hand's joint.
+    V3 axis{};
+    double slideUu = 0.0;   // 0: no shaft
 };
 inline HeldTolerance HeldToleranceFor(bool hasChain) {
     return hasChain ? HeldTolerance{45.0, 20.0, 3000.0} : HeldTolerance{kHeldReseatDeg, kHeldReseatUu, kHeldMinGapMs};
@@ -48,6 +55,34 @@ inline HeldTolerance HeldToleranceFor(bool hasChain) {
 
 inline bool HeldDiffers(const HeldPose& a, const HeldPose& b, double deg, double uu) {
     return QuatAngleDeg(a.rot, b.rot) > deg || Vec3Dist(a.pos, b.pos) > uu;
+}
+
+inline double Vec3DotH(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+inline bool HeldDiffers(const HeldPose& a, const HeldPose& b, const HeldTolerance& tol) {
+    if (tol.slideUu <= tol.uu) return HeldDiffers(a, b, tol.deg, tol.uu);
+    if (QuatAngleDeg(a.rot, b.rot) > tol.deg) return true;
+    const V3 d = Vec3Sub(a.pos, b.pos);
+    const double along = Vec3DotH(d, tol.axis);
+    return std::fabs(along) > tol.slideUu || Vec3Dist(d, Vec3Scale(tol.axis, along)) > tol.uu;
+}
+
+constexpr double kHeldMidShaftUu = 25.0;   // the hand this far along the shaft from the weapon root: gripped mid-shaft
+constexpr double kHeldSlideUu = 60.0;      // how far a mid-shaft seat may slide before it is made again
+constexpr double kHeldMinShaftUu = 30.0;   // a base-to-tip shorter than this gives no direction to trust
+
+// The tolerance for the owner's seat `owner` of a weapon whose blade base and tip (world) are `base`, `tip`, in a hand
+// turned `handRot`: a mid-shaft grip gets the slide along the shaft. A sword is held at its hilt, by the root, and keeps
+// the plain tolerance.
+inline HeldTolerance HeldToleranceForShaft(HeldTolerance tol, const HeldPose& owner, Q4 handRot, V3 base, V3 tip) {
+    const V3 w = Vec3Sub(tip, base);
+    const double len = std::sqrt(Vec3DotH(w, w));
+    if (len < kHeldMinShaftUu) return tol;
+    const V3 axis = QuatRotateVec(QuatConj(QuatNormalize(handRot)), Vec3Scale(w, 1.0 / len));
+    if (std::fabs(Vec3DotH(owner.pos, axis)) < kHeldMidShaftUu) return tol;
+    tol.axis = axis;
+    tol.slideUu = std::max(tol.slideUu, kHeldSlideUu);
+    return tol;
 }
 
 class HeldCheck {
@@ -61,7 +96,7 @@ public:
     // 2026-10-25: "28 deg, 0.6 uu off" logged every second), another re-seat at the same place only shakes it. The owner
     // moving the weapon in the hand (kHeldSteadyDeg / kHeldSteadyUu from that seat) allows the next one.
     bool Update(double nowMs, const HeldPose& owner, const HeldPose& standIn, const HeldTolerance& tol = HeldToleranceFor(false)) {
-        if (!HeldDiffers(owner, standIn, tol.deg, tol.uu)) { since_ = -1.0; return false; }
+        if (!HeldDiffers(owner, standIn, tol)) { since_ = -1.0; return false; }
         if (since_ < 0.0 || HeldDiffers(owner, anchor_, kHeldSteadyDeg, kHeldSteadyUu)) {
             since_ = nowMs;
             anchor_ = owner;

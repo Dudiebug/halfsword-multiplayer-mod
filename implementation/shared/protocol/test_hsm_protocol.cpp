@@ -117,7 +117,7 @@ static void TestMatchInfoAndKill() {
     m.phase = 2; m.timeLeftMs = 123456; m.winner = -1000;
     m.scores = {{0, 3}, {1, -2}, {2, 7}};
     m.fighters = {{1, 0, 3, 1, "host"}, {2, 1, 0, 2, "ann"}, {9, 2, 7, 0, "Bot"}};
-    CHECK(m.gear == 0 && m.tier == 2 && m.round == 0 && m.roundGapLeftMs == 0 && m.roundWinner == 0);
+    CHECK(m.gear == 0 && m.tier == 2 && m.round == 0 && m.roundGapLeftMs == 0 && m.roundWinner == 0 && m.damagePct == 0xFFFF);
     CHECK(m.fighters[0].pingMs == 0 && m.fighters[0].alive);                   // defaults: no ping known, alive
     m.gear = 2; m.tier = 5; m.round = 3; m.roundGapLeftMs = 4200; m.roundWinner = 9;   // rev 13: the rounds plan's fields
     m.fighters[0].pingMs = 87; m.fighters[1].alive = false; m.fighters[2].pingMs = 65535;
@@ -126,9 +126,20 @@ static void TestMatchInfoAndKill() {
     auto b = Encode(m); MatchInfo o;
     CHECK(Decode(b.data(), b.size(), o));
     CHECK(o.gear == 2 && o.tier == 5 && o.round == 3 && o.roundGapLeftMs == 4200 && o.roundWinner == 9);
+    CHECK(o.damagePct == 0xFFFF);   // rev 24: stock
+    { MatchInfo dm = m; dm.damagePct = 150; auto e = Encode(dm); MatchInfo y;
+      CHECK(Decode(e.data(), e.size(), y) && y.damagePct == 150); }
+    { MatchInfo dm = m; dm.damagePct = 1000; auto e = Encode(dm); MatchInfo y;
+      CHECK(Decode(e.data(), e.size(), y) && y.damagePct == 1000); }
     CHECK(o.fighters[0].pingMs == 87 && o.fighters[0].alive && !o.fighters[1].alive && o.fighters[1].pingMs == 0);
     CHECK(o.fighters[2].alive && o.fighters[2].pingMs == 65535);
     CHECK(o.fighters[2].down && !o.fighters[0].down && !o.fighters[1].down);
+    CHECK(o.fighters[0].steamId == 0 && o.fighters[2].steamId == 0);              // rev 24: bots and non-Steam players carry none
+    { MatchInfo sid = m; sid.fighters[0].steamId = 76561198000000001ull; sid.fighters[1].steamId = 0xFFFFFFFFFFFFFFFFull;
+      auto e = Encode(sid); MatchInfo y;
+      CHECK(Decode(e.data(), e.size(), y) && y.fighters[0].steamId == 76561198000000001ull && y.fighters[1].steamId == 0xFFFFFFFFFFFFFFFFull && y.fighters[2].steamId == 0);
+      CHECK(y.fighters[1].name == "ann" && y.fighters[2].entity == 9);
+      for (size_t cut = 0; cut < e.size(); ++cut) CHECK(!Decode(e.data(), cut, y)); }
     { MatchInfo dd = m; dd.fighters[2].alive = false; auto e = Encode(dd); MatchInfo y;   // each bit on its own
       CHECK(Decode(e.data(), e.size(), y) && !y.fighters[2].alive && y.fighters[2].down); }
     for (uint8_t g = 0; g < kGearCount; ++g)
@@ -153,6 +164,7 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 101; }));
     CHECK(bad([](MatchInfo& x) { x.timeLimitS = 3601; }));
     CHECK(bad([](MatchInfo& x) { x.respawnDelayS = 61; }));
+    CHECK(bad([](MatchInfo& x) { x.damagePct = 1001; }));   // rev 24: past the most, not the stock marker
     CHECK(bad([](MatchInfo& x) { x.fighters[0].entity = 0; }));
     CHECK(bad([](MatchInfo& x) { x.fighters[0].team = 8; }));
     CHECK(bad([](MatchInfo& x) { x.fighters.resize(kMaxWillies + 1, {1, 0, 0, 0, ""}); }));
@@ -162,7 +174,7 @@ static void TestMatchInfoAndKill() {
     CHECK(kGearCount == 4 && uint8_t(Gear::Fists) == kGearCount - 1);          // the last accepted gear is Fists; an older build's range ended at 2
     CHECK(bad([](MatchInfo& x) { x.gear = kGearCount; }));
     CHECK(bad([](MatchInfo& x) { x.tier = 8; }));
-    { auto e = Encode(m); CHECK(e.back() == 3); e.back() = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only
+    { auto e = Encode(m); uint8_t& al = e[e.size() - 9]; CHECK(al == 3 && e.back() == 0); al = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only
     { auto e = Encode(m); e.pop_back(); MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }                        // truncated
     b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));                  // trailing byte
     Kill k; k.killer = 3; k.victim = 4; k.flags = 1;
@@ -173,7 +185,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 18 && kProtocolRevision == 23);   // rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 18 && kProtocolRevision == 24);   // rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so

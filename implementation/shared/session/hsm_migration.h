@@ -1,9 +1,12 @@
 // Host migration (0.7.0-pre5), pure parts. When a Steam lobby's host leaves, Steam makes another member the lobby owner.
 // Instead of everyone going back to the main menu, that member becomes the host of the same lobby, and every other client
 // connects to it as it would join: the new host opens the current map again with the lobby's settings (scores start
-// over), and the clients follow its Travel. If Steam names no new owner in time, or the new host never welcomes us,
-// the client returns to the menu as before.
+// over), and the clients follow its Travel. The scores do not start over: every client holds the old host's last
+// MatchInfo, and ScoreCarryFrom turns it into the scores by SteamID that the new host's Match::Start takes in. If Steam
+// names no new owner in time, or the new host never welcomes us, the client returns to the menu as before.
 #pragma once
+#include "match/hsm_match.h"
+#include "protocol/hsm_protocol.h"
 #include <cstdint>
 
 namespace hsm {
@@ -12,6 +15,25 @@ constexpr uint32_t kMigrationOwnerWaitMs = 30000;   // Steam drops a crashed hos
 constexpr uint32_t kMigrationWelcomeMs = 20000;     // following a new host: its Welcome must come within this
 constexpr uint32_t kMigrationStartDelayMs = 3000;   // a new host waits this long before opening the map, so most clients
                                                     // are connected and load it once
+
+// The scores of the match the old host ran, by player, from the last MatchInfo a client heard. Empty (nothing to hand over)
+// when no match was running or it was over: the rematch starts at zero anyway. Only fighters with a SteamID carry over;
+// bots come back with the next wave.
+inline ScoreCarry ScoreCarryFrom(const MatchInfo& m) {
+    ScoreCarry b;
+    const auto phase = MatchPhase(m.phase);
+    if (phase == MatchPhase::Idle || phase == MatchPhase::Results || m.format >= kFormatCount) return b;
+    b.format = Format(m.format);
+    const bool own = b.format == Format::FreeForAll || b.format == Format::Duel;   // scored per entity; else per team
+    for (const ScoreEntry& s : m.scores) if (!own) b.teams[s.key] = s.score;
+    for (const FighterEntry& f : m.fighters) {
+        if (!f.steamId) continue;
+        PlayerScore p; p.id = f.steamId; p.kills = f.kills; p.deaths = f.deaths;
+        if (own) for (const ScoreEntry& s : m.scores) if (s.key == f.entity) p.score = s.score;
+        b.players.push_back(p);
+    }
+    return b;
+}
 
 enum class MigrationStep : uint8_t {
     Idle,         // no migration under way

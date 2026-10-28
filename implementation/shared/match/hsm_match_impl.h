@@ -13,6 +13,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
     if (uint8_t(c.gear) >= kGearCount || (c.gear == Gear::Fists && c.format != Format::FreeForAll)) c.gear = Gear::Own;
     c.tier = std::min<uint8_t>(c.tier, 7);
     if (c.gear == Gear::Fists) c.tier = 0;                              // Brawl is tier 0: the lowest build, no gear budget
+    if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
     return c;
 }
 
@@ -63,19 +64,34 @@ inline uint8_t KillLog::KillerOf(uint8_t victim, uint32_t nowMs) const {
 inline void KillLog::Forget(uint8_t entity) { last_.erase(entity); }
 inline void KillLog::ForgetAttacker(uint8_t entity) { std::erase_if(last_, [&](const auto& kv) { return kv.second.attacker == entity; }); }
 
-inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs) {
-    cfg_ = Sanitize(cfg); fighters_.clear(); score_.clear(); winner_ = kNoWinner; endedPending_ = false; ResetModeState();
+inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs, const ScoreCarry& carry) {
+    cfg_ = Sanitize(cfg); fighters_.clear(); score_.clear(); bank_.clear(); winner_ = kNoWinner; endedPending_ = false; ResetModeState();
+    if (carry.format == cfg_.format) {                  // a host migration: the old host's scores, kept under each player's id
+        for (const PlayerScore& p : carry.players) if (p.id) bank_[p.id] = p;
+        score_ = carry.teams;
+        if (IsBotFormat(cfg_.format)) wave_ = Score(kHumanTeam);   // Survival's team score is the waves cleared
+    }
     for (const FighterInfo& f : fighters) AddFighter(f);
     phase_ = MatchPhase::Countdown; phaseStart_ = nowMs;
 }
 
 inline void Match::AddFighter(const FighterInfo& f) {
-    F x; x.team = f.team; x.human = f.human; fighters_[f.entity] = x;
+    F x; x.team = f.team; x.human = f.human; x.id = f.id; fighters_[f.entity] = x;
+    if (auto b = f.id ? bank_.find(f.id) : bank_.end(); b != bank_.end()) {   // a player back: their score, kills and deaths
+        F& added = fighters_[f.entity];
+        added.kills = b->second.kills; added.deaths = b->second.deaths;
+        if (cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel) score_[int(f.entity)] = b->second.score;
+        bank_.erase(b);
+    }
     if (!f.human && spawnOwed_ > 0) --spawnOwed_;
 }
 inline void Match::RemoveFighter(uint8_t entity) {
+    auto it = fighters_.find(entity);
+    const bool own = cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel;   // teams keep their score
+    if (it != fighters_.end() && it->second.id)
+        bank_[it->second.id] = {it->second.id, own ? Score(int(entity)) : 0, it->second.kills, it->second.deaths};
     fighters_.erase(entity); skipVotes_.erase(entity); gone_.erase(entity);
-    if (cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel) score_.erase(int(entity));   // teams keep their score
+    if (own) score_.erase(int(entity));
 }
 
 inline bool Match::Leave(uint8_t entity, uint32_t nowMs) {
@@ -304,7 +320,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         if (leader != kNoWinner) End(leader, nowMs);
         else { phase_ = MatchPhase::SuddenDeath; phaseStart_ = nowMs; }
     } else if (phase_ == MatchPhase::Results && elapsed >= kResultsMs) {
-        score_.clear(); winner_ = kNoWinner; ResetModeState();
+        score_.clear(); bank_.clear(); winner_ = kNoWinner; ResetModeState();
         std::erase_if(fighters_, [](const auto& kv) { return !kv.second.human; });   // last run's bots are gone
         for (auto& [e, f] : fighters_) { f.alive = true; f.kills = 0; f.deaths = 0; }
         phase_ = MatchPhase::Countdown; phaseStart_ = nowMs; ev.rematch = true;

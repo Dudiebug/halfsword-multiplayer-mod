@@ -3,8 +3,8 @@
 Online multiplayer for Half Sword in one drop-in DLL.
 No game files are changed; delete the DLL to go back to vanilla.
 
-> **Status: release.** The current build is v0.7.0. Expect rough edges, and please report what you find
-> with `/bug` in the game. Everyone in a session needs the same version (0.7.0 connects only to 0.7.0).
+> **Status: release.** The current build is v0.7.1. Expect rough edges, and please report what you find
+> with `/bug` in the game. Everyone in a session needs the same version (0.7.1 connects only to 0.7.1).
 
 ## What it does
 
@@ -53,13 +53,15 @@ No game files are changed; delete the DLL to go back to vanilla.
   pings: when A to C through B is quicker than A to C directly, B passes A's movement on as well. Only A and C can make
   or check those packets. `detour=0` turns it off.
 - **Hosting without playing (experimental):** `role=server` runs matches and rotates maps with no fighter of its own;
-  players spawn at the map's start points. It runs a normal copy of the game.
+  players spawn at the map's start points. It runs a normal copy of the game and opens a public Steam lobby that
+  players find in the game's lobby browser.
 
 ## Known limitations
 
 - **Time of day follows the map.** You cannot pick day or night in a lobby yet; a lobby setting is planned.
 - **Brawl:** weapons on the level's own racks and floors can still be picked up.
-- **Direct-IP sessions have no lobby**, so they play Free-for-all with default settings.
+- **Direct IP is deprecated and will be removed in 0.8.0.** Use Steam lobbies. Direct-IP sessions have no lobby, so they
+  play Free-for-all with default settings.
 - Loadouts with no fabric armour show no team colour.
 
 ## Bug reports and privacy

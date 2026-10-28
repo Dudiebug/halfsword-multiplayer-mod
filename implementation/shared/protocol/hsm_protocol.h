@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 23;         // 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 24;         // 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -196,6 +196,7 @@ struct FighterEntry {
     uint16_t pingMs = 0;                // round trip to the host, 0 = unknown (the host itself, bots)
     bool alive = true;
     bool down = false;                  // rev 17: Duel, the host's draw check has it down (match/hsm_draw.h DrawCheck::Down)
+    uint64_t steamId = 0;               // rev 24: the player's SteamID, 0 = bot / not a Steam player (the scores' identity, session/hsm_migration.h)
 };
 struct MatchInfo {
     uint8_t format = 0;                 // hsm::Format
@@ -208,6 +209,7 @@ struct MatchInfo {
     uint16_t round = 0;                 // Duel: the round being fought, or just won in the gap; 0 in other formats
     uint32_t roundGapLeftMs = 0;        // Duel: time before the next round, 0 outside the gap
     uint8_t roundWinner = 0;            // Duel's gap: the entity that took the round, 0 = drawn
+    uint16_t damagePct = 0xFFFF;        // rev 24: the Player Damage Rate everyone runs, percent (0..1000); 0xFFFF the stock one (match/hsm_damage.h)
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
 };
@@ -425,7 +427,7 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     Writer w; w.header(MsgType::MatchInfo);
     w.u8(m.format); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
     w.u8(m.phase); w.u32(m.timeLeftMs); w.i16(m.winner);
-    w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner);
+    w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner); w.u16(m.damagePct);
     size_t ns = m.scores.size() < 255 ? m.scores.size() : 255; w.u8(uint8_t(ns));
     for (size_t i = 0; i < ns; ++i) { w.i16(m.scores[i].key); w.i16(m.scores[i].score); }
     size_t nf = m.fighters.size() < 255 ? m.fighters.size() : 255; w.u8(uint8_t(nf));
@@ -433,6 +435,7 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
         const FighterEntry& f = m.fighters[i];
         w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); w.u16(f.pingMs);
         w.u8(uint8_t((f.alive ? 1 : 0) | (f.down ? 2 : 0)));   // bit 0 alive, bit 1 down
+        w.u64(f.steamId);
     }
     return w.buf;
 }
@@ -440,9 +443,9 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
     m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
-    m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8();
+    m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8(); m.damagePct = r.u16();
     if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
-    if (m.gear >= kGearCount || m.tier > 7) return false;
+    if (m.gear >= kGearCount || m.tier > 7 || (m.damagePct != 0xFFFF && m.damagePct > 1000)) return false;
     m.friendlyFire = ff == 1;
     size_t ns = r.u8(); if (ns > kMaxWillies) return false;
     m.scores.resize(ns); for (ScoreEntry& e : m.scores) { e.key = r.i16(); e.score = r.i16(); }
@@ -451,6 +454,7 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     for (FighterEntry& f : m.fighters) {
         f.entity = r.u8(); f.team = int8_t(r.u8()); f.kills = r.i16(); f.deaths = r.i16(); f.name = r.str(kMaxPlayerName);
         f.pingMs = r.u16(); uint8_t alive = r.u8(); f.alive = (alive & 1) != 0; f.down = (alive & 2) != 0;
+        f.steamId = r.u64();
         if (f.entity == 0 || f.team < -1 || f.team > 7) return false;
         if (alive > 3) return false;
     }
@@ -523,7 +527,10 @@ inline bool Decode(const uint8_t* d, size_t n, PingTableMsg& m) {
 // relays it to the players who may hear it (voice/hsm_voice.h) with the entity it checked. flags: kVoiceSpurt, the
 // first chunk of a talk spurt; kVoiceAdpcm (rev 23), the data is IMA ADPCM at 16 kHz (voice/hsm_adpcm.h), recorded
 // by the mod from a microphone the player picked, instead of Steam-compressed.
-constexpr uint8_t kVoiceSpurt = 1, kVoiceAdpcm = 2;
+// Rev 24: voice is each player's own setting, carried by the speaker's chunks: kVoiceEveryone, the speaker chose
+// Everyone (else Proximity; Off sends nothing); kVoiceNoCut, the speaker keeps talking when knocked out or low on
+// consciousness (voice_cut=0; the dead still talk only to the dead).
+constexpr uint8_t kVoiceSpurt = 1, kVoiceAdpcm = 2, kVoiceNoCut = 4, kVoiceEveryone = 8;
 constexpr size_t kMaxVoiceBytes = 4096;   // over a second of speech: only a long hitch makes a chunk this big
 struct VoiceMsg { uint8_t entity = 0; uint16_t seq = 0; uint8_t flags = 0; std::vector<uint8_t> data; };
 inline std::vector<uint8_t> Encode(const VoiceMsg& m) {
@@ -536,13 +543,13 @@ inline bool Decode(const uint8_t* d, size_t n, VoiceMsg& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Voice) return false;
     m.entity = r.u8(); m.seq = r.u16(); m.flags = r.u8();
     const size_t len = r.u16();
-    if (!r.ok() || m.entity == 0 || (m.flags & ~(kVoiceSpurt | kVoiceAdpcm)) != 0 || len == 0 || len > kMaxVoiceBytes || n < 10 || n - 10 != len) return false;   // 4 header + 6 fields
+    if (!r.ok() || m.entity == 0 || (m.flags & ~(kVoiceSpurt | kVoiceAdpcm | kVoiceNoCut | kVoiceEveryone)) != 0 || len == 0 || len > kMaxVoiceBytes || n < 10 || n - 10 != len) return false;   // 4 header + 6 fields
     m.data.assign(d + 10, d + n);
     return true;
 }
 
 // VoiceMode (rev 23): the host's voice setting changed mid-session (voice/hsm_voice.h Reach: 0 Off, 1 Proximity,
-// 2 Everyone). The session's starting value comes in Welcome.flags.
+// 2 Everyone). Unused since rev 24 (voice is each player's own; kWelcomeVoice* too); still decoded.
 struct VoiceModeMsg { uint8_t reach = 0; };
 inline std::vector<uint8_t> Encode(const VoiceModeMsg& m) { Writer w; w.header(MsgType::VoiceMode); w.u8(m.reach); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, VoiceModeMsg& m) {

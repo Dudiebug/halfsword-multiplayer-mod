@@ -32,7 +32,7 @@ int main() {
     selected = 0;
     for (const ModeCard& m : on.modes) selected += m.selected;
     CHECK(selected == 1);                              // the formats are all unselected
-    CHECK(on.settings.empty() && on.maps.empty());
+    CHECK(on.settings.size() == 1 && on.settings[0].id == LobbyRow::Damage && on.maps.empty());   // player damage alone
     CHECK(on.start);
 
     LobbyScene member = BuildLobbyScene(Lobby(false, true));

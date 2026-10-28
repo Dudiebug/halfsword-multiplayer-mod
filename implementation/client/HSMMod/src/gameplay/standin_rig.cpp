@@ -61,7 +61,7 @@ constexpr int kHeadScanEvery = 15;            // frames between searches for a f
 constexpr int32_t kFlailMaxBones = 64;
 constexpr double kFullEarlyEveryMs = 500.0, kFullEarlyForMs = 6000.0, kFullEveryMs = 2000.0;
 constexpr double kCapsuleTeleportUu = 150.0;  // HSMP main.lua:133 TELEPORT_DIST
-constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel
+constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 4;   // ECollisionChannel
 constexpr uint8_t kIgnore = 0;                // ECollisionResponse::ECR_Ignore
 constexpr uint8_t kNoCollision = 0;           // ECollisionEnabled::NoCollision
 constexpr uint8_t kLocked = 2;                 // ELinearConstraintMotion::LCM_Locked, EAngularConstraintMotion::ACM_Locked
@@ -725,6 +725,15 @@ void FighterRig::Neutralise(double nowMs) {
     bool slotsChanged = false;
     for (int k = 0; k < kSheathSlots; ++k)
         if (UObject* s = FieldAt(slotOffset_[k]); s != slotSeen_[k]) { slotSeen_[k] = s; slotsChanged = true; }
+    // The game's own collision refreshes undo the chain's policy between full passes: Unsheathed Mode (a draw,
+    // Willie_BP.cpp:6426) and Turn On Collision put the chain's WorldStatic response back to Block
+    // (ModularWeaponBP.cpp:2232-2234), Refresh Collisions re-attaches it (:1651-1657). One cheap read per chain per frame.
+    for (Weapon& wp : weapons_)
+        if (wp.flail && Live(wp.flail, wp.flailIndex)) {
+            Call g(wp.flail, "GetCollisionResponseToChannel");
+            g.set<uint8_t>("Channel", kWorldStatic);
+            if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) SetChainPolicy(wp.flail);
+        }
     if (nowMs < nextFullMs_ && !weaponChanged_ && !slotsChanged) return;
     NeutraliseFull();
     weaponChanged_ = false;
@@ -907,7 +916,7 @@ bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
     SetWorldTransform(root, keep);
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmFlail(weaponR);
-    if (weapons_[0].flail && Live(weapons_[0].flail, weapons_[0].flailIndex)) SetBodyPolicy(weapons_[0].flail);   // the chain's bodies were made again
+    if (weapons_[0].flail && Live(weapons_[0].flail, weapons_[0].flailIndex)) SetChainPolicy(weapons_[0].flail);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
     switchOn_ = false;
     HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
@@ -947,11 +956,15 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
     const sync::BodyNow& sh = now.bones[sync::kBoneHandR];
     const sync::HeldPose owner = sync::HeldIn(oh.pos, oh.rot, ow.pos, ow.rot);
     const sync::HeldPose mine = sync::HeldIn(sh.pos, sh.rot, now.weapons[0].pos, now.weapons[0].rot);
-    if (offJoint_ && sync::QuatAngleDeg(owner.rot, mine.rot) < kHeldTwoHandDeg && sync::Vec3Dist(owner.pos, mine.pos) < kHeldTwoHandUu) {
+    // A spear or staff held mid-shaft may sit slid along the shaft (hsm_held.h HeldToleranceForShaft).
+    const sync::HeldTolerance tol = sync::HeldToleranceForShaft(sync::HeldToleranceFor(wp.flail != nullptr), owner, oh.rot, ow.base, ow.tip);
+    sync::HeldTolerance twoHand = tol;
+    twoHand.deg = kHeldTwoHandDeg; twoHand.uu = kHeldTwoHandUu;
+    if (offJoint_ && !sync::HeldDiffers(owner, mine, twoHand)) {
         heldCheck_.Reset();
         return;
     }
-    if (!heldCheck_.Update(nowMs, owner, mine, sync::HeldToleranceFor(wp.flail != nullptr))) return;
+    if (!heldCheck_.Update(nowMs, owner, mine, tol)) return;
     FTransform keep;
     if (!WorldTransform(wp.root, keep)) return;
     V3 pos;
@@ -967,7 +980,7 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
     SetWorldTransform(wp.root, keep);
     Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmFlail(wp.actor);
-    if (wp.flail && Live(wp.flail, wp.flailIndex)) SetBodyPolicy(wp.flail);   // the chain's bodies were made again
+    if (wp.flail && Live(wp.flail, wp.flailIndex)) SetChainPolicy(wp.flail);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again on the next Drive
     switchOn_ = false;
     if (offJoint_) {            // the off hand is attached again to the weapon's new seat on the next ApplyGrip
@@ -977,9 +990,9 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
         offJoint_ = nullptr;
         offTryMs_ = -1e18;
     }
-    HSM_LOG("rig: %s: weapon re-seated in the right hand as the owner holds it (%.0f deg, %.1f uu off)%s",
+    HSM_LOG("rig: %s: weapon re-seated in the right hand as the owner holds it (%.0f deg, %.1f uu off%s)%s",
             ObjectName(willie_).c_str(), sync::QuatAngleDeg(owner.rot, mine.rot), sync::Vec3Dist(owner.pos, mine.pos),
-            ok ? "" : " (joint NOT remade)");
+            tol.slideUu > 0.0 ? ", mid-shaft" : "", ok ? "" : " (joint NOT remade)");
 }
 
 void FighterRig::SetBodyPolicy(UObject* body) {
@@ -988,6 +1001,15 @@ void FighterRig::SetBodyPolicy(UObject* body) {
     Call(body, "SetEnableGravity").set<bool>("bGravityEnabled", false).invoke();
     Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", kIgnore).invoke();
     Call(body, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldDynamic).set<uint8_t>("NewResponse", kIgnore).invoke();
+}
+
+// A flail chain on a stand-in, as SetBodyPolicy, and passing through fighters' bodies and armour: its head is driven by
+// velocity (no force limit), so a chain wrapped round the local fighter dragged them after the owner's swing ("flails
+// tug on you"). Hits are judged on the owner's game, so nothing is lost; weapons still meet it (parries, binds).
+void FighterRig::SetChainPolicy(UObject* chain) {
+    SetBodyPolicy(chain);
+    Call(chain, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kPawn).set<uint8_t>("NewResponse", kIgnore).invoke();
+    Call(chain, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kPhysicsBody).set<uint8_t>("NewResponse", kIgnore).invoke();
 }
 
 void FighterRig::NeutraliseFull() {
@@ -1021,7 +1043,7 @@ void FighterRig::NeutraliseFull() {
             SetBodyPolicy(wp.root);
             // The flail chain follows the handle's policy (every body of the component): gravity and world geometry left
             // on sagged it and snagged it on the floor while the handle and body ignored both.
-            if (wp.flail && Live(wp.flail, wp.flailIndex)) SetBodyPolicy(wp.flail);
+            if (wp.flail && Live(wp.flail, wp.flailIndex)) SetChainPolicy(wp.flail);
         }
     CollisionOff(ObjField(willie_, "BoneCore"));   // HSMP main.lua:4673
     Call rc(willie_, "K2_GetRootComponent");

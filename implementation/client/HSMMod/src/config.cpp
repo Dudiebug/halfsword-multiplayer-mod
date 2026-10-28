@@ -15,7 +15,7 @@ namespace {
 constexpr char kDefaultIni[] =
     "; HalfSwordMP configuration. role = steam | host | client | off\n"
     "; steam: use the Multiplayer button on the main menu (Steam lobbies, invites, no port forwarding).\n"
-    "; host/client: direct IP over UDP (LAN/testing; host forwards the port). off: completely vanilla.\n"
+    "; host/client: DEPRECATED direct IP over UDP (testing only; removed in 0.8.0, use role=steam). off: completely vanilla.\n"
     "[net]\n"
     "role=steam\n"
     "host=127.0.0.1\n"
@@ -41,15 +41,17 @@ constexpr char kDefaultIni[] =
     "; 1: also send your HSMMod log (Steam IDs, IPs and your user name removed) when someone in your lobby files a bug report\n"
     "; or a crash is reported. The MULTIPLAYER page has the same switch. 0: off (default)\n"
     "help_improve=0\n"
-    "; voice chat (the multiplayer page and the Esc menu in a match change these). The host's voice=1 turns it on for the\n"
-    "; session (0, the default: off for everyone); voice_reach=proximity fades voices with distance (full volume within\n"
-    "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one. Your microphone:\n"
+    "; voice chat (the multiplayer page and the Esc menu in a match change these). voice=1 turns it on for you (0, the\n"
+    "; default: you neither talk nor hear); voice_reach=proximity fades voices with distance (full volume within\n"
+    "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one; between two\n"
+    "; players the narrower setting holds. voice_cut=0 keeps you talking when knocked out. Your microphone:\n"
     "; voice_mode=ptt sends while voice_key is held (a letter, a digit, f1..f12, mouse4 or mouse5), level sends while you\n"
     "; speak above voice_level_db (-60 picks up whispers, -30 only a firm voice), off never sends. voice_device: a\n"
     "; recording device's name (empty: the Windows default). A fighter below voice_cutoff percent of full consciousness,\n"
     "; knocked out or dead is cut off; the dead hear the dead. votekick=1 lets players vote a player out of your session.\n"
     "voice=0\n"
     "voice_reach=proximity\n"
+    "voice_cut=1\n"
     "voice_mode=ptt\n"
     "voice_device=\n"
     "voice_level_db=-40\n"
@@ -59,9 +61,11 @@ constexpr char kDefaultIni[] =
     "voice_cutoff=30\n"
     "voice_volume=100\n"
     "; role=server (a hosted retail instance with no fighter of its own that starts matches by itself):\n"
-    "; server_transport=direct|steam (steam is experimental), server_format=ffa|duel|teams|survival|zombies,\n"
+    "; server_transport=steam|direct (steam: a public Steam lobby in the game's lobby browser, the way servers run; direct is\n"
+    "; DEPRECATED and removed in 0.8.0), server_format=ffa|duel|teams|survival|zombies,\n"
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
-    "; server_countdown_s=30, server_min_players=2 (1..8)\n"
+    "; server_countdown_s=30, server_min_players=2 (1..8), server_damage=stock or a percent (player damage for everyone,\n"
+    "; 100 = the game's rate 1.0, inside the game's own damage slider)\n"
     "; server_admins=Steam IDs (comma list) allowed to /kick, /ban and /unban from the chat; server_votekick=1 lets players\n"
     "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players\n"
     "; and say (HSMMod.cmd)\n"
@@ -72,6 +76,7 @@ constexpr char kDefaultIni[] =
     "server_time_limit_s=0\n"
     "server_countdown_s=30\n"
     "server_min_players=2\n"
+    "server_damage=stock\n"
     "server_admins=\n"
     "server_votekick=1\n"
     "votekick=1\n";
@@ -142,6 +147,7 @@ Config LoadConfig() {
         c.voiceReach = voice::ReachFromIni(reach, voice::Reach::Proximity);
         if (c.voiceReach == voice::Reach::Off) c.voiceReach = voice::Reach::Proximity;   // off is voice=0
         if (reach != "proximity" && reach != "everyone") HSM_LOG("config: voice_reach=%s is not proximity or everyone; using proximity", reach.c_str());
+        c.voiceCut = ReadString(ini, L"voice_cut", "1") != "0";
         const std::string mode = ReadString(ini, L"voice_mode", "ptt");
         if (!voice::MicFromIni(mode, c.voiceMic)) HSM_LOG("config: voice_mode=%s is not ptt, level or off; using ptt", mode.c_str());
         c.voiceDevice = ReadString(ini, L"voice_device", "");
@@ -166,13 +172,17 @@ Config LoadConfig() {
     if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
     c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
     c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
-    c.serverTransport = ReadString(ini, L"server_transport", "direct") == "steam" ? "steam" : "direct";
+    c.serverTransport = ReadString(ini, L"server_transport", "steam") == "direct" ? "direct" : "steam";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
     c.serverMaps = ReadString(ini, L"server_maps", "all");
     c.serverScoreLimit = Clamp(std::atoi(ReadString(ini, L"server_score_limit", "0").c_str()), 0, 100);
     c.serverTimeLimitS = Clamp(std::atoi(ReadString(ini, L"server_time_limit_s", "0").c_str()), 0, 3600);
     c.serverCountdownS = Clamp(std::atoi(ReadString(ini, L"server_countdown_s", "30").c_str()), 0, 600);
     c.serverMinPlayers = Clamp(std::atoi(ReadString(ini, L"server_min_players", "2").c_str()), 1, kMaxPlayers);
+    {
+        const std::string d = ReadString(ini, L"server_damage", "stock");
+        c.serverDamagePct = d.empty() || d == "stock" ? -1 : Clamp(std::atoi(d.c_str()), 0, 1000);
+    }
     c.serverAdmins = ReadString(ini, L"server_admins", "");
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     // Command-line overrides (several instances share one ini, e.g. a local host + client test).
@@ -193,11 +203,13 @@ Config LoadConfig() {
             c.allowBuildMismatch ? 1 : 0);
     HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
             c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);
-    HSM_LOG("config: voice=%d reach=%s mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
-            voice::ReachIni(c.voiceReach), voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
+    if (c.role == Role::Host || c.role == Role::Client || (c.role == Role::Server && c.serverTransport == "direct"))
+        HSM_LOG("config: direct IP (role=host/client or server_transport=direct) is deprecated and will be removed in 0.8.0; use Steam lobbies");
+    HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
+            voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)
-        HSM_LOG("config: server transport=%s format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d", c.serverTransport.c_str(),
-                c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers);
+        HSM_LOG("config: server transport=%s format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d", c.serverTransport.c_str(),
+                c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
     if (c.role == Role::Server)
         HSM_LOG("config: server admins=%s", c.serverAdmins.empty() ? "none (console only)" : "set");
     return c;

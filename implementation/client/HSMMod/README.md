@@ -20,7 +20,7 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
 `.agents/workflow/tools/workflowctl.py verify`.
 
-## New in 0.7.0
+## New in 0.7.0 (pre-release)
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
 - **Mesh (experimental, on by default from 0.7.0-pre6; `mesh=0` under `[net]` turns it off):** in a Steam lobby the
@@ -74,9 +74,10 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 - **`role=server` (experimental):** the host runs matches without a fighter of its own and cycles maps by itself.
   Keys under `[net]`: `server_format` (ffa, teams, survival, zombies, duel), `server_maps` (comma list or `all`),
   `server_score_limit`, `server_time_limit_s`, `server_countdown_s` (30), `server_min_players` (2).
-  `server_transport=steam` opens a public Steam lobby by itself (named after `name=`) and keeps it open; players join
-  it from the Multiplayer page and Steam relays the traffic. It needs Steam running and signed in on that machine,
-  with an account that owns the game. `server_transport=direct` (default) listens on `port` for direct-IP clients.
+  `server_transport=steam` (default) opens a public Steam lobby by itself (named after `name=`) and keeps it open;
+  players find it in the game's lobby browser and Steam relays the traffic. It needs Steam running and signed in on
+  that machine, with an account that owns the game. `server_transport=direct` listens on `port` for direct-IP clients;
+  it is deprecated and removed in 0.8.0.
   This is a hosted copy of the retail game, not a dedicated server. With no host fighter to spawn around, players
   spawn at the map's PlayerStart, else a navmesh point, else the floor found by a trace, and the map origin only as
   the last resort.
@@ -165,7 +166,7 @@ Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor 
 1. Copy `build/dwmapi.dll` to `Half Sword/HalfswordUE5/Binaries/Win64/`.
 2. Proton/Linux only: set Steam launch options to `WINEDLLOVERRIDES="dwmapi=n,b" %command%`. Launch through Steam:
    starting Proton by hand outside Steam's runtime falls back to software rendering or crashes the D3D12 renderer.
-3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). For direct IP instead of Steam, edit it:
+3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). Direct IP is deprecated (testing only, removed in 0.8.0; use Steam lobbies), but still works if you edit it:
    - Host: `role=host`, and forward UDP `27777` (or your `port`) to the host machine.
    - Client: `role=client`, `host=<host IP>`.
 4. Logs go to `HSMMod.log` in the same folder.
@@ -359,7 +360,7 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   Blueprints before any code is written.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression rewards (payout, rank points, injuries) are not yet applied to clients' own saves after co-op fights.
-- Direct-IP (ENet) sessions have no lobby, so they play Free-for-all with default settings (Progression co-op
+- Direct-IP (ENet) is deprecated and removed in 0.8.0; servers and players use Steam lobbies. Direct-IP sessions have no lobby, so they play Free-for-all with default settings (Progression co-op
   outside Free Mode).
 - Next: a spectator host (`role=server`): the retail game plus this mod hosting with no fighter of its own and
   automatic match start/rotation. It is a hosted retail instance, not a dedicated server build.

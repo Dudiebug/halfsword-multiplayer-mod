@@ -39,7 +39,7 @@ static void TestWire() {
     for (uint8_t f : {uint8_t(0), kVoiceSpurt, kVoiceAdpcm, uint8_t(kVoiceSpurt | kVoiceAdpcm)}) {
         v.flags = f; b = Encode(v); CHECK(Decode(b.data(), b.size(), o) && o.flags == f);
     }
-    v.flags = 4; b = Encode(v); CHECK(!Decode(b.data(), b.size(), o));
+    v.flags = 16; b = Encode(v); CHECK(!Decode(b.data(), b.size(), o));   // rev 24 takes 4 and 8 (kVoiceNoCut, kVoiceEveryone)
 
     Welcome w; w.flags = kWelcomeVoice | kWelcomeVoiceAll; Welcome wo;
     b = Encode(w); CHECK(Decode(b.data(), b.size(), wo) && wo.flags == 24);

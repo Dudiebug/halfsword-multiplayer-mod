@@ -6,6 +6,7 @@
 //   RegearFor     - which respawns bring a new generated loadout
 //   PartitionSides / PickRespawn - team spawn sides and respawn points
 #pragma once
+#include "match/hsm_damage.h"
 #include "session/hsm_spawn.h"
 #include <algorithm>
 #include <cmath>
@@ -34,6 +35,7 @@ struct MatchConfig {
     bool friendlyFire = false;
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
+    uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
 };
 // Brawl: free-for-all where every fighter spawns bare (no armour, no weapons) and fights with fists. A mode card, not a
 // Format: the rules are free-for-all's.
@@ -93,7 +95,20 @@ inline bool GaveUpDeath(uint32_t markedAtMs, uint32_t nowMs) {
 enum class MatchPhase : uint8_t { Idle = 0, Countdown = 1, Live = 2, SuddenDeath = 3, Results = 4 };
 inline bool CombatPhase(MatchPhase phase) { return phase == MatchPhase::Live || phase == MatchPhase::SuddenDeath; }   // blows count
 
-struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = true; };
+// id: the player's stable identity (SteamID; 0 = none: bots, direct-IP peers), which keeps their score across a leave and
+// rejoin and across a host migration. The entity is only the slot they hold now.
+struct FighterInfo { uint8_t entity = 0; int8_t team = kNoTeam; bool human = true; uint64_t id = 0; };
+
+// A match's scores by identity, for the next host after a host migration (session/hsm_migration.h builds it from the last
+// MatchInfo): each player's score (free-for-all / Duel), kills and deaths by SteamID, the team scores by team. Match::Start
+// takes it in and gives each player theirs back as they come in; it applies only to the same format.
+struct PlayerScore { uint64_t id = 0; int score = 0, kills = 0, deaths = 0; };
+struct ScoreCarry {
+    Format format = Format::FreeForAll;
+    std::vector<PlayerScore> players;
+    std::map<int, int> teams;
+    bool empty() const { return players.empty() && teams.empty(); }
+};
 
 class Match {
 public:
@@ -110,9 +125,11 @@ public:
         Regear regear = Regear::None;   // with respawn or rematch: the gear they come back with (RegearFor)
     };
 
-    void Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs);
-    void AddFighter(const FighterInfo& f);              // joins mid-match: alive, no score change
-    void RemoveFighter(uint8_t entity);                 // free-for-all / Duel: its score goes with it (the slot's next player starts at 0)
+    void Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs, const ScoreCarry& carry = {});
+    void AddFighter(const FighterInfo& f);              // joins mid-match: alive; a player with an id comes back with the score they left with
+    // A fighter leaves for good. Its score goes with the slot (the slot's next player starts at 0), but a player with an id has
+    // it kept under that id until the rematch (AddFighter), so a rejoin on any slot gets it back. Team scores stay with the team.
+    void RemoveFighter(uint8_t entity);
     // K1/K2: a fighter who left (or is held for a rejoin) in a fought phase falls with no kill credited (a Duel round goes to
     // whoever is left; Survival: the last human gone ends it) and is neither respawned nor counted until Return/RemoveFighter.
     // False, and no effect, outside a fought phase, for an unknown fighter or one already down (it is still marked gone).
@@ -172,7 +189,7 @@ public:
     size_t size() const { return fighters_.size(); }
 
 private:
-    struct F { int8_t team = kNoTeam; bool human = true, alive = true; uint32_t diedAt = 0; int kills = 0, deaths = 0; };
+    struct F { int8_t team = kNoTeam; bool human = true, alive = true; uint32_t diedAt = 0; int kills = 0, deaths = 0; uint64_t id = 0; };
     void AddPoints(int key, int points);
     void ResolveDuelRound(uint32_t nowMs);              // Duel: the round goes to the last one standing
     void End(int winnerKey, uint32_t nowMs);
@@ -183,6 +200,7 @@ private:
     uint32_t phaseStart_ = 0;
     std::map<uint8_t, F> fighters_;
     std::map<int, int> score_;
+    std::map<uint64_t, PlayerScore> bank_;              // by id: scores of players not in the match now (left, or not back since a migration)
     std::set<uint8_t> gone_;                            // K1: left mid-match, down until Return
     int winner_ = kNoWinner;
     bool endedPending_ = false;

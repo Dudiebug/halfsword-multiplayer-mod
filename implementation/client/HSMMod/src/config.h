@@ -36,15 +36,16 @@ struct Config {
     // true (default): when a Steam lobby's host leaves, the member Steam makes the new lobby owner hosts the same lobby
     // and the others follow it (session/hsm_migration.h) instead of everyone going back to the menu.
     bool hostMigration = true;
-    // Voice chat (gameplay/voice.h). The host's voice and voiceReach are the session's setting: off (the default), by
+    // Voice chat (gameplay/voice.h). Each player's own setting (0.7.1): voice and voiceReach are off (the default), by
     // distance (proximity: full volume within voiceNearM, silent past voiceFarM) or every living player hears every
-    // living one (everyone). A fighter below voiceCutoff of full consciousness (or knocked out, or dead) is cut off; the
-    // dead hear only the dead. Every player hears whatever the host's setting allows; the rest is each player's own:
-    // voiceMic (push to talk on voiceKey by default, an open microphone above voiceLevelDb, or off), voiceDevice (a
+    // living one (everyone); two players hear each other at the narrower of their settings. A fighter below voiceCutoff
+    // of full consciousness (or knocked out, or dead) is cut off unless its voiceCut is false; the dead hear only the
+    // dead. Also each player's own: voiceMic (push to talk on voiceKey by default, an open microphone above voiceLevelDb, or off), voiceDevice (a
     // Windows recording device by name; empty: the Windows default, recorded by Steam) and voiceVolume. The multiplayer
     // page and the in-match menu change them and write them back (SaveIniValues).
     bool voice = false;
     voice::Reach voiceReach = voice::Reach::Proximity;   // when voice is on
+    bool voiceCut = true;        // false: keep talking when knocked out or low on consciousness
     voice::Mic voiceMic = voice::Mic::PushToTalk;
     std::string voiceDevice;
     float voiceLevelDb = -40.f;
@@ -68,12 +69,13 @@ struct Config {
     std::string reportUrl = "https://reports.dudiebug.net";
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
-    // role=server only (see session/hsm_autoflow.h). transport: "direct" (ENet on `port`) or "steam" (experimental).
-    std::string serverTransport = "direct";
+    // role=server only (see session/hsm_autoflow.h). transport: "steam" (a public Steam lobby, default) or "direct" (ENet on `port`; deprecated, removed in 0.8.0).
+    std::string serverTransport = "steam";
     std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
     std::string serverMaps = "all";            // comma list of map display names, or all
     int serverScoreLimit = 0;                  // 0: the format's default
     int serverTimeLimitS = 0;                  // 0: none
+    int serverDamagePct = -1;                  // player damage for everyone, percent of the rate; -1: the stock rate
     int serverCountdownS = 30;                 // lobby countdown once serverMinPlayers have joined
     int serverMinPlayers = 2;
     // Moderation (session/hsm_moderation.h): on role=server, Steam IDs that may /kick, /ban and /unban from the chat (the

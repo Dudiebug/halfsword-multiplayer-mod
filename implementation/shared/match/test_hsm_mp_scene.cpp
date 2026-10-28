@@ -34,15 +34,25 @@ static void TestVoiceRows() {
     v.mic = voice::Mic::Off; s = BuildVoiceScene(v, false);
     CHECK(s.meterText == "Microphone muted" && !Row(s, VoiceRow::Monitor)->enabled && !Row(s, VoiceRow::Level) && !Row(s, VoiceRow::Key));
 
-    // A client in someone's session: the reach is shown, not changed; off at the host says so.
+    // 0.7.1: a client in someone's session sets its own reach; its own off says so.
     MpVoice c; c.session = true; c.host = false; c.reach = voice::Reach::Off;
     s = BuildVoiceScene(c, false);
-    CHECK(!Row(s, VoiceRow::Reach)->enabled && Row(s, VoiceRow::Reach)->hint == "The host's setting.");
-    CHECK(s.note == "The host has voice chat off.");
+    CHECK(Row(s, VoiceRow::Reach)->enabled && s.note == "Your voice chat is off.");
+    CHECK(!Row(s, VoiceRow::Cut));                           // nothing to cut while voice is off
     c.reach = voice::Reach::Everyone; s = BuildVoiceScene(c, false);
     CHECK(Row(s, VoiceRow::Reach)->value == "Everyone" && s.note.empty());
-    c.host = true; c.server = true; s = BuildVoiceScene(c, false);
-    CHECK(!Row(s, VoiceRow::Reach)->enabled);                // a role=server host's setting is the server's
+    c.server = true; s = BuildVoiceScene(c, false);
+    CHECK(Row(s, VoiceRow::Reach)->enabled);                 // a client of a server talks as it likes
+    c.host = true; s = BuildVoiceScene(c, false);
+    CHECK(!Row(s, VoiceRow::Reach)->enabled);                // the role=server host itself relays only
+
+    // The knocked-out toggle: shown with voice on, flipped by either arrow.
+    MpVoice k; k.reach = voice::Reach::Proximity;
+    s = BuildVoiceScene(k, false);
+    CHECK(Row(s, VoiceRow::Cut) && Row(s, VoiceRow::Cut)->value == "Go quiet" && Row(s, VoiceRow::Cut)->enabled);
+    k = StepVoice(k, VoiceRow::Cut, 1); CHECK(!k.cut);
+    s = BuildVoiceScene(k, false); CHECK(Row(s, VoiceRow::Cut)->value == "Keep talking");
+    k = StepVoice(k, VoiceRow::Cut, -1); CHECK(k.cut);
 
     // Devices: a named one that is gone says so; the list is stepped through, the default first.
     MpVoice d; d.devices = {"Headset", "USB Mic"}; d.device = "Old Mic";

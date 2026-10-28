@@ -25,7 +25,7 @@ public:
     // The multiplayer menus (the page's voice block, the in-match Esc menu). Voice settings are written to HSMMod.ini.
     virtual bool InSession() const = 0;                              // joined (a client welcomed) or hosting
     virtual MpVoice VoiceView() = 0;                                 // also keeps the microphone recording for the meter a moment
-    virtual void SetVoiceReach(voice::Reach reach) = 0;              // host: the session's voice chat (Off / Proximity / Everyone)
+    virtual void SetVoiceReach(voice::Reach reach) = 0;              // this player's own voice chat (Off / Proximity / Everyone); a role=server host only relays
     virtual void SetVoicePrefs(const MpVoice& v) = 0;                // mic mode, threshold, key, volume, device
     virtual void SetVoiceMonitor(bool on) = 0;                       // HEAR MYSELF
     virtual std::vector<MpPlayer> Players() = 0;                     // the session's players, this machine's view

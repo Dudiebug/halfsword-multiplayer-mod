@@ -107,8 +107,13 @@ inline Hear Audible(bool speakerAlive, bool speakerAwake, bool listenerAlive) {
     return Hear::Spatial;
 }
 
-// The host's session setting (0.7.0-pre6): no voice, by distance, or every living player hears every living one.
+// Each player's own setting (0.7.1; the host's for the whole session in 0.7.0): no voice, by distance, or every living
+// player hears every living one.
 enum class Reach : uint8_t { Off = 0, Proximity = 1, Everyone = 2 };
+
+// Between a speaker and a listener the narrower of their two settings holds: Off on either side is silence, Everyone
+// only when both chose it, so a speaker on Proximity is never heard across the map.
+inline Reach PairReach(Reach speaker, Reach listener) { return Reach(std::min(uint8_t(speaker), uint8_t(listener))); }
 
 inline Hear AudibleIn(Reach reach, bool speakerAlive, bool speakerAwake, bool listenerAlive) {
     if (reach == Reach::Off) return Hear::None;

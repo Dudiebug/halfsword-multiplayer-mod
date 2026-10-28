@@ -14,10 +14,11 @@ namespace hsm {
 // ---------------------------------------------------------------- what the session reports
 
 struct MpVoice {
-    bool session = false;                 // in a session or a lobby (the reach is the host's then)
-    bool host = true;                     // this machine sets the reach (hosting, or not in anyone's lobby)
+    bool session = false;                 // in a session or a lobby
+    bool host = true;                     // this machine hosts (or is in nobody's lobby)
     bool server = false;                  // the host is a role=server instance (it relays, never talks)
-    voice::Reach reach = voice::Reach::Off;
+    voice::Reach reach = voice::Reach::Off;   // this player's own (0.7.1)
+    bool cut = true;                      // knocked out or low on consciousness: this player's voice goes quiet
     voice::Mic mic = voice::Mic::PushToTalk;
     int levelDb = -40;
     int key = 'V';
@@ -53,7 +54,7 @@ struct MpVote {
 
 // ---------------------------------------------------------------- the voice block
 
-enum class VoiceRow : uint8_t { Reach, Mic, Device, Level, Key, Volume, Monitor, Count };
+enum class VoiceRow : uint8_t { Reach, Cut, Mic, Device, Level, Key, Volume, Monitor, Count };
 struct VoiceRowView {
     VoiceRow id = VoiceRow::Reach;
     std::string label, value, hint;
@@ -95,12 +96,16 @@ inline std::string MicLabel(voice::Mic m) {
 inline VoiceScene BuildVoiceScene(const MpVoice& v, bool binding) {
     VoiceScene s;
     {
-        VoiceRowView r; r.id = VoiceRow::Reach; r.label = "Voice chat"; r.value = ReachLabel(v.reach); r.enabled = v.host && !v.server;
-        if (v.server) r.hint = "Set by the server.";
-        else if (!v.host) r.hint = "The host's setting.";
-        else if (v.reach == voice::Reach::Off) r.hint = "Nobody can talk in your sessions.";
+        VoiceRowView r; r.id = VoiceRow::Reach; r.label = "Voice chat"; r.value = ReachLabel(v.reach); r.enabled = !(v.server && v.host);
+        if (v.server && v.host) r.hint = "A server relays voice; it does not talk.";
+        else if (v.reach == voice::Reach::Off) r.hint = "You neither talk nor hear anyone.";
         else if (v.reach == voice::Reach::Proximity) r.hint = "Voices fade with distance; the dead hear the dead.";
-        else r.hint = "Every living player hears every living one; the dead hear the dead.";
+        else r.hint = "You hear, and are heard by, every living player who also chose Everyone; others hear you by distance.";
+        s.rows.push_back(r);
+    }
+    if (v.reach != voice::Reach::Off) {
+        VoiceRowView r; r.id = VoiceRow::Cut; r.label = "Knocked out"; r.value = v.cut ? "Go quiet" : "Keep talking";
+        r.hint = v.cut ? "Your voice cuts out when you are knocked out or nearly." : "Your voice stays on while you are knocked out (the dead still talk only to the dead).";
         s.rows.push_back(r);
     }
     {
@@ -144,11 +149,11 @@ inline VoiceScene BuildVoiceScene(const MpVoice& v, bool binding) {
     if (v.mic == voice::Mic::Off) s.meterText = "Microphone muted";
     else if (!v.recording) s.meterText = "Not recording";
     else s.meterText = DbText(v.micDb) + (v.sending ? ", sending" : s.meterHot ? ", would send" : "");
-    if (v.session && v.reach == voice::Reach::Off) s.note = v.host ? "Voice chat is off for your session." : "The host has voice chat off.";
+    if (v.session && v.reach == voice::Reach::Off) s.note = "Your voice chat is off.";
     return s;
 }
 
-// The settings a < or > on `row` leads to (Reach and Monitor are applied by the caller: they are not preferences).
+// The settings a < or > on `row` leads to (Reach and Monitor are applied by the caller through their own calls).
 // devices: the list the Device row steps through.
 inline MpVoice StepVoice(MpVoice v, VoiceRow row, int dir) {
     switch (row) {
@@ -162,6 +167,7 @@ inline MpVoice StepVoice(MpVoice v, VoiceRow row, int dir) {
         case VoiceRow::Level: v.levelDb = voice::StepLevelDb(v.levelDb, dir); break;
         case VoiceRow::Volume: v.volumePct = voice::StepVolumePct(v.volumePct, dir); break;
         case VoiceRow::Monitor: v.monitor = !v.monitor; break;
+        case VoiceRow::Cut: v.cut = !v.cut; break;
         case VoiceRow::Key: case VoiceRow::Count: break;
     }
     return v;

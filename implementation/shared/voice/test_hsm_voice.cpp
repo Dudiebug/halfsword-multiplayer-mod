@@ -18,7 +18,9 @@ static void TestWire() {
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(9); CHECK(!Decode(extra.data(), extra.size(), o));   // length must match
     VoiceMsg bad = m; bad.entity = 0; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));
-    bad = m; bad.flags = 4; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));   // rev 23: bit1 is kVoiceAdpcm, bit2 unknown
+    bad = m; bad.flags = 16; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));   // rev 24: bits 0-3 known, bit 4 not
+    VoiceMsg own = m; own.flags = kVoiceSpurt | kVoiceNoCut | kVoiceEveryone; b = Encode(own);   // rev 24: the speaker's own settings
+    CHECK(Decode(b.data(), b.size(), o) && o.flags == (kVoiceSpurt | kVoiceNoCut | kVoiceEveryone));
     bad = m; bad.data.clear(); b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));     // an empty chunk is not sent
     VoiceMsg big = m; big.data.assign(kMaxVoiceBytes + 50, 7); b = Encode(big);           // the encoder bounds it
     CHECK(Decode(b.data(), b.size(), o) && o.data.size() == kMaxVoiceBytes);
@@ -76,6 +78,15 @@ static void TestAudible() {
     CHECK(RelayVoice(Hear::Flat, 9000.f, false, r) && !RelayVoice(Hear::None, 10.f, true, r));
 }
 
+static void TestPairReach() {   // 0.7.1: the narrower of the speaker's and the listener's own settings
+    CHECK(PairReach(Reach::Everyone, Reach::Everyone) == Reach::Everyone);
+    CHECK(PairReach(Reach::Everyone, Reach::Proximity) == Reach::Proximity);
+    CHECK(PairReach(Reach::Proximity, Reach::Everyone) == Reach::Proximity);   // a Proximity speaker is not heard across the map
+    CHECK(PairReach(Reach::Off, Reach::Everyone) == Reach::Off && PairReach(Reach::Everyone, Reach::Off) == Reach::Off);
+    CHECK(AudibleIn(PairReach(Reach::Proximity, Reach::Everyone), true, true, true) == Hear::Spatial);
+    CHECK(AudibleIn(PairReach(Reach::Everyone, Reach::Everyone), true, true, true) == Hear::Flat);
+}
+
 static bool Near(float a, float b) { return std::fabs(a - b) < 0.01f; }
 
 static void TestSpatial() {
@@ -131,7 +142,7 @@ static void TestMixer() {
 }
 
 int main() {
-    TestWire(); TestLevelGate(); TestConscious(); TestAudible(); TestSpatial(); TestGuards(); TestMixer();
+    TestWire(); TestLevelGate(); TestConscious(); TestAudible(); TestPairReach(); TestSpatial(); TestGuards(); TestMixer();
     std::printf(g_fail ? "%d FAILED\n" : "test_hsm_voice: all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

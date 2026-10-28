@@ -118,6 +118,7 @@ private:
     bool Pinned(int w) const { return (pinned_ >> w) & 1u; }
     void NeutraliseFull();
     void SetBodyPolicy(ue::UObject* body);
+    void SetChainPolicy(ue::UObject* chain);   // SetBodyPolicy, and through fighters' bodies (a flail's chain)
 
     ue::UObject* willie_ = nullptr;
     int32_t willieIndex_ = -1;

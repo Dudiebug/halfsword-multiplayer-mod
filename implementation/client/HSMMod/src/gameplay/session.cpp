@@ -28,6 +28,7 @@
 #include "gameplay/mirror.h"
 #include "gameplay/owner_sync.h"
 #include "gameplay/prop_sync.h"
+#include "gameplay/damage_pin.h"
 #include "gameplay/save_guard.h"
 #include "gameplay/severs.h"
 #include "gameplay/standin_gore.h"
@@ -245,7 +246,8 @@ public:
         lobby_.onMemberLeft = [this](steam::SteamId id) { lobbyGate_.Forget(id); meshPeers_.Forget(id); if (steamNet_) steamNet_->DropPeer(id); };
         lobby_.onChat = [this](steam::SteamId from, const std::string& text) { OnLobbyChat(from, text); };
         lobby_.onPresence = [](const std::string& name, bool joined) { ui::ShowLine("HSMMod", style::kBone, (name.empty() ? "?" : name) + (joined ? " joined" : " left")); };
-        ui::ChatSetup(cfg_.chatKey, [this](bool on) { adapter_.CaptureInput(on); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
+        ui::ChatSetup(cfg_.chatKey, [this](bool on) {   // in a menu level the chat closing gives the menu its cursor back
+                adapter_.CaptureInput(on); if (!on && !InFightLevel()) adapter_.ShowPauseCursor(); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
     }
 
     bool Start() {
@@ -255,6 +257,7 @@ public:
                                           : enet->StartClient(cfg_.hostAddress, cfg_.port, ValidateForClient);
         if (ok) { net_ = std::move(enet); ++sessionGen_; }
         if (ok && (cfg_.role == Role::Host || cfg_.role == Role::Server)) hostPending_ = true;
+        if (ok && cfg_.role != Role::Server) ui::ShowLine("HSMMod", style::kBone, "Direct IP is deprecated and will be removed in 0.8.0. Use Steam lobbies (role=steam).");
         return ok;
     }
 
@@ -460,6 +463,13 @@ public:
         if (hostPending_) { hostPending_ = false; BecomeHost(); }
         agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
         AutoRun();
+        if (!inFight_ && menuInputAt_ && NowMs() >= menuInputAt_) {   // twice: after the menu level's own setup, then once more
+            const bool first = !menuInputRepeat_;
+            const bool done = first ? adapter_.MenuInputBack() : (adapter_.ShowPauseCursor(), true);
+            menuInputAt_ = first && done ? NowMs() + 2000 : 0;
+            menuInputRepeat_ = first && done;
+            if (done) HSM_LOG("session: menu level: cursor and UI input given back");
+        }
         if (!inFight_) ui::Tick(*this, gameMode);   // the main menu exists only in menu levels (its scan walks every object)
         else if (FighterLevel()) ui::LeaveMenus();
         EnsureLocalFighter();
@@ -470,6 +480,7 @@ public:
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
+        game::TickDamagePin(joined, SessionDamage());       // one player damage for everyone, the host's
         adapter_.SetDestroyAware(net_ && OwnerMode());
         adapter_.SetSubclassWeapons(OwnerMode());   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel() && OwnerMode();
@@ -1179,9 +1190,7 @@ public:
         v.session = inLobby || net_;
         v.host = net_ ? IsHost() : inLobby ? lobby_.IsHost() : true;
         v.server = IsServer();
-        if (v.host) v.reach = HostReach();
-        else if (welcomed_) v.reach = hostReach_;
-        else { const int r = lobby_.VoiceReach(); v.reach = r == 1 ? voice::Reach::Proximity : r == 2 ? voice::Reach::Everyone : voice::Reach::Off; }
+        v.reach = MyReach(); v.cut = cfg_.voiceCut;
         v.mic = cfg_.voiceMic; v.levelDb = int(std::lround(cfg_.voiceLevelDb)); v.key = cfg_.voiceKey;
         v.volumePct = int(std::lround(cfg_.voiceVolume * 100.f)); v.device = cfg_.voiceDevice;
         v.devices = voice_.Devices(now);
@@ -1195,19 +1204,18 @@ public:
     }
 
     void SetVoiceReach(voice::Reach r) override {
-        const bool host = net_ ? IsHost() : !(steamMode() && lobby_.InLobby()) || lobby_.IsHost();
-        if (!host || IsServer() || r == HostReach()) return;
+        if (IsServer() || r == MyReach()) return;   // a role=server host only relays
         cfg_.voice = r != voice::Reach::Off;
         if (r != voice::Reach::Off) cfg_.voiceReach = r;
-        HSM_LOG("voice: session voice chat set to %s from the menu", voice::ReachIni(r));
+        HSM_LOG("voice: voice chat set to %s from the menu", voice::ReachIni(r));
         if (!SaveIniValues({{"voice", cfg_.voice ? "1" : "0"}, {"voice_reach", voice::ReachIni(cfg_.voiceReach)}}))
             HSM_LOG("voice: could not write voice/voice_reach to HSMMod.ini");
-        BroadcastVoiceMode();
         if (r == voice::Reach::Off) for (uint8_t e = 1; e < voice::kMaxSpeakers; ++e) voice_.Forget(e);
     }
 
     void SetVoicePrefs(const MpVoice& v) override {
         cfg_.voiceMic = v.mic;
+        cfg_.voiceCut = v.cut;
         cfg_.voiceLevelDb = float(std::clamp(v.levelDb, voice::kLevelMinDb, voice::kLevelMaxDb));
         if (v.key) cfg_.voiceKey = v.key;
         cfg_.voiceVolume = float(std::clamp(v.volumePct, 0, voice::kVolumeMaxPct)) / 100.f;
@@ -1215,6 +1223,7 @@ public:
         voice_.Configure(VoiceSettingsFromConfig());
         voiceConfigured_ = true;
         if (!SaveIniValues({{"voice_mode", voice::MicIni(cfg_.voiceMic)},
+                            {"voice_cut", cfg_.voiceCut ? "1" : "0"},
                             {"voice_device", cfg_.voiceDevice},
                             {"voice_level_db", std::to_string(int(cfg_.voiceLevelDb))},
                             {"voice_key", voice::VoiceKeyIni(cfg_.voiceKey)},
@@ -1327,7 +1336,7 @@ public:
         } else {
             out.push_back("Detours: off");
         }
-        out.push_back("Voice chat: " + ReachLabel(SessionReach()));
+        out.push_back("Voice chat: " + ReachLabel(MyReach()));
         return out;
     }
 
@@ -1717,11 +1726,11 @@ private:
         if (lobby_.IsHost()) {
             for (const game::LobbyMember& m : lobby_.members()) if (m.id != steam::MySteamId()) steamNet_->AllowPeer(m.id);
             hostPending_ = true;
-            lobby_.SetVoiceReach(int(HostReach()));
         } else { hostSteam_ = lobby_.owner(); steamNet_->AllowPeer(hostSteam_); }
     }
 
     void ResetNetwork(const char* why) {
+        if (!migration_.Active()) migrateBoard_ = ScoreCarry{};
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
         steamNet_ = nullptr; net_.reset();
         ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
@@ -1753,7 +1762,7 @@ private:
         routeLinks_.Clear(); routePlanner_.Clear(); nextRoutePlan_ = 0;
         for (MsgBudget& b : meshBudget_) b = MsgBudget{};
         meshRx_ = meshDropped_ = meshRelaySkipped_ = 0;
-        voice_.Stop(); voiceState_ = {}; hostReach_ = voice::Reach::Off; voiceWelcomeLogged_ = false; voiceSeq_ = 0; voiceDrops_ = VoiceDrops{}; voiceRelayed_ = 0; voiceCutLogs_ = 0;
+        voice_.Stop(); voiceState_ = {}; voiceSeq_ = 0; voiceDrops_ = VoiceDrops{}; voiceRelayed_ = 0; voiceCutLogs_ = 0;
         voteState_ = VoteStateMsg{}; voteWasActive_ = voteDirty_ = false; voteSentAt_ = 0;
         detour_.Clear(); pairKeys_.Clear(); detourEpoch_ = 0; detourDirty_ = false; detourStats_ = DetourStats{}; detourLoggedEpoch_ = -1;
         meshDirectTx_ = meshDupes_ = 0;
@@ -1829,6 +1838,7 @@ private:
         adapter_.SetBare(steamMode() && lobby_.InLobby() && MatchLevel() && !lobby_.Progression() && IsBrawl(lobby_.config()));   // Brawl: no gear on any body
         if (!InFightLevel()) RestoreFoes();
         inputFixAt_ = net_ && FighterLevel() ? NowMs() + 1500 : 0;
+        menuInputAt_ = InFightLevel() ? 0 : NowMs() + 500; menuInputRepeat_ = false;
         if (net_ && MatchLevel() && !bugHintShown_ && !bugHintAt_) bugHintAt_ = NowMs() + 8000;   // once the fight is under way
         probeSince_ = FighterLevel() ? std::max(NowMs(), 1u) : 0;
         severedSent_.clear(); worldTracker_ = WorldTracker{}; worldView_ = WorldView{}; jitter_.clear(); placed_.clear();
@@ -2619,7 +2629,7 @@ private:
                 fighters_[slot].wasDead = false;
                 if (w) QueueTint(w, sp.team);
             }
-            if (match_.phase() != MatchPhase::Idle && !match_.Has(sp.entity)) { match_.AddFighter({sp.entity, sp.team, true}); infoDirty_ = true; }
+            if (match_.phase() != MatchPhase::Idle && !match_.Has(sp.entity)) { match_.AddFighter({sp.entity, sp.team, true, ScoreId(sp.entity)}); infoDirty_ = true; }
             sp.x = float(at.x); sp.y = float(at.y); sp.z = float(at.z); sp.yaw = float(yaw);
             director_.MarkSpawned(sp);
             net_->Broadcast(kChanReliable, Encode(sp), true);
@@ -2878,8 +2888,6 @@ private:
         w.snapshotHz = uint16_t(SnapshotHz()); w.map = currentLevel_; w.syncMode = uint8_t(syncMode_); w.modBuild = game::ModBuild();
         if (IsServer()) w.flags |= kWelcomeNoHostFighter;   // role=server: no host fighter to spectate or score
         if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
-        if (HostReach() != voice::Reach::Off) w.flags |= kWelcomeVoice;   // rev 22: this host relays voice
-        if (HostReach() == voice::Reach::Everyone) w.flags |= kWelcomeVoiceAll;   // rev 23: ...to every living player
         if (PeerMapHost() && cfg_.peerPing) w.flags |= kWelcomePeerPing;   // rev 22: clients ping each other and report
         net_->Send(ev.peer, kChanReliable, Encode(w), true);
         SendAllBlobs(ev.peer);
@@ -3127,7 +3135,16 @@ private:
         c.scoreLimit = cfg_.serverScoreLimit > 0 ? uint16_t(cfg_.serverScoreLimit) : DefaultScoreLimit(c.format);
         c.timeLimitS = uint16_t(cfg_.serverTimeLimitS);
         c.friendlyFire = false; c.gear = Gear::Own;
+        c.damagePct = cfg_.serverDamagePct < 0 ? kDamageStock : uint16_t(cfg_.serverDamagePct);
         return Sanitize(c);
+    }
+
+    // The player damage every machine runs (match/hsm_damage.h): the host's lobby or server_damage; a client takes the
+    // Steam lobby's, or the host's MatchInfo on a direct connection.
+    uint16_t SessionDamage() const {
+        if (IsServer()) return ServerMatchConfig().damagePct;
+        if (steamMode() && lobby_.InLobby()) return lobby_.config().damagePct;
+        return IsHost() ? kDamageStock : info_.damagePct;
     }
 
     // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
@@ -3136,6 +3153,12 @@ private:
         if (!adapter_.FreeModeActive()) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
         if (cfg.format == Format::Duel) cfg.friendlyFire = true;   // two fighters, no teams: every hit counts
         return cfg;
+    }
+
+    // The identity a player's score follows (FighterInfo::id): their SteamID, the host's own included; 0 for a direct-IP peer.
+    uint64_t ScoreId(uint8_t entity) const {
+        const RosterMember* m = steamMode() ? roster_.ByEntity(entity) : nullptr;
+        return !m ? 0 : m->key == kHostKey ? steam::MySteamId() : (m->key >> 63) ? 0 : m->key;
     }
 
     void StartMatch() {
@@ -3150,8 +3173,9 @@ private:
         }
         slotTeam_ = ResolveTeams(req, cfg.format);
         std::vector<FighterInfo> list;
-        for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true});
-        match_.Start(cfg, list, NowMs());
+        for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true, ScoreId(m.entity)});
+        match_.Start(cfg, list, NowMs(), migrateBoard_);   // after a host migration: the old host's scores
+        migrateBoard_ = ScoreCarry{};
         kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression; looted_.clear();
         respawnQueue_.clear();
         Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own, Brawl and bot formats
@@ -3776,6 +3800,7 @@ private:
         m.winner = int16_t(match_.winner());
         m.gear = uint8_t(IsBotFormat(c.format) ? Gear::Own : c.gear); m.tier = c.tier;   // the gear in effect
         m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
+        m.damagePct = SessionDamage();
         if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
             m.roundGapLeftMs = match_.BreakLeftMs(now);
             m.roundWinner = uint8_t(std::min<size_t>(match_.SkipVotes(), 255));
@@ -3783,7 +3808,7 @@ private:
         for (const auto& [key, score] : match_.scores()) if (m.scores.size() < kMaxWillies) m.scores.push_back({int16_t(key), int16_t(score)});
         for (const RosterMember& r : roster_.members())
             m.fighters.push_back({r.entity, match_.TeamOf(r.entity), int16_t(match_.Kills(r.entity)), int16_t(match_.Deaths(r.entity)), r.name,
-                                  PingOfSlot(r.slot), match_.Alive(r.entity), DownInRound(r.entity)});
+                                  PingOfSlot(r.slot), match_.Alive(r.entity), DownInRound(r.entity), ScoreId(r.entity)});
         for (auto& [e, ref] : bots_)
             if (m.fighters.size() < kMaxWillies)
                 m.fighters.push_back({e, kBotTeam, int16_t(match_.Kills(e)), int16_t(match_.Deaths(e)), "Bot", 0, match_.Alive(e), false});
@@ -3878,17 +3903,18 @@ private:
     }
 
     // ------------------------------------------------------------------ voice chat (gameplay/voice.h, voice/hsm_voice.h)
-    // The host's setting (voice + voice_reach: Off / Proximity / Everyone) is the session's; clients learn it from
-    // Welcome.flags and VoiceMode, and every client hears what it allows (their own voice= no longer matters). Each
-    // player's microphone (push to talk by default, open, or off), device and volume are their own. A client sends its
-    // chunks to the host, which relays each one to the machines that may hear it (near the speaker, everyone living,
-    // or dead with the dead). A fighter below voice_cutoff of full consciousness, knocked out or dead is cut off from
-    // the living: by its own machine, by the host and by each listener. With the mesh on, voice still goes through the
-    // host. A role=server host relays only: it records and plays nothing.
-    voice::Reach HostReach() const { return cfg_.voice ? cfg_.voiceReach : voice::Reach::Off; }
-    voice::Reach SessionReach() const { return !net_ ? HostReach() : IsHost() ? HostReach() : welcomed_ ? hostReach_ : voice::Reach::Off; }
-    bool VoiceHostOn() const { return net_ && IsHost() && HostReach() != voice::Reach::Off; }
-    bool VoiceClientOn() const { return net_ && !IsHost() && welcomed_ && hostReach_ != voice::Reach::Off; }
+    // 0.7.1: voice is each player's own setting (voice + voice_reach: Off / Proximity / Everyone; voice_cut), the host's
+    // too, and the host relays every client's voice whatever its own setting. Each player's microphone (push to talk by
+    // default, open, or off), device and volume are their own as well. A client sends its chunks to the host, which
+    // relays each one to the machines that may hear it (near the speaker, everyone living, or dead with the dead); the
+    // chunk's flags carry the speaker's reach and whether it keeps talking when cut off. A listener hears a speaker at
+    // the narrower of the two reaches (PairReach). A fighter below voice_cutoff of full consciousness, knocked out or
+    // dead is cut off from the living, unless its own voice_cut=0: by its own machine, by the host and by each
+    // listener. With the mesh on, voice still goes through the host. A role=server host relays only: it records and
+    // plays nothing.
+    voice::Reach MyReach() const { return cfg_.voice ? cfg_.voiceReach : voice::Reach::Off; }
+    bool VoiceOn() const { return net_ && MyReach() != voice::Reach::Off; }
+    static voice::Reach FlagsReach(uint8_t flags) { return (flags & kVoiceEveryone) ? voice::Reach::Everyone : voice::Reach::Proximity; }
     voice::Range VoiceRange() const { return {cfg_.voiceNearM * 100.f, cfg_.voiceFarM * 100.f}; }
 
     // Alive: in the match list, not marked dead there or (when known) by its vitals. Not listed (waiting, spectating):
@@ -3957,7 +3983,7 @@ private:
     void VoiceTick() {
         if (!net_ || !localFighter_) return;   // role=server: VoiceRelay only, nothing recorded or played
         const uint32_t now = NowMs();
-        const bool on = VoiceHostOn() || VoiceClientOn();
+        const bool on = VoiceOn();
         if (!voiceConfigured_) { voiceConfigured_ = true; voice_.Configure(VoiceSettingsFromConfig()); }
         if ((on || VoiceMeterWanted(now)) && !steam::Ready() && !voiceSteamTried_) {   // direct IP: Steam records the default microphone and decodes
             voiceSteamTried_ = true;
@@ -3973,13 +3999,14 @@ private:
                     if (f.entity != me)
                         if (UObject* a = EntityActor(f.entity)) { VitalsMsg v; if (adapter_.ReadVitals(a, f.entity, v)) { v.entity = f.entity; VoiceVitals(v); } }
         }
-        // The dead talk (to the dead); the living only while conscious enough.
-        const bool mayTalk = on && me && InFightLevel() && (!VoiceAlive(me) || VoiceAwake(me));
+        // The dead talk (to the dead); the living only while conscious enough (or whatever, with voice_cut=0).
+        const bool mayTalk = on && me && InFightLevel() && (!VoiceAlive(me) || VoiceAwake(me) || !cfg_.voiceCut);
         voice_.Capture(mayTalk, VoiceKeyAllowed(), VoiceMeterWanted(now), now, voiceOut_);
         for (size_t i = 0; i < voiceOut_.chunks.size(); ++i) {
             if (voiceOut_.chunks[i].size() > kMaxVoiceBytes) { ++voiceDrops_.big; continue; }   // a long hitch: dropped, never cut
             VoiceMsg m; m.entity = me; m.seq = ++voiceSeq_;
-            m.flags = uint8_t(((i == 0 && voiceOut_.spurt) ? kVoiceSpurt : 0) | (voiceOut_.adpcm ? kVoiceAdpcm : 0));
+            m.flags = uint8_t(((i == 0 && voiceOut_.spurt) ? kVoiceSpurt : 0) | (voiceOut_.adpcm ? kVoiceAdpcm : 0) |
+                                  (MyReach() == voice::Reach::Everyone ? kVoiceEveryone : 0) | (cfg_.voiceCut ? 0 : kVoiceNoCut));
             m.data = std::move(voiceOut_.chunks[i]);
             const std::vector<uint8_t> bytes = Encode(m);
             if (IsHost()) VoiceRelay(m, bytes);
@@ -3991,19 +4018,20 @@ private:
     // Host: a client's chunk, for its own fighter only and at most VoiceRate, then on to whoever may hear it.
     void VoiceFromClient(const NetEvent& ev, const Peer& peer) {
         VoiceMsg m;
-        if (HostReach() == voice::Reach::Off || !Decode(ev.data.data(), ev.data.size(), m)) { ++voiceDrops_.off; return; }
+        if (!Decode(ev.data.data(), ev.data.size(), m)) { ++voiceDrops_.off; return; }
         if (m.entity != Roster::EntityForSlot(peer.slot) || m.entity >= voice::kMaxSpeakers) { ++voiceDrops_.sender; return; }
         if (!voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
         VoiceRelay(m, ev.data);
     }
 
     // Host: one chunk of speaker m.entity (a client's or the host's own) to every machine that may hear it, and to the
-    // host's own player. Proximity: a living listener gets it only within voice_far_m (and a margin); a dead one
-    // wherever it is. Everyone: every living listener.
+    // host's own player, by the speaker's own reach (its Voice flags). Proximity: a living listener gets it only within
+    // voice_far_m (and a margin); a dead one wherever it is. Everyone: every living listener. Each listener's machine
+    // then applies its own reach too.
     void VoiceRelay(const VoiceMsg& m, const std::vector<uint8_t>& bytes) {
         const uint8_t from = m.entity;
-        const voice::Reach reach = HostReach();
-        const bool alive = VoiceAlive(from), awake = VoiceAwake(from);
+        const voice::Reach reach = FlagsReach(m.flags);
+        const bool alive = VoiceAlive(from), awake = VoiceAwake(from) || (m.flags & kVoiceNoCut);
         if (alive && !awake) { ++voiceDrops_.cut; return; }
         FVector at{};
         const bool placed = reach == voice::Reach::Proximity && VoiceHead(from, at);
@@ -4028,12 +4056,14 @@ private:
 
     // A chunk this machine may play: checked again as this machine sees the speaker and itself, then decoded.
     void VoiceIn(const VoiceMsg& m) {
-        if (!localFighter_ || !(VoiceHostOn() || VoiceClientOn())) { ++voiceDrops_.off; return; }
+        if (!localFighter_ || !VoiceOn()) { ++voiceDrops_.off; return; }
         const uint8_t me = MyEntity();
         if (m.entity == 0 || m.entity > kMaxFighters || m.entity == me) { ++voiceDrops_.sender; return; }
         if (!IsHost() && !voiceState_[m.entity].rate.Allow(m.data.size(), NowMs())) { ++voiceDrops_.rate; return; }
+        VoiceState& st = voiceState_[m.entity];
+        st.reach = FlagsReach(m.flags); st.noCut = (m.flags & kVoiceNoCut) != 0;
         const bool alive = VoiceAlive(m.entity);
-        const voice::Hear h = voice::AudibleIn(SessionReach(), alive, VoiceAwake(m.entity), VoiceAlive(me));
+        const voice::Hear h = voice::AudibleIn(voice::PairReach(st.reach, MyReach()), alive, VoiceAwake(m.entity) || st.noCut, VoiceAlive(me));
         if (h == voice::Hear::None) { ++(alive ? voiceDrops_.cut : voiceDrops_.deaf); return; }
         voice_.Receive(m.entity, m.seq, (m.flags & kVoiceAdpcm) != 0, m.data.data(), m.data.size(), NowMs());
     }
@@ -4057,11 +4087,10 @@ private:
         adapter_.ControlRotation(0, yaw, pitch);
         const uint8_t me = MyEntity();
         const bool meAlive = VoiceAlive(me);
-        const voice::Reach reach = SessionReach();
         for (uint8_t e = 1; e <= kMaxFighters; ++e) {
             if (e == me || !voice_.Talking(e, now, 1000)) continue;
             voice::Gains g{0.f, 0.f};
-            switch (voice::AudibleIn(reach, VoiceAlive(e), VoiceAwake(e), meAlive)) {
+            switch (voice::AudibleIn(voice::PairReach(voiceState_[e].reach, MyReach()), VoiceAlive(e), VoiceAwake(e) || voiceState_[e].noCut, meAlive)) {
                 case voice::Hear::Flat: g = {1.f, 1.f}; break;
                 case voice::Hear::Spatial: {
                     FVector at{};
@@ -4076,21 +4105,6 @@ private:
             g.left *= mine; g.right *= mine;
             voice_.SetGains(e, g);
         }
-    }
-
-    // Host: the setting changed mid-session. Clients follow at once (VoiceMode); the lobby shows it (hsm_voice).
-    void BroadcastVoiceMode() {
-        if (steamMode()) lobby_.SetVoiceReach(int(HostReach()));   // the lobby's members see it before they join
-        if (!net_ || !IsHost()) return;
-        VoiceModeMsg m; m.reach = uint8_t(HostReach());
-        net_->Broadcast(kChanReliable, Encode(m), true);
-    }
-    void ApplyHostReach(voice::Reach r, const char* why) {
-        if (r == hostReach_ && voiceWelcomeLogged_) return;
-        voiceWelcomeLogged_ = true;
-        HSM_LOG("client: voice chat %s at the host (%s)", voice::ReachIni(r), why);
-        hostReach_ = r;
-        if (r == voice::Reach::Off) for (uint8_t e = 1; e < voice::kMaxSpeakers; ++e) voice_.Forget(e);
     }
 
     // With the health line, when anything happened: what was sent, heard, relayed and dropped, and why.
@@ -4112,7 +4126,7 @@ private:
         HSM_LOG("voice: %s, mic %s (%s, %s), sent %u chunks %.1f KB (gate open %u ms), heard %u chunks %.1f KB, relayed %u; dropped: cut off %u, "
                 "out of range %u, not for this listener %u, rate %u, wrong sender %u, too big %u, voice off %u, late %u, undecodable %u; "
                 "mixer dropped %llu samples; output %s; full consciousness%s",
-                voice::ReachIni(SessionReach()), s.recording ? "on" : "off", voice::MicIni(cfg_.voiceMic), s.adpcm ? "own recording" : "Steam",
+                voice::ReachIni(MyReach()), s.recording ? "on" : "off", voice::MicIni(cfg_.voiceMic), s.adpcm ? "own recording" : "Steam",
                 s.sent, s.sentBytes / 1024.0, s.gateOpenMs, s.received, s.receivedBytes / 1024.0, relayed,
                 d.cut, d.distant, d.deaf, d.rate, d.sender, d.big, d.off, s.late, s.badChunks, (unsigned long long)s.mixerDropped,
                 s.device ? "open" : "closed", full.empty() ? " unknown" : full.c_str());
@@ -4293,6 +4307,7 @@ private:
             migration_.Start(oldHost, NowMs());
             // The map to open again (the new host) or to wait in (the others): the fight level the old host had open.
             migrateLevel_ = InFightLevel() ? currentLevel_ : std::string();
+            migrateBoard_ = ScoreCarryFrom(info_);   // the last MatchInfo heard: the new host restores these scores
         }
         ResetNetwork("host migration");
     }
@@ -4318,18 +4333,20 @@ private:
             case MigrationStep::GiveUp:
                 HSM_LOG("session: host migration gave up (%s); returning to the main menu",
                         !cfg_.hostMigration ? "off" : !lobby_.InLobby() ? "left the lobby" : "no new host in time");
-                migrateLevel_.clear();
+                migrateLevel_.clear(); migrateBoard_ = ScoreCarry{};
                 if (lobby_.InLobby() || net_ || InFightLevel()) ReturnToMenuAfterHostLoss();
                 return;
             default: break;
         }
         if (migration_.StartDue(now)) {
-            // Scores start over: the old host's match state left with it. A fight map opens again with the lobby's
-            // settings; the Progression hub through the stock path; anything else stays where it is.
+            // A fight map opens again with the lobby's settings (the scores come back with migrateBoard_ at the match start);
+            // the Progression hub through the stock path; anything else stays where it is. Nobody else in the lobby: the
+            // match stays on the open map instead, and starts there when the others are in.
             const std::string level = std::move(migrateLevel_);
             migrateLevel_.clear();
             const MapInfo* map = level.empty() ? nullptr : FindMap(level);
-            if (map && FindMap(kHubLevel) == map) StartProgression();
+            if (map && lobby_.members().size() <= 1) HSM_LOG("session: host migration: no other member; staying on %s", level.c_str());
+            else if (map && FindMap(kHubLevel) == map) StartProgression();
             else if (map) StartOnMap(map->path);
             else if (!level.empty()) HSM_LOG("session: host migration: %s is not a catalog map; staying here", level.c_str());
         }
@@ -4948,10 +4965,9 @@ private:
                     HSM_LOG("client: host on mod build '%s', ours '%s' - update; the host will not start a match until both match",
                             w.modBuild.c_str(), game::ModBuild().c_str());
                 if (OwnerMode() && !streams_.Started()) StartOwner();   // a repeated Welcome keeps the stream clock
-                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); HSM_LOG("client: host migration done"); }
+                if (migration_.step() == MigrationStep::Following) { migration_.Welcomed(); migrateBoard_ = ScoreCarry{}; HSM_LOG("client: host migration done"); }
                 meshOn_ = cfg_.mesh && steamNet_ && OwnerMode() && (w.flags & kWelcomeMesh);
                 peerPingOn_ = cfg_.peerPing && steamNet_ && OwnerMode() && (w.flags & kWelcomePeerPing);
-                ApplyHostReach(!(w.flags & kWelcomeVoice) ? voice::Reach::Off : (w.flags & kWelcomeVoiceAll) ? voice::Reach::Everyone : voice::Reach::Proximity, "welcome");
                 if (!meshOn_ && !peerPingOn_ && meshPeers_.Named()) ApplyPeerMap(PeerMapMsg{});   // the host stopped offering it
                 RefreshMeshSend();
                 if (meshOn_ || peerPingOn_) HSM_LOG("client: mesh %s, per-player pings %s", meshOn_ ? "on" : "off", peerPingOn_ ? "on" : "off");
@@ -4961,7 +4977,6 @@ private:
             }
             case MsgType::PeerMap: { PeerMapMsg m; if ((meshOn_ || peerPingOn_) && Decode(d, n, m)) ApplyPeerMap(m); break; }
             case MsgType::Voice: { VoiceMsg m; if (Decode(d, n, m)) VoiceIn(m); break; }
-            case MsgType::VoiceMode: { VoiceModeMsg m; if (Decode(d, n, m)) ApplyHostReach(voice::Reach(m.reach), "changed"); break; }
             case MsgType::VoteState: { VoteStateMsg m; if (Decode(d, n, m)) voteState_ = m; break; }
             case MsgType::RouteTable: { RouteTableMsg m; if (Decode(d, n, m)) ApplyRouteTable(m); break; }
             case MsgType::Pong: { Ping p; bool pong = false; if (DecodePing(d, n, p, pong) && pong) pings_.OnPong(kHostSlot, p.timeMs, NowMs()); break; }
@@ -5119,6 +5134,7 @@ private:
     bool hostPending_ = false;
     HostMigration migration_;      // survives ResetNetwork: it spans the old session and the new one
     std::string migrateLevel_;     // the fight level open when the old host left
+    ScoreCarry migrateBoard_;      // its scores by SteamID, until the new host's match starts (ResetNetwork drops it outside a migration)
     bool serverReadyLogged_ = false;
     uint32_t serverLobbyAt_ = 0, serverConfigAt_ = 0;   // role=server over Steam: next lobby open try, next settings push
     // role=server
@@ -5213,6 +5229,8 @@ private:
         voice::ConsciousGate gate;
         uint32_t vitalsAt = 0;          // the last vitals for this entity (0: none yet)
         bool dead = false;
+        voice::Reach reach = voice::Reach::Proximity;   // the speaker's own setting, from its last chunk (Voice flags)
+        bool noCut = false;             // ...and whether it keeps talking when knocked out
         voice::VoiceRate rate;          // host: per sender; client: per speaker as relayed
     };
     struct VoiceDrops { uint32_t cut = 0, distant = 0, deaf = 0, rate = 0, sender = 0, big = 0, off = 0; };
@@ -5223,8 +5241,7 @@ private:
     uint32_t voiceRelayed_ = 0, voiceVitalsAt_ = 0, voiceCutLogs_ = 0;
     uint32_t voiceMeterUntil_ = 0;   // a menu shows the microphone meter until then
     uint16_t voiceSeq_ = 0;
-    voice::Reach hostReach_ = voice::Reach::Off;   // client: the host's setting (Welcome, VoiceMode)
-    bool voiceConfigured_ = false, voiceSteamTried_ = false, voiceWelcomeLogged_ = false;
+    bool voiceConfigured_ = false, voiceSteamTried_ = false;
     std::map<std::string, voice::Listen> listen_;   // this player's own mute and volume per speaker, by name, while the game runs
     // votekick: the client's view of the host's vote; the host's broadcast state
     VoteStateMsg voteState_;
@@ -5327,7 +5344,8 @@ private:
     uint32_t probeSince_ = 0;   // InputProbeTick: when the fight level loaded, 0 once logged
     uint32_t levelLoadedAt_ = 0;
     uint32_t inputFixAt_ = 0, nextHealth_ = 0, snapsRx_ = 0, nextHello_ = 0, hellosSent_ = 0;
-    bool inputFixRepeat_ = false, pauseMenuWas_ = false;
+    uint32_t menuInputAt_ = 0;
+    bool inputFixRepeat_ = false, pauseMenuWas_ = false, menuInputRepeat_ = false;
     std::map<uint8_t, JitterBuffer<32>> jitter_;
     uint16_t snapshotHz_ = 30;
     SpectateCycler spectate_;

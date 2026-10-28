@@ -183,6 +183,11 @@ bool IsDeathOverlay(const std::string& squashed) {
     return squashed == "uivignettec" || squashed == "uivignettedarkc" || squashed == "uivignettedamagec";
 }
 
+// UI_HUD's Tick sets Vignette from Consciousness and Stamina, Vignette_WakeUp to 1 - Wake Up Rate and BLACK to 1 at Wake Up Rate 0
+// (0.75 at Consciousness 0) (UI_HUD.cpp:77, 86-87). The death timeline drives Wake Up Rate down (Willie_BP.cpp:8265, 8351), so a
+// dead fighter's HUD is a solid black image whichever camera is the view target.
+constexpr const char* kHudDarkImages[] = {"BLACK", "Vignette_WakeUp", "Vignette"};
+
 struct HiddenOverlay { UObject* w = nullptr; int32_t index = -1; uint8_t visibility = 0; };
 std::vector<HiddenOverlay> g_hidden;
 
@@ -191,26 +196,34 @@ std::vector<HiddenOverlay> g_hidden;
 void HideDeathOverlays(UObject* own, bool log) {
     std::string seen;
     int postProcess = 0;
-    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
-        UObject* o = ObjectAt(i);
-        if (!o || IsDefaultObject(o)) continue;
-        const std::string cls = Squash(ObjectName(reinterpret_cast<UObject*>(ClassOf(o))));
-        if (log && cls == "bpcustompostprocessc") ++postProcess;
-        if (!IsDeathOverlay(cls)) continue;
-        if (std::any_of(g_hidden.begin(), g_hidden.end(), [o](const HiddenOverlay& h) { return h.w == o; })) continue;
+    // Hides one widget (remembering how it was) and notes it for the log; a widget already hidden is left alone.
+    auto hide = [&](UObject* o, const std::string& label) {
+        if (std::any_of(g_hidden.begin(), g_hidden.end(), [o](const HiddenOverlay& h) { return h.w == o; })) return;
         Call gv(o, "GetVisibility");
         const uint8_t was = gv.invoke() ? gv.get<uint8_t>("ReturnValue") : uint8_t(4);   // SelfHitTestInvisible if unread
         if (log) {
             Call op(o, "GetRenderOpacity");
             const float opacity = op.invoke() ? op.get<float>("ReturnValue") : -1.0f;
             char buf[160];
-            std::snprintf(buf, sizeof buf, "%s%s (visibility %u, opacity %.2f)", seen.empty() ? "" : ", ",
-                          ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).c_str(), unsigned(was), opacity);
+            std::snprintf(buf, sizeof buf, "%s%s (visibility %u, opacity %.2f)", seen.empty() ? "" : ", ", label.c_str(),
+                          unsigned(was), opacity);
             seen += buf;
         }
-        if (was == kSlateHidden || was == 1) continue;   // already off (Hidden, Collapsed)
+        if (was == kSlateHidden || was == 1) return;   // already off (Hidden, Collapsed)
         Call(o, "SetVisibility").set<uint8_t>("InVisibility", kSlateHidden).invoke();
         g_hidden.push_back({o, ObjectIndex(o), was});
+    };
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || IsDefaultObject(o)) continue;
+        const std::string cls = Squash(ObjectName(reinterpret_cast<UObject*>(ClassOf(o))));
+        if (log && cls == "bpcustompostprocessc") ++postProcess;
+        if (cls == "uihudc") {   // the HUD's own full-screen images: its Tick sets their opacity from the fighter every frame
+            for (const char* name : kHudDarkImages)
+                if (UObject** img = Field<UObject*>(o, name); img && *img) hide(*img, std::string("UI_HUD.") + name);
+            continue;
+        }
+        if (IsDeathOverlay(cls)) hide(o, ObjectName(reinterpret_cast<UObject*>(ClassOf(o))));
     }
     if (!log) return;
     double consciousness = -1.0;

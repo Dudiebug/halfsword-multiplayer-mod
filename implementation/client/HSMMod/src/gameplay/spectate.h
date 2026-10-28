@@ -34,7 +34,9 @@ std::string WidgetsOnScreen();
 // The game's vignette widgets (UI_Vignette, UI_VignetteDark, UI_VignetteDamage) darken the screen with the local fighter's
 // consciousness, health and pain; a dead fighter's stay dark over the follow camera (public #8, #10: spectating after a
 // death is black, after a rejoin without dying it is not). Hidden while spectating (call again now and then: a new HUD
-// brings new ones), put back as they were by RestoreDeathOverlays. `own`: the dead fighter, for the log line only.
+// brings new ones), put back as they were by RestoreDeathOverlays.
+// The cause in the decompile is UI_HUD's own BLACK, Vignette_WakeUp and Vignette images (UI_HUD.cpp:77, 86-87: opaque once
+// Wake Up Rate falls to 0 in the death timeline, Willie_BP.cpp:8351), hidden here as well. `own`: the dead fighter, for the log line only.
 void HideDeathOverlays(ue::UObject* own, bool log);
 void RestoreDeathOverlays(Adapter& a);
 

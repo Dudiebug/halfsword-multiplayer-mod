@@ -269,6 +269,16 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
             a.deadShown = dead;
             if (double* hp = Field<double>(a.willie, "Health"); hp && dead) *hp = 0.0;
             HSM_LOG("standins: entity %u's stand-in marked %s", entity, dead ? "dead" : "alive");
+            // The lock-on never reads DED: Willie_BP's 0.1 s pulse (decomp Willie_BP.cpp:15778) sphere-traces object type 13,
+            // the enemy's "Lock On Detector Beacon", and aims at the first hit; Lock On Found is rewritten each pulse and
+            // cleared at :16545. The game's own release is the beacon going away: Death() destroys it (:8259) and the tick
+            // turns its collision off while Fallen (:16565), neither of which runs on a stand-in. So do the same here.
+            UObject** bp = Field<UObject*>(a.willie, "Lock On Detector Beacon");
+            UObject* beacon = bp ? *bp : nullptr;
+            if (beacon && ObjectAt(ObjectIndex(beacon)) == beacon) {
+                Call(beacon, "SetCollisionEnabled").set<uint8_t>("NewType", dead ? 0 : 1).invoke();   // NoCollision / QueryOnly
+                HSM_LOG("standins: entity %u's lock-on beacon %s", entity, dead ? "off; a lock-on on it releases" : "back on");
+            }
         }
         // Down, not dead yet (test 2026-10-25: cut in half, the owner lay fallen and knocked out at 0 health for 23 s
         // before the game called it a death, and the other player's lock-on kept aiming at the standing spot its capsule

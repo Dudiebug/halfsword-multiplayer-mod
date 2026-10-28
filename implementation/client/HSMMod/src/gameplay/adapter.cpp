@@ -104,6 +104,7 @@ void Adapter::RestoreGameInput() {
     pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
+    inputTouched_ = true;
     Call mode(WidgetLibrary(), "SetInputMode_GameOnly");
     mode.set<UObject*>("PlayerController", ctrl).set<bool>("bFlushInput", false).invoke();
     SetBool(ctrl, "bShowMouseCursor", false);
@@ -189,6 +190,14 @@ void Adapter::ShowPauseCursor() {
     SetBool(ctrl, "bShowMouseCursor", true);
 }
 
+bool Adapter::MenuInputBack() {
+    if (!inputTouched_) return false;
+    inputTouched_ = false;
+    inputCaptured_ = false;
+    ShowPauseCursor();
+    return true;
+}
+
 // The call the game makes when its death screen opens (decomp UI/UI_DeathDoor.cpp:226): UI-only, no widget focused, the
 // mouse not locked (EMouseLockMode::DoNotLock), the keys held now flushed (a running fighter stops). The viewport then
 // ignores keys, so G (inventory), R (slow motion) and Esc (pause) reach neither the fighter nor the pause menu; the
@@ -200,6 +209,7 @@ void Adapter::CaptureInput(bool on) {
     pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
+    inputTouched_ = true;
     Call mode(WidgetLibrary(), "SetInputMode_UIOnlyEx");
     mode.set<UObject*>("PlayerController", ctrl).set<UObject*>("InWidgetToFocus", nullptr).set<uint8_t>("InMouseLockMode", 0)
         .set<bool>("bFlushInput", true).invoke();
