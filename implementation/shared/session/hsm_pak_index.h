@@ -9,7 +9,11 @@
 //            20-byte hash), i32 hasFullDirectoryIndex (+ i64 offset, i64 size, 20-byte hash), the encoded entries
 //   full directory index   i32 dirCount, per dir: FString name, i32 fileCount, per file: FString name, i32 entry offset
 //
-// An encrypted index (the stock game's own pak), a pak older than version 10 and an IoStore container are reported, not
+// Versions 3 to 9 (UE 4.x tools such as repak or an old UnrealPak; the engine still mounts them) have the legacy index
+// instead: FString mount point, i32 entry count, then per entry FString file name + the serialized FPakEntry
+// (ParsePakLegacyIndex). A frozen v9 index is refused.
+//
+// An encrypted index (the stock game's own pak), a pak older than version 3 and an IoStore container are reported, not
 // parsed; the caller then lists that pak's maps without attribution. Only the .umap names are kept: a package path
 // (/Game/Maps/Foo) for each, which is what OpenLevel takes.
 #pragma once
@@ -92,11 +96,17 @@ inline PakParse ParsePakFooter(const uint8_t* tail, size_t n, uint64_t fileSize,
         if (c.u32() != kPakMagic) continue;
         const uint32_t version = c.u32();
         if (version < 1 || version > 32) continue;
-        if (version < 10 || version > 11) return PakParse::Unsupported;
+        out.version = version;
+        if (version < 3 || version > 11) return PakParse::Unsupported;
         const uint64_t off = c.u64(), size = c.u64();
         if (!c.ok()) return PakParse::Malformed;
-        out.version = version;
-        out.encryptedIndex = tail[p - 1] != 0;
+        out.encryptedIndex = version >= 4 && tail[p - 1] != 0;     // the flag byte exists from IndexEncryption (4)
+        if (version == 9) {                                         // FrozenIndex: a bool after the 20-byte index hash
+            c.skip(20);
+            const uint8_t frozen = c.u8();
+            if (!c.ok()) return PakParse::Malformed;
+            if (frozen != 0) return PakParse::Unsupported;
+        }
         out.indexOffset = off; out.indexSize = size;
         if (out.encryptedIndex) return PakParse::Encrypted;
         if (size == 0 || off > fileSize || size > fileSize - off) return PakParse::Malformed;
@@ -201,6 +211,56 @@ inline PakParse ParsePakDirectoryIndex(const uint8_t* d, size_t n, const std::st
         }
     }
     return c.left() == 0 ? PakParse::Ok : PakParse::Malformed;
+}
+
+namespace pak_detail {
+// One legacy FPakEntry (FPakEntry::Serialize before v10). v8 comes in two shapes (8A: a u8 compression index, 8B: u32),
+// told apart by the caller trying both. False when the bytes cannot be such an entry.
+inline bool SkipLegacyEntry(Cursor& c, uint32_t version, bool v8a) {
+    c.skip(8 + 8 + 8);                               // offset, size, uncompressed size
+    uint32_t method = 0;
+    if (version == 8 && v8a) method = c.u8();
+    else method = c.u32();                           // flags before v8, an index from v8
+    if (version >= 8 && method > 4) return false;    // five compression name slots at most
+    if (version <= 1) c.skip(8);                     // timestamp
+    c.skip(20);                                      // hash
+    if (version >= 3) {
+        if (method != 0) {
+            const int32_t blocks = c.i32();
+            if (!c.ok() || blocks < 0 || size_t(blocks) > c.left() / 16) return false;
+            c.skip(size_t(blocks) * 16);
+        }
+        c.skip(1 + 4);                               // flags, compression block size
+    }
+    return c.ok();
+}
+
+inline PakParse LegacyPass(const uint8_t* d, size_t n, uint32_t version, bool v8a, std::vector<std::string>& maps) {
+    maps.clear();
+    Cursor c(d, n);
+    const std::string mount = c.fstring();
+    const int32_t entries = c.i32();
+    if (!c.ok() || entries < 0) return PakParse::Malformed;
+    for (int32_t i = 0; i < entries; ++i) {
+        const std::string name = c.fstring();
+        if (!c.ok() || !SkipLegacyEntry(c, version, v8a)) return PakParse::Malformed;
+        if (maps.size() >= kMaxPakMaps || !EndsWithNoCase(name, ".umap")) continue;
+        const std::string pkg = PakFileToPackagePath(mount + name);
+        if (pkg.empty()) continue;
+        bool dup = false;
+        for (const std::string& m : maps) if (m == pkg) dup = true;
+        if (!dup) maps.push_back(pkg);
+    }
+    return PakParse::Ok;                             // v8+ may have trailing bytes (a hash-less filler); entries are what count
+}
+}  // namespace pak_detail
+
+// d: the whole legacy index (version 3..9). maps gets the package path of each .umap.
+inline PakParse ParsePakLegacyIndex(const uint8_t* d, size_t n, uint32_t version, std::vector<std::string>& maps) {
+    if (version < 3 || version > 9) return PakParse::Unsupported;
+    PakParse r = pak_detail::LegacyPass(d, n, version, false, maps);
+    if (r != PakParse::Ok && version == 8) r = pak_detail::LegacyPass(d, n, version, true, maps);
+    return r;
 }
 
 }  // namespace hsm

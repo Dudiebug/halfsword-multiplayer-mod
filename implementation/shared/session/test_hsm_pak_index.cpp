@@ -65,7 +65,65 @@ const Dirs kSample = {
     {"HalfswordUE5/Content/Maps/Arenas/", {"Map_Arena_Yard.umap"}},
     {"HalfswordUE5/Content/Textures/", {"T_Bog.uasset"}},
 };
+
+// A legacy (v3..v9) pak: the index is the mount point, the entry count and per entry the file name + FPakEntry.
+// v8a: the 4.22 shape (u8 compression index). compressed: every entry has 2 compression blocks.
+Pak BuildLegacy(const std::string& mount, const std::vector<std::string>& files, uint32_t version, bool v8a = false,
+                bool compressed = false, uint8_t frozen = 0) {
+    Pak p;
+    Buf data; data.zeros(100);
+    Buf idx; idx.fstr(mount); idx.u32(uint32_t(files.size()));
+    for (const std::string& f : files) {
+        idx.fstr(f);
+        idx.u64(0); idx.u64(10); idx.u64(10);
+        const uint32_t method = compressed ? 1 : 0;
+        if (version == 8 && v8a) idx.u8(uint8_t(method)); else idx.u32(method);
+        if (version <= 1) idx.u64(0);
+        idx.zeros(20);
+        if (version >= 3) {
+            if (compressed) { idx.u32(2); idx.zeros(32); }
+            idx.u8(0); idx.u32(65536);
+        }
+    }
+    p.primaryOff = data.b.size(); p.primarySize = idx.b.size();
+    Buf f = data;
+    f.b.insert(f.b.end(), idx.b.begin(), idx.b.end());
+    f.zeros(16); f.u8(0); f.u32(kPakMagic); f.u32(version);
+    f.u64(p.primaryOff); f.u64(p.primarySize); f.zeros(20); f.u8(frozen); f.zeros(160);
+    p.file = f.b;
+    return p;
+}
+const std::vector<std::string> kLegacyFiles = {"HalfswordUE5/Content/Maps/Airplane/Airplane.umap", "HalfswordUE5/Content/Maps/Airplane/Airplane.uexp",
+                                               "HalfswordUE5/Content/Textures/T_Wing.uasset", "HalfswordUE5/Content/Maps/Airplane/Airplane_Sub.umap"};
 }  // namespace
+
+static void TestLegacy() {
+    struct Case { uint32_t v; bool v8a, compressed; };
+    for (const Case k : {Case{3, false, false}, Case{4, false, true}, Case{7, false, true}, Case{8, false, false}, Case{8, false, true},
+                         Case{8, true, false}, Case{8, true, true}, Case{9, false, true}}) {
+        const Pak p = BuildLegacy("../../../", kLegacyFiles, k.v, k.v8a, k.compressed);
+        const std::vector<uint8_t> t = Tail(p);
+        PakFooter f;
+        CHECK(ParsePakFooter(t.data(), t.size(), p.file.size(), f) == PakParse::Ok && f.version == k.v);
+        CHECK(f.indexOffset == p.primaryOff && f.indexSize == p.primarySize);
+        std::vector<std::string> maps;
+        CHECK(ParsePakLegacyIndex(p.file.data() + p.primaryOff, p.primarySize, k.v, maps) == PakParse::Ok);
+        CHECK(maps.size() == 2 && maps[0] == "/Game/Maps/Airplane/Airplane" && maps[1] == "/Game/Maps/Airplane/Airplane_Sub");
+        // Every truncation is refused, never over-read.
+        for (size_t n = 0; n + 1 < p.primarySize; ++n) CHECK(ParsePakLegacyIndex(p.file.data() + p.primaryOff, n, k.v, maps) != PakParse::Ok);
+    }
+    // A frozen v9 index is not read.
+    { const Pak p = BuildLegacy("../../../", kLegacyFiles, 9, false, false, 1); const std::vector<uint8_t> t = Tail(p); PakFooter f;
+      CHECK(ParsePakFooter(t.data(), t.size(), p.file.size(), f) == PakParse::Unsupported && f.version == 9); }
+    // The legacy reader refuses the newer layouts and a compression index past the five name slots.
+    std::vector<std::string> maps;
+    const Pak p = BuildLegacy("../../../", kLegacyFiles, 8);
+    CHECK(ParsePakLegacyIndex(p.file.data() + p.primaryOff, p.primarySize, 10, maps) == PakParse::Unsupported);
+    std::vector<uint8_t> bad(p.file.begin() + long(p.primaryOff), p.file.begin() + long(p.primaryOff + p.primarySize));
+    const size_t method = 4 + 10 + 4 + 4 + 50 + 24;                    // mount FString, count, first name FString, 3 x i64
+    bad[method] = 9;
+    CHECK(ParsePakLegacyIndex(bad.data(), bad.size(), 8, maps) != PakParse::Ok);
+}
 
 static void TestPackagePaths() {
     CHECK(PakFileToPackagePath("../../../HalfswordUE5/Content/Maps/Foo/Bar.umap") == "/Game/Maps/Foo/Bar");
@@ -136,7 +194,7 @@ static void TestFooterRejections() {
     std::vector<uint8_t> junk(600, 0x5A);
     CHECK(ParsePakFooter(junk.data(), junk.size(), 100000, f) == PakParse::NotPak);
     // Versions: older and newer than the layout this reads.
-    for (uint32_t v : {1u, 3u, 8u, 9u, 12u, 13u}) {
+    for (uint32_t v : {1u, 2u, 12u, 13u}) {
         const Pak pv = Build("../../../", kSample, v);
         const std::vector<uint8_t> tv = Tail(pv);
         CHECK(ParsePakFooter(tv.data(), tv.size(), pv.file.size(), f) == PakParse::Unsupported);
@@ -195,6 +253,7 @@ static void TestIndexRejections() {
 }
 
 int main() {
+    TestLegacy();
     TestPackagePaths();
     TestParse();
     TestFooterRejections();

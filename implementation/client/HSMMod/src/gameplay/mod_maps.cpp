@@ -71,7 +71,7 @@ bool HashFile(const std::wstring& path, Sha256Digest& out) {
     return ok;
 }
 
-// Reads the pak's own index (unencrypted, version 10 or 11) and returns the map packages it lists.
+// Reads the pak's own index (unencrypted, version 3 to 11) and returns the map packages it lists.
 PakParse ReadPakMaps(const std::wstring& path, uint64_t size, std::vector<std::string>& maps) {
     maps.clear();
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -83,9 +83,11 @@ PakParse ReadPakMaps(const std::wstring& path, uint64_t size, std::vector<std::s
         if (tailLen == 0 || !ReadAt(h, size - tailLen, tail.data(), tailLen)) break;
         PakFooter f;
         result = ParsePakFooter(tail.data(), tail.size(), size, f);
+        if (result == PakParse::Unsupported) HSM_LOG("maps: pak version %u is not read (3 to 11 are, a frozen v9 index is not)", f.version);
         if (result != PakParse::Ok) break;
         std::vector<uint8_t> primary(size_t(f.indexSize));
         if (!ReadAt(h, f.indexOffset, primary.data(), primary.size())) { result = PakParse::Malformed; break; }
+        if (f.version < 10) { result = ParsePakLegacyIndex(primary.data(), primary.size(), f.version, maps); break; }
         PakPrimary pr;
         result = ParsePakPrimaryIndex(primary.data(), primary.size(), size, pr);
         if (result != PakParse::Ok) break;
@@ -256,10 +258,19 @@ std::string LastSegmentOf(const std::string& p) { const size_t k = p.rfind('/');
 bool QueryRegistry(std::vector<std::string>& out) {
     out.clear();
     std::vector<UObject*> regs = FindInstances("AssetRegistryImpl");
-    if (regs.empty()) { HSM_LOG("maps: asset registry not found"); return false; }
-    UObject* reg = regs[0];
+    UObject* reg = regs.empty() ? nullptr : regs[0];
+    if (!reg) {
+        // The shipping game keeps no named instance we can find: ask AssetRegistryHelpers.GetAssetRegistry, which returns
+        // the registry as a TScriptInterface (its object pointer first).
+        UClass* helpers = FindClass("AssetRegistryHelpers");
+        PreparedCall get(helpers, "GetAssetRegistry", {"ReturnValue"});
+        if (helpers && get.valid() && get.invoke(DefaultObject(helpers))) reg = get.take<UObject*>(0);
+    }
+    if (!reg) { HSM_LOG("maps: asset registry not found"); return false; }
+    // Only a function the registry's own class lists is called (the interface's thunk is not called on it): without one the
+    // pak index alone names the maps.
     PreparedCall pc(ClassOf(reg), "GetAssetsByClass", {"ClassPathName", "bSearchSubClasses", "OutAssetData"});
-    if (!pc.valid()) { HSM_LOG("maps: GetAssetsByClass not found on the asset registry"); return false; }
+    if (!pc.valid()) { HSM_LOG("maps: GetAssetsByClass not found on the asset registry (%s); the pak index names the maps", ObjectName(reg).c_str()); return false; }
     // The element size from the reflected parameter: OutAssetData is TArray<FAssetData>, its Inner a StructProperty.
     int32_t stride = 0;
     for (FProperty* p : Params(pc.function())) {

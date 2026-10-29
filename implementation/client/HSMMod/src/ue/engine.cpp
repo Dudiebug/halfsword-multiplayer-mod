@@ -335,6 +335,10 @@ uint32_t FunctionFlags(const UFunction* f) { return Read<uint32_t>(f, kFuncFlags
 void* FunctionNative(const UFunction* f) { return f ? Read<void*>(f, kFuncNative) : nullptr; }
 bool IsScriptFunction(const UFunction* f) { return g_build && FunctionNative(f) == reinterpret_cast<void*>(g_base + g_build->vm.processInternal); }
 
+// A jump another mod's hook put at a function's start (UE4SS hooks the same VM functions): E9 rel32 or FF 25 [rip+x].
+// MinHook chains onto either; the other checks (Func pointer, the call site inside ProcessInternal) still pin the address.
+static bool ForeignHookJump(const uint8_t* p) { return p[0] == 0xE9 || (p[0] == 0xFF && p[1] == 0x25); }
+
 void* ScriptExecutorAddress() {
     if (!g_build) return nullptr;
     const ScriptVm& vm = g_build->vm;
@@ -343,8 +347,16 @@ void* ScriptExecutorAddress() {
     UObject* math = FindObject("KismetMathLibrary", "Class");
     UFunction* add = math ? FindFunction(reinterpret_cast<UClass*>(math), "Add_IntInt") : nullptr;
     bool funcOk = add && FunctionNative(add) == reinterpret_cast<void*>(g_base + vm.execAddIntInt);
-    bool prologues = std::memcmp(pi, kProcessInternalPrologue, sizeof kProcessInternalPrologue) == 0 &&
-                     std::memcmp(exec, kExecutorPrologue, sizeof kExecutorPrologue) == 0;
+    const bool piStock = std::memcmp(pi, kProcessInternalPrologue, sizeof kProcessInternalPrologue) == 0;
+    const bool execStock = std::memcmp(exec, kExecutorPrologue, sizeof kExecutorPrologue) == 0;
+    const bool piHooked = !piStock && ForeignHookJump(pi), execHooked = !execStock && ForeignHookJump(exec);
+    bool prologues = (piStock || piHooked) && (execStock || execHooked);
+    if (piHooked || execHooked)
+        HSM_LOG("engine: script VM already hooked by another mod (ProcessInternal %s, executor %s); chaining onto it",
+                piHooked ? "jump" : "stock", execHooked ? "jump" : "stock");
+    else if (!prologues)
+        HSM_LOG("engine: script VM prologue bytes ProcessInternal %02X %02X %02X %02X %02X, executor %02X %02X %02X %02X %02X",
+                pi[0], pi[1], pi[2], pi[3], pi[4], exec[0], exec[1], exec[2], exec[3], exec[4]);
     const uint8_t* call = pi + vm.executorCallSite;
     bool callOk = call[0] == 0xE8 && call + 5 + Read<int32_t>(call, 1) == exec;
     HSM_LOG("engine: script VM Func@0x%zx %s, prologues %s, ProcessInternal->executor call %s", kFuncNative,
