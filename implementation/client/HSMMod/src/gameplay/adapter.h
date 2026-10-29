@@ -5,6 +5,7 @@
 #include "ue/engine.h"
 #include <array>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -80,6 +81,11 @@ public:
     // "Weapon L") and quiver are actors of their own and its armour pieces are attached actors, none of which the
     // engine or Willie_BP removes with it. Attached fighters are never destroyed.
     void DestroyFighter(ue::UObject* willie, int32_t index);
+    // 0.8.0-pre7: a fighter destroyed while the vertex-paint plugin still had a task queued on its mesh (a splash of blood
+    // just applied) left that task's worker reading a freed mesh (#72, a crash at a kill on the host). DestroyFighter
+    // parks such a fighter out of sight (hidden, no collision) and this destroys it once the plugin is idle, or after
+    // kParkMaxMs. Called once a frame.
+    void TickDeferredDestroys();
     // The game turns a Willie's hair simulation off before it destroys the groom (Willie_BP.cpp:16487-16488); destroying a
     // live, simulating one left Niagara's hair-strands data interface reading freed buffers on a worker thread (public
     // #28, #39, #44). Turns it off, and with `destroy` also destroys the component. Logged once per fighter.
@@ -189,6 +195,17 @@ public:
     std::wstring SaveGamesDir();   // <Saved>/SaveGames/ (sweeps temporary slots left by a crash the first time); empty before the engine is up
 
 private:
+    struct Parked {
+        ue::UObject* willie = nullptr;
+        int32_t index = -1;
+        std::vector<std::pair<ue::UObject*, int32_t>> carried;
+        double sinceMs = 0;
+    };
+    std::vector<Parked> parked_;
+    ue::UClass* paintClass_ = nullptr;
+    bool paintClassLooked_ = false;
+    bool PaintTasksQueued(ue::UObject* willie);
+    void FinishDestroy(Parked& pk, const char* why, double t0Ms);
     int muscleTier_ = -1;
     bool bare_ = false;
     bool ResolveBones(ue::UObject* mesh);

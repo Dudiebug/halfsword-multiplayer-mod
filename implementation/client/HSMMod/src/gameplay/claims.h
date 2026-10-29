@@ -66,9 +66,13 @@ public:
         stuckLimiter_.Forget(entity);
         queue_.Forget(entity);                                       // blows queued against its old body are dropped
         parry_.Forget(entity);
-        if (entity <= kMaxWillies) { lastClashMs_[entity] = {}; recent_[entity] = {}; }   // K4: a new body has no recent attacker
+        if (entity <= kMaxWillies) { lastClashMs_[entity] = {}; recent_[entity] = {}; lastDcdMs_[entity] = 0.0; }   // K4: a new body has no recent attacker
     }
     std::string HealthLine();                                        // since the previous call
+    // C0 (0.8.0-pre7): the hit audit, kept only while on (help_improve). AuditLine: since the previous call; empty when
+    // nothing was struck.
+    void SetAudit(bool on) { if (on != audit_) { audit_ = on; strikes_.clear(); landed_.clear(); } }
+    std::string AuditLine();
 
 private:
     struct Box { ue::UObject* pawn = nullptr; int32_t pawnIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
@@ -118,12 +122,21 @@ private:
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
     // The claim just made (no id yet), until its stand-in's own run of the blow returns: its Damage Out decides whether
     // the claim is sent (combat::BlowCoalescer) and ranks it.
-    struct Pending { ue::UObject* standIn = nullptr; combat::HitClaim claim; combat::BlowKey key; bool prop = false; };
+    struct Pending { ue::UObject* standIn = nullptr; combat::HitClaim claim; combat::BlowKey key; bool prop = false; std::string audit; };
     Pending pending_;
     std::array<Recent, kMaxWillies + 1> recent_{};
+    std::array<double, kMaxWillies + 1> lastDcdMs_{};                    // per stand-in victim: the last blow through its DCD gate
     std::array<std::array<double, 3>, kMaxWillies + 1> lastClashMs_{};   // per attacker and StrikeSource
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box
     Counters n_, reported_;
+    // C0: blows on stand-ins by what struck them, and their fate; claims replayed on my fighter by striking component.
+    struct Strike { uint32_t contacts = 0, blocked = 0, gated = 0, limited = 0, noClaim = 0, coalesced = 0, zero = 0, capped = 0, sent = 0;
+                    double damage = 0; };
+    struct Landed { uint32_t replayed = 0, parried = 0, missed = 0, zeroDamage = 0; double damage = 0; };
+    bool audit_ = false;
+    std::map<std::string, Strike> strikes_;
+    std::map<std::string, Landed> landed_;
+    Strike* AuditStrike(ue::UObject* comp);                          // null with the audit off
 };
 
 }  // namespace hsm::game

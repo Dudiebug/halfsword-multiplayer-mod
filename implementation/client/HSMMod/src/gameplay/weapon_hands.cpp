@@ -154,7 +154,7 @@ bool ObjectSync::ReleaseFromStandIn(uint64_t propId, UObject* standIn, int hand,
     Prop* p = Track(propId, copy);
     if (!p) return false;
     p->restoreTicks = kRestoreTicks;
-    RestorePhysics(p->root, p->rootIndex);
+    RestorePhysics(p->actor, p->root, p->rootIndex);
     p->dirty = view_.Find(propId) != nullptr;
     return true;
 }
@@ -385,6 +385,9 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
     for (const Loose& l : loose_) consider(l.actor, l.index, 0);
     for (const auto& kv : props_) consider(kv.second.actor, kv.second.index, 0);
     for (const Candidate& c : weapons_) consider(c.actor, c.index, c.classHash);
+    // A level object that was at rest when the census walked (not a census prop, not a weapon): the owner may have
+    // picked it up, and this machine's copy of it still lies there (0.8.0-pre7, #88 "holding an invisible rock").
+    for (const Candidate& c : idle_) consider(c.actor, c.index, c.classHash);
     int pick = sync::PickAttach(loose, pose.classHash, pose.pos, pose.firstPos);
     if (pick < 0 && (pick = sync::PickAttachFar(loose, pose.classHash, pose.pos, pose.firstPos)) >= 0)
         HSM_LOG("props: stand-in of e%u hand %d: the owner's weapon matched one of its class within %.0f uu here (drifted)", e, h,
@@ -395,8 +398,8 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
         return SpawnIntoHand(e, standIn, h, pose.classHash);
     if (pick < 0) {
         if (n_.attachMiss < kLogFirst)
-            HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class within %.0f uu here (%zu of that class loose)",
-                    e, h, sync::kAttachRadiusUu, loose.size());
+            HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class %08x within %.0f uu here (%zu of that class loose)",
+                    e, h, pose.classHash, sync::kAttachRadiusUu, loose.size());
         return false;
     }
     UObject* w = actors[size_t(pick)];
@@ -464,7 +467,7 @@ void ObjectSync::LetLoose(uint8_t e, int h, UObject* w, double nowMs) {
     if (auto known = byActor_.find(w); known != byActor_.end()) {
         if (auto p = props_.find(known->second); p != props_.end()) {
             p->second.restoreTicks = kRestoreTicks;
-            RestorePhysics(p->second.root, p->second.rootIndex);
+            RestorePhysics(p->second.actor, p->second.root, p->second.rootIndex);
             p->second.dirty = view_.Find(known->second) != nullptr;
         }
         return;
@@ -482,7 +485,7 @@ void ObjectSync::LetLoose(uint8_t e, int h, UObject* w, double nowMs) {
     l.classHash = ClassHashOf(w);
     l.atMs = nowMs;
     l.restoreTicks = kRestoreTicks;
-    RestorePhysics(l.root, l.rootIndex);
+    RestorePhysics(l.actor, l.root, l.rootIndex);
     loose_.push_back(l);
 }
 
@@ -493,7 +496,7 @@ void ObjectSync::TickLoose(double nowMs) {
             it = loose_.erase(it);   // gone, too old to be a drop on its way, a prop now, or held again
             continue;
         }
-        if (l.restoreTicks > 0) { --l.restoreTicks; RestorePhysics(l.root, l.rootIndex); }
+        if (l.restoreTicks > 0) { --l.restoreTicks; RestorePhysics(l.actor, l.root, l.rootIndex); }
         ++it;
     }
 }

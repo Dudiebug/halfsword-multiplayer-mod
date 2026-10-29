@@ -20,7 +20,8 @@ public:
     virtual void LobbyChatLine(const std::string& line) = 0;         // typed in the lobby chat box: /bug, /sendlog and /nolog work as in the match chat, else it goes to every member
     virtual std::string TakeNotice() = 0;                            // why the host turned us away (kicked, banned, full...), once; empty: nothing new
     virtual bool HelpImprove() const = 0;                            // help_improve in HSMMod.ini: also send the log when someone in the lobby files a report
-    virtual void SetHelpImprove(bool on) = 0;                        // also written back to HSMMod.ini
+    virtual void SetHelpImprove(bool on) = 0;                        // also written back to HSMMod.ini (and marks the question answered)
+    virtual bool HelpImproveAsked() const = 0;                       // the one-time question on the first MULTIPLAYER click was answered
 
     // The multiplayer menus (the page's voice block, the in-match Esc menu). Voice settings are written to HSMMod.ini.
     virtual bool InSession() const = 0;                              // joined (a client welcomed) or hosting

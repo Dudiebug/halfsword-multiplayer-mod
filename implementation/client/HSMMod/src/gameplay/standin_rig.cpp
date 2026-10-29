@@ -35,7 +35,10 @@ constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried
 constexpr double kOffhandAttachMs = 100.0, kOffhandReleaseMs = 250.0;
 // While both hands hold the shaft a re-seat of the right hand breaks the off hand's joint and swings a long weapon:
 // only a seat this far off is fixed then (one-handed: hsm_held.h's thresholds).
-constexpr double kHeldTwoHandDeg = 60.0, kHeldTwoHandUu = 30.0;
+constexpr double kHeldTwoHandDeg = 60.0, kHeldTwoHandUu = 45.0;   // 0.8.0-pre7: 45 (was 30): fewer re-seats on a polearm (#74, #79)
+// The off hand just took or left the shaft: the weapon swings to its new balance for a moment, which is no reason to
+// re-seat the right hand (ApplyHeld).
+constexpr double kOffhandSettleMs = 250.0;
 constexpr const char* kWeaponFields[sync::kPoseWeapons] = {"Weapon R", "Weapon L"};   // slot = hand
 constexpr const char* kGripFields[2] = {"PhysicsConstraint R Hand", "PhysicsConstraint L Hand"};
 // The sheath slots (SheathSlots_Enum order, standin_slots.cpp SlotActor): a weapon the game puts in one is anchored on the
@@ -61,7 +64,9 @@ constexpr int kHeadScanEvery = 15;            // frames between searches for a f
 constexpr int32_t kFlailMaxBones = 64;
 constexpr double kFullEarlyEveryMs = 500.0, kFullEarlyForMs = 6000.0, kFullEveryMs = 2000.0;
 constexpr double kCapsuleTeleportUu = 150.0;  // HSMP main.lua:133 TELEPORT_DIST
-constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 4;   // ECollisionChannel
+// ECollisionChannel: WorldStatic 0, WorldDynamic 1, Pawn 2, Visibility 3, Camera 4, PhysicsBody 5. 0.8.0-pre7: PhysicsBody
+// was 4 (the camera channel), so a chain "through fighters' bodies" still met their armour.
+constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 5;
 constexpr uint8_t kIgnore = 0;                // ECollisionResponse::ECR_Ignore
 constexpr uint8_t kNoCollision = 0;           // ECollisionEnabled::NoCollision
 constexpr uint8_t kLocked = 2;                 // ELinearConstraintMotion::LCM_Locked, EAngularConstraintMotion::ACM_Locked
@@ -348,7 +353,27 @@ bool FighterRig::ReadWeapon(int w, const V3& hand) {
 // The flail head: the chain's last simulating body (highest bone index; the chain runs parents first from Joint1). Searched
 // for while none is found, since a sheathed chain is kinematic; a frame where it is kinematic sends no head.
 bool FighterRig::ReadHead(Weapon& wp, sync::BoneSample& out) {
-    if (!wp.flail || !Live(wp.flail, wp.flailIndex)) return false;
+    if (wp.head) {   // a component chain (ScanParts)
+        if (!Live(wp.head, wp.headIndex) || !Live(wp.actor, wp.index)) {   // the game made the chain again: found anew
+            wp.parts.clear(); wp.partIndex.clear(); wp.head = nullptr; wp.headIndex = -1;
+            return false;
+        }
+        wp.headSim.put(0, FName{});
+        if (!wp.headSim.invoke(wp.head) || !wp.headSim.take<bool>(1)) return false;
+        if (!wp.headToWorld.invoke(wp.head)) return false;
+        const FTransform t = wp.headToWorld.take<FTransform>(0);
+        out = sync::BoneSample{ToV3(t.translation), ToQ4(t.rotation), V3{}, V3{}};
+        wp.headLinVelAt.put(0, t.translation).put(1, FName{});
+        if (wp.headLinVelAt.invoke(wp.head)) out.vel = ToV3(wp.headLinVelAt.take<FVector>(2));
+        wp.headAngVel.put(0, FName{});
+        if (wp.headAngVel.invoke(wp.head)) out.angVelDeg = ToV3(wp.headAngVel.take<FVector>(1));
+        return true;
+    }
+    if (!wp.flail || !Live(wp.flail, wp.flailIndex)) {
+        // No skeletal chain: the game's flails carry theirs as components, simulating once drawn. Looked for now and then.
+        if (wp.root && !wp.fists && wp.headTries++ % kHeadScanEvery == 0) ScanParts(wp);
+        return false;   // read from the next frame on
+    }
     if (!wp.haveHeadBone) {
         if (wp.headTries++ % kHeadScanEvery != 0) return false;
         Call count(wp.flail, "GetNumBones");
@@ -378,6 +403,99 @@ bool FighterRig::ReadHead(Weapon& wp, sync::BoneSample& out) {
     wp.headAngVel.put(0, wp.headBone);
     if (wp.headAngVel.invoke(wp.flail)) out.angVelDeg = ToV3(wp.headAngVel.take<FVector>(1));
     return true;
+}
+
+// The weapon actor's simulating primitive components other than its root: a flail's links and head (Flail_A..D: 'Blade1'
+// and the links, each a body joined to the next by a constraint). Nothing on a sword, a spear or a shield. The head is
+// the 'Blade*' part, else the part farthest from the handle. Found parts get the chain's collision policy at once.
+void FighterRig::ScanParts(Weapon& wp) {
+    if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
+    if (!primitiveClass_ || !wp.actor || !wp.root) return;
+    Call byClass(wp.actor, "K2_GetComponentsByClass");
+    byClass.set<UClass*>("ComponentClass", primitiveClass_);
+    if (!byClass.valid() || !byClass.invoke()) return;
+    void* value = byClass.paramPtr("ReturnValue");
+    const FObjArray* arr = static_cast<const FObjArray*>(value);
+    std::vector<UObject*> found;
+    if (arr && arr->data && arr->num > 0 && arr->num <= 64)
+        for (int32_t i = 0; i < arr->num; ++i) {
+            UObject* c = arr->data[i];
+            if (!c || c == wp.root || c == wp.base || c == wp.tip) continue;
+            Call sim(c, "IsSimulatingPhysics");
+            sim.setName("BoneName", FName{});
+            if (sim.valid() && sim.invoke() && sim.get<bool>("ReturnValue")) found.push_back(c);
+        }
+    if (FProperty* prop = FindProperty(byClass.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
+    if (found.empty()) return;
+    UObject* head = nullptr;
+    for (UObject* c : found)
+        if (StartsWithNameAscii(ObjectName(c), "Blade")) { head = c; break; }
+    if (!head) {
+        double farthest = -1.0;
+        for (UObject* c : found) {
+            Call at(c, "K2_GetComponentLocation");
+            if (!at.invoke()) continue;
+            const double d = Len(Sub(ToV3(at.get<FVector>("ReturnValue")), wp.pos));
+            if (d > farthest) { farthest = d; head = c; }
+        }
+        if (!head) return;
+    }
+    const UClass* hc = ClassOf(head);
+    wp.headToWorld = PreparedCall(hc, "K2_GetComponentToWorld", {"ReturnValue"});
+    wp.headSim = PreparedCall(hc, "IsSimulatingPhysics", {"BoneName", "ReturnValue"});
+    wp.headLinVelAt = PreparedCall(hc, "GetPhysicsLinearVelocityAtPoint", {"Point", "BoneName", "ReturnValue"});
+    wp.headAngVel = PreparedCall(hc, "GetPhysicsAngularVelocityInDegrees", {"BoneName", "ReturnValue"});
+    wp.headSetLin = PreparedCall(hc, "SetPhysicsLinearVelocity", {"NewVel", "bAddToCurrent", "BoneName"});
+    wp.headSetAng = PreparedCall(hc, "SetPhysicsAngularVelocityInDegrees", {"NewAngVel", "bAddToCurrent", "BoneName"});
+    if (!wp.headToWorld.valid() || !wp.headSim.valid() || !wp.headLinVelAt.valid() || !wp.headAngVel.valid() ||
+        !wp.headSetLin.valid() || !wp.headSetAng.valid()) {
+        HSM_LOG("rig: %s: chain part %s has no physics functions; the chain is not streamed", ObjectName(willie_).c_str(), ObjectName(head).c_str());
+        wp.headTries = 1;   // not scanned again until the weapon changes
+        return;
+    }
+    wp.parts = found;
+    wp.partIndex.clear();
+    for (UObject* c : found) wp.partIndex.push_back(ObjectIndex(c));
+    wp.head = head;
+    wp.headIndex = ObjectIndex(head);
+    wp.headBone = FName{};
+    wp.haveHeadBone = false;
+    ChainPolicy(wp);
+    std::string names;
+    for (UObject* c : found) { if (!names.empty()) names += ' '; names += ObjectName(c); }
+    HSM_LOG("rig: %s: %s chain = %zu simulating part(s) (%s), head %s", ObjectName(willie_).c_str(), ObjectName(wp.actor).c_str(),
+            found.size(), names.c_str(), ObjectName(head).c_str());
+}
+
+UObject* FighterRig::HeadBody(const Weapon& wp) const {
+    if (wp.head) return Live(wp.head, wp.headIndex) ? wp.head : nullptr;
+    return wp.haveHeadBone && Live(wp.flail, wp.flailIndex) ? wp.flail : nullptr;
+}
+
+UObject* FighterRig::ChainBody(const Weapon& wp) const {
+    if (wp.flail && Live(wp.flail, wp.flailIndex)) return wp.flail;
+    if (!wp.parts.empty() && Live(wp.parts[0], wp.partIndex[0])) return wp.parts[0];
+    return nullptr;
+}
+
+void FighterRig::ChainPolicy(const Weapon& wp) {
+    if (wp.flail && Live(wp.flail, wp.flailIndex)) SetChainPolicy(wp.flail);
+    for (size_t i = 0; i < wp.parts.size(); ++i)
+        if (Live(wp.parts[i], wp.partIndex[i])) SetChainPolicy(wp.parts[i]);
+}
+
+// A component chain after the rig toggled the handle's physics (ApplySeat, ApplyHeld): every part simulating, and still.
+void FighterRig::RearmChain(const Weapon& wp) {
+    if (Live(wp.actor, wp.index)) RearmFlail(wp.actor);
+    for (size_t i = 0; i < wp.parts.size(); ++i) {
+        UObject* c = wp.parts[i];
+        if (!Live(c, wp.partIndex[i])) continue;
+        Call sim(c, "IsSimulatingPhysics");
+        sim.setName("BoneName", FName{});
+        if (sim.invoke() && !sim.get<bool>("ReturnValue")) Call(c, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+        Call(c, "SetPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).setName("BoneName", FName{}).invoke();
+        Call(c, "SetPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).setName("BoneName", FName{}).invoke();
+    }
 }
 
 bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sync::FighterNow* now) {
@@ -644,11 +762,12 @@ void FighterRig::Drive(const sync::FighterCommand& cmd) {
     }
     for (int w = 0; w < sync::kPoseWeapons; ++w) {   // the flail heads, on their own chains (4b)
         Weapon& wp = weapons_[w];
-        if (!cmd.headDrive[w] || !wp.read || Pinned(w) || !wp.haveHeadBone || !Live(wp.flail, wp.flailIndex)) continue;
-        wp.headSetLin.put(0, ToF(cmd.heads[w].vel)).put(1, false).put(2, wp.headBone);
-        wp.headSetLin.invoke(wp.flail);
+        UObject* const hb = HeadBody(wp);
+        if (!cmd.headDrive[w] || !wp.read || Pinned(w) || !hb) continue;
+        wp.headSetLin.put(0, ToF(cmd.heads[w].vel)).put(1, false).put(2, wp.headBone);   // headBone: none on a part
+        wp.headSetLin.invoke(hb);
         wp.headSetAng.put(0, ToF(cmd.heads[w].angVelDeg)).put(1, false).put(2, wp.headBone);
-        wp.headSetAng.invoke(wp.flail);
+        wp.headSetAng.invoke(hb);
     }
     for (int h = 0; h < 2; ++h) {
         if (lock[h]) LockGrip(h);
@@ -696,6 +815,12 @@ void FighterRig::Shift(const V3& d) {
                 Call(wp.flail, "SetAllPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
             }
         }
+        for (size_t i = 0; i < wp.parts.size(); ++i) {   // a component chain: every part by d, still (0.8.0-pre7)
+            if (!Live(wp.parts[i], wp.partIndex[i])) continue;
+            MoveBy(wp.parts[i], d);
+            Call(wp.parts[i], "SetPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).setName("BoneName", FName{}).invoke();
+            Call(wp.parts[i], "SetPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).setName("BoneName", FName{}).invoke();
+        }
         MoveTo(wp.root, Add(wp.pos, d));   // wp.pos is the root component's location as read this frame
         HoldStill(wp);
     }
@@ -731,12 +856,19 @@ void FighterRig::Neutralise(double nowMs) {
     // The game's own collision refreshes undo the chain's policy between full passes: Unsheathed Mode (a draw,
     // Willie_BP.cpp:6426) and Turn On Collision put the chain's WorldStatic response back to Block
     // (ModularWeaponBP.cpp:2232-2234), Refresh Collisions re-attaches it (:1651-1657). One cheap read per chain per frame.
-    for (Weapon& wp : weapons_)
-        if (wp.flail && Live(wp.flail, wp.flailIndex)) {
-            Call g(wp.flail, "GetCollisionResponseToChannel");
+    // The same refreshes put a held weapon's Pawn response back (0.8.0-pre7: weapon roots pass through fighters too).
+    for (Weapon& wp : weapons_) {
+        if (UObject* c = ChainBody(wp)) {
+            Call g(c, "GetCollisionResponseToChannel");
             g.set<uint8_t>("Channel", kWorldStatic);
-            if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) SetChainPolicy(wp.flail);
+            if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) ChainPolicy(wp);
         }
+        if (wp.root && Live(wp.actor, wp.index) && Live(wp.root, wp.rootIndex)) {
+            Call g(wp.root, "GetCollisionResponseToChannel");
+            g.set<uint8_t>("Channel", kPawn);
+            if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) SetChainPolicy(wp.root);
+        }
+    }
     if (nowMs < nextFullMs_ && !weaponChanged_ && !slotsChanged) return;
     NeutraliseFull();
     weaponChanged_ = false;
@@ -918,8 +1050,8 @@ bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
     const bool ok = MakeGripJoint(r, root, socket, seat.lowerArm);
     SetWorldTransform(root, keep);
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
-    RearmFlail(weaponR);
-    if (weapons_[0].flail && Live(weapons_[0].flail, weapons_[0].flailIndex)) SetChainPolicy(weapons_[0].flail);   // the chain's bodies were made again
+    RearmChain(weapons_[0]);
+    ChainPolicy(weapons_[0]);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
     switchOn_ = false;
     HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
@@ -955,6 +1087,8 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
                         (!ow.classHash || !wp.classHash || ow.classHash == wp.classHash) && now.weaponValid[0] &&
                         now.valid[sync::kBoneHandR] && !target.grip.switched2H && gripR != 6 && gripR != 7;
     if (!usable) { heldCheck_.Reset(); return; }
+    const double steadyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (steadyMs - offWantSinceMs_ < kOffhandSettleMs) { heldCheck_.Reset(); return; }   // ApplyGrip's clock
     const sync::BoneSample& oh = target.bones[sync::kBoneHandR];
     const sync::BodyNow& sh = now.bones[sync::kBoneHandR];
     const sync::HeldPose owner = sync::HeldIn(oh.pos, oh.rot, ow.pos, ow.rot);
@@ -982,17 +1116,12 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
     const bool ok = MakeGripJoint(r, wp.root, seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket", seat.lowerArm);
     SetWorldTransform(wp.root, keep);
     Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
-    RearmFlail(wp.actor);
-    if (wp.flail && Live(wp.flail, wp.flailIndex)) SetChainPolicy(wp.flail);   // the chain's bodies were made again
+    RearmChain(wp);
+    ChainPolicy(wp);            // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again on the next Drive
     switchOn_ = false;
-    if (offJoint_) {            // the off hand is attached again to the weapon's new seat on the next ApplyGrip
-        Call br(willie_, "Break L Constraint");
-        br.set<bool>("Slide", false);
-        br.invoke();
-        offJoint_ = nullptr;
-        offTryMs_ = -1e18;
-    }
+    // The off hand's joint stays (0.8.0-pre7): it holds hand_l to the shaft, which the right hand's new joint now carries
+    // to the owner's seat; breaking and re-attaching it (pre6) swung a polearm by the length between the hands (#74, #79).
     HSM_LOG("rig: %s: weapon re-seated in the right hand as the owner holds it (%.0f deg, %.1f uu off%s)%s",
             ObjectName(willie_).c_str(), sync::QuatAngleDeg(owner.rot, mine.rot), sync::Vec3Dist(owner.pos, mine.pos),
             tol.slideUu > 0.0 ? ", mid-shaft" : "", ok ? "" : " (joint NOT remade)");
@@ -1043,10 +1172,14 @@ void FighterRig::NeutraliseFull() {
     SetBodyPolicy(mesh_);
     for (Weapon& wp : weapons_)   // as of the last Read (Neutralise runs before this frame's): checked live
         if (Live(wp.actor, wp.index) && Live(wp.root, wp.rootIndex)) {
-            SetBodyPolicy(wp.root);
+            // 0.8.0-pre7: a held weapon passes through fighters' bodies and armour like a chain (SetChainPolicy): its root
+            // is velocity-driven with no force limit, and a polearm against the local fighter dragged them after the
+            // owner's swing (#68 "dragged by a poleaxe", #70/#76 "got flung"). Blows are judged on the owner's game and
+            // weapons still meet it (parries, binds); a dropped one gets its responses back (ObjectSync::RestorePhysics).
+            SetChainPolicy(wp.root);
             // The flail chain follows the handle's policy (every body of the component): gravity and world geometry left
             // on sagged it and snagged it on the floor while the handle and body ignored both.
-            if (wp.flail && Live(wp.flail, wp.flailIndex)) SetChainPolicy(wp.flail);
+            ChainPolicy(wp);
         }
     CollisionOff(ObjField(willie_, "BoneCore"));   // HSMP main.lua:4673
     Call rc(willie_, "K2_GetRootComponent");

@@ -318,8 +318,9 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
     resume_ = m_.MakeFlat("RESUME", 18);
     gameMenu_ = m_.MakeFlat("GAME MENU", 18);
     report_ = m_.MakeFlat("REPORT A BUG", 18);
+    help_ = m_.MakeFlat("HELP IMPROVE THE MOD: OFF", 18);
     leave_ = m_.MakeFlat("LEAVE SESSION", 18);
-    for (Flat* f : {&resume_, &gameMenu_, &report_, &leave_}) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
+    for (Flat* f : {&resume_, &gameMenu_, &report_, &help_, &leave_}) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
     panel_.Show(false);
     return true;
 }
@@ -430,8 +431,16 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (!nextData_ || int32_t(now - nextData_) >= 0) { nextData_ = now + 250; Refresh(session); }
     if (tab_ == 1) voice_.Tick(session);
 
-    for (Flat* f : {&resume_, &gameMenu_, &report_, &leave_}) Paint(f->card);
+    for (Flat* f : {&resume_, &gameMenu_, &report_, &help_, &leave_}) Paint(f->card);
     if (report_.card) report_.card.button.Show(reportOn);
+    if (help_.card) {                           // the multiplayer page's switch: on gets the blood frame and a green label
+        const bool help = session.HelpImprove();
+        help_.card.button.Show(reportOn);
+        help_.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
+        help_.label.Color(help ? style::kOk : style::kBone);
+        help_.card.selected = help;
+        if (reportOn && Clicked(help_.card)) { session.SetHelpImprove(!help); nextData_ = 0; }
+    }
     const bool resume = Clicked(resume_.card), game = Clicked(gameMenu_.card), report = Clicked(report_.card), leave = Clicked(leave_.card);
     if (leaveArmedAt_ && now - leaveArmedAt_ >= kConfirmMs) leaveArmedAt_ = 0;
     if (leave_.card) {

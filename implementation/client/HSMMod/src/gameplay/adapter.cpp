@@ -690,22 +690,77 @@ void Adapter::StopHair(UObject* willie, bool destroy) {
     HSM_LOG("adapter: hair of %s simulation %s%s", ObjectName(willie).c_str(), stopped ? "off" : "NOT turned off", destroy ? ", destroyed" : "");
 }
 
-void Adapter::DestroyFighter(UObject* willie, int32_t index) {
-    if (!StillValid(willie, index)) return;
-    const auto t0 = std::chrono::steady_clock::now();
-    const std::vector<UObject*> carried = CarriedActors(willie);
-    UClass* fighter = FindClass(kWillieClass);
+namespace {
+constexpr double kParkMaxMs = 3000;   // a parked fighter is destroyed by then whatever the paint plugin says
+double NowMsLocal() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+}
+
+// HasAnyTasksQueuedUp on the fighter's VertexPaintDetectionComponent (REVERSE_ENGINEERING.md: check it before changing
+// a painted mesh). False when the component or the call is missing.
+bool Adapter::PaintTasksQueued(UObject* willie) {
+    if (!paintClassLooked_) {
+        paintClassLooked_ = true;
+        paintClass_ = FindClass("VertexPaintDetectionComponent");
+        HSM_LOG("adapter: paint component class %s (fighters %s for paint tasks before they are destroyed)", paintClass_ ? "ok" : "MISSING",
+                paintClass_ ? "wait" : "do not wait");
+    }
+    if (!paintClass_) return false;
+    Call get(willie, "GetComponentByClass");
+    get.set<UClass*>("ComponentClass", paintClass_);
+    UObject* comp = get.valid() && get.invoke() ? get.get<UObject*>("ReturnValue") : nullptr;
+    if (!comp) return false;
+    Call busy(comp, "HasAnyTasksQueuedUp");
+    return busy.valid() && busy.invoke() && busy.get<bool>("ReturnValue");
+}
+
+void Adapter::FinishDestroy(Parked& pk, const char* why, double t0Ms) {
     int destroyed = 0;
-    for (UObject* a : carried) {
-        if (!a || a == willie || IsA(a, fighter)) continue;
+    for (auto& [a, i] : pk.carried) {
+        if (!StillValid(a, i)) continue;
         DestroyActor(a);
         ++destroyed;
     }
-    const std::string name = ObjectName(willie);
+    const std::string name = ObjectName(pk.willie);
+    if (StillValid(pk.willie, pk.index)) DestroyActor(pk.willie);
+    HSM_LOG("adapter: destroyed %s and %d carried actor(s) in %.1f ms (%s)", name.c_str(), destroyed, NowMsLocal() - t0Ms, why);
+}
+
+void Adapter::DestroyFighter(UObject* willie, int32_t index) {
+    if (!StillValid(willie, index)) return;
+    for (const Parked& pk : parked_) if (pk.willie == willie && pk.index == index) return;   // already on its way
+    const double t0 = NowMsLocal();
+    Parked pk;
+    pk.willie = willie; pk.index = index; pk.sinceMs = t0;
+    UClass* fighter = FindClass(kWillieClass);
+    for (UObject* a : CarriedActors(willie)) {
+        if (!a || a == willie || IsA(a, fighter)) continue;
+        pk.carried.push_back({a, ObjectIndex(a)});
+    }
     StopHair(willie, true);
-    DestroyActor(willie);
-    HSM_LOG("adapter: destroyed %s and %d carried actor(s) in %.1f ms", name.c_str(), destroyed,
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (!PaintTasksQueued(willie)) { FinishDestroy(pk, "now", t0); return; }
+    // The plugin's queued task would run on the freed mesh (#72): out of sight until it is done (TickDeferredDestroys).
+    Call(willie, "SetActorHiddenInGame").set<bool>("bNewHidden", true).invoke();
+    Call(willie, "SetActorEnableCollision").set<bool>("bNewActorEnableCollision", false).invoke();
+    for (auto& [a, i] : pk.carried) {
+        if (!StillValid(a, i)) continue;
+        Call(a, "SetActorHiddenInGame").set<bool>("bNewHidden", true).invoke();
+        Call(a, "SetActorEnableCollision").set<bool>("bNewActorEnableCollision", false).invoke();
+    }
+    HSM_LOG("adapter: %s has paint tasks queued; parked out of sight until they are done (%zu carried actor(s))",
+            ObjectName(willie).c_str(), pk.carried.size());
+    parked_.push_back(std::move(pk));
+}
+
+void Adapter::TickDeferredDestroys() {
+    const double now = NowMsLocal();
+    for (auto it = parked_.begin(); it != parked_.end();) {
+        Parked& pk = *it;
+        if (!StillValid(pk.willie, pk.index)) { it = parked_.erase(it); continue; }   // gone with the level
+        const bool waited = now - pk.sinceMs >= kParkMaxMs;
+        if (!waited && PaintTasksQueued(pk.willie)) { ++it; continue; }
+        FinishDestroy(pk, waited ? "parked; paint tasks still queued after the wait" : "parked until its paint tasks were done", pk.sinceMs);
+        it = parked_.erase(it);
+    }
 }
 
 FVector Adapter::ActorLocation(UObject* actor) {

@@ -99,6 +99,17 @@ private:
         bool haveHeadBone = false;
         int headTries = 0;
         ue::PreparedCall headSocket, headSim, headLinVelAt, headAngVel, headSetLin, headSetAng;
+        // 0.8.0-pre7: the game's flails (Flail_A..D) have no skeletal chain. Their links and head are the actor's own
+        // simulating primitive components (the head is 'Blade1': claims log "by weapon R 'Blade1'"), joined by
+        // constraints; neither lookup above ever matched ("flail no" on every machine), so the chain was never streamed,
+        // never shifted with the body and never made to pass through fighters. Found once they simulate (a sheathed
+        // chain is kinematic): the head is the 'Blade*' part, else the part farthest from the handle, driven through
+        // headSim/headLinVelAt/headAngVel/headSetLin/headSetAng with no bone name.
+        std::vector<ue::UObject*> parts;
+        std::vector<int32_t> partIndex;
+        ue::UObject* head = nullptr;
+        int32_t headIndex = -1;
+        ue::PreparedCall headToWorld;
         // this frame
         bool read = false, haveTip = false, driven = false;
         sync::V3 pos{}, basePos{}, tipPos{};
@@ -108,6 +119,11 @@ private:
     void RefreshWeapon(int w);                    // re-resolves slot w when its field changed
     bool ReadWeapon(int w, const sync::V3& handPos);
     bool ReadHead(Weapon& wp, sync::BoneSample& out);   // the flail head of a held weapon, world
+    void ScanParts(Weapon& wp);                         // a component chain's simulating parts and head (Weapon::parts)
+    ue::UObject* HeadBody(const Weapon& wp) const;      // the component the head is read from and driven on, or nullptr
+    ue::UObject* ChainBody(const Weapon& wp) const;     // one body of the chain, to check its collision policy, or nullptr
+    void ChainPolicy(const Weapon& wp);                 // SetChainPolicy on every body of the chain
+    void RearmChain(const Weapon& wp);                  // RearmFlail, and a component chain simulating again and still
     bool GripWanted(int hand) const;
     bool GripLoose(int hand) const;
     void FreeGrip(int hand);
@@ -169,6 +185,7 @@ private:
     bool pelvisRead_ = false;
     ue::UObject* failLogged_ = nullptr;                      // the fighter whose bind failure was logged
     bool flailShiftLogged_ = false;                          // a flail chain that would not shift was logged
+    ue::UClass* primitiveClass_ = nullptr;                   // "PrimitiveComponent", for ScanParts
     StandInSlots slots_;                                     // the sheathed weapons (standin_slots.h)
 };
 

@@ -20,7 +20,7 @@ constexpr size_t kReportIdMax = 32;           // relay ids: [A-Za-z0-9]
 constexpr size_t kReportTokenMax = 64;        // attach tokens: [A-Za-z0-9_-]
 constexpr size_t kReportLogTailBytes = 3u << 20;   // the end of each log that is sent (the relay takes 4 MB per file)
 constexpr uint32_t kReportOfferMs = 120000;   // how long another player may answer "/sendlog"
-constexpr uint32_t kReportCooldownMs = 120000;     // one report per player per two minutes
+constexpr uint32_t kReportCooldownMs = 30000;      // one report per player per 30 s (the relay allows 20 an hour, 60 a day per address)
 constexpr uint32_t kReportShareGapMs = 60000;      // the host relays one ReportShare per peer per minute
 constexpr uint32_t kPendingShareMs = 1800000;      // a crash report filed at start is shared with a session joined within 30 min
 constexpr size_t kCrashLineMax = 200;
@@ -76,6 +76,38 @@ inline size_t Ipv4At(const std::string& s, size_t i) {
     if (p < s.size() && (Word(s[p]) || (s[p] == '.' && p + 1 < s.size() && Digit(s[p + 1])))) return 0;
     return p - i;
 }
+inline bool Hex(char c) { return Digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+// An IPv6 address at s[i] (not inside a longer word or address): hex groups of 1-4 digits split by ':', either all eight
+// or fewer with one "::", optionally ending in a dotted quad ("::ffff:10.0.0.5") and a "%zone". Length or 0. "::1" and
+// "::" are 0 (loopback and unspecified stay, like 127.0.0.1). A clock ("12:34:56") has no "::" and too few groups.
+inline size_t Ipv6At(const std::string& s, size_t i) {
+    if (i > 0 && (Word(s[i - 1]) || s[i - 1] == ':' || s[i - 1] == '.')) return 0;
+    size_t p = i, colons = 0, groups = 0, lastGroup = i;
+    bool dbl = false;
+    while (p < s.size()) {
+        if (s[p] == ':') {
+            if (p + 1 < s.size() && s[p + 1] == ':') { if (dbl) return 0; dbl = true; colons += 2; p += 2; continue; }
+            ++colons; ++p; continue;
+        }
+        if (!Hex(s[p])) break;
+        size_t g = p; while (p < s.size() && Hex(s[p]) && p - g < 5) ++p;
+        if (p - g > 4) return 0;
+        ++groups; lastGroup = g;
+    }
+    if (p > i && s[p - 1] == ':' && !(p >= i + 2 && s[p - 2] == ':')) { --p; --colons; }   // a sentence's ':' after it
+    if (p < s.size() && s[p] == '.' && groups > 0) {                                      // an IPv4 tail
+        if (size_t n = Ipv4At(s, lastGroup)) { p = lastGroup + n; ++groups; }
+        else return 0;
+    }
+    if (p < s.size() && (Word(s[p]) || s[p] == '.')) return 0;
+    const bool full = !dbl && groups == 8 && colons == 7;
+    const bool compressed = dbl && groups >= 1 && groups <= 7 && colons <= 8;
+    if (!full && !compressed) return 0;
+    const std::string a = s.substr(i, p - i);
+    if (a == "::1" || a == "::") return 0;
+    if (p < s.size() && s[p] == '%') { ++p; while (p < s.size() && (Word(s[p]) || s[p] == '-') && p - i < 64) ++p; }
+    return p - i;
+}
 inline char Lower(char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; }
 inline bool Sep(char c) { return c == '\\' || c == '/'; }
 // The profile folder at s[i], just after "Users" (any case, as Windows paths are) or "home": its length, or 0. A folder
@@ -114,7 +146,8 @@ inline size_t HostValueAt(const std::string& s, size_t i) {
 
 // Takes out what identifies a player outside the game: SteamID64s (7656119 and 10 more digits) become "steam:<hash>", any
 // other 17- or 18-digit number (a Steam lobby or group id) becomes "steamid:<hash>", IPv4 addresses other than 127.0.0.1
-// and 0.0.0.0 become "ip:<hash>", a "host=<name>" becomes "host=host:<hash>", and the profile folder in "...\Users\<name>\"
+// and 0.0.0.0 become "ip:<hash>", IPv6 addresses other than ::1 and :: become "ip6:<hash>" (0.8.0-pre7), a "host=<name>"
+// becomes "host=host:<hash>", and the profile folder in "...\Users\<name>\"
 // (any case, also the escaped "\\Users\\") and "/home/<name>/" becomes "<user>". Player names stay: the logs go to a
 // private store, and they tell who is who.
 inline std::string RedactLog(const std::string& in, uint64_t salt) {
@@ -123,6 +156,9 @@ inline std::string RedactLog(const std::string& in, uint64_t salt) {
     size_t i = 0;
     while (i < in.size()) {
         const char c = in[i];
+        if ((Hex(c) || c == ':')) {
+            if (size_t n = Ipv6At(in, i)) { out += "ip6:" + RedactHash(in.substr(i, n), salt); i += n; continue; }
+        }
         if (Digit(c) && (i == 0 || !Word(in[i - 1]))) {
             size_t p = i; while (p < in.size() && Digit(in[p])) ++p;
             const bool wordEnd = p >= in.size() || !Word(in[p]);
@@ -298,10 +334,12 @@ inline ReportVerdict JudgeReportAnswer(ReportJob job, ReportTransport transport,
     if (status >= 200 && status < 300) { v.outcome = ReportOutcome::MaybeDone; v.reason = "the report server gave an unexpected answer"; return v; }
     if (status == 504) { v.outcome = ReportOutcome::MaybeDone; v.reason = "the report server timed out"; return v; }   // the proxy gave up waiting on the relay
     v.outcome = ReportOutcome::Refused;
-    if (status == 429) { v.reason = "too many reports right now, try again in a few minutes"; return v; }
     if (status == 413) { v.reason = "the report is too large"; return v; }
     std::string clean;   // the relay's own "error" (printable ASCII only), e.g. its 502 when GitHub failed
     for (char ch : JsonStringField(body, "error")) if (ch >= 0x20 && ch < 0x7F && clean.size() < 80) clean.push_back(ch);
+    // 429: the relay says which limit was hit ("too many reports from you, try again later"); the generic line only
+    // when it says nothing.
+    if (status == 429) { v.reason = clean.empty() ? "too many reports right now, try again in a few minutes" : clean; return v; }
     v.reason = clean.empty() ? "the report server answered " + std::to_string(status) : clean;
     return v;
 }

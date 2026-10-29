@@ -153,12 +153,26 @@ void ObjectSync::ReleaseLease(uint64_t id, Prop& p, double nowMs) {
     p.restoreTicks = 0;
 }
 
+namespace {
+// The body is where it started: within 1 cm, and its rotation within about 1 degree (q and -q are the same turn).
+bool Unmoved(const BodyStateMsg& now, const BodyStateMsg& start) {
+    const double dx = now.px - start.px, dy = now.py - start.py, dz = now.pz - start.pz;
+    if (dx * dx + dy * dy + dz * dz > 1.0) return false;
+    auto near = [&](int sign) {
+        return std::abs(now.rot.x - sign * start.rot.x) < 300 && std::abs(now.rot.y - sign * start.rot.y) < 300 &&
+               std::abs(now.rot.z - sign * start.rot.z) < 300 && std::abs(now.rot.w - sign * start.rot.w) < 300;
+    };
+    return near(1) || near(-1);
+}
+}  // namespace
+
 void ObjectSync::ResetProp(uint64_t id, Prop& p, ResetAction action, double nowMs) {
     if (!adapter_->StillValid(p.actor, p.index)) return;
     ReleaseLease(id, p, nowMs);
     if (action == ResetAction::Restore) {
         for (size_t b = 0; b < p.bodies.size() && b < p.start.size(); ++b) {
             if (!p.start[b].ok || p.bodies[b].detached) continue;
+            if (BodyStateMsg here; Read(p, b, here) && Unmoved(here, p.start[b].s)) { ++n_.resetUnmoved; continue; }   // #85: not woken
             BodyStateMsg s = p.start[b].s;
             s.vx = s.vy = s.vz = s.wx = s.wy = s.wz = 0.f;
             DriveBody(p, b, s);              // places the body (the whole actor for a root body) and zeroes what simulates

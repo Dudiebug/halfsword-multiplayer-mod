@@ -234,6 +234,14 @@ inline size_t Match::LoadoutsAhead() const {
     RespawnCause cause;
     if (phase_ == MatchPhase::Results) cause = RespawnCause::Rematch;
     else if (roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath)) cause = RespawnCause::RoundReset;
+    else if (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath) {
+        // 0.8.0-pre7: the fallen fighters' next loadouts, made while they wait out their respawn delay rather than on
+        // the respawn frame, which already stalls for the spawn itself (#65: a hitch at every respawn of a running fight).
+        if (RegearFor(cfg_, RespawnCause::Individual) != Regear::Each) return 0;
+        size_t dead = 0;
+        for (const auto& [e, f] : fighters_) dead += f.human && !f.alive && !gone_.count(e) ? 1 : 0;
+        return dead;
+    }
     else return 0;
     const Regear r = RegearFor(cfg_, cause);
     if (r == Regear::Shared) return 1;

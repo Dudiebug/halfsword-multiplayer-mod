@@ -364,7 +364,14 @@ static void TestLoadoutsAhead() {
     Match ffa; ffa.Start(fc, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
     ffa.Tick(Match::kCountdownMs);
     ffa.OnDeath(2, 1, t + 1);
-    CHECK(ffa.LoadoutsAhead() == 0);                                            // others still fight: not ahead
+    CHECK(ffa.LoadoutsAhead() == 1);                                            // the fallen one's next loadout, while it waits
+    ffa.MarkRespawned(2);
+    CHECK(ffa.LoadoutsAhead() == 0);                                            // everyone fights: nothing ahead
+    MatchConfig fo = fc; fo.gear = Gear::Own;
+    Match ffaOwn; ffaOwn.Start(fo, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    ffaOwn.Tick(Match::kCountdownMs);
+    ffaOwn.OnDeath(2, 1, t + 1);
+    CHECK(ffaOwn.LoadoutsAhead() == 0);                                         // own gear: nothing generated
 }
 
 static void TestStartLoadoutsAhead() {

@@ -16,6 +16,7 @@ constexpr double kBotPoseEveryMs = 1000.0 / 30.0;   // bots: up to 10 of them, h
 constexpr double kVitalsEveryMs = 1000.0 / 15.0;
 constexpr double kBindGraceMs = 3000.0;             // a fresh stand-in's mesh registers within a few frames
 constexpr double kBindRetryMs = 500.0;              // after the grace: retry this often (a bind resolves names)
+constexpr double kStuckNoShiftUu = 300.0;           // no teleport of a stand-in my blade is stuck in unless it is this far off
 constexpr double kSnapClearUu = 90.0;               // never snap a stand-in's pelvis onto a local one (main.lua:2432)
 
 double Dist(const V3& a, const V3& b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)); }
@@ -269,16 +270,6 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
             a.deadShown = dead;
             if (double* hp = Field<double>(a.willie, "Health"); hp && dead) *hp = 0.0;
             HSM_LOG("standins: entity %u's stand-in marked %s", entity, dead ? "dead" : "alive");
-            // The lock-on never reads DED: Willie_BP's 0.1 s pulse (decomp Willie_BP.cpp:15778) sphere-traces object type 13,
-            // the enemy's "Lock On Detector Beacon", and aims at the first hit; Lock On Found is rewritten each pulse and
-            // cleared at :16545. The game's own release is the beacon going away: Death() destroys it (:8259) and the tick
-            // turns its collision off while Fallen (:16565), neither of which runs on a stand-in. So do the same here.
-            UObject** bp = Field<UObject*>(a.willie, "Lock On Detector Beacon");
-            UObject* beacon = bp ? *bp : nullptr;
-            if (beacon && ObjectAt(ObjectIndex(beacon)) == beacon) {
-                Call(beacon, "SetCollisionEnabled").set<uint8_t>("NewType", dead ? 0 : 1).invoke();   // NoCollision / QueryOnly
-                HSM_LOG("standins: entity %u's lock-on beacon %s", entity, dead ? "off; a lock-on on it releases" : "back on");
-            }
         }
         // Down, not dead yet (test 2026-10-25: cut in half, the owner lay fallen and knocked out at 0 health for 23 s
         // before the game called it a death, and the other player's lock-on kept aiming at the standing spot its capsule
@@ -288,6 +279,17 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
             a.downShown = down;
             HSM_LOG("standins: entity %u is %s (flags %u, health %.0f)", entity, down ? "down; the capsule follows the body" : "up again",
                     unsigned(v.flags), double(v.health));
+            // The lock-on never reads DED: Willie_BP's 0.1 s pulse (decomp Willie_BP.cpp:15778) sphere-traces object type 13,
+            // the enemy's "Lock On Detector Beacon", and aims at the first hit; Lock On Found is rewritten each pulse and
+            // cleared at :16545. The game's own release is the beacon going away: Death() destroys it (:8259) and the tick
+            // turns its collision off while Fallen (:16565), neither of which runs on a stand-in. So do the same here,
+            // for the whole time down (0.8.0-pre7; pre6 only on death: a lock-on kept aiming at a fallen stand-in's beacon).
+            UObject** bp = Field<UObject*>(a.willie, "Lock On Detector Beacon");
+            UObject* beacon = bp ? *bp : nullptr;
+            if (beacon && ObjectAt(ObjectIndex(beacon)) == beacon) {
+                Call(beacon, "SetCollisionEnabled").set<uint8_t>("NewType", down ? 0 : 1).invoke();   // NoCollision / QueryOnly
+                HSM_LOG("standins: entity %u's lock-on beacon %s", entity, down ? "off; a lock-on on it releases" : "back on");
+            }
         }
         if (!dead && v.health <= 0.f)
             if (double* hp = Field<double>(a.willie, "Health"); hp && *hp > 0.0) *hp = 0.0;
@@ -303,7 +305,8 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
         for (const V3& p : avoid) snapBlocked = snapBlocked || Dist(a.lastTargetPelvis, p) < kSnapClearUu;
     sync::PoseFrame target;
     const sync::DriverStep st = a.driver.Step(s.feed->player, nowMs, now, dt, snapBlocked, target);
-    const uint32_t held = heldBones_ ? heldBones_(entity) : 0u;   // bones my fighter's grab holds: left to the grab
+    // Bones my fighter's grab holds, and bones my blade is stuck in: left to the grab and the lodged blade (0.8.0-pre7).
+    const uint32_t held = (heldBones_ ? heldBones_(entity) : 0u) | (stuckBones_ ? stuckBones_(entity) : 0u);
     if (st.have) {
         // The capsule goes where the owner's capsule was at the shown time, facing its way; first, since a teleporting
         // capsule may carry the Mesh, then Shift (HSMP main.lua:4773 drive_root, then :4791 snap_mesh).
@@ -318,7 +321,10 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
         a.shownTs = st.info.playTsMs;
         a.haveShown = true;
     }
-    if (st.place) a.rig.Shift(st.shift);
+    // A blade of mine lodged in this stand-in (stuck bones are among held): a teleport of the body would yank it, my hand
+    // and me after it (#70, #76 "I hit someone and got flung"). The body is left to the servo unless it is far off.
+    const bool stuckHere = stuckBones_ && stuckBones_(entity) != 0u;
+    if (st.place && !(stuckHere && st.pelvisErrUu < kStuckNoShiftUu)) a.rig.Shift(st.shift);
     if (st.have && st.pelvisErrUu >= 0.0) {
         if (!held) a.rig.Drive(st.cmd);
         else {

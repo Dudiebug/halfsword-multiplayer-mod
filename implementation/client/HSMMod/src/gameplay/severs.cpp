@@ -1,6 +1,7 @@
 #include "gameplay/severs.h"
 #include "log.h"
 #include "session/hsm_authority.h"
+#include "sync/hsm_grab.h"
 #include "ue/script_hook.h"
 #include "util/hsm_names.h"
 #include "util/hsm_sanitize.h"
@@ -714,7 +715,7 @@ void Severs::SendStuck(uint8_t entity, StrikeSource source, Hand& h, UObject* co
     if (!comp || !*comp || !mesh || m.bone.empty() || m.bone == "None" || !BoneXform(mesh, m.bone, bone) ||
         !ComponentXform(*comp, blade)) {
         ++n_.stuckBad;
-        h = Hand{false, true, h.seq, victim, RefOf(constraint)};   // not retried every frame
+        h = Hand{false, true, h.seq, victim, RefOf(constraint), {}};   // not retried every frame
         return;
     }
     m.weaponComponent = ObjectName(*comp);
@@ -722,12 +723,12 @@ void Severs::SendStuck(uint8_t entity, StrikeSource source, Hand& h, UObject* co
     if (m.weaponComponent.size() > combat::kMaxClaimString || m.bone.size() > combat::kMaxClaimString ||
         !combat::detail::LocalXformOk(m.weaponInBone)) {
         ++n_.stuckBad;
-        h = Hand{false, true, h.seq, victim, RefOf(constraint)};
+        h = Hand{false, true, h.seq, victim, RefOf(constraint), {}};
         return;
     }
     m.seq = ++nextStuckSeq_;
     env_.sendStuck(m);
-    h = Hand{true, false, m.seq, victim, RefOf(constraint)};
+    h = Hand{true, false, m.seq, victim, RefOf(constraint), m.bone};
     ++n_.stuckSent;
     if (n_.stuckSent <= kLogFirst)
         HSM_LOG("severs: blade of e%u (%s '%s') stuck in e%u bone %s, seq %u", entity, SourceName(source),
@@ -931,6 +932,16 @@ uint32_t Severs::HeldWeapons(uint8_t attacker) const {
             else if (key.second == uint8_t(StrikeSource::WeaponLeft)) slots |= 2u;   // slot 1, "Weapon L"
         }
     return slots;
+}
+
+// The stand-in bone my lodged blade holds (and its parent) is left to the blade rather than the servo (StandIns' held
+// bones): a bone driven by velocity with no force limit pulled the blade, my hand and me after the owner's every move
+// (#70, #76). Stuck blades are scanned every tick (ScanOurBlades), so a freed one drops out at once.
+uint32_t Severs::StuckBones(uint8_t victim) const {
+    uint32_t bones = 0;
+    for (const auto& [key, h] : hands_)
+        if (h.stuck && h.victim == victim && Live(h.actor)) bones |= sync::YieldBones(sync::PoseBoneIndex(h.bone), false);
+    return bones;
 }
 
 // ---------------------------------------------------------------- lookups

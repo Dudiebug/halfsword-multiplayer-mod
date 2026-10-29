@@ -204,7 +204,7 @@ private:
         uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, forced = 0, kept = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
                  requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
-                 attached = 0, attachMiss = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
+                 attached = 0, attachMiss = 0, resetUnmoved = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
                  spawned = 0, spawnFailed = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0,
                  despawned = 0,
@@ -259,6 +259,7 @@ private:
     bool Drive(uint64_t id, Prop& p);                                // every body with a fresh state from the streamer
     bool DriveBody(Prop& p, size_t body, const BodyStateMsg& s);
     bool BuildBodies(Prop& p, bool multi);                           // BodyIndex over the actor's movable primitives
+    bool LooseParts(ue::UObject* actor, ue::UObject* root);          // a simulating movable primitive besides the root (a flail's chain)
     std::vector<ue::UObject*> ComponentsOf(ue::UObject* actor, const ue::UClass* cls);
     bool MovableComp(ue::UObject* comp);
     bool ClassSkipped(const ue::UClass* actorClass);                 // an effect, gore or mod actor class (or a child of one)
@@ -295,7 +296,7 @@ private:
     ue::UObject* ParentActorOf(ue::UObject* actor);
     bool InCensus(uint64_t propId) const;                            // a level id of the current census
     bool TaggedRandomDelete(ue::UObject* actor);
-    void RestorePhysics(ue::UObject* root, int32_t rootIndex);
+    void RestorePhysics(ue::UObject* actor, ue::UObject* root, int32_t rootIndex);   // every movable primitive of the actor
     RootCalls* CallsFor(ue::UObject* root);
     ue::UObject* ObjectField(ue::UObject* o, int which);             // 0 "Parent Actor", 1 "Weapon R", 2 "Weapon L"
     bool InUse(uint64_t propId, double nowMs) const;
@@ -332,6 +333,7 @@ private:
     std::array<StandInHands, kMaxWillies + 1> standInHands_{};
     std::vector<Loose> loose_;
     std::vector<Candidate> weapons_;
+    std::vector<Candidate> idle_;          // the level's movable objects at rest at the last walk (no census prop): Attach's last resort (#88)
     double weaponsMs_ = -1e18;                                       // when weapons_ was last refreshed
     std::unordered_map<uint32_t, std::pair<ue::UClass*, int32_t>> weaponClasses_;   // class hash -> loaded class, its slot
     double weaponClassesMs_ = -1e18;                                 // when weaponClasses_ was last walked

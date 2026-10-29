@@ -66,6 +66,9 @@ struct Config {
     // true: your HSMMod log is also sent to the report relay when someone in your lobby files a report or a crash is reported
     // (the multiplayer page's HELP IMPROVE THE MOD toggle; SaveHelpImprove writes the key). Off by default.
     bool helpImprove = false;
+    // help_improve_asked=1: the one-time HELP IMPROVE THE MOD question (the first MULTIPLAYER click, 0.8.0-pre7) was
+    // answered, or the toggle was used. It never turns help_improve on by itself.
+    bool helpImproveAsked = false;
     std::string reportUrl = "https://reports.dudiebug.net";
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
@@ -90,7 +93,7 @@ struct Config {
 
 Config LoadConfig();          // writes a commented default file if none exists
 const char* RoleName(Role r);
-bool SaveHelpImprove(bool on);   // writes help_improve= under [net] in HSMMod.ini, the rest of the file untouched; false: could not
+bool SaveHelpImprove(bool on);   // writes help_improve= (and help_improve_asked=1) under [net] in HSMMod.ini, the rest untouched; false: could not
 // Writes these keys under [net] in HSMMod.ini in one replace, the rest of the file untouched; false: could not.
 bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys);
 }  // namespace hsm

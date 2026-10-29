@@ -604,6 +604,21 @@ static void TestDownCarry() {
     }
     CHECK(!overshot && Len(x) < 0.5);
 
+    // Lift cap (0.8.0-pre7, #83/#84): a carried body is never driven up faster than kGrabDownMaxUpUu, whatever the hand
+    // does above it; sideways and downward pulls are untouched, and the soft hold has no cap.
+    CHECK(down.maxUpUu == hsm::sync::kGrabDownMaxUpUu && soft.maxUpUu < 0);
+    const V3 above{ 0, 0, 80 }, up{ 0, 0, 900 };
+    CHECK(GrabPullDv(V3{}, V3{}, above, up, dt, down).z <= down.maxUpUu + 1e-9);
+    CHECK(GrabPullDv(V3{}, V3{ 0, 0, 500 }, above, up, dt, down).z <= down.maxUpUu - 500 + 1e-9);   // already rising: slowed to the cap
+    CHECK(GrabPullDv(V3{}, V3{}, above, up, dt, soft).z > soft.maxDvUu - 1e-9);                     // uncapped: the step cap alone
+    CHECK(GrabPullDv(V3{}, V3{}, V3{ 0, 0, -80 }, V3{ 0, 0, -900 }, dt, down).z < -down.maxUpUu);  // downward: no cap
+    CHECK(GrabPullDv(V3{}, V3{}, V3{ 80, 0, 0 }, V3{ 900, 0, 0 }, dt, down).x > down.maxUpUu);      // sideways: no cap
+    {
+        GrabPullParams capped = down;
+        capped.maxUpUu = 0.0;
+        CHECK(GrabPullDv(V3{}, V3{}, above, up, dt, capped).z <= 1e-9);                              // 0: never lifted
+    }
+
     // Break-free: the soft hold breaks past 80 uu for 300 ms; a down body's only past 250 uu for 1 s.
     const auto mine = [](uint8_t e) { return e == 5; };
     const auto alive = [](uint8_t) { return false; };

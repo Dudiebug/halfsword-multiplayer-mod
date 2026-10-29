@@ -38,6 +38,19 @@ static void TestRedaction() {
     CHECK(lobby.find("steamid:" + RedactHash("109775241234567890", salt)) != std::string::npos);
     CHECK(lobby.find("created, group=steamid:") != std::string::npos);
 
+    // IPv6 (0.8.0-pre7): full, compressed, bracketed with a port, with a zone, with an IPv4 tail; loopback stays
+    {
+        const std::string v6 = RedactLog("peer 2001:db8:85a3:0:0:8a2e:370:7334 and [2001:db8::1]:27015, fe80::1ff:fe23:4567:890a%eth0; "
+                                         "map ::ffff:10.0.0.5 up", salt);
+        for (const char* gone : {"2001:db8:85a3", "2001:db8::1", "fe80::", "10.0.0.5", "ffff"}) CHECK(v6.find(gone) == std::string::npos);
+        CHECK(v6.find("[ip6:" + RedactHash("2001:db8::1", salt) + "]:27015") != std::string::npos);
+        CHECK(v6.find("ip6:" + RedactHash("2001:db8:85a3:0:0:8a2e:370:7334", salt)) != std::string::npos);
+        CHECK(v6.find("eth0") == std::string::npos);
+        for (const char* keep : {"bind ::1 ok", "any ::", "[12:34:56.789]", "hsm::game::Adapter", "std::abs", "a:b:c", "dead:beef",
+                                 "mac aa:bb:cc:dd:ee:ff", "0x1028 / 0x0E68", "ratio 1:2", "add::x", "Cafe::Bean"})
+            CHECK(RedactLog(keep, salt) == keep);
+        CHECK(RedactLog("addr 2001:db8::7: failed", salt) == "addr ip6:" + RedactHash("2001:db8::7", salt) + ": failed");
+    }
     const std::string ip = RedactLog("config: role=client host=192.168.1.254 port=27777; net: 10.0.0.5:27777 up", salt);
     CHECK(ip.find("192.168.1.254") == std::string::npos && ip.find("10.0.0.5") == std::string::npos);
     CHECK(ip.find("ip:" + RedactHash("10.0.0.5", salt) + ":27777") != std::string::npos);
@@ -204,7 +217,11 @@ static void TestOutcomes() {
     }
 
     // Refusals: the relay said no, nothing was filed.
-    CHECK(line(ReportJob::Report, T::Ok, true, 429, "{\"error\":\"too many reports\"}") ==
+    CHECK(line(ReportJob::Report, T::Ok, true, 429, "{\"error\":\"too many reports from you, try again later\"}") ==
+          "Bug report not filed: too many reports from you, try again later.");                 // the relay's own words
+    CHECK(line(ReportJob::Report, T::Ok, true, 429, "") ==
+          "Bug report not filed: too many reports right now, try again in a few minutes.");    // none: the generic line
+    CHECK(line(ReportJob::Report, T::Ok, true, 429, "<html>Too Many Requests</html>") ==
           "Bug report not filed: too many reports right now, try again in a few minutes.");
     CHECK(line(ReportJob::Report, T::Ok, true, 413, "") == "Bug report not filed: the report is too large.");
     CHECK(line(ReportJob::Report, T::Ok, true, 502, "{\"error\":\"the report could not be filed, try again later\"}") ==

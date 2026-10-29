@@ -20,7 +20,7 @@ constexpr double kSpawnAfterMs = 1500.0;      // a pose showing a class no weapo
                                               // the stand-in's hand (round start: the loadout fills the hand within 0.2 s)
 constexpr double kClassWalkMs = 10000.0;      // the loaded weapon classes are walked again (on a miss) at most this often
 constexpr uint64_t kLogFirst = 10;            // the first attaches, releases, self-drops and adoptions are logged in full
-constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kBlock = 2;   // ECollisionChannel / ECollisionResponse
+constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 5, kBlock = 2;   // ECollisionChannel / ECollisionResponse
 
 struct Hands {                         // what an owned fighter held as of the previous tick
     ue::UObject* willie = nullptr;

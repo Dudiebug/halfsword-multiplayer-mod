@@ -95,6 +95,7 @@ public:
     // Pose bones of an entity's stand-in a fighter simulated here holds natively (GrabSync::HeldBones): not servoed while
     // held, so the servo and the grab constraint do not pull them two ways.
     void SetHeldBones(std::function<uint32_t(uint8_t)> heldBones) { heldBones_ = std::move(heldBones); }
+    void SetStuckBones(std::function<uint32_t(uint8_t)> stuckBones) { stuckBones_ = std::move(stuckBones); }   // bones my blades are stuck in
     // Called after every driven step of a stand-in with what the servo read, the target and the rig (the mirror bench's
     // tracking measures, mirror.h). Optional.
     using StepObserver = std::function<void(uint8_t entity, const sync::DriverStep& step, const sync::FighterNow& now,
@@ -129,7 +130,7 @@ private:
         double bindDeadlineMs = 0, nextBindMs = 0;
         bool bindLogged = false, haveTarget = false;
         bool deadShown = false;   // DED set on the stand-in from the owner's vitals
-        bool downShown = false;   // the owner is dead, fallen, knocked out or at 0 health: the capsule follows the body
+        bool downShown = false;   // the owner is dead, fallen, knocked out or at 0 health: the capsule follows the body, the beacon is off
         sync::V3 lastTargetPelvis{};
         uint32_t shownTs = 0;
         bool haveShown = false;
@@ -150,6 +151,7 @@ private:
     std::function<uint32_t(uint8_t)> deadBones_;
     std::function<uint32_t(uint8_t)> heldWeapons_;
     std::function<uint32_t(uint8_t)> heldBones_;
+    std::function<uint32_t(uint8_t)> stuckBones_;
     StepObserver stepObserver_;
     double costSumMs_ = 0, costMaxMs_ = 0;
     uint64_t ticks_ = 0;

@@ -247,12 +247,13 @@ Wine version) and the end of `HSMMod.log` and `HSMMod.prev.log` (at most 3 MB ea
 (`report_url` in `HSMMod.ini`, default `https://reports.dudiebug.net`).
 The relay opens a public GitHub issue with the text and the facts only (label `in-game-report`) and keeps the logs
 in a private repository. Before sending, Steam IDs and IP addresses in the logs become salted hashes (`steam:1a2b3c4d`,
-`ip:5e6f7a8b`; the salt is new for every report, so reports cannot be matched up) and the profile folder name in
+`ip:5e6f7a8b`, IPv6 `ip6:...`; the salt is new for every report, so reports cannot be matched up) and the profile folder name in
 paths becomes `<user>`. Player names stay in the logs.
 
 When a session player files a report, every other player sees "<name> filed a bug report. Type /sendlog to add
 your log, or /nolog." `/sendlog` within 2 minutes adds that player's own log to the same report; nothing is sent
-otherwise. One report per player every 2 minutes; the host relays one share per player per minute.
+otherwise. One report per player every 30 seconds (the relay allows 20 an hour and 60 a day per address; when it
+refuses, its own reason is shown); the host relays one share per player per minute.
 
 The only web requests are `/bug` and `/sendlog` (below) and the update check (next section); WinHTTP is loaded from
 System32 only then. `reports=off` in `HSMMod.ini` turns the report commands off.
@@ -270,13 +271,19 @@ full releases; a full release only full releases (`session/hsm_version.h`). `upd
 (`kModVersion` is "0.7.0" for every 0.7.0 prerelease): tag the commit before building a release.
 
 **Help improve the mod.** `help_improve=1` under `[net]` (default `0`, off) is the switch behind the **HELP IMPROVE THE
-MOD: ON/OFF** button on the multiplayer page; the button writes the key back to `HSMMod.ini`, and nothing else in the
-file changes. When on, your HSMMod log (same redaction as above: Steam IDs, IPs and your user name removed) is sent to
+MOD: ON/OFF** button at the top of the multiplayer page and on the Esc menu in a session fight; the button writes the
+key back to `HSMMod.ini`, and nothing else in the file changes. The first MULTIPLAYER click asks once (YES turns it on,
+NO THANKS or Esc leaves it off; `help_improve_asked=1` records the answer). It is never turned on without that answer.
+When on, your HSMMod log (same redaction as above: Steam IDs, IPs and your Windows user name removed; player names
+stay) is sent to
 the bug report server whenever someone in your lobby files a report, without waiting for you to type `/sendlog`. And if
 your last session crashed (`crash: fault` in `HSMMod.prev.log`), the next start files a crash report by itself: its
 public text is the crash line only, both logs go privately. When that report is filed in the menu, it is shared with
 the next session you join within 30 minutes, so the players there who also turned it on add their logs (their logs
-still hold the crashed session if they kept playing). Off, nothing is sent unless you type the command.
+still hold the crashed session if they kept playing). Off, nothing is sent unless you type the command; after a crash
+the chat says once where the button is. When on, the session health lines also carry a hit audit (`hit audit (help
+improve):` per striking weapon class and component: contacts, sent, gated, limited, coalesced, no-claim, blocked; and
+claims replayed on you by striking component with their damage), kept in the log only.
 
 ## Command-line options and the agent bridge (testing)
 

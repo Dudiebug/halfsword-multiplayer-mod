@@ -268,15 +268,24 @@ struct GrabPullParams {
     double leadUu = 30.0;        // the spring's stretch is capped here: pull <= stiffness x lead (grab_lead)
     double maxDvUu = 300.0;      // cm/s per step at most: a glitch never launches a body
     double minDtS = 0.004, maxDtS = 0.080;   // the stand-in servo's frame-time clamp
+    // The held bone is never driven upward faster than this (cm/s); negative: no cap. 0.8.0-pre7 (#83, #84): a carried
+    // body followed the grabber's hand straight up through a jump, and the gravity-free stand-in of that body, seen a
+    // round trip later on the grabber's screen, held the hand up in turn: the two machines lifted each other.
+    double maxUpUu = -1.0;
 };
 
 // A held body that cannot struggle (dead, fallen, knocked out): carried the way the game carries a held NPC, not
 // dragged on a soft spring (test 2026-10-25: grabbing another player's body "worked" but did not feel like the game's).
 // Stiffer, a longer lead, still overdamped (zeta = 200 / (2 sqrt 4500) ~ 1.5), and a higher per-step cap so a body keeps
 // up with a walking grabber (unchanged in 0.7.3: carrying a body was never the problem).
+// A carried body is lifted no faster than this (cm/s): dragged along the ground at any speed, hoisted at a slow lift,
+// never flown up with a jumping grabber. And the pull aims at the hand itself, not ahead of it (GrabAnchor lead 0): the
+// lead was longer than the round trip, so the body arrived ahead of the hand and pushed it on.
+constexpr double kGrabDownMaxUpUu = 120.0;
 inline GrabPullParams DownPullParams() {
     GrabPullParams p;
     p.stiffness = 4500.0; p.damping = 200.0; p.leadUu = 80.0; p.maxDvUu = 1500.0;
+    p.maxUpUu = kGrabDownMaxUpUu;
     return p;
 }
 // Share of a down body's pull also given to its pelvis and chest, so the whole body comes along, not just the held limb.
@@ -318,7 +327,8 @@ inline V3 GrabPullDv(const V3& grip, const V3& gripVel, const V3& hand, const V3
     const double dt = std::clamp(dtS, p.minDtS, p.maxDtS);
     const V3 stretch = ClampLen(Sub(Add(hand, Scale(handVel, dt)), grip), p.leadUu);
     const V3 drive = Add(Scale(stretch, p.stiffness), Scale(handVel, p.damping));
-    const V3 v = Scale(Add(gripVel, Scale(drive, dt)), 1.0 / (1.0 + p.damping * dt + p.stiffness * dt * dt));
+    V3 v = Scale(Add(gripVel, Scale(drive, dt)), 1.0 / (1.0 + p.damping * dt + p.stiffness * dt * dt));
+    if (p.maxUpUu >= 0.0 && v.z > p.maxUpUu) v.z = p.maxUpUu;   // the bone's velocity after this step, not the change
     const V3 dv = ClampLen(Sub(v, gripVel), p.maxDvUu);
     return Finite(dv) ? dv : V3{};
 }

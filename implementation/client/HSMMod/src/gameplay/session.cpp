@@ -488,6 +488,7 @@ public:
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
         game::TickPaintDefer();
+        adapter_.TickDeferredDestroys();
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
         adapter_.SetDestroyAware(net_ != nullptr);
@@ -642,6 +643,8 @@ public:
         HSM_LOG("%s: %s", who, CensusLine().c_str());
         if (std::string line = standIns_.HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, claims_.HealthLine().c_str());
+        claims_.SetAudit(cfg_.helpImprove);   // C0: the hit audit only with HELP IMPROVE THE MOD on (0.8.0-pre7)
+        if (std::string line = claims_.AuditLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, fx_.HealthLine().c_str());
         if (std::string line = game::PaintDeferHealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         if (std::string line = game::shareddice::HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
@@ -768,7 +771,7 @@ public:
         if (cmd.kind == ReportCommandKind::SendLog) {
             std::string id, token;
             if (!reportOffer_.Take(now, id, token)) say("No bug report is waiting for your log.");
-            else if (report::Attach(id, token, ReportFactsNow())) say("Sending your HSMMod log (Steam IDs, IPs and your user name removed)...");
+            else if (report::Attach(id, token, ReportFactsNow())) say("Sending your HSMMod log (Steam IDs, IPs and your Windows user name removed)...");
             else say("Your log was not sent: the request could not be started.");
         } else if (cmd.text.empty()) {
             say("Type /bug and what went wrong, e.g. /bug my sword vanished after respawn");
@@ -789,7 +792,7 @@ public:
             return "Please wait " + std::to_string((kReportCooldownMs - (now - lastReportAt_)) / 1000 + 1) + " s before another report.";
         if (!report::Submit(text, ReportFactsNow(), ReportJob::Report)) return "Bug report not sent: the request could not be started.";
         reportSession_ = sessionGen_; reportIsManual_ = true;   // the cooldown starts when the relay answers (ReportTick)
-        return "Sending your bug report... The text becomes a public GitHub issue; your log (Steam IDs, IPs and user name removed) stays private.";
+        return "Sending your bug report... The text becomes a public GitHub issue; your log (Steam IDs, IPs and your Windows user name removed) stays private.";
     }
 
     std::string ReportStatus() const override { return reportStatus_; }
@@ -1330,8 +1333,10 @@ public:
     }
 
     bool HelpImprove() const override { return cfg_.helpImprove; }
+    bool HelpImproveAsked() const override { return cfg_.helpImproveAsked; }
     void SetHelpImprove(bool on) override {
         cfg_.helpImprove = on;
+        cfg_.helpImproveAsked = true;
         HSM_LOG("report: help improve the mod: %s", on ? "on" : "off");
         if (!SaveHelpImprove(on)) HSM_LOG("report: could not write help_improve=%d to HSMMod.ini", on ? 1 : 0);
     }
@@ -1421,7 +1426,14 @@ public:
         }
         const std::string line = CrashLineOf(tail);
         if (line.empty()) return;
-        if (!cfg_.helpImprove) { HSM_LOG("report: the last session crashed (%s); help_improve is off, nothing sent", line.c_str()); return; }
+        if (!cfg_.helpImprove) {
+            HSM_LOG("report: the last session crashed (%s); help_improve is off, nothing sent", line.c_str());
+            // Said once, where the player can see it (held like a report outcome until the chat or the page is up).
+            if (report::Enabled())
+                ReportOutcomeToPlayer("The game crashed last session. Turn on HELP IMPROVE THE MOD on the multiplayer page "
+                                      "(or the Esc menu in a match) to send crash reports automatically.");
+            return;
+        }
         if (!report::Enabled() || report::Busy()) { HSM_LOG("report: the last session crashed; reports are off or busy, not sent"); return; }
         if (!report::Submit(CrashReportText(line), ReportFactsNow(), ReportJob::Crash)) { HSM_LOG("report: the crash report could not be started"); return; }
         HSM_LOG("report: the last session crashed; sending a crash report (help_improve is on): %s", line.c_str());
@@ -1433,7 +1445,8 @@ public:
         if (!reportOffer_.Take(NowMs(), id, token)) return;
         if (!report::Attach(id, token, ReportFactsNow())) { HSM_LOG("report: could not add the log to report %s", id.c_str()); return; }
         HSM_LOG("report: help_improve is on; sending this log to report %s", id.c_str());
-        ui::ShowLine("HSMMod", style::kBone, "Help improve the mod is on: sending your HSMMod log too (Steam IDs, IPs and your user name removed).");
+        ui::ShowLine("HSMMod", style::kBone, "Help improve the mod is on: sending your HSMMod log too (Steam IDs, IPs and your "
+                                             "Windows user name removed; player names stay).");
     }
 
     // A newer HSMMod release (net/update_check.h), said once in the chat a few seconds into the first fight level, when the HUD is up.
@@ -1726,6 +1739,8 @@ private:
         // host
         for (uint8_t slot = 1; slot < kMaxFighters; ++slot) DespawnFighter(slot);
         roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); helloWatch_.Clear(); blobVersion_.fill(0); hostExport_.clear();
+        for (auto& b : ownLoadout_) b.clear();
+        ownBlobId_.fill(0);
         picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
         bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
@@ -1871,7 +1886,14 @@ private:
         }
         oneFight_ = InFightLevel() && !adapter_.FreeModeActive();   // a client has the host's GI settings (Travel) by now
         // Fighters are built for the lobby's tier (both sides read it from the Steam lobby); MatchInfo keeps it current.
-        adapter_.SetMuscleTier(steamMode() && lobby_.InLobby() && MatchLevel() ? int(lobby_.config().tier) : -1);
+        {
+            // Own gear in a PvP format: the player's passport carries its own muscle; the lobby's tier is for generated gear
+            // (0.8.0-pre7, #62: an Own-gear fighter came up with the tier's muscle instead of its own).
+            const bool lobbyMatch = steamMode() && lobby_.InLobby() && MatchLevel();
+            const MatchConfig lc = lobbyMatch ? lobby_.config() : MatchConfig{};
+            const bool ownGear = lobbyMatch && lc.gear == Gear::Own && !IsBotFormat(lc.format);
+            adapter_.SetMuscleTier(lobbyMatch && !ownGear ? int(lc.tier) : -1);
+        }
         adapter_.SetBare(steamMode() && lobby_.InLobby() && MatchLevel() && !lobby_.Progression() && IsBrawl(lobby_.config()));   // Brawl: no gear on any body
         if (!InFightLevel()) RestoreFoes();
         inputFixAt_ = net_ && FighterLevel() ? NowMs() + 1500 : 0;
@@ -2025,6 +2047,7 @@ private:
         standIns_.SetDeadBones([this](uint8_t e) { return gore_.DeadBones(e); });
         standIns_.SetHeldWeapons([this](uint8_t e) { return severs_.HeldWeapons(e); });   // its blades held in my fighter
         standIns_.SetHeldBones([this](uint8_t e) { return grabs_.HeldBones(e); });        // its bones held by my fighter's grab
+        standIns_.SetStuckBones([this](uint8_t e) { return severs_.StuckBones(e); });      // its bones my blades are stuck in
         game::GrabSync::Env genv;
         genv.standInEntity = [this](const UObject* w) { return standIns_.EntityOf(w); };
         genv.standInActor = [this](uint8_t e) { return standIns_.ActorOf(e); };
@@ -2677,20 +2700,43 @@ private:
         std::vector<uint8_t> bytes;
         if (!adapter_.ExportPassport(bytes) || bytes == hostExport_) return;
         hostExport_ = bytes;
-        StoreAndRelay(0, std::move(bytes), 0);
+        const std::vector<uint8_t> own = bytes;
+        KeepOwnLoadout(0, own, StoreAndRelay(0, std::move(bytes), 0));
     }
 
-    // Assigns a fresh host blob id for the slot, keeps it, and sends it to every peer except `skipPeer`.
-    void StoreAndRelay(uint8_t slot, std::vector<uint8_t> bytes, uint32_t skipPeer) {
+    // Assigns a fresh host blob id for the slot, keeps it, and sends it to every peer except `skipPeer`; 0 when not stored.
+    uint32_t StoreAndRelay(uint8_t slot, std::vector<uint8_t> bytes, uint32_t skipPeer) {
         uint32_t id = MakeBlobId(slot, ++blobVersion_[slot]);
         std::vector<BlobChunk> chunks = SplitBlob(id, bytes);
-        if (chunks.empty() || !hostBlobs_.Put(id, std::move(bytes))) { HSM_LOG("host: loadout for slot %u not storable", slot); return; }
+        if (chunks.empty() || !hostBlobs_.Put(id, std::move(bytes))) { HSM_LOG("host: loadout for slot %u not storable", slot); return 0; }
         director_.OnBlob(slot, id);
-        if (!net_) return;
+        if (!net_) return id;
         for (const auto& [peer, p] : peers_) {
             if (peer == skipPeer) continue;
             for (const BlobChunk& c : chunks) net_->Send(peer, kChanReliable, Encode(c), true);
         }
+        return id;
+    }
+
+    // A player's own uploaded loadout and its blob id, kept apart from the slot's current blob: a generated-gear match
+    // replaces the slot's blob, and the next Own-gear match has to find the upload again (#62: after a Random-tier match
+    // the Own-gear match that followed respawned everyone in the generated gear). 0.8.0-pre7.
+    void KeepOwnLoadout(uint8_t slot, const std::vector<uint8_t>& bytes, uint32_t id) {
+        if (slot >= ownLoadout_.size() || !id) return;
+        ownLoadout_[slot] = bytes; ownBlobId_[slot] = id;
+    }
+    void RestoreOwnLoadouts(const char* why) {
+        int restored = 0;
+        for (const RosterMember& m : roster_.members()) {
+            const uint8_t slot = m.slot;
+            if (slot >= ownLoadout_.size() || !ownBlobId_[slot] || ownLoadout_[slot].empty()) continue;
+            const uint32_t cur = slot == 0 ? hostBlobs_.LatestFor(0) : director_.BlobFor(slot);
+            if (cur == ownBlobId_[slot]) continue;
+            const uint32_t id = StoreAndRelay(slot, ownLoadout_[slot], 0);
+            if (!id) continue;
+            ownBlobId_[slot] = id; ++restored;
+        }
+        if (restored) HSM_LOG("host: %s: %d player(s) back in their own loadout", why, restored);
     }
 
     void SendAllBlobs(uint32_t peer) {
@@ -2851,7 +2897,8 @@ private:
                 return;
             }
             HSM_LOG("host: loadout from slot %u (%zu bytes)", peer.slot, blob.size());
-            StoreAndRelay(peer.slot, std::move(blob), ev.peer);
+            const std::vector<uint8_t> own = blob;
+            KeepOwnLoadout(peer.slot, own, StoreAndRelay(peer.slot, std::move(blob), ev.peer));
         }
     }
 
@@ -2963,6 +3010,7 @@ private:
         VoiceForget(Roster::EntityForSlot(slot));
         props_.SlotLeft(slot); props_.ForgetEntity(Roster::EntityForSlot(slot));
         hostBlobs_.DropSlot(slot);
+        if (slot < ownLoadout_.size()) { ownLoadout_[slot].clear(); ownBlobId_[slot] = 0; }
         if (uint8_t e = director_.OnLeave(slot)) { Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true); }
         match_.RemoveFighter(Roster::EntityForSlot(slot)); infoDirty_ = true;
         HSM_LOG("host: slot %u left", slot);
@@ -3154,6 +3202,7 @@ private:
         HSM_LOG("host: match gear %d, tier %u", int(cfg.gear), cfg.tier);
         if (progression) HSM_LOG("host: Progression start: %zu player(s), stock fighters adopted as bots %s, level %s", roster_.size(), adoptStock_ ? "on" : "OFF", currentLevel_.c_str());
         RegearSlots(match_.config(), AllSlots(), startGear, "match start");
+        if (startGear == Regear::None && cfg.gear == Gear::Own) RestoreOwnLoadouts("match start");   // #62: after a generated-gear match
         BroadcastInfo(NowMs());                          // the clients know the match's gear before their Spawns arrive
         RespawnAll();   // team sides / generated loadouts take effect; F2: and everyone starts alive in the arena's start spots, own gear too
     }
@@ -4244,7 +4293,8 @@ private:
             HSM_LOG("client: own Spawn names loadout %08x, which has not arrived; respawning in the uploaded loadout", sp.blobId);
         if (!retry && generated && assigned && ownBlob_ && sp.blobId != ownBlob_) NewGearNotice(info_.tier);
         ownBlob_ = sp.blobId;
-        game::Adapter::SpawnOptions o; o.blob = assigned ? assigned : lastUpload_.empty() ? nullptr : &lastUpload_;
+        // Own gear: my upload, even when the Spawn still names a blob I have (a generated one from the last match, #62).
+        game::Adapter::SpawnOptions o; o.blob = generated && assigned ? assigned : !lastUpload_.empty() ? &lastUpload_ : assigned;
         o.at = {sp.x, sp.y, sp.z}; o.yawDeg = sp.yaw; o.teamInt = 1;
         severs_.Forget(world_.myEntity());          // a new body: its stuck blades and holds start afresh
         claims_.Forget(world_.myEntity()); fx_.Forget(world_.myEntity()); equip_.Forget(world_.myEntity());
@@ -4530,7 +4580,9 @@ private:
         if (entity == world_.myEntity()) return adapter_.PlayerWillie(0);
         auto it = puppets_.find(entity);
         if (it == puppets_.end()) return nullptr;
-        if (!adapter_.StillValid(it->second.obj, it->second.index)) { puppets_.erase(it); return nullptr; }
+        // An actor the game destroyed is left in puppets_ for RecoverLostPuppets, which detaches it and marks it lost so it
+        // is made again (0.8.0-pre7, #86: erased here first, inside the re-create limiter's 2 s, it was never re-created).
+        if (!adapter_.StillValid(it->second.obj, it->second.index)) return nullptr;
         return it->second.obj;
     }
 
@@ -4983,7 +5035,11 @@ private:
                 groundSeen_ = true;
                 info_ = std::move(m); infoAt_ = NowMs();
                 if (groundClear) GroundCleared();
-                if (MatchLevel()) { adapter_.SetMuscleTier(info_.tier); adapter_.SetBare(IsBrawl(Format(info_.format), Gear(info_.gear))); }
+                if (MatchLevel()) {
+                    const bool ownGear = Gear(info_.gear) == Gear::Own && !IsBotFormat(Format(info_.format));   // #62: own muscle with own gear
+                    adapter_.SetMuscleTier(ownGear ? -1 : int(info_.tier));
+                    adapter_.SetBare(IsBrawl(Format(info_.format), Gear(info_.gear)));
+                }
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
                 if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) {   // F5: after the own body's armour is on
                     dropClearPending_ = true; dropClearDue_ = NowMs() + kDropClearDelayMs; dropClearGiveUp_ = NowMs() + kDropClearGiveUpMs;
@@ -5081,6 +5137,8 @@ private:
     HostDirector director_;
     BlobStore hostBlobs_;
     std::array<uint32_t, kMaxWillies> blobVersion_{};
+    std::array<std::vector<uint8_t>, kMaxFighters> ownLoadout_{};   // each slot's own upload (KeepOwnLoadout)
+    std::array<uint32_t, kMaxFighters> ownBlobId_{};
     std::vector<uint8_t> hostExport_;
     std::vector<uint8_t> mirrorBlob_;            // the match's shared generated loadout (Everyone identical), for joiners
     std::map<uint32_t, Peer> peers_;

@@ -96,6 +96,9 @@ struct State {
     mp::Maker voiceMaker;
     mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
+    Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
+    Flat askYes, askNo;
+    bool askOpen = false, escDown = false;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
     std::array<ChatRow, kChatLogLines> chatRows;
@@ -329,7 +332,15 @@ void BuildChat(Box& left) {
 
 // Left column: hosting and the browser (not in a lobby), the players with Invite, Ready, Auto-balance and Leave (in one).
 void BuildLobbyColumn(Box& left) {
-    g.lobbyTitle = Section(left, "LOBBY", 0);
+    // HELP IMPROVE THE MOD first, where it is seen (0.8.0-pre7; it sat under REPORT A BUG at the foot of the column).
+    // The setting behind help_improve in HSMMod.ini; what it sends is session.cpp's business.
+    g.helpToggle = MakeFlat("HELP IMPROVE THE MOD: OFF", 18);
+    g.helpNote = NewText("When on, your HSMMod log goes to the maintainers when someone in your lobby files a bug report or your game "
+                         "crashes. Steam IDs, IPs and your Windows user name are removed; player names stay. Off unless you turn it on.",
+                         13, style::kIron);
+    AddFlat(left, g.helpToggle, 0);
+    if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(left, g.helpNote, 6); }
+    g.lobbyTitle = Section(left, "LOBBY", 22);
     g.hostFriends = MakeFlat("Host a lobby for friends", 18);
     g.hostPublic = MakeFlat("Host a public lobby", 18);
     g.find = MakeFlat("Find public lobbies", 18);
@@ -403,12 +414,48 @@ void BuildLobbyColumn(Box& left) {
     if (g.reportNote) { g.reportNote.Wrap(true); AddToVerticalBox(left, g.reportNote, 8); }
     g.reportHow = NewText("In a fight: press Enter and type /bug and what happened. Your HSMMod log goes with it.", 13, style::kIron);
     if (g.reportHow) { g.reportHow.Wrap(true); AddToVerticalBox(left, g.reportHow, 4); }
+}
 
-    // HELP IMPROVE THE MOD: the setting behind help_improve in HSMMod.ini (what it sends is session.cpp's business).
-    g.helpToggle = MakeFlat("HELP IMPROVE THE MOD: OFF", 17);
-    g.helpNote = NewText("When on, your HSMMod log is sent to the bug report server whenever someone in your lobby files a report or a crash is reported (Steam IDs, IPs and your user name removed).", 13, style::kIron);
-    AddFlat(left, g.helpToggle, 26);
-    if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(left, g.helpNote, 6); }
+// The one-time question (0.8.0-pre7): the first MULTIPLAYER click shows it over the menu before the page opens. YES turns
+// help_improve on, NO THANKS (or Esc) leaves it off; either answer is saved and it is never asked again. Off by default.
+void BuildAsk(Canvas& root) {
+    g.ask = g.kit.MakePanel();
+    Fixed width = g.kit.MakeFixed();
+    Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
+    Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
+    Text title = NewText("HELP IMPROVE THE MOD?", 30, style::kBone);
+    Text body = NewText("When someone in your lobby files a bug report, or your game crashes, your HSMMod log is sent to the "
+                        "maintainers so the bug can be found and fixed.", 17, style::kBone);
+    Text privacy = NewText("Steam IDs, IP addresses and your Windows user name are removed first. Player names stay. "
+                           "Nothing is sent unless you say yes. You can change this any time with HELP IMPROVE THE MOD on the "
+                           "multiplayer page or in the Esc menu during a match.", 14, style::kIron);
+    g.askYes = MakeFlat("YES, SEND MY LOG", 18);
+    g.askNo = MakeFlat("NO THANKS", 18);
+    if (!g.ask || !width || !frame || !face || !column || !buttons || !title || !body || !privacy || !g.askYes.card || !g.askNo.card) {
+        HSM_LOG("ui: the help-improve question could not be made; the page opens without it");
+        g.ask = Panel{};
+        return;
+    }
+    root.Add(g.ask).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(110);
+    g.ask.Color({0, 0, 0, 0.80f});
+    g.ask.ContentAlign(HAlign::Center, VAlign::Center);
+    g.ask.Content(width);
+    width.Width(760);
+    width.Content(frame);
+    frame.Color(style::kBlood);
+    frame.Padding({2, 2, 2, 2});
+    frame.Content(face);
+    face.Color({style::kSmoke.r, style::kSmoke.g, style::kSmoke.b, 0.98f});
+    face.Padding({36, 28, 36, 28});
+    face.Content(column);
+    title.Font(30, 1, {0, 0, 0, 0.85f});
+    AddToVerticalBox(column, title, 0);
+    body.Wrap(true); AddToVerticalBox(column, body, 14);
+    privacy.Wrap(true); AddToVerticalBox(column, privacy, 10);
+    AddToVerticalBox(column, buttons, 22);
+    AddToHorizontalBox(buttons, g.askYes.card.button, 0, 14);
+    AddToHorizontalBox(buttons, g.askNo.card.button, 0, 0);
+    g.ask.Show(false);
 }
 
 // Middle column: the mode cards two to a row, then a stepper row per setting with its hint.
@@ -562,6 +609,7 @@ bool BuildPanel() {
     BuildLobbyColumn(left);
     BuildMatchColumn();
     BuildMapColumn();
+    BuildAsk(root);
 
     g.close = MakeFlat("Back", 18);
     AddFlat(page, g.close, 16);
@@ -856,7 +904,26 @@ void HandleClicks(Session& session) {
     game::Lobby& lobby = session.lobby();
     const bool openClicked = Clicked(g.openButton);
     Paint(g.openButton.card);
-    if (openClicked) { g.panelOpen = !g.panelOpen; g.panel.Show(g.panelOpen); if (g.panelOpen) { g.nextText = 0; game::modmaps::Rescan(); } }
+    auto openPage = [&] { g.panelOpen = true; g.panel.Show(true); g.nextText = 0; game::modmaps::Rescan(); };
+    if (g.askOpen) {                            // the one-time question: nothing else on the menu until it is answered
+        Paint(g.askYes.card); Paint(g.askNo.card);
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.escDown;
+        g.escDown = esc;
+        const bool yes = Clicked(g.askYes.card), no = Clicked(g.askNo.card) || escEdge;
+        if (!yes && !no) return;
+        g.askOpen = false; g.ask.Show(false);
+        HSM_LOG("ui: help-improve question answered: %s", yes ? "yes" : "no");
+        session.SetHelpImprove(yes);
+        openPage();
+        return;
+    }
+    if (openClicked && !g.panelOpen && !session.HelpImproveAsked() && g.ask) {
+        g.askOpen = true; g.ask.Show(true);
+        g.escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        HSM_LOG("ui: first MULTIPLAYER click: asking about help improve the mod (off until answered)");
+        return;
+    }
+    if (openClicked) { if (g.panelOpen) { g.panelOpen = false; g.panel.Show(false); } else openPage(); }
     if (!g.panelOpen) { SetLobbyTyping(false); return; }
     const LobbyScene& s = g.scene;
     bool acted = false;

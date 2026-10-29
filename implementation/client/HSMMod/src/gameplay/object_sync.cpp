@@ -257,7 +257,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
         const uint8_t holder = parent && env_.ownedEntity ? env_.ownedEntity(parent) : 0;
         const bool holding = holder != 0;
         if (holding) p.toucher = holder;
-        if (p.restoreTicks > 0) { --p.restoreTicks; if (!parent) RestorePhysics(p.root, p.rootIndex); }
+        if (p.restoreTicks > 0) { --p.restoreTicks; if (!parent) RestorePhysics(p.actor, p.root, p.rootIndex); }
 
         // An object I put on another keeps my lease while it hangs there: I am the one that sees it let go of (PollEvents).
         if (p.attachedSent && p.claim.sent != LeaseLevel::Free && view_.Streamer(id) == MySlot()) p.lastContactMs = nowMs;
@@ -405,11 +405,17 @@ bool ObjectSync::ClassSkipped(const UClass* actorClass) {
 }
 
 // The bodies of an object (session/hsm_object.h BodyIndex): the root first when it is a movable primitive, then the actor's
-// other movable primitives in their order. A dropped weapon (multi false) is its root alone, as it always was.
+// other movable primitives in their order. A dropped weapon (multi false) is its root alone, as it always was, unless
+// it has simulating parts of its own (0.8.0-pre7: a flail's chain and head are primitives of the weapon actor, not its
+// root; streamed as the root alone, the head lay wherever the far machine's physics left it, #78).
 bool ObjectSync::BuildBodies(Prop& p, bool multi) {
     Call rc(p.actor, "K2_GetRootComponent");
     UObject* root = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
     const bool rootBody = root && MovableComp(root) && CallsFor(root);
+    if (!multi && LooseParts(p.actor, root)) {
+        multi = true;
+        HSM_LOG("props: %s has simulating parts; every body is streamed", ObjectName(p.actor).c_str());
+    }
     if (!multi) {
         if (!rootBody) return false;
         p.bodies.assign(1, BodyRef{});
@@ -447,6 +453,16 @@ bool ObjectSync::BuildBodies(Prop& p, bool multi) {
     return true;
 }
 
+bool ObjectSync::LooseParts(UObject* actor, UObject* root) {
+    if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
+    for (UObject* c : ComponentsOf(actor, primitiveClass_)) {
+        if (c == root || !MovableComp(c) || !CallsFor(c)) continue;
+        Call sim(c, "IsSimulatingPhysics");
+        if (sim.valid() && sim.invoke() && sim.get<bool>("ReturnValue")) return true;
+    }
+    return false;
+}
+
 ObjectSync::Prop* ObjectSync::Track(uint64_t propId, UObject* actor) {
     if (props_.count(propId) || byActor_.count(actor)) return nullptr;
     Prop probe;
@@ -468,13 +484,21 @@ ObjectSync::Prop* ObjectSync::Track(uint64_t propId, UObject* actor) {
     return &p;
 }
 
-// The stand-in rig kept its weapons gravity-free and blind to world geometry (FighterRig::SetBodyPolicy); a weapon it
-// let go of falls and lands like any other (Block on WorldStatic and WorldDynamic, the weapon's default response).
-void ObjectSync::RestorePhysics(UObject* root, int32_t rootIndex) {
+// The stand-in rig kept its weapons gravity-free and blind to world geometry, fighters and loose bodies
+// (FighterRig::SetBodyPolicy); a weapon it let go of falls and lands like any other (Block on WorldStatic, WorldDynamic,
+// Pawn and PhysicsBody, the weapon's default responses). 0.8.0-pre7: every movable primitive of it, a flail's chain too,
+// and the Pawn and PhysicsBody responses as well: a dropped weapon passed through fighters and other weapons (#68).
+void ObjectSync::RestorePhysics(UObject* actor, UObject* root, int32_t rootIndex) {
     if (!adapter_->StillValid(root, rootIndex)) return;
-    Call(root, "SetEnableGravity").set<bool>("bGravityEnabled", true).invoke();
-    Call(root, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", kBlock).invoke();
-    Call(root, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldDynamic).set<uint8_t>("NewResponse", kBlock).invoke();
+    if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
+    std::vector<UObject*> comps = actor ? ComponentsOf(actor, primitiveClass_) : std::vector<UObject*>{};
+    if (std::find(comps.begin(), comps.end(), root) == comps.end()) comps.push_back(root);
+    for (UObject* c : comps) {
+        if (c != root && !MovableComp(c)) continue;
+        Call(c, "SetEnableGravity").set<bool>("bGravityEnabled", true).invoke();
+        for (uint8_t ch : {kWorldStatic, kWorldDynamic, kPawn, kPhysicsBody})
+            Call(c, "SetCollisionResponseToChannel").set<uint8_t>("Channel", ch).set<uint8_t>("NewResponse", kBlock).invoke();
+    }
 }
 
 // ---------------------------------------------------------------- leases
@@ -753,9 +777,11 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
         }
         if (sim || IsGeometryCollection(o)) { la.anySim = true; la.simComp = o; }   // a geometry collection is synced by its breaks (shatter_sync.cpp)
     }
+    idle_.clear();
     for (LevelActor& la : acc) {
         if (la.bodies == 0) continue;
-        if (la.anySim) out.push_back(la); else ++notSimulating;
+        if (la.anySim) out.push_back(la);
+        else { ++notSimulating; idle_.push_back(Candidate{la.actor, la.index, la.classHash}); }
     }
     n_.simAsked += asked; n_.simCached += cached; n_.simCapped += capped;
     // The walk's cost, every census (the cache and the cap are tuned from this line).
@@ -1164,7 +1190,7 @@ std::string ObjectSync::HealthLine() {
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
                   "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu spawned %llu (failed %llu) "
                   "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
-                  "leftOut %zu purged %llu censuses %llu censusRejected %llu | despawned %llu",
+                  "leftOut %zu purged %llu censuses %llu censusRejected %llu | despawned %llu resetUnmoved %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
                   d(a.resolved, b.resolved), d(a.forced, b.forced), d(a.kept, b.kept), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
                   d(a.releaseFailed, b.releaseFailed), d(a.requests, b.requests), d(a.releases, b.releases),
@@ -1175,7 +1201,7 @@ std::string ObjectSync::HealthLine() {
                   d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased), level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
-                  d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected), d(a.despawned, b.despawned));
+                  d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected), d(a.despawned, b.despawned), d(a.resetUnmoved, b.resetUnmoved));
     size_t spawned = 0, bodies = 0;
     for (const auto& kv : props_) { spawned += kv.second.spawned ? 1 : 0; bodies += kv.second.bodies.size(); }
     char objects[640];

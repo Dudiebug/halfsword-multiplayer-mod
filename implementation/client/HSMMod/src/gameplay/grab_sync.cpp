@@ -168,6 +168,7 @@ std::array<GrabHand, kGrabHands> GrabSync::ReadHands(UObject* willie) {
 
 // One step of one hold: the grip on my bone toward the grabber's stand-in hand (both read, the stand-in untouched),
 // a velocity change added to that body. False when nothing could be read, or the hold just broke free.
+constexpr double kFarSkipFactor = 4.0;   // the hand farther than this many break distances: a glitch, no pull
 bool GrabSync::DownHere(uint8_t entity, UObject* me) {
     VitalsMsg v;
     return me && adapter_->ReadVitals(me, entity, v) && ((v.flags & 7u) != 0 || v.health <= 0.f);
@@ -194,11 +195,19 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
     vel_.put(0, hands_[p.hand]);
     if (!velAt_.invoke(mesh) || !vel_.invoke(handMesh)) { ++n_.noAnchor; return false; }
     const V3 handVel = ToV(vel_.take<FVector>(1));
-    const V3 hand = sync::GrabAnchor(ToV(a.translation), handVel);
+    // A carried body aims at the hand itself (lead 0): the lead ran ahead of the round trip and the body pushed the hand on.
+    const V3 hand = down ? sync::GrabAnchor(ToV(a.translation), handVel, 0.0) : sync::GrabAnchor(ToV(a.translation), handVel);
     const double dist = Dist(grip, hand);
     if (down ? inbox_.NoteDistance(p, dist, nowMs, sync::kGrabDownBreakUu, sync::kGrabDownBreakMs) : inbox_.NoteDistance(p, dist, nowMs)) {
         if (++n_.broke <= kLogFirst) HSM_LOG("grabs: e%u broke free of e%u's hand %s (%.0f cm)", p.target, p.grabber, kHandTag[p.hand], dist);
         return false;
+    }
+    // A hand far past the break distance is a glitch in the grabber's stream (a teleport, a burst of stale poses), no
+    // reach: no pull toward it while the hold runs out its break time, or my fighter is flung after it (0.8.0-pre7, #87
+    // "started floating": a hand 800 m off pulled for the whole second a carried body takes to break free).
+    if (dist > kFarSkipFactor * (down ? sync::kGrabDownBreakUu : sync::kGrabBreakUu)) {
+        if (++n_.farSkips <= kLogFirst) HSM_LOG("grabs: e%u's hand %s is %.0f cm from my grip; not pulled toward it", p.grabber, kHandTag[p.hand], dist);
+        return true;
     }
     const V3 dv = sync::GrabPullDv(grip, ToV(velAt_.take<FVector>(2)), hand, handVel, dt, down ? sync::DownPullParams() : sync::GrabPullParams{});
     addVel_.put(0, ToF(dv)).put(1, true).put(2, bone);   // bAddToCurrent: the change, on that body only

@@ -8,8 +8,8 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre6 tries out object and shatter sync, modded maps, UE4SS loading, a map reset every round
-> and shared map randomness. It connects only to 0.8.0-pre6.
+> **Prerelease:** v0.8.0-pre7 tries out object and shatter sync, modded maps, UE4SS loading, a map reset every round
+> and shared map randomness, with fixes from the latest play-session reports. It connects only to 0.8.0-pre7.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 
@@ -138,6 +138,7 @@ Settings live in `HSMMod.ini`, next to the DLL, under `[net]` unless noted. The 
 | `detour` | `1` | `0`: no detours through other players. |
 | `votekick` | `1` | `0` (host): turn vote kicks and vote bans off. |
 | `help_improve` | `0` | `1`: same as HELP IMPROVE THE MOD on the multiplayer page (see below). |
+| `help_improve_asked` | `0` | `1`: the one-time HELP IMPROVE THE MOD question was answered; it is not asked again. |
 | `reports` | `on` | `off`: no bug reports, log uploads or crash reports at all. |
 | `update_check` | `1` | `0`: no update check. |
 | `ue4ss` (`[mod]`) | `1` | `0`: do not load UE4SS. |
@@ -160,14 +161,24 @@ it is filed, or a short reason if it was not. Other players in the session are a
 
 `/bug` sends your text, the mod and game version, the match setup and your OS version to the report server, which
 opens a public issue in this repository with those details. The end of your `HSMMod.log` goes along but is stored
-privately with the maintainers, never on the issue. Before it leaves your PC, Steam IDs and IP addresses in the log
-are replaced with one-off hashes and your Windows user name is removed from file paths. Player names stay in the log.
+privately with the maintainers, never on the issue. Before it leaves your PC, Steam IDs and IP addresses (IPv4 and
+IPv6) in the log are replaced with one-off hashes and your Windows user name is removed from file paths. **Player
+names stay in the log.** You can file one report every 30 seconds.
 
 Apart from the update check below, the mod makes no web request unless you type `/bug` or `/sendlog`, or turn on
-**HELP IMPROVE THE MOD** on the multiplayer page (off by default). With it on, your log (redacted the same way) also
-goes to the report server by itself when someone in your lobby files a report, and if your game crashed, the next
-start files a crash report: its public text is the crash line only (error code and code offset), and your logs stay
-private. `reports=off` turns all of it off.
+**HELP IMPROVE THE MOD**. It is **off unless you turn it on.** The first time you click MULTIPLAYER, the mod asks you
+once: YES turns it on, NO THANKS (or Esc) leaves it off, and it never asks again. You can change it any time with the
+HELP IMPROVE THE MOD button at the top of the multiplayer page or on the Esc menu in a session fight.
+
+With it on:
+- your log (redacted the same way) goes to the report server by itself when someone in your lobby files a report;
+- if your game crashed, the next start files a crash report: its public text is the crash line only (error code and
+  code offset), and your logs stay private;
+- your log also gets a short combat summary every few seconds (which weapon struck whom and what the mod did with each
+  blow), so missed hits like the flail's can be tracked down. It stays in your log and is only sent as above.
+
+With it off and your game crashed, the mod says so once in the chat and points you to the button. Nothing is sent.
+`reports=off` turns all of it off.
 
 ## Update check
 

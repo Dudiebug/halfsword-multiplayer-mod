@@ -19,6 +19,13 @@ namespace {
 
 constexpr const char* kHookOwner = "claims";
 constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker weapon
+// C0: the striking actor's class and the component, e.g. "BP_Flail_C/Head"; "none" when the call named no component.
+std::string AuditKey(UObject* comp) {
+    if (!comp) return "none";
+    UObject* outer = OuterOf(comp);
+    return (outer ? ObjectName(reinterpret_cast<UObject*>(ClassOf(outer))) : std::string("?")) + "/" + ObjectName(comp);
+}
+constexpr double kResetLastDamageMs = 200;    // Willie_BP's Reset Last Damage Taken delay after a blow (OnDealComplexDamage)
 constexpr double kRecentAttackerMs = 60000;   // a death this long after the last replayed blow has no killer (KillLog::kWindowMs)
 constexpr uint64_t kLogFirst = 20;            // the first claims and replays are logged in full (test evidence)
 
@@ -135,6 +142,8 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
     UObject* striker = comp && !isProp ? adapter_->FighterOf(OuterOf(comp)) : nullptr;
     if (const uint8_t victim = standIns_->EntityOf(self)) {
         pending_ = {};
+        Strike* audit = AuditStrike(comp);
+        if (audit) ++audit->contacts;
         uint8_t attacker = striker ? env_.ownedEntity(striker) : 0;
         if (isProp)
             attacker = combat::DecidePropContact(false, prop.streamedHere) != combat::PropContact::Claim ? 0
@@ -144,11 +153,13 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
         if (!attacker || attacker == victim) {
             c.ZeroOutputs();
             ++n_.blockedStandIn;
+            if (audit) ++audit->blocked;
             return true;
         }
         if (env_.allowed && !env_.allowed(attacker, victim)) {
             c.ZeroOutputs();
             ++n_.friendly;
+            if (audit) ++audit->blocked;
             return true;
         }
         // Willie_BP.cpp:2994, read from the stand-in's own fields exactly as its body is about to.
@@ -158,19 +169,32 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
         c.get("Hit Impulse", impulse);
         c.get("Cutting Power", cutting);
         c.get("Hit Bone", bone);
-        const double* lastImpulse = Field<double>(self, "Last Complex Damage Impulse");
+        double* lastImpulse = Field<double>(self, "Last Complex Damage Impulse");
         const FName* lastBone = Field<FName>(self, "Last Complex Damage Bone");
         const double len = std::sqrt(impulse.x * impulse.x + impulse.y * impulse.y + impulse.z * impulse.z);
+        // The stand-in's tick is blocked, so the game's Reset Last Damage Taken (0.2 s after a blow) never cleared this on
+        // it: after one hard blow, every softer blow on the same bone was gated out until another bone was hit. A body
+        // on the ground is struck on the same bone again and again (#77, #81: the "invisible force field" round a downed
+        // player, since 0.6). 0.8.0-pre7: cleared here once the game's own 0.2 s have passed since the last blow through.
+        const double nowMs = SteadyNowMs();
+        if (lastImpulse && nowMs - lastDcdMs_[victim] > kResetLastDamageMs) *lastImpulse = 0.0;
         if (lastImpulse && lastBone && !combat::DcdGatePasses(len, cutting, *lastImpulse, SameName(*lastBone, bone))) {
             ++n_.gated;
+            if (audit) ++audit->gated;
             return false;   // the body returns at its own gate: nothing happens natively either
         }
+        lastDcdMs_[victim] = nowMs;
         if (!limiter_.Allow(victim, NameToString(bone))) {
             c.ZeroOutputs();
             ++n_.limited;
+            if (audit) ++audit->limited;
             return true;
         }
         MakeClaim(c, self, victim, attacker, striker, comp, isProp ? &prop : nullptr);
+        if (audit) {
+            if (pending_.standIn) pending_.audit = AuditKey(comp);
+            else ++audit->noClaim;
+        }
         // The body leaves its outputs alone when it returns early (Damage Out read ~1e32): they start at zero.
         if (pending_.standIn) c.ZeroOutputs();
         return false;
@@ -199,7 +223,14 @@ void Claims::SendPending(ScriptCall& c) {
     Pending p = std::move(pending_);
     pending_ = {};
     const double damage = c.get<double>("Damage Out");
-    switch (coalescer_.Allow(p.key, damage, SteadyNowMs())) {
+    Strike* audit = audit_ && !p.audit.empty() ? &strikes_[p.audit] : nullptr;
+    const combat::BlowCoalescer::Verdict verdict = coalescer_.Allow(p.key, damage, SteadyNowMs());
+    if (audit) {
+        using V = combat::BlowCoalescer::Verdict;
+        if (verdict == V::Send) { ++audit->sent; audit->damage += damage; }
+        else ++(verdict == V::Coalesced ? audit->coalesced : verdict == V::ZeroImpulse ? audit->zero : audit->capped);
+    }
+    switch (verdict) {
     case combat::BlowCoalescer::Verdict::Send: break;
     case combat::BlowCoalescer::Verdict::Coalesced: ++n_.coalesced; return;
     case combat::BlowCoalescer::Verdict::ZeroImpulse: ++n_.zeroImpulse; return;
@@ -337,7 +368,7 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
     const uint32_t ts = streams_->ClockMs(SteadyNowMs());
     HitClaim claim = combat::MakeClaim(in, boneWorld, 0, attacker, victim, ts, source, key.strikeComponent, std::string{});
     if (prop) combat::StruckByProp(claim, prop->id, prop->velocity, boneWorld);
-    pending_ = Pending{standIn, std::move(claim), std::move(key), prop != nullptr};
+    pending_ = Pending{standIn, std::move(claim), std::move(key), prop != nullptr, {}};
 }
 
 bool Claims::BoneXform(UObject* mesh, FName bone, Xform& out) const {
@@ -381,8 +412,10 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
 void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     if (c.striker == combat::StrikerKind::Stuck) { ReplayStuck(c, nowMs); return; }   // a lodged blade is no swing: nothing to parry
     int32_t clashMs = 0;
+    Landed* landed = audit_ ? &landed_[StrikerName(c) + "/" + c.strikeComponent] : nullptr;
     if (parry_.Cancels(c, &clashMs)) {
         ++n_.parried;
+        if (landed) ++landed->parried;
         const auto& i = c.hitImpulse;   // how hard the blow was: a real one cancelled, or a blade sliding off in a bind
         HSM_LOG("claims: #%u from e%u parried (my weapon met their %s weapon %+d ms from the blow at t=%u; bone %s |impulse| %.0f cut %.2f)",
                 c.claimId, c.attacker, c.source == StrikeSource::WeaponLeft ? "left" : "right", int(clashMs), c.attackerTsMs, c.hitBone.c_str(),
@@ -412,11 +445,13 @@ void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     double damage = 0;
     if (!CallDealComplexDamage(victim, mesh, striker, bone, in, box, &damage)) {
         ++n_.failed;
+        if (landed) ++landed->missed;
         if (n_.failed <= 3) HSM_LOG("claims: #%u from e%u: Deal Complex Damage could not be called", c.claimId, c.attacker);
         return;
     }
     recent_[c.victim] = Recent{c.attacker, nowMs};
     ++n_.replayed;
+    if (landed) { ++landed->replayed; landed->damage += damage; if (!(damage > 0.0)) ++landed->zeroDamage; }
     const bool byProp = c.striker == combat::StrikerKind::Prop;
     if (byProp) ++n_.propReplayed;
     if (n_.replayed <= kLogFirst || (byProp && n_.propReplayed <= kLogFirst))
@@ -648,6 +683,33 @@ bool Claims::PeerBoneOk(const combat::HitClaim& c) {
         HSM_LOG("claims: #%u from e%u names an invalid bone '%.64s' (%llu so far); dropped", c.claimId, c.attacker,
                 util::StripControlChars(c.hitBone).c_str(), static_cast<unsigned long long>(n_.badBone));
     return false;
+}
+
+// C0: what struck a stand-in, as the audit's key: the striking actor's class and the component ("Flail_C/Head").
+Claims::Strike* Claims::AuditStrike(UObject* comp) {
+    if (!audit_) return nullptr;
+    return &strikes_[AuditKey(comp)];
+}
+
+std::string Claims::AuditLine() {
+    if (!audit_ || (strikes_.empty() && landed_.empty())) return {};
+    std::string out = "hit audit (help improve):";
+    char buf[320];
+    for (const auto& [key, s] : strikes_) {
+        std::snprintf(buf, sizeof buf, " | on stand-ins by %s: contacts %u sent %u (damage avg %.1f) gated %u limited %u coalesced %u "
+                      "zero %u capped %u no-claim %u blocked %u",
+                      key.c_str(), s.contacts, s.sent, s.sent ? s.damage / s.sent : 0.0, s.gated, s.limited, s.coalesced, s.zero,
+                      s.capped, s.noClaim, s.blocked);
+        out += buf;
+    }
+    for (const auto& [key, l] : landed_) {
+        std::snprintf(buf, sizeof buf, " | on me by %s: replayed %u (damage avg %.1f, %u at zero) parried %u failed %u",
+                      key.c_str(), l.replayed, l.replayed ? l.damage / l.replayed : 0.0, l.zeroDamage, l.parried, l.missed);
+        out += buf;
+    }
+    strikes_.clear();
+    landed_.clear();
+    return out;
 }
 
 std::string Claims::HealthLine() {

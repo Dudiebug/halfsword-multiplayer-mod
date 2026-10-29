@@ -123,16 +123,19 @@ bool Foreground() {
     return pid == GetCurrentProcessId();
 }
 
-// Fresh press this frame, or (when allowRepeat) an auto-repeat while held. Updates the key's edge state.
-bool Fires(int vk, uint32_t now, bool allowRepeat) {
+// Fresh press this frame, or (when allowRepeat) an auto-repeat while held. Updates the key's edge state. `state` is the
+// key's GetAsyncKeyState: bit 15 down now, bit 0 pressed since the key was last asked, so a tap shorter than a frame
+// (pressed and released between two polls, which a 20 fps frame makes common) still fires once (0.8.0-pre7, #65).
+bool Fires(int vk, SHORT state, uint32_t now, bool allowRepeat) {
     Key& k = d.keys[vk];
-    if (!(GetAsyncKeyState(vk) & 0x8000)) { k.down = false; return false; }
+    if (!(state & 0x8000)) { const bool tapped = (state & 1) && !k.down; k.down = false; return tapped; }
     if (!k.down) { k.down = true; k.heldSince = k.lastRepeat = now; return true; }
     if (!allowRepeat) return false;
     if (uint32_t(now - k.heldSince) < kRepeatDelayMs || uint32_t(now - k.lastRepeat) < kRepeatEveryMs) return false;
     k.lastRepeat = now;
     return true;
 }
+bool Fires(int vk, uint32_t now, bool allowRepeat) { return Fires(vk, GetAsyncKeyState(vk), now, allowRepeat); }
 
 // One event into the session; the keyboard follows what it reports, and every take and give-back is logged (with why,
 // when the event stands for something else: a level change is a hidden HUD).
@@ -159,9 +162,9 @@ std::string Utf8(const wchar_t* in, int n) {
     return u;
 }
 
-// Keyboard state for ToUnicode, read from the live async state (the thread message queue may not be pumped).
-void BuildKeyState(BYTE (&ks)[256]) {
-    for (int vk = 0; vk < 256; ++vk) ks[vk] = (GetAsyncKeyState(vk) & 0x8000) ? 0x80 : 0;
+// Keyboard state for ToUnicode, from this poll's async state (the thread message queue may not be pumped).
+void BuildKeyState(BYTE (&ks)[256], const SHORT (&st)[256]) {
+    for (int vk = 0; vk < 256; ++vk) ks[vk] = (st[vk] & 0x8000) ? 0x80 : 0;
     if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] |= 1;
 }
 
@@ -174,19 +177,21 @@ void Poll(uint32_t now) {
         return;
     }
     if (d.paused && d.paused()) { Feed(hsm::ChatEvent::Paused, now); return; }
-    if (Fires(VK_ESCAPE, now, false)) { Feed(hsm::ChatEvent::Escape, now); return; }
-    if (Fires(VK_RETURN, now, false)) { Feed(hsm::ChatEvent::Enter, now); return; }
+    SHORT st[256] = {};   // every key read once per poll: GetAsyncKeyState clears the "pressed since" bit it reports
+    for (int vk = 0x08; vk <= 0xFE; ++vk) st[vk] = GetAsyncKeyState(vk);
+    if (Fires(VK_ESCAPE, st[VK_ESCAPE], now, false)) { Feed(hsm::ChatEvent::Escape, now); return; }
+    if (Fires(VK_RETURN, st[VK_RETURN], now, false)) { Feed(hsm::ChatEvent::Enter, now); return; }
     BYTE ks[256] = {};
     bool ksReady = false;
     for (int vk = 0x08; vk <= 0xFE; ++vk) {
         if (vk == VK_RETURN || vk == VK_ESCAPE) continue;
         if (vk == d.swallowVk) {   // held since it opened the chat: typed only once pressed again
-            if (!(GetAsyncKeyState(vk) & 0x8000)) { d.swallowVk = 0; d.keys[vk].down = false; }
+            if (!(st[vk] & 0x8000)) { d.swallowVk = 0; d.keys[vk].down = false; }
             continue;
         }
-        if (!Fires(vk, now, true)) continue;
+        if (!Fires(vk, st[vk], now, true)) continue;
         if (vk == VK_BACK) { Feed(hsm::ChatEvent::Backspace, now); continue; }
-        if (!ksReady) { BuildKeyState(ks); ksReady = true; }
+        if (!ksReady) { BuildKeyState(ks, st); ksReady = true; }
         WCHAR buf[8] = {};
         int n = ToUnicode(UINT(vk), MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC), ks, buf, 8, 0x4);   // 0x4: keep dead-key state
         if (n > 0) Feed(hsm::ChatEvent::Char, now, Utf8(buf, n));
@@ -223,11 +228,12 @@ void Draw(const ChatScene& s) {
     if (w.built) {
         const ULONGLONG now = GetTickCount64();
         if (now >= w.nextLive) {
-            w.nextLive = now + 1000;
+            // Within 100 ms while a line is being typed: a respawn mid-line took the box away for up to a second (#65).
+            w.nextLive = now + (d.session.typing() ? 100 : 1000);
             if (!InViewport(w.hud))
                 if (UObject* on = OnScreen(FindInstances("UI_HUD_C")); on && on != w.hud) {
                     UClass* cls = w.hudClass; w = Widgets{}; w.hudClass = cls; w.hud = on; w.hudIndex = ObjectIndex(on);
-                    w.nextLive = now + 1000;
+                    w.nextLive = now + (d.session.typing() ? 100 : 1000);
                     HSM_LOG("chat: UI_HUD replaced by the game; moving to the new one");
                 }
         }

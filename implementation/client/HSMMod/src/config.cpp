@@ -35,9 +35,11 @@ constexpr char kDefaultIni[] =
     "; (Steam IDs, IP addresses and your Windows user name are removed first). Nothing is sent unless you type it.\n"
     "reports=on\n"
     "report_url=https://reports.dudiebug.net\n"
-    "; 1: also send your HSMMod log (Steam IDs, IPs and your user name removed) when someone in your lobby files a bug report\n"
-    "; or a crash is reported. The MULTIPLAYER page has the same switch. 0: off (default)\n"
+    "; 1: also send your HSMMod log (Steam IDs, IPs and your Windows user name removed; player names stay) when someone in\n"
+    "; your lobby files a bug report or your game crashed last time. The MULTIPLAYER page and the Esc menu in a match have\n"
+    "; the same switch. 0: off (default). help_improve_asked=1: the one-time question on the multiplayer page was answered.\n"
     "help_improve=0\n"
+    "help_improve_asked=0\n"
     "; voice chat (the multiplayer page and the Esc menu in a match change these). voice=1 turns it on for you (0, the\n"
     "; default: you neither talk nor hear); voice_reach=proximity fades voices with distance (full volume within\n"
     "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one; between two\n"
@@ -132,7 +134,7 @@ bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys)
     return true;
 }
 
-bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" : "0"}}); }
+bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" : "0"}, {"help_improve_asked", "1"}}); }
 
 Config LoadConfig() {
     std::wstring ini = ModFilePath(L"HSMMod.ini");
@@ -183,6 +185,7 @@ Config LoadConfig() {
     c.reportUrl = ReadString(ini, L"report_url", "https://reports.dudiebug.net");
     if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
     c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
+    c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";   // already on: nothing to ask
     c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
     c.serverMaps = ReadString(ini, L"server_maps", "all");
