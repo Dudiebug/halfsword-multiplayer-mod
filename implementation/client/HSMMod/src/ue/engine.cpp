@@ -16,15 +16,18 @@ struct ScriptVm {
     uintptr_t executor;            // ProcessLocalScriptFunction(UObject*, FFrame&, RESULT_DECL)
     uint32_t executorCallSite;     // offset of ProcessInternal's E8 call to the executor
     uintptr_t execAddIntInt;       // UKismetMathLibrary::execAdd_IntInt, checks UFunction::Func's offset
+    uintptr_t frameStep;           // FFrame::Step(UObject* Context, RESULT_DECL): evaluates the next bytecode expression
 };
 struct BuildInfo { uint64_t key; const char* label; uintptr_t gobjects, appendString; uint32_t processEventIndex; ScriptVm vm; };
 // key = PE TimeDateStamp << 32 | SizeOfImage. Unknown key => mod disables itself.
 constexpr BuildInfo kBuilds[] = {
     {0x8EFA122909712000ull, "steam-24185754 (UE 5.4.4 CL-2705)", 0x08BFD240, 0x012C1CB0, 0x4D,
-     {0x014A4850, 0x014A4950, 0x6C, 0x036AF990}},
+     {0x014A4850, 0x014A4950, 0x6C, 0x036AF990, 0x014A4EF0}},
 };
 // Prologues of the two VM functions in the builds above (MSVC, /GS): checked before the executor is detoured.
 constexpr uint8_t kExecutorPrologue[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x70};
+// FFrame::Step: loads Code, reads the opcode, advances Code and jumps to GNatives[opcode] (rcx = Stack, rdx = Context, r8 = Result).
+constexpr uint8_t kFrameStepPrologue[] = {0x48, 0x8B, 0x41, 0x20, 0x4C, 0x8B, 0xD2, 0x48, 0x8B, 0xD1, 0x44, 0x0F, 0xB6, 0x08, 0x48, 0xFF, 0xC0};
 constexpr uint8_t kProcessInternalPrologue[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10};
 // ---- UE 5.4 core layouts for this build
 constexpr size_t kObjFlags = 0x08, kObjIndex = 0x0C, kObjClass = 0x10, kObjName = 0x18, kObjOuter = 0x20;
@@ -38,6 +41,7 @@ constexpr size_t kBoolByteOffset = 0x71, kBoolByteMask = 0x72;
 constexpr size_t kPropVtCopyValues = 0xF0;   // FProperty::CopyValuesInternal(Dest, Src, Count)
 constexpr size_t kPropVtClearValue = 0x130;   // FProperty::ClearValueInternal(Data), as ProcessLocalScriptFunction's abort path calls it
 constexpr uint32_t kRF_ClassDefaultObject = 0x10;
+constexpr uint32_t kRF_WasLoaded = 0x80000;   // the object came out of a package (a placed actor), not from a spawn
 constexpr uint32_t kRF_MirroredGarbage = 0x40000000;   // UE5: set by MarkAsGarbage (an actor's destroy) until GC frees it
 constexpr uint64_t kCPF_Parm = 0x80, kCPF_OutParm = 0x100, kCPF_ZeroConstructor = 0x200, kCPF_ReturnParm = 0x400,
                    kCPF_NoDestructor = 0x1000000000ull;
@@ -128,6 +132,7 @@ std::string ObjectName(const UObject* o) { return o ? NameToString(Read<FName>(o
 UClass* ClassOf(const UObject* o) { return o ? Read<UClass*>(o, kObjClass) : nullptr; }
 UObject* OuterOf(const UObject* o) { return o ? Read<UObject*>(o, kObjOuter) : nullptr; }
 bool IsDefaultObject(const UObject* o) { return o && (Read<uint32_t>(o, kObjFlags) & kRF_ClassDefaultObject); }
+bool WasLoaded(const UObject* o) { return o && (Read<uint32_t>(o, kObjFlags) & kRF_WasLoaded); }
 bool IsGarbage(const UObject* o) { return o && (Read<uint32_t>(o, kObjFlags) & kRF_MirroredGarbage); }
 
 std::string FullName(const UObject* o) {
@@ -333,6 +338,17 @@ int32_t ParamsSize(const UFunction* f) { return Read<int32_t>(f, kStructSize); }
 uint32_t FunctionFlags(const UFunction* f) { return Read<uint32_t>(f, kFuncFlags); }
 
 void* FunctionNative(const UFunction* f) { return f ? Read<void*>(f, kFuncNative) : nullptr; }
+void SetFunctionNative(UFunction* f, void* native) { if (f) std::memcpy(reinterpret_cast<uint8_t*>(f) + kFuncNative, &native, sizeof native); }
+
+void* FrameStepAddress() {
+    if (!g_build) return nullptr;
+    auto* step = reinterpret_cast<const uint8_t*>(g_base + g_build->vm.frameStep);
+    if (std::memcmp(step, kFrameStepPrologue, sizeof kFrameStepPrologue) != 0) {
+        HSM_LOG("engine: FFrame::Step prologue bytes %02X %02X %02X %02X %02X; frame stepping unavailable", step[0], step[1], step[2], step[3], step[4]);
+        return nullptr;
+    }
+    return const_cast<uint8_t*>(step);
+}
 bool IsScriptFunction(const UFunction* f) { return g_build && FunctionNative(f) == reinterpret_cast<void*>(g_base + g_build->vm.processInternal); }
 
 // A jump another mod's hook put at a function's start (UE4SS hooks the same VM functions): E9 rel32 or FF 25 [rip+x].

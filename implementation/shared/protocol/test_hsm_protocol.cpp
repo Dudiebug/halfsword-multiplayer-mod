@@ -127,6 +127,9 @@ static void TestMatchInfoAndKill() {
     CHECK(Decode(b.data(), b.size(), o));
     CHECK(o.gear == 2 && o.tier == 5 && o.round == 3 && o.roundGapLeftMs == 4200 && o.roundWinner == 9);
     CHECK(o.damagePct == 0xFFFF);   // rev 24: stock
+    { MatchInfo cw = m; cw.waveBreakS = 120; cw.clearGroundMin = 5; cw.clearCount = 7; auto e = Encode(cw); MatchInfo y;   // rev 28
+      CHECK(Decode(e.data(), e.size(), y) && y.waveBreakS == 120 && y.clearGroundMin == 5 && y.clearCount == 7); }
+    CHECK(o.waveBreakS == 0 && o.clearGroundMin == 0 && o.clearCount == 0);
     { MatchInfo dm = m; dm.damagePct = 150; auto e = Encode(dm); MatchInfo y;
       CHECK(Decode(e.data(), e.size(), y) && y.damagePct == 150); }
     { MatchInfo dm = m; dm.damagePct = 1000; auto e = Encode(dm); MatchInfo y;
@@ -164,6 +167,8 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 101; }));
     CHECK(bad([](MatchInfo& x) { x.timeLimitS = 3601; }));
     CHECK(bad([](MatchInfo& x) { x.respawnDelayS = 61; }));
+    CHECK(bad([](MatchInfo& x) { x.waveBreakS = 45; }));      // rev 28
+    CHECK(bad([](MatchInfo& x) { x.clearGroundMin = 4; }));
     CHECK(bad([](MatchInfo& x) { x.damagePct = 1001; }));   // rev 24: past the most, not the stock marker
     CHECK(bad([](MatchInfo& x) { x.fighters[0].entity = 0; }));
     CHECK(bad([](MatchInfo& x) { x.fighters[0].team = 8; }));
@@ -185,7 +190,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 18 && kProtocolRevision == 27);   // rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 18 && kProtocolRevision == 28);   // rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so
@@ -200,7 +205,7 @@ static void TestMatchInfoAndKill() {
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required
     // Reserved for M4-M6: numbers fixed, no decoder. A Welcome with the reserved flag 32 is rejected until M4 lands.
     CHECK(uint8_t(MsgType::ModList) == 48 && uint8_t(MsgType::SessionMods) == 49 && uint8_t(MsgType::ModMsg) == 50
-          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && kLastDecodedMsgType == 53 && kLastReservedMsgType == 53);
+          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && kLastDecodedMsgType == 55 && kLastReservedMsgType == 55);
     {
         Welcome w; w.snapshotHz = 30; w.map = "m"; w.flags = 32;
         auto wb = Encode(w); Welcome back; CHECK(!Decode(wb.data(), wb.size(), back));

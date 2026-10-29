@@ -38,6 +38,7 @@ bool IsA(const UObject* o, const UClass* c);
 bool IsChildOf(const UClass* c, const UClass* base);   // c == base or derives from it
 UClass* SuperOf(const UClass* c);                      // the class it derives from (nullptr at the root)
 bool IsDefaultObject(const UObject* o);
+bool WasLoaded(const UObject* o);              // loaded from a package (RF_WasLoaded): a placed actor, not a spawned one
 bool IsGarbage(const UObject* o);              // destroyed (marked as garbage), not yet freed by garbage collection
 int32_t ObjectCount();
 int32_t ObjectIndex(const UObject* o);          // GUObjectArray slot (UObjectBase::InternalIndex)
@@ -74,6 +75,10 @@ int32_t ParamsSize(const UFunction* f);
 uint32_t FunctionFlags(const UFunction* f);
 std::vector<FProperty*> Params(const UFunction* f);
 void* FunctionNative(const UFunction* f);           // UFunction::Func: the native thunk, or ProcessInternal for script functions
+void SetFunctionNative(UFunction* f, void* native);   // swaps UFunction::Func (the caller keeps the old pointer to chain to)
+// This build's FFrame::Step(FFrame* Stack, UObject* Context, void* Result), which evaluates the next bytecode expression of
+// Stack into Result: how a native thunk reads its parameters when a Blueprint calls it. nullptr = prologue not verified.
+void* FrameStepAddress();
 bool IsScriptFunction(const UFunction* f);          // Func is this build's ProcessInternal (a Blueprint body run by the VM)
 // This build's ProcessLocalScriptFunction (UObject*, FFrame&, RESULT_DECL), the one executor every Blueprint function body
 // runs through, after checking Func's offset, ProcessInternal's call into it and both prologues. nullptr = not verified.

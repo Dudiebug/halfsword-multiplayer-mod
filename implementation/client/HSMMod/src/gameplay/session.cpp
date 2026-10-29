@@ -32,6 +32,7 @@
 #include "gameplay/damage_pin.h"
 #include "gameplay/paint_defer.h"
 #include "gameplay/save_guard.h"
+#include "gameplay/shared_dice.h"
 #include "gameplay/severs.h"
 #include "gameplay/standin_gore.h"
 #include "gameplay/spectate.h"
@@ -42,6 +43,7 @@
 #include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
+#include "session/hsm_map_reset.h"
 #include "log.h"
 #include "ue4ss_load.h"
 #include "ue/profiler.h"
@@ -63,6 +65,7 @@
 #include "session/hsm_peer_ping.h"
 #include "session/hsm_route.h"
 #include "session/hsm_detour.h"
+#include "session/hsm_dice.h"
 #include <random>
 #include "session/hsm_migration.h"
 #include "session/hsm_autoflow.h"
@@ -193,6 +196,8 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Event: { Event m; return Decode(d, n, m); }
         case MsgType::Travel: { Travel m; return Decode(d, n, m); }
         case MsgType::ModMap: { ModMapMsg m; return Decode(d, n, m); }
+        case MsgType::MapReset: { MapResetMsg m; return Decode(d, n, m); }
+        case MsgType::LevelSeed: { dice::LevelSeedMsg m; return Decode(d, n, m); }
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
@@ -449,6 +454,8 @@ public:
             // Swapped-out armour outlives the paint tasks that read it (T5), in single player too; paint_defer=0 turns it off.
             if (vmHook && cfg_.paintDefer) game::InstallPaintDefer();
             else if (!cfg_.paintDefer) HSM_LOG("session: armour paint guard off (paint_defer=0)");
+            // The map's Blueprint random numbers agree across a session (the seed comes with each travel); inert until one is set.
+            game::shareddice::Install();
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
@@ -532,6 +539,7 @@ public:
         }
         GiveUpTick();
         DropsTick();
+        MapResetTick();
         HudScene hud = BuildHud();
         ui::HudTick(hud, NameTags(hud), Format(info_.format));
         ui::ChatTick(hud);
@@ -636,6 +644,7 @@ public:
         HSM_LOG("%s: %s", who, claims_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, fx_.HealthLine().c_str());
         if (std::string line = game::PaintDeferHealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
+        if (std::string line = game::shareddice::HealthLine(); !line.empty()) HSM_LOG("%s: %s", who, line.c_str());
         HSM_LOG("%s: %s", who, equip_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, severs_.HealthLine().c_str());
         HSM_LOG("%s: %s", who, gore_.HealthLine().c_str());
@@ -1705,6 +1714,7 @@ private:
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
         steamNet_ = nullptr; net_.reset();
         ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
+        game::shareddice::Clear();                   // the game's own randomness again
         claims_.Stop();                              // the hooks go before any fighter does
         fx_.Stop();                                  // with its paint boxes on the stand-ins
         equip_.Stop();
@@ -1718,8 +1728,8 @@ private:
         roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); helloWatch_.Clear(); blobVersion_.fill(0); hostExport_.clear();
         picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; feed_.clear(); banner_.Reset(); tints_.clear();
-        ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false;
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
+        ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset();
         mirrorBlob_.clear(); ownBlob_ = 0;
         // client
         for (auto& [e, ref] : puppets_) {
@@ -1818,8 +1828,11 @@ private:
         if (IsHost()) {
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
             fightSettings_ = t.settings;
+            const uint64_t seed = NewLevelSeed();   // shared dice: a fresh seed for every level the host opens
+            game::shareddice::SetSeed(seed);
             if (net_) {
                 net_->Broadcast(kChanReliable, Encode(HostModMapFor(level)), true);   // modded maps: before the Travel, so a client can refuse in time
+                net_->Broadcast(kChanReliable, Encode(dice::LevelSeedMsg{t.seq, seed}), true);   // before the Travel: it is set by the time the level's BeginPlay runs
                 net_->Broadcast(kChanReliable, Encode(t), true);
             }
             const MatchConfig shown = lobby_.config();
@@ -1872,9 +1885,9 @@ private:
         director_.OnLevel(FighterLevel(), NowMs(), travelSeq_);
         serverTravelling_ = false; serverAnchor_.reset(); serverPawnSeenAt_ = serverStripAt_ = 0; serverStripped_ = 0; anchorSearch_.OnLevel(NowMs());
         if (net_ && !IsHost()) hostLoss_.Reset(NowMs());   // the load itself froze the loop: that silence is not the host's (N1)
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; feed_.clear(); banner_.Reset();
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
         tints_.clear();
-        ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; ownDiedAt_ = 0; mirrorBlob_.clear(); ownBlob_ = 0;
+        ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset(); ownDiedAt_ = 0; mirrorBlob_.clear(); ownBlob_ = 0;
         // Client side: puppets died with the level; the host re-announces them after Ready.
         world_.OnLevel(); puppets_.clear();
         levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
@@ -2902,6 +2915,8 @@ private:
             else { t.level = currentLevel_; t.settings = game::CaptureGameSettings(); }   // short map name resolves too
             if (!t.seq) t.seq = ++travelSeq_;
             net_->Send(ev.peer, kChanReliable, Encode(HostModMapFor(t.level)), true);   // modded maps: the pak it needs, before the Travel
+            if (!game::shareddice::Active()) game::shareddice::SetSeed(NewLevelSeed());   // hosting started inside this level: its dice start now
+            net_->Send(ev.peer, kChanReliable, Encode(dice::LevelSeedMsg{t.seq, game::shareddice::Seed()}), true);   // the running level's seed
             net_->Send(ev.peer, kChanReliable, Encode(t), true);
         }
         HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxPlayers);
@@ -3224,7 +3239,11 @@ private:
         if (ev.roundReset) HSM_LOG("host: duel round reset");
         if (ev.live || ev.roundReset || ev.rematch) draw_.Reset(now);
         CheckDraw(now);
-        if (dropWatch_.Observe(match_.config().format, uint8_t(match_.phase()), uint16_t(match_.round()))) ClearDroppedWeapons();
+        if (dropWatch_.Observe(match_.config().format, uint8_t(match_.phase()), uint16_t(match_.round()))) {
+            ClearDroppedWeapons();
+            HostMapReset(ev.rematch || match_.config().format != Format::Duel);
+        }
+        GroundClearTick(now);
         if (ev.ended) HSM_LOG("host: match over, winner key %d", match_.winner());
         MakeGearAhead(now);
         if (ev.rematch && IsServer()) {                  // role=server: the results are over, the flow picks the next map
@@ -3428,7 +3447,7 @@ private:
     // Duel's new round, and free-for-all and teams' rematch, start without the weapons and armour pieces dropped before
     // (weapons piled up 5 -> 36 in test 13). Every machine clears its own copies; the prop sync lets go of the ones it
     // was moving. Armour the level had at the match start stays (LooseTimer's baseline).
-    void ClearDroppedWeapons() {
+    void ClearDroppedWeapons(const char* why = nullptr) {
         if (!MatchLevel()) return;
         const int weapons = adapter_.DestroyDroppedWeapons();
         int armor = 0;
@@ -3440,7 +3459,44 @@ private:
             for (uint64_t id : looseTimer_.Sweep(ids, now + kIdleDespawnMs)) { adapter_.DestroyActor(byId[id]); ++armor; }   // all but the baseline
         }
         HSM_LOG("drops: %s, %d dropped weapon(s) and %d armour piece(s) cleared",
-                Format(info_.format) == Format::Duel ? "new round" : "rematch", weapons, armor);
+                why ? why : Format(info_.format) == Format::Duel ? "new round" : "rematch", weapons, armor);
+    }
+
+    // The "Clear ground" lobby setting (free-for-all, teams, Brawl): every clearGroundMin minutes of a fought phase the host
+    // clears its own drops and counts it in MatchInfo.clearCount; each client clears when that count changes (MatchInfo).
+    // Held and worn gear stays: ClearDroppedWeapons skips what is held and armour that is attached.
+    void GroundClearTick(uint32_t now) {
+        const MatchConfig& c = match_.config();
+        if (!c.clearGroundMin || !CombatPhase(match_.phase())) { nextGroundClear_ = 0; return; }
+        if (!nextGroundClear_) { nextGroundClear_ = now + uint32_t(c.clearGroundMin) * 60000u; return; }
+        if (!DueAt(now, nextGroundClear_)) return;
+        nextGroundClear_ = now + uint32_t(c.clearGroundMin) * 60000u;
+        ++clearCount_; infoDirty_ = true;
+        GroundCleared();
+    }
+    void GroundCleared() {
+        ClearDroppedWeapons("timer");
+        ui::ShowLine("MATCH", style::kBone, "Ground cleared");
+    }
+
+    // Map reset (session/hsm_map_reset.h): the host's setting map_reset sends one MapReset when the drops are cleared (a Duel
+    // round, a rematch); every machine, the host too, runs it once the own respawn and the drop clear are done (MapResetGate).
+    // Not before a travel (role=server, the Progression hub): the level is going away.
+    void HostMapReset(bool rematch) {
+        if (!cfg_.mapReset || !MatchLevel() || !net_ || (rematch && (IsServer() || progression_))) return;
+        MapResetMsg m;
+        m.seq = ++mapResetSeq_;
+        m.round = uint16_t(match_.round());
+        m.flags = rematch ? kMapResetRematch : 0;
+        net_->Broadcast(kChanReliable, Encode(m), true);
+        mapGate_.Queue(m, NowMs());
+    }
+    void MapResetTick() {
+        if (!mapGate_.pending()) return;
+        MapResetMsg m;
+        const bool busy = ownDeadPending_ || dropClearPending_ || !respawnQueue_.empty();
+        if (!mapGate_.Poll(NowMs(), busy, m)) return;
+        if (MatchLevel()) props_.MapReset(game::SteadyNowMs(), m.flags);
     }
 
     // The loose armour pieces here, keyed by object (LooseTimer ids).
@@ -3455,6 +3511,7 @@ private:
     // baseline is taken when a match starts in this level, so armour the level had stays.
     void DropsTick() {
         const bool running = MatchLevel() && info_.phase != uint8_t(MatchPhase::Idle);
+        if (running) props_.MarkBaseline();              // the map reset's baseline (the first call counts)
         const bool idle = running && DropClearFor(Format(info_.format)) == DropClear::AfterIdle;
         props_.SetIdleDespawn(idle);
         if (!running) { if (looseOn_) { looseTimer_.Reset(); looseOn_ = false; } return; }
@@ -3759,6 +3816,7 @@ private:
         m.gear = uint8_t(IsBotFormat(c.format) ? Gear::Own : c.gear); m.tier = c.tier;   // the gear in effect
         m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
         m.damagePct = SessionDamage();
+        m.waveBreakS = c.waveBreakS; m.clearGroundMin = c.clearGroundMin; m.clearCount = clearCount_;
         if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
             m.roundGapLeftMs = match_.BreakLeftMs(now);
             m.roundWinner = uint8_t(std::min<size_t>(match_.SkipVotes(), 255));
@@ -4602,6 +4660,15 @@ private:
         for (size_t i = 0; i < n; ++i) p[i] = uint8_t(rd());
     }
 
+    // A new level's dice seed (session/hsm_dice.h): the secure source mixed with the clock, so no two travels agree.
+    static uint64_t NewLevelSeed() {
+        uint8_t b[8] = {};
+        SecureRandom(b, sizeof b);
+        uint64_t v = 0;
+        for (uint8_t x : b) v = v << 8 | x;
+        return dice::Mix64(v ^ uint64_t(GetTickCount64()));
+    }
+
     // Host: a new epoch of tables to every client (the plan or the roster changed).
     void SendRouteTables() {
         detourDirty_ = false;
@@ -4877,11 +4944,17 @@ private:
                 FollowTravel(tr);
                 break;
             }
+            case MsgType::LevelSeed: { dice::LevelSeedMsg m; if (Decode(d, n, m)) game::shareddice::SetSeed(m.seed); break; }   // the host's dice for the level it sent us to
             case MsgType::ModMap: {
                 ModMapMsg m; if (!Decode(d, n, m)) break;
                 modMapHost_ = m; modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
                 bodyWork_ = true;
                 ModMapTick();
+                break;
+            }
+            case MsgType::MapReset: {
+                MapResetMsg m; if (!Decode(d, n, m)) break;
+                mapGate_.Queue(m, NowMs());
                 break;
             }
             case MsgType::Spawn: {
@@ -4905,7 +4978,11 @@ private:
                 break;
             }
             case MsgType::MatchInfo: {
-                MatchInfo m; Decode(d, n, m); info_ = std::move(m); infoAt_ = NowMs();
+                MatchInfo m; if (!Decode(d, n, m)) break;
+                const bool groundClear = groundSeen_ && m.clearCount != info_.clearCount && CombatPhase(MatchPhase(m.phase));   // the host cleared its ground
+                groundSeen_ = true;
+                info_ = std::move(m); infoAt_ = NowMs();
+                if (groundClear) GroundCleared();
                 if (MatchLevel()) { adapter_.SetMuscleTier(info_.tier); adapter_.SetBare(IsBrawl(Format(info_.format), Gear(info_.gear))); }
                 banner_.Observe(info_, world_.myEntity(), infoAt_);
                 if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) {   // F5: after the own body's armour is on
@@ -5042,6 +5119,9 @@ private:
     bool ownDeadPending_ = false;
     RespawnRetry ownRespawn_;
     static constexpr uint32_t kDropClearDelayMs = 1500, kDropClearGiveUpMs = 5000;
+    uint32_t nextGroundClear_ = 0;                   // host: when the Clear ground timer fires next, 0 = not running
+    uint8_t clearCount_ = 0;                         // host: the ground clears so far (MatchInfo.clearCount)
+    bool groundSeen_ = false;                        // client: info_ holds a MatchInfo of this session (clearCount to compare)
     bool dropClearPending_ = false;                  // F5: client, a rematch / Duel round: ClearDroppedWeapons waits for the own body
     uint32_t dropClearDue_ = 0, dropClearGiveUp_ = 0;
     std::deque<uint8_t> respawnQueue_;   // host, owner sync: entities whose respawn waits for its tick (RespawnQueued)
@@ -5049,6 +5129,8 @@ private:
     GiveUpHold giveUp_;
     std::unordered_map<uint8_t, uint32_t> gaveUp_;   // host: entity -> when it held G (free-for-all, teams, Duel)
     bool giveUpWait_ = false;                        // G is held but there is nothing to give up yet (queued for respawn / round gap)
+    MapResetGate mapGate_;                           // a queued map reset waits for the respawn and the drop clear
+    uint16_t mapResetSeq_ = 0;                       // host: the count of MapResets sent
     DropClearWatch dropWatch_;                       // Duel round / rematch: the drops are cleared (DropClearFor)
     LooseTimer looseTimer_;                          // loose armour pieces here (DropsTick)
     bool looseOn_ = false;                           // the timer has its baseline for this match

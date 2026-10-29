@@ -13,7 +13,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 27;         // 27: ModMap 53 (host -> client: the picked modded map's package path and the pak it comes from, name + size + SHA-256; session/hsm_modmaps.h), a client without that pak leaves with a line saying what to install; 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 28;         // 28: MapReset 54 (host -> client: the map goes back to the round start at a Duel round reset and a rematch; session/hsm_map_reset.h); MatchInfo.waveBreakS (the host's pause between waves), clearGroundMin and clearCount (the ground-clear timer; clients clear when the count changes); LevelSeed 55 (host -> client: the seed of the travel's shared dice, so the map's Blueprint random numbers agree on every machine; session/hsm_dice.h); 27: ModMap 53 (host -> client: the picked modded map's package path and the pak it comes from, name + size + SHA-256; session/hsm_modmaps.h), a client without that pak leaves with a line saying what to install; 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -80,10 +80,12 @@ enum class MsgType : uint8_t {
     PackList = 51,    // host -> client, reliable (M6): the .pak packs the host lists (SHA-256, size)
     PackStatus = 52,  // client -> host, reliable (M6): download, cache and mount progress
     ModMap = 53,      // host -> client, reliable (rev 27): the modded map the host picked and the pak it comes from (name, size, SHA-256; session/hsm_modmaps.h); empty path = a stock map. Not 48-52: those belong to the mod relay
+    MapReset = 54,    // host -> client, reliable (rev 28): props back to their start, round-spawned objects gone, level weapons back (session/hsm_map_reset.h); not sent when the host's map_reset is off
+    LevelSeed = 55,   // host -> client, reliable (rev 28): the seed of the level's shared dice, sent ahead of each Travel (session/hsm_dice.h)
 };
-// The highest type that has a decoder (ModMap); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
-constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::ModMap);
-constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::ModMap);
+// The highest type that has a decoder (LevelSeed); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
+constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::LevelSeed);
+constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::LevelSeed);
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
 enum class Axis : uint8_t {
@@ -224,6 +226,9 @@ struct MatchInfo {
     uint16_t round = 0;                 // Duel: the round being fought, or just won in the gap; 0 in other formats
     uint32_t roundGapLeftMs = 0;        // Duel: time before the next round, 0 outside the gap
     uint8_t roundWinner = 0;            // Duel's gap: the entity that took the round, 0 = drawn
+    uint16_t waveBreakS = 0;            // rev 28: bot formats, the pause between waves in seconds (10/30/60/120), 0 = the format's own
+    uint8_t clearGroundMin = 0;         // rev 28: the ground-clear timer in minutes (0, 2, 3, 5), 0 = off
+    uint8_t clearCount = 0;             // rev 28: the host's ground clears so far (wraps); a change makes every machine clear its dropped weapons and loose armour
     uint16_t damagePct = 0xFFFF;        // rev 24: the Player Damage Rate everyone runs, percent (0..1000); 0xFFFF the stock one (match/hsm_damage.h)
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
@@ -443,6 +448,7 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     w.u8(m.format); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
     w.u8(m.phase); w.u32(m.timeLeftMs); w.i16(m.winner);
     w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner); w.u16(m.damagePct);
+    w.u16(m.waveBreakS); w.u8(m.clearGroundMin); w.u8(m.clearCount);
     size_t ns = m.scores.size() < 255 ? m.scores.size() : 255; w.u8(uint8_t(ns));
     for (size_t i = 0; i < ns; ++i) { w.i16(m.scores[i].key); w.i16(m.scores[i].score); }
     size_t nf = m.fighters.size() < 255 ? m.fighters.size() : 255; w.u8(uint8_t(nf));
@@ -459,8 +465,10 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
     m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8(); m.damagePct = r.u16();
+    m.waveBreakS = r.u16(); m.clearGroundMin = r.u8(); m.clearCount = r.u8();
     if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
     if (m.gear >= kGearCount || m.tier > 7 || (m.damagePct != 0xFFFF && m.damagePct > 1000)) return false;
+    if (!ValidWaveBreakS(m.waveBreakS) || !ValidClearGroundMin(m.clearGroundMin)) return false;
     m.friendlyFire = ff == 1;
     size_t ns = r.u8(); if (ns > kMaxWillies) return false;
     m.scores.resize(ns); for (ScoreEntry& e : m.scores) { e.key = r.i16(); e.score = r.i16(); }

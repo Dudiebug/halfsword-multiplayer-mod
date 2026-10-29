@@ -495,6 +495,33 @@ static void TestWaveBreakSkip() {
     CHECK(!f.VoteSkip(1, Match::kCountdownMs + 1));
 }
 
+// Lobby settings: the wave break (bot formats) and the ground-clear timer (free-for-all, teams, Brawl).
+static void TestWaveBreakAndClearSettings() {
+    MatchConfig c = Cfg(Format::PlayersVsBots, 10);
+    CHECK(Sanitize(c).waveBreakS == 0);                                          // default: the format's own
+    c.waveBreakS = 30; CHECK(Sanitize(c).waveBreakS == 30);
+    c.waveBreakS = 45; CHECK(Sanitize(c).waveBreakS == 0);                       // not an option
+    c = Cfg(Format::TwoTeams, 10); c.waveBreakS = 30; c.clearGroundMin = 3;
+    CHECK(Sanitize(c).waveBreakS == 0 && Sanitize(c).clearGroundMin == 3);       // wave break: bot formats only
+    c.clearGroundMin = 4; CHECK(Sanitize(c).clearGroundMin == 0);
+    c = Cfg(Format::Duel, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);
+    c = Cfg(Format::Zombies, 10); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);
+    c = Cfg(Format::FreeForAll, 5); c.gear = Gear::Fists; c.clearGroundMin = 2; CHECK(Sanitize(c).clearGroundMin == 2);   // Brawl
+    // The break the match runs: 60 s Survival, 10 s Zombies, or the pick.
+    for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
+        for (uint16_t s : {0, 10, 30, 60, 120}) {
+            MatchConfig b = Cfg(f, 10); b.tier = 2; b.waveBreakS = s;
+            Match m; m.Start(Sanitize(b), Two(), 0);
+            m.Tick(Match::kCountdownMs);
+            const uint32_t t = Match::kCountdownMs;
+            for (uint8_t e = 7; m.botsLeft() > 0 && e < 200; ++e) { m.Tick(t + 1); m.AddFighter({e, kBotTeam, false}); m.OnDeath(e, 1, t + 10); }
+            CHECK(m.Tick(t + 11).waveCleared);
+            const uint32_t want = s ? s * 1000u : f == Format::Zombies ? Match::kZombieBreakMs : Match::kWaveBreakMs;
+            CHECK(m.BreakLeftMs(t + 11) == want);
+        }
+    }
+}
+
 // A fallen Survival bot sheds a couple of armour pieces (LootPicks: which of its worn pieces), besides its weapons.
 static void TestLootPicks() {
     CHECK(kLootArmorPieces == 2 && Match::kLootDelayMs == 2000);
@@ -765,6 +792,7 @@ static void TestBrawl() {
 
 int main() {
     TestBrawl();
+    TestWaveBreakAndClearSettings();
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();

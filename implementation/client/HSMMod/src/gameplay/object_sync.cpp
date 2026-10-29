@@ -92,6 +92,7 @@ bool ApplyBodyPose(UObject* comp, float px, float py, float pz, const Quat16& ro
 constexpr double kHeardLiveMs = 3000.0;       // an id heard this recently is live somewhere (the host re-sends FREE ones every second)
 constexpr double kCensusFirstMs = 3000.0;     // a fight level's first census walk (and a client's first match) waits this
                                               // long: past the level manager's purge (0.1 s) and its first respawns (2.5 s)
+constexpr size_t kStartsPerTick = 8;          // level props whose start transform is read per tick at most (map reset)
 constexpr size_t kLevelReadsPerTick = 16;     // level props read (and so streamed) per tick at most, the moving ones first
 constexpr uint8_t kMovable = 2;               // EComponentMobility::Movable: only a movable root can simulate
 constexpr double kIdleCheckMs = 1000.0;       // DespawnIdle: how often the FREE weapons are checked
@@ -184,6 +185,9 @@ void ObjectSync::Clear() {
     history_.clear();
     recheckMs_ = eventMs_ = 0;
     shatter_ = ShatterState{};
+    baselineMs_ = -1;
+    levelWeapons_.clear();
+    resetQueue_.clear();
 }
 
 // ---------------------------------------------------------------- per frame
@@ -191,6 +195,7 @@ void ObjectSync::Clear() {
 void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*>>& owned) {
     if (!active_ || !adapter_) return;
     ++tick_;
+    if (!resetQueue_.empty()) StepReset(nowMs);
     if (env_.host)
         for (uint64_t id : table_.Tick(nowMs)) { ++n_.lapsed; Grant(id, kHostSlot, LeaseLevel::Free); }
     DetectDrops(nowMs, owned);
@@ -210,6 +215,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
         }
     }
     const uint8_t me = MySlot();
+    size_t startsRead = 0;                      // level props whose start transform was read this tick (map reset)
     std::vector<uint64_t> dueMoving, dueIdle;   // level props and spawned objects due on the moving schedule, by their last read
     for (auto it = props_.begin(); it != props_.end();) {
         const uint64_t id = it->first;
@@ -246,6 +252,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
             }
             continue;
         }
+        if (p.level && !p.startTried && startsRead < kStartsPerTick) { ++startsRead; RecordStart(p); }
         UObject* parent = ObjectField(p.actor, 0);
         const uint8_t holder = parent && env_.ownedEntity ? env_.ownedEntity(parent) : 0;
         const bool holding = holder != 0;
@@ -453,6 +460,7 @@ ObjectSync::Prop* ObjectSync::Track(uint64_t propId, UObject* actor) {
     probe.classHash = ClassHashOf(actor);
     probe.level = IsLevelProp(propId);
     probe.spawned = IsSpawnedId(propId);
+    probe.bornMs = SteadyNowMs();
     Prop& p = props_[propId];
     p = std::move(probe);
     byActor_[actor] = propId;

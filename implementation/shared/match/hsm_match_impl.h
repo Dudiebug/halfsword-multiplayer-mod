@@ -14,6 +14,8 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.tier = std::min<uint8_t>(c.tier, 7);
     if (c.gear == Gear::Fists) c.tier = 0;                              // Brawl is tier 0: the lowest build, no gear budget
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
+    if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
+    if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || c.format == Format::Duel) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
     return c;
 }
 

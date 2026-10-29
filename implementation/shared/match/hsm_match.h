@@ -36,7 +36,13 @@ struct MatchConfig {
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
     uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
+    uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
+    uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
 };
+inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
+inline constexpr uint8_t kClearGroundOptions[4] = {0, 2, 3, 5};       // minutes, 0 = off
+inline bool ValidWaveBreakS(uint16_t s) { return s == 0 || s == 10 || s == 30 || s == 60 || s == 120; }
+inline bool ValidClearGroundMin(uint8_t m) { return m == 0 || m == 2 || m == 3 || m == 5; }
 // Brawl: free-for-all where every fighter spawns bare (no armour, no weapons) and fights with fists. A mode card, not a
 // Format: the rules are free-for-all's.
 inline bool IsBrawl(Format f, Gear g) { return f == Format::FreeForAll && g == Gear::Fists; }
@@ -211,7 +217,7 @@ private:
     bool inBreak_ = false, clearedPending_ = false;
     uint32_t breakStart_ = 0;
     std::set<uint8_t> skipVotes_;
-    uint32_t BreakMs() const { return cfg_.format == Format::Zombies ? kZombieBreakMs : kWaveBreakMs; }
+    uint32_t BreakMs() const { return cfg_.waveBreakS ? uint32_t(cfg_.waveBreakS) * 1000u : cfg_.format == Format::Zombies ? kZombieBreakMs : kWaveBreakMs; }
     std::vector<uint8_t> revive_;
     void ResetModeState();
     // duel

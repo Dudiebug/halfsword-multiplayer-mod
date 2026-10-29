@@ -139,6 +139,12 @@ public:
     // Destroys every weapon lying loose that a fighter once held: no "Parent Actor" (a drop clears it, Willie_BP.cpp:5987,
     // 6299) but a "Last Parent" (set by every grab, :6073, 6394). Level weapons nobody picked up stay. Returns how many.
     int DestroyDroppedWeapons();
+    // Weapons the level itself placed: lying loose (no "Parent Actor") and never held ("Last Parent" empty). The map reset
+    // records them at the match start (object_sync.h). One pass over the object array.
+    std::vector<ue::UObject*> LevelWeapons();
+    // A new actor of a class (a Blueprint or native actor class with no setup of its own) at a place, spawned always.
+    ue::UObject* SpawnActorAt(ue::UClass* cls, const ue::FVector& at, const ue::FRotator& rot);
+    ue::FRotator ActorRotation(ue::UObject* actor);
     // Armour pieces lying loose (no attach parent): what a strip, a pick-up swap or a fallen bot's loot left. Worn and
     // carried pieces are attached. One pass over the object array.
     std::vector<ue::UObject*> LooseArmor();

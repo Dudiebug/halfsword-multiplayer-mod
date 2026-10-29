@@ -53,7 +53,7 @@ struct LobbyLocal {
 };
 
 // MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, MyTeam };
+enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam };
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
@@ -106,6 +106,8 @@ inline std::vector<int> LimitOptions(Format f) {
 }
 inline const std::vector<int> kTimeOptions = {0, 300, 600, 900, 1200};
 inline const std::vector<int> kRespawnOptions = {3, 5, 10, 15, 20};
+// The wave break in seconds the match runs (0 = the format's own: Survival 60, Zombies 10).
+inline int WaveBreakShown(const MatchConfig& c) { return c.waveBreakS ? c.waveBreakS : c.format == Format::Zombies ? int(Match::kZombieBreakMs / 1000) : int(Match::kWaveBreakMs / 1000); }
 
 // The format and team pick go their own ways (SelectFormat, StepTeamPick); every other row steps here, by +1 or -1.
 // A value out of range steps from where Sanitize would put it. damage: the game's own slider (the Damage row's range).
@@ -123,6 +125,14 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
         case LobbyRow::Tier: c.tier = uint8_t((std::min<uint8_t>(c.tier, 7) + (back ? 7 : 1)) % 8); break;
         case LobbyRow::FriendlyFire: c.friendlyFire = !c.friendlyFire; break;
         case LobbyRow::Damage: c.damagePct = StepDamage(c.damagePct, dir, damage); break;
+        case LobbyRow::WaveBreak: {
+            std::vector<int> o(std::begin(kWaveBreakOptions), std::end(kWaveBreakOptions));
+            c.waveBreakS = uint16_t(StepOf(o, WaveBreakShown(c), dir)); break;
+        }
+        case LobbyRow::ClearGround: {
+            std::vector<int> o(std::begin(kClearGroundOptions), std::end(kClearGroundOptions));
+            c.clearGroundMin = uint8_t(StepOf(o, c.clearGroundMin, dir)); break;
+        }
         case LobbyRow::MyTeam: break;
     }
     return c;
@@ -270,6 +280,19 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.value = DamageLabel(c.damagePct, l.damage);
             r.hint = "How hard hits land on every player, the game's own slider for everyone. Yours is back after the session.";
             break;
+        case LobbyRow::WaveBreak: {
+            const int s = WaveBreakShown(c);
+            r.label = "Wave break";
+            r.value = s == 120 ? "2 min" : std::to_string(s) + " s";
+            r.hint = "The pause between waves. Hold G to vote to skip it.";
+            break;
+        }
+        case LobbyRow::ClearGround:
+            r.label = "Clear ground";
+            r.value = c.clearGroundMin ? "Every " + std::to_string(c.clearGroundMin) + " min" : "Off";
+            r.hint = c.clearGroundMin ? "Dropped weapons and loose armour are cleared on this timer, to keep the lag down. Held and worn gear stays."
+                                      : "Dropped weapons and loose armour stay until the next round.";
+            break;
         case LobbyRow::MyTeam: {
             r.label = "My team";
             r.enabled = true;                                        // everyone picks their own
@@ -289,12 +312,13 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 // The rows the format uses, in page order. Every format has Damage (Progression co-op shows it alone).
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     Format f = c.format;
-    if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Tier, LobbyRow::FriendlyFire, LobbyRow::Damage};   // endless, own gear, back at a wave clear
-    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage};            // nothing to choose in gear: everyone is bare
+    if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Tier, LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage};   // endless, own gear, back at a wave clear
+    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround};            // nothing to choose in gear: everyone is bare
     std::vector<LobbyRow> v = {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear};
     if (c.gear != Gear::Own) v.push_back(LobbyRow::Tier);
     if (HasTeams(f)) v.push_back(LobbyRow::FriendlyFire);
     v.push_back(LobbyRow::Damage);
+    if (f != Format::Duel) v.push_back(LobbyRow::ClearGround);
     if (HasTeams(f)) v.push_back(LobbyRow::MyTeam);
     return v;
 }

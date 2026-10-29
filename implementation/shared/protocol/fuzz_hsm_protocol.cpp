@@ -7,7 +7,9 @@
 #include "combat/hsm_sever.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
+#include "session/hsm_dice.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_map_reset.h"
 #include "session/hsm_modmaps.h"
 #include "session/hsm_object_event.h"
 #include "session/hsm_prop_census.h"
@@ -57,7 +59,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
-    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n);
+    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -148,6 +150,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     s.push_back(Encode(mm));
     mm.pakName.clear(); mm.pakSize = 0; mm.sha = {}; s.push_back(Encode(mm));      // a map no pak is known for
     s.push_back(Encode(ModMapMsg{}));                                              // the stock-pick clear
+    s.push_back(Encode(dice::LevelSeedMsg{7, 0x0123456789ABCDEFull}));            // a level's shared-dice seed
+    { MapResetMsg mr; mr.seq = 0xFFFF; mr.round = 12; mr.flags = kMapResetRematch; s.push_back(Encode(mr)); s.push_back(Encode(MapResetMsg{})); }
     {   // a pak full directory index, for the pak reader (byte-level mutation reaches its length and count checks)
         std::vector<uint8_t> fdi;
         auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) fdi.push_back(uint8_t(v >> (8 * i))); };

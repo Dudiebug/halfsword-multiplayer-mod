@@ -18,6 +18,7 @@
 #include "gameplay/shatter_sync.h"
 #include "gameplay/weapon_hands.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_map_reset.h"
 #include "session/hsm_object.h"
 #include "session/hsm_object_attach.h"
 #include "session/hsm_object_event.h"
@@ -117,6 +118,12 @@ public:
 
     std::string HealthLine();                                        // since the previous call
 
+    // Map reset (map_reset_sync.cpp, session/hsm_map_reset.h). MarkBaseline: the match has started in this level (every
+    // frame it runs is fine; the first counts): level weapons are recorded, and objects spawned after this are the round's.
+    // MapReset: put this machine's copy of the map back as it began, a few items a frame (StepReset, from Tick).
+    void MarkBaseline();
+    void MapReset(double nowMs, uint8_t flags);
+
 private:
     struct RootCalls {
         ue::PreparedCall toWorld, linVel, angVel, setAng, setLin, simulating;
@@ -131,6 +138,15 @@ private:
         BodyStateMsg read;
     };
     struct ConstraintRef { ue::UObject* comp = nullptr; int32_t index = -1; };
+    struct StartBody { bool ok = false; BodyStateMsg s; };       // a body's transform when the level began
+    struct LevelWeapon {                   // a weapon the level placed, as the match began
+        ue::UObject* actor = nullptr;
+        int32_t index = -1;
+        uint32_t classHash = 0;
+        ue::FVector at;
+        ue::FRotator rot;
+    };
+    struct ResetItem { ResetAction action = ResetAction::Leave; uint64_t id = 0; size_t weapon = 0; bool isWeapon = false; };
     struct Prop {
         ue::UObject* actor = nullptr;
         int32_t index = -1;
@@ -157,6 +173,9 @@ private:
         bool level = false;                // a level prop (MakeLevelPropId), not a dropped weapon
         bool moving = false;               // its last read was not at rest (level props: streamed before those at rest)
         uint8_t toucher = 0;               // the fighter simulated here that held or touched it last (Touch)
+        double bornMs = 0;                 // when it was first tracked here (a spawned object born in the round is destroyed by a map reset)
+        bool startTried = false;           // a level prop: its start was read (once)
+        std::vector<StartBody> start;      // a level prop: each body's transform as the level began (map reset)
     };
     using Hands = hands::Hands;
     using StandInHand = hands::StandInHand;
@@ -280,6 +299,13 @@ private:
     RootCalls* CallsFor(ue::UObject* root);
     ue::UObject* ObjectField(ue::UObject* o, int which);             // 0 "Parent Actor", 1 "Weapon R", 2 "Weapon L"
     bool InUse(uint64_t propId, double nowMs) const;
+    // Map reset (map_reset_sync.cpp).
+    void RecordStart(Prop& p);                                       // a level prop: read each body's transform once
+    void StepReset(double nowMs);                                    // a few queued items a frame
+    void ResetProp(uint64_t id, Prop& p, ResetAction action, double nowMs);
+    void ResetWeapon(size_t i, ResetAction action, double nowMs);
+    void ReleaseLease(uint64_t id, Prop& p, double nowMs);                      // a reset prop is FREE again
+    bool ShatterBroken(uint64_t id) const;                           // a geometry collection of it has broken
     // A dropped weapon FREE for a minute goes (session/hsm_lease.h IdleDespawnDue); every kIdleCheckMs, while SetIdleDespawn.
     void DespawnIdle(double nowMs);
 
@@ -357,6 +383,13 @@ private:
     std::vector<QueuedEvent> queuedEvents_;                          // events for objects not found here yet
     std::vector<std::vector<uint8_t>> history_;                      // host: events relayed, for a joiner
     ShatterState shatter_;                                           // geometry collections (shatter_sync.cpp)
+    // Map reset. baselineMs_: when the match began in this level (-1: not yet); levelWeapons_: the level's own weapons then;
+    // resetQueue_: what a MapReset still has to do, resetPerFrame_ items a frame.
+    double baselineMs_ = -1;
+    std::vector<LevelWeapon> levelWeapons_;
+    std::vector<ResetItem> resetQueue_;
+    size_t resetPerFrame_ = 0;
+    ResetTally resetTally_;
     double recheckMs_ = 0, eventMs_ = 0, hintMs_ = -1e18;
     ue::UClass* primitiveClass_ = nullptr;
     ue::UClass* constraintClass_ = nullptr;

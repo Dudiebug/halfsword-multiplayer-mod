@@ -31,6 +31,9 @@ struct Config {
     // true (default): when a Steam lobby's host leaves, the member Steam makes the new lobby owner hosts the same lobby
     // and the others follow it (session/hsm_migration.h) instead of everyone going back to the menu.
     bool hostMigration = true;
+    // true (default): the host resets the map at each Duel round and each rematch (props back to their start, objects spawned
+    // in the round gone, the level's own weapons back on their spots); 0 sends no MapReset. Read on the host only.
+    bool mapReset = true;
     // Voice chat (gameplay/voice.h). Each player's own setting (0.7.1): voice and voiceReach are off (the default), by
     // distance (proximity: full volume within voiceNearM, silent past voiceFarM) or every living player hears every
     // living one (everyone); two players hear each other at the narrower of their settings. A fighter below voiceCutoff

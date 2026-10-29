@@ -151,6 +151,7 @@ Config LoadConfig() {
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
+    c.mapReset = ReadString(ini, L"map_reset", "1") != "0";
     c.voice = ReadString(ini, L"voice", "0") != "0";
     {
         const std::string reach = ReadString(ini, L"voice_reach", "proximity");
@@ -212,8 +213,8 @@ Config LoadConfig() {
     HSM_LOG("config: role=%s snapshot_hz=%d input_hz=%d chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
             c.snapshotHz, c.inputHz, ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
-    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
-            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0);
+    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
+            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0);
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)

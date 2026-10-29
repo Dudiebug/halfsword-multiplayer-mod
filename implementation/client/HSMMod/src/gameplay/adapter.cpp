@@ -1131,6 +1131,40 @@ int Adapter::DestroyDroppedWeapons() {
     return destroyed;
 }
 
+std::vector<UObject*> Adapter::LevelWeapons() {
+    std::vector<UObject*> out;
+    for (UObject* w : WeaponActors()) {
+        if (IsBodyWeapon(w)) continue;
+        UObject** parent = Field<UObject*>(w, "Parent Actor");
+        UObject** last = Field<UObject*>(w, "Last Parent");
+        if (parent && !*parent && last && !*last) out.push_back(w);
+    }
+    return out;
+}
+
+FRotator Adapter::ActorRotation(UObject* actor) {
+    Call c(actor, "K2_GetActorRotation");
+    return c.invoke() ? c.get<FRotator>("ReturnValue") : FRotator{};
+}
+
+UObject* Adapter::SpawnActorAt(UClass* cls, const FVector& at, const FRotator& rot) {
+    if (!cls || !statics_ || !world_) return nullptr;
+    FTransform t; t.translation = at;
+    Call begin(statics_, "BeginDeferredActorSpawnFromClass");
+    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+         .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
+    UObject* a = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
+    if (!a) return nullptr;
+    Call finish(statics_, "FinishSpawningActor");
+    finish.set<UObject*>("Actor", a).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
+    a = finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
+    if (!a) return nullptr;
+    Call move(a, "K2_SetActorLocationAndRotation");
+    move.set<FVector>("NewLocation", at).set<FRotator>("NewRotation", rot).set<bool>("bSweep", false).set<bool>("bTeleport", true);
+    move.invoke();
+    return a;
+}
+
 namespace {
 // An armour piece's class: BP_Armor_Master_C and its children carry both.
 bool ArmorClass(UClass* cls) { return FindProperty(cls, "Armor Passport") && FindProperty(cls, "Armor Slot"); }

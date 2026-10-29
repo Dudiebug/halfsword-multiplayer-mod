@@ -47,6 +47,23 @@ static void TestPrevNext() {
     CHECK(StepOf(o, 5, 1) == 10 && StepOf(o, 5, -1) == 3 && StepOf(o, 5, 0) == 10);
 }
 
+static void TestNewRows() {
+    MatchConfig b; b.format = Format::PlayersVsBots;
+    CHECK(WaveBreakShown(b) == 60 && StepSetting(b, LobbyRow::WaveBreak, 1).waveBreakS == 120 && StepSetting(b, LobbyRow::WaveBreak, -1).waveBreakS == 30);
+    MatchConfig z; z.format = Format::Zombies;
+    CHECK(WaveBreakShown(z) == 10 && StepSetting(z, LobbyRow::WaveBreak, 1).waveBreakS == 30 && StepSetting(z, LobbyRow::WaveBreak, -1).waveBreakS == 120);
+    MatchConfig f;
+    CHECK(StepSetting(f, LobbyRow::ClearGround, 1).clearGroundMin == 2 && StepSetting(f, LobbyRow::ClearGround, -1).clearGroundMin == 5);
+    f.clearGroundMin = 5; CHECK(StepSetting(f, LobbyRow::ClearGround, 1).clearGroundMin == 0);
+    auto has = [](const MatchConfig& c, LobbyRow r) { for (LobbyRow x : SettingsFor(c)) if (x == r) return true; return false; };
+    CHECK(has(b, LobbyRow::WaveBreak) && has(z, LobbyRow::WaveBreak) && !has(b, LobbyRow::ClearGround));
+    MatchConfig d; d.format = Format::Duel;
+    CHECK(!has(d, LobbyRow::ClearGround) && !has(d, LobbyRow::WaveBreak));
+    CHECK(has(MatchConfig{}, LobbyRow::ClearGround));
+    MatchConfig br; br.gear = Gear::Fists; CHECK(has(br, LobbyRow::ClearGround));
+    MatchConfig t; t.format = Format::TwoTeams; CHECK(has(t, LobbyRow::ClearGround));
+}
+
 static void TestStepSetting() {
     MatchConfig c;                                       // free-for-all, limit 5
     CHECK(StepSetting(c, LobbyRow::Limit, 1).scoreLimit == 10);
@@ -230,16 +247,16 @@ static void TestHostAgainstMember() {
 static void TestRowsPerFormat() {
     using V = std::vector<LobbyRow>;
     using enum LobbyRow;
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, Gear, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, MyTeam}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::ThreeTeams, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, MyTeam}));
-    CHECK(Ids(BuildLobbyScene(InLobby(false, Format::ThreeTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, MyTeam}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, Gear, Damage, ClearGround}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, ClearGround, MyTeam}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::ThreeTeams, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam}));
+    CHECK(Ids(BuildLobbyScene(InLobby(false, Format::ThreeTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, ClearGround, MyTeam}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, Gear, Damage}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, Tier, FriendlyFire, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, Tier, FriendlyFire, Damage}));   // gear is PvP only
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, Tier, WaveBreak, FriendlyFire, Damage}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, Tier, WaveBreak, FriendlyFire, Damage}));   // gear is PvP only
 }
 
 static void TestLabelsAndValues() {
@@ -429,7 +446,7 @@ static void TestBrawl() {
     int selected = 0, brawls = 0;
     for (const ModeCard& m : s.modes) { selected += m.selected; brawls += m.brawl; }
     CHECK(selected == 1 && brawls == 1 && !s.modes[0].selected);              // the free-for-all card is not also lit
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage}));   // no Gear, no Tier
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround}));   // no Gear, no Tier
     CHECK(RowOf(s, LobbyRow::Gear) == nullptr && RowOf(s, LobbyRow::Tier) == nullptr);
     LobbyScene own = BuildLobbyScene(InLobby(true));
     CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 2].selected && RowOf(own, LobbyRow::Gear) != nullptr);
@@ -592,6 +609,7 @@ static void TestModdedMaps() {
 int main() {
     TestPrevNext();
     TestStepSetting();
+    TestNewRows();
     TestTeamPick();
     TestSelectFormat();
     TestPill();
