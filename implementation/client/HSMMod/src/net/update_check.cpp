@@ -7,10 +7,6 @@
 #include <mutex>
 #include <thread>
 
-#ifndef HSM_GIT_TAG
-#define HSM_GIT_TAG ""   // build.sh: the checkout's nearest v* tag as git describe prints it, if any
-#endif
-
 namespace hsm::update {
 namespace {
 constexpr const char kRepo[] = "Dudiebug/halfsword-multiplayer-mod";
@@ -37,8 +33,7 @@ std::string Reason(const net::HttpResponse& r) {
 }
 
 void Check() {
-    const std::string tag = HSM_GIT_TAG;
-    const std::optional<Version> running = RunningVersion(game::kModVersion, tag);
+    const std::optional<Version> running = RunningVersion(game::kModVersion);
     if (!running) { HSM_LOG("update: check failed (this build's version %s is not known)", game::kModVersion); return; }
     const std::string cur = FormatVersion(*running);
 

@@ -8,8 +8,8 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre3 tries out object and shatter sync, modded maps and UE4SS loading, with the 0.7.3 grab and
-> strip fixes. It connects only to 0.8.0-pre3.
+> **Prerelease:** v0.8.0-pre4 tries out object and shatter sync, modded maps and UE4SS loading, with the 0.7.3 grab and
+> strip fixes. It connects only to 0.8.0-pre4.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 

@@ -41,17 +41,13 @@ static void TestDescribed() {
 }
 
 static void TestRunning() {
-    CHECK(RunningVersion("0.7.0", "")->pre == 0);
-    CHECK(RunningVersion("0.7.0", "v0.7.0-pre2")->pre == 2);
-    CHECK(RunningVersion("0.7.0", "v0.7.0-pre2-3-gabc1234")->pre == 2);
-    CHECK(RunningVersion("0.7.0", "v0.4.0-pre1-308-gd475850")->pre == 0 && RunningVersion("0.7.0", "v0.4.0-pre1-308-gd475850")->minor == 7);   // an old tag says nothing
-    CHECK(RunningVersion("0.7.0", "d475850")->pre == 0);
-    CHECK(RunningVersion("0.7.0", "v0.7.0")->pre == 0);
-    CHECK(!RunningVersion("", "v0.7.0-pre2") && !RunningVersion("junk", ""));
+    CHECK(RunningVersion("0.7.0")->pre == 0);
+    CHECK(!RunningVersion("") && !RunningVersion("junk"));
     // The release's own number (kModVersion "0.7.0-pre3"): a pre3 build is older than 0.7.0 and newer than pre2.
-    CHECK(RunningVersion("0.7.0-pre3", "")->pre == 3);
-    CHECK(RunningVersion("0.7.0-pre3", "v0.7.0-pre3-4-gabc1234-dirty")->pre == 3);
-    CHECK(CompareVersion(*RunningVersion("0.7.0-pre3", ""), V("v0.7.0-pre2")) > 0 && CompareVersion(*RunningVersion("0.7.0-pre3", ""), V("v0.7.0")) < 0);
+    CHECK(RunningVersion("0.7.0-pre3")->pre == 3);
+    // #55-#57: kModVersion is the truth even when the build's nearest tag is the previous prerelease.
+    CHECK(RunningVersion("0.8.0-pre3")->pre == 3 && RunningVersion("0.8.0")->pre == 0);
+    CHECK(CompareVersion(*RunningVersion("0.7.0-pre3"), V("v0.7.0-pre2")) > 0 && CompareVersion(*RunningVersion("0.7.0-pre3"), V("v0.7.0")) < 0);
 }
 
 static const char kList[] = R"([

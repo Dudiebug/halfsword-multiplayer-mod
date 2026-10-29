@@ -13,8 +13,6 @@ mkdir -p build/obj
 COMMON="$OPT -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -fstack-protector-strong"
 # The build string players compare (session/hsm_build.h): kModVersion plus this checkout's commit (and -dirty), if any.
 DESCRIBE=$(git describe --always --dirty --exclude='*' 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
-# The update check (net/update_check.cpp) reads the prerelease number from the nearest v* tag, as git describe prints it.
-TAG=$(git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
 INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/minhook/include"
 
 objs=()
@@ -26,7 +24,7 @@ done
 for f in src/*.cpp src/*/*.cpp; do
   [ -e "$f" ] || continue
   o=build/obj/$(echo "${f%.cpp}" | tr '/' '_').o
-  "$CXX" -std=c++20 $COMMON -Werror $INC -DHSM_GIT_DESCRIBE="\"$DESCRIBE\"" -DHSM_GIT_TAG="\"$TAG\"" -c "$f" -o "$o"
+  "$CXX" -std=c++20 $COMMON -Werror $INC -DHSM_GIT_DESCRIBE="\"$DESCRIBE\"" -c "$f" -o "$o"
   objs+=("$o")
 done
 LINK_FLAGS="-fstack-protector-strong -s"

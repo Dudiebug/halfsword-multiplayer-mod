@@ -79,16 +79,10 @@ inline std::optional<Version> ParseDescribedVersion(std::string s) {
     return ParseVersion(s.substr(0, dash));
 }
 
-// The version this build runs. kModVersion ("0.7.0") never says which prerelease it is, so the build's git tag
-// ("v0.7.0-pre2-3-gabc123") refines it, but only when it is the same MAJOR.MINOR.PATCH: a checkout whose nearest tag
-// is an older release says nothing about this one. Empty or unparsable: kModVersion alone.
-inline std::optional<Version> RunningVersion(const std::string& modVersion, const std::string& gitTag) {
-    std::optional<Version> base = ParseVersion(modVersion);
-    if (!base) return std::nullopt;
-    if (std::optional<Version> tag = ParseDescribedVersion(gitTag))
-        if (tag->major == base->major && tag->minor == base->minor && tag->patch == base->patch) return tag;
-    return base;
-}
+// The version this build runs: kModVersion ("0.8.0-pre3", "0.7.3"), which is bumped with every release tag. The
+// build's git tag is not consulted: a release is built before its own tag exists, so the nearest tag is the previous
+// prerelease (0.8.0-pre3 built on top of v0.8.0-pre2 called itself pre2 and offered pre3 to its own players, #55-#57).
+inline std::optional<Version> RunningVersion(const std::string& modVersion) { return ParseVersion(modVersion); }
 
 // One release object of GitHub's list.
 struct ReleaseInfo {
