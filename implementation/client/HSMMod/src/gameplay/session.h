@@ -31,6 +31,7 @@ public:
     virtual void SetVoiceMonitor(bool on) = 0;                       // HEAR MYSELF
     virtual std::vector<MpPlayer> Players() = 0;                     // the session's players, this machine's view
     virtual void SetPlayerListen(uint8_t slot, bool muted, int volumePct) = 0;   // this player's own mute and volume for one speaker
+    virtual void SetLobbyPassword(const std::string& password) = 0;  // host: lock the lobby with it, or open it again with ""; nobody is kicked
     virtual void KickPlayer(uint8_t slot, bool ban) = 0;             // host
     virtual void VoteKickPlayer(uint8_t slot) = 0;                   // starts a vote (the host counts it)
     virtual void VoteBanPlayer(uint8_t slot) = 0;                    // starts a voteban (role=server sessions: 7 days)

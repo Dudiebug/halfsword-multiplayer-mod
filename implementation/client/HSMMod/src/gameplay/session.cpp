@@ -93,6 +93,8 @@
 #include "session/hsm_reconnect.h"
 #include "session/hsm_report.h"
 #include "session/hsm_roster.h"
+#include "session/hsm_password.h"
+#include "session/hsm_player_limit.h"
 #include "session/hsm_spawn_anchor.h"
 #include "session/hsm_spawn.h"
 #include "session/hsm_travel_gate.h"
@@ -215,6 +217,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::MapReset: { MapResetMsg m; return Decode(d, n, m); }
         case MsgType::GroundClear: { GroundClearMsg m; return Decode(d, n, m); }
         case MsgType::LevelSeed: { dice::LevelSeedMsg m; return Decode(d, n, m); }
+        case MsgType::LobbySecret: { LobbySecretMsg m; return Decode(d, n, m); }   // rev 35: from the host only (never in ValidateForHost)
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
@@ -1197,14 +1200,18 @@ public:
             case RejectReason::Malformed: break;
             case RejectReason::Kicked: msg = "The host kicked you from the lobby. You can join again."; break;
             case RejectReason::Banned: msg = "You are banned from this lobby (by the host, an admin or a vote)."; break;
+            case RejectReason::WrongPassword: msg = "Wrong password"; break;
+            case RejectReason::TooManyTries: msg = "Too many wrong tries: wait 60 s"; break;
         }
         HSM_LOG("client: rejected by the host (reason %d); leaving", int(why));
         const bool fight = InFightLevel();
+        const steam::SteamId lobbyId = lobby_.id();
         welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
         if (steamMode()) lobby_.Leave();
         ResetNetwork("rejected by the host");
         ui::ShowLine("HSMMod", style::kBone, msg);
-        notice_ = msg;                                 // shown on the multiplayer page, which opens for it (menu.cpp)
+        if (why == RejectReason::WrongPassword && steamMode() && lobbyId) lobby_.AskPassword(lobbyId, msg);   // the page asks again (menu.cpp)
+        else notice_ = msg;                            // shown on the multiplayer page, which opens for it (menu.cpp)
         if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
@@ -1320,6 +1327,16 @@ public:
         if (name.empty()) return;
         listen_[name] = voice::Listen{muted, std::clamp(volumePct, 0, voice::kVolumeMaxPct)};
         HSM_LOG("voice: slot%u %s, volume %d%% (this machine only)", unsigned(slot), muted ? "muted" : "unmuted", volumePct);
+    }
+
+    // Host: set or clear the lobby password. Nobody is kicked; every accepted peer gets the new one (empty: open again).
+    void SetLobbyPassword(const std::string& password) override {
+        if (!steamMode() || !lobby_.IsHost()) return;
+        lobby_.SetPassword(password);
+        HSM_LOG("lobby: password %s", lobby_.Password().empty() ? "cleared" : "set");
+        if (!net_) return;
+        const std::vector<uint8_t> msg = Encode(LobbySecretMsg{lobby_.Password()});
+        for (const auto& [peer, p] : peers_) net_->Send(peer, kChanReliable, msg, true);
     }
 
     void KickPlayer(uint8_t slot, bool ban) override {
@@ -3720,6 +3737,9 @@ private:
         if (h.revision != kProtocolRevision) r.reason = RejectReason::BadRevision;
         else if (h.buildKey != BuildKey()) r.reason = RejectReason::BuildMismatch;
         else if (const BanEntry* b = BannedEntry(ev)) r.reason = b->kick ? RejectReason::Kicked : RejectReason::Banned;
+        else if (const PasswordVerdict pv = passwordGate_.Check(key, CleanPassword(h.password), lobby_.Password(), game::SteadyNowMs()); pv != PasswordVerdict::Ok)
+            r.reason = pv == PasswordVerdict::TooManyTries ? RejectReason::TooManyTries : RejectReason::WrongPassword;   // a locked lobby; rejoins need it too
+        else if (!RoomForHello(roster_.size(), roster_.Find(key) != nullptr, lobby_.MaxPlayers())) r.reason = RejectReason::Full;   // the host's player limit; a rejoin within its reservation still holds its seat
         else if (!(slot = roster_.Add(key, h.name))) r.reason = RejectReason::Full;
         if (slot && reservations_.Claim(key, NowMs())) {        // rejoin: score kept, fighter respawns fresh
             HSM_LOG("host: slot %u rejoined within its reservation", *slot);
@@ -3754,6 +3774,7 @@ private:
         if (MeshHost()) w.flags |= kWelcomeMesh;            // the PeerMap follows on the next tick
         if (PeerMapHost() && cfg_.peerPing) w.flags |= kWelcomePeerPing;   // rev 22: clients ping each other and report
         net_->Send(ev.peer, kChanReliable, Encode(w), true);
+        if (!lobby_.Password().empty()) net_->Send(ev.peer, kChanReliable, Encode(LobbySecretMsg{lobby_.Password()}), true);   // so a new host keeps the lobby locked
         net_->Send(ev.peer, kChanReliable, Encode(leases_.Snapshot()), true);   // rev 32: every hand-off lease (its own stream's epoch too)
         SendAllBlobs(ev.peer);
         if (InFightLevel()) {                          // late joiner: follow the host into the running level
@@ -5224,6 +5245,7 @@ private:
 
     void SendHello() {
         Hello h; h.buildKey = BuildKey(); h.name = MyName(); h.modBuild = game::ModBuild();
+        h.password = lobby_.Password();   // the one typed to join (or the host's latest, after a migration)
         net_->Send(hostPeer_, kChanReliable, Encode(h), true);
         nextHello_ = NowMs() + 2000;
         HSM_LOG("client: hello sent to the host%s", hellosSent_++ ? " (no welcome yet; retrying)" : "");
@@ -5273,6 +5295,7 @@ private:
                 ui::ShowLine("HSMMod", style::kBone, "The host left. You are the new host.");
                 ResetNetwork("host migration");
                 OnLobbyEntered();                 // as the owner: a host transport, every member allowed, BecomeHost next tick
+                lobby_.SetPassword(lobby_.Password());   // the password the old host handed us: the lobby stays locked (open when we never got one)
                 break;
             case MigrationStep::FollowHost:
                 HSM_LOG("session: host migration: following the new host");
@@ -5901,6 +5924,7 @@ private:
                 FollowTravel(tr);
                 break;
             }
+            case MsgType::LobbySecret: { LobbySecretMsg m; if (Decode(d, n, m)) lobby_.RememberPassword(m.password); break; }   // the host's latest password
             case MsgType::LevelSeed: { dice::LevelSeedMsg m; if (Decode(d, n, m)) game::shareddice::SetSeed(m.seed); break; }   // the host's dice for the level it sent us to
             case MsgType::ModMap: {
                 ModMapMsg m; if (!Decode(d, n, m)) break;
@@ -6295,6 +6319,7 @@ private:
     PeerSilenceMonitor peerSilence_;
     HelloWatch helloWatch_;
     ReservationTable reservations_;
+    PasswordGate passwordGate_;   // host: wrong tries per SteamID, kept across rejected peers
     double groundOffset_ = 0;
     bool groundValid_ = false, foesStopped_ = false;
     int savedFoes_ = -1;

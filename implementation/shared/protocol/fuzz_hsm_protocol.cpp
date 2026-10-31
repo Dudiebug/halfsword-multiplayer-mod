@@ -13,6 +13,7 @@
 #include "session/hsm_map_reset.h"
 #include "session/hsm_modmaps.h"
 #include "session/hsm_object_event.h"
+#include "session/hsm_password.h"
 #include "session/hsm_prop_census.h"
 #include "session/hsm_report.h"
 #include "sync/hsm_grab.h"
@@ -60,7 +61,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
-    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n);
+    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -73,6 +74,9 @@ void TryAll(const uint8_t* d, size_t n) {
 std::vector<std::vector<uint8_t>> Seeds() {
     std::vector<std::vector<uint8_t>> s;
     Hello h; h.buildKey = 0x8EFA122909712000ull; h.name = "seed"; h.modBuild = "0.6.4 (v0.6.3-12-gdb82570)"; s.push_back(Encode(h));
+    h.password = "hunter2 hunter2"; s.push_back(Encode(h));                    // a locked lobby's Hello
+    s.push_back(Encode(LobbySecretMsg{"hunter2 hunter2"})); s.push_back(Encode(LobbySecretMsg{}));   // the host's password hand-out, and its clear
+    s.push_back(Encode(LobbySecretMsg{std::string(kMaxLobbyPassword, 'p')}));
     Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; w.flags = kWelcomeMesh; s.push_back(Encode(w));
     Reject r; r.reason = RejectReason::Full; s.push_back(Encode(r));
     r.reason = RejectReason::Banned; s.push_back(Encode(r));

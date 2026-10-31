@@ -8,6 +8,7 @@
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_map_list.h"
 #include "session/hsm_build.h"
+#include "session/hsm_player_limit.h"
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -25,16 +26,23 @@ struct LobbyPlayer {
     std::string build;                  // their mod build (session/hsm_build.h), empty until their member data comes
 };
 
-// The public-lobby list's filters (the page's chips, in this order): mode, room, compatibility, sorting. All off: every
-// lobby Steam returned, in its order.
+// The public-lobby list's filters (the page's chips, in this order): mode, room, compatibility, sorting, passwords. All
+// off: every lobby Steam returned, in its order.
 struct BrowserFilter {
     uint8_t mode = 0;                   // 0: any; else the kBrowserModes entry shown
     bool hasRoom = false, compatibleOnly = false, mostPlayers = false;
+    bool noPassword = false;            // hide the locked lobbies
 };
+
+// What a locked lobby's name starts with in the browser: plain Latin-1/ASCII, the game's font has no padlock glyph.
+// The one place to change it.
+inline constexpr const char* kLockedMarker = "[locked] ";
 
 struct LobbyFound {                     // a public lobby from Find
     std::string name, map, mode;
     int players = 0;
+    int maxPlayers = 8;                 // the host's player limit (lobby data hsm_max; 8 when the lobby has none)
+    bool locked = false;                // it asks for a password (lobby data hsm_lock = "1"); the password itself is never listed
     bool compatible = false;
     std::string reason;                 // why not, when !compatible
 };
@@ -45,6 +53,7 @@ struct LobbyLocal {
     LobbyPhase phase = LobbyPhase::Offline;
     bool host = false;                  // we own the lobby
     bool publicLobby = false;           // it is listed publicly (else friends only)
+    bool locked = false;                // the lobby asks for a password (Lobby::Locked)
     std::string myName, status, version;
     std::string myBuild;                // this mod's build (ModBuildString)
     bool allowBuildMismatch = false;    // allow_build_mismatch=1: the host may start with other builds in
@@ -57,11 +66,12 @@ struct LobbyLocal {
     std::vector<LobbyPlayer> players;
     std::vector<LobbyFound> found;
     BrowserFilter filter;
-    int maxPlayers = 8;
+    int maxPlayers = 8;                 // in a lobby: the host's player limit (Lobby::MaxPlayers)
 };
 
-// MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, Weapons, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
+// Players is the lobby's own player limit, not a MatchConfig field: the scene offers it as LobbyScene::playerLimit (it is
+// in no SettingsFor list) and the page applies it with Lobby::SetMaxPlayers. First, so it leads the MATCH section.
+enum class LobbyRow : uint8_t { Players, Limit, Time, Respawn, Gear, Tier, Weapons, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
@@ -70,7 +80,7 @@ struct ModeCard { Format format = Format::FreeForAll; std::string name, descript
                   ModeGroup group = ModeGroup::Versus; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
                  bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
-struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; size_t source = 0; };   // source: its index in LobbyLocal::found
+struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; bool locked = false; size_t source = 0; };   // source: its index in LobbyLocal::found
 struct RosterRow {
     std::string name, team;             // team: the formats with teams only
     Rgba swatch;                        // a == 0: none
@@ -103,12 +113,13 @@ inline const std::vector<std::string>& BrowserModes() {
     static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "2 teams", "3 teams", "Brawl", "Survival", "Zombies"};
     return m;
 }
-inline constexpr size_t kFilterChips = 4;   // mode, has room, compatible only, most players first
+inline constexpr size_t kFilterChips = 5;   // mode, has room, compatible only, most players first, no password
 struct FilterChip { std::string label; bool on = false; };
 inline std::vector<FilterChip> FilterChips(const BrowserFilter& f) {
     const auto& modes = BrowserModes();
     return {{modes[f.mode < modes.size() ? f.mode : 0], f.mode != 0}, {"Has room", f.hasRoom},
-            {"Compatible only", f.compatibleOnly}, {"Most players first", f.mostPlayers}};
+            {"Compatible only", f.compatibleOnly}, {"Most players first", f.mostPlayers},
+            {"No password", f.noPassword}};
 }
 // A chip clicked: the mode steps on (wrapping to any), the others turn on or off.
 inline BrowserFilter ToggleFilter(BrowserFilter f, size_t chip) {
@@ -117,15 +128,17 @@ inline BrowserFilter ToggleFilter(BrowserFilter f, size_t chip) {
         case 1: f.hasRoom = !f.hasRoom; break;
         case 2: f.compatibleOnly = !f.compatibleOnly; break;
         case 3: f.mostPlayers = !f.mostPlayers; break;
+        case 4: f.noPassword = !f.noPassword; break;
         default: break;
     }
     return f;
 }
-inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f, int maxPlayers) {
+inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f) {
     const auto& modes = BrowserModes();
     if (f.mode != 0 && f.mode < modes.size() && l.mode != modes[f.mode]) return false;
-    if (f.hasRoom && l.players >= maxPlayers) return false;
+    if (f.hasRoom && LobbyIsFull(l.players, l.maxPlayers)) return false;   // each lobby's own limit
     if (f.compatibleOnly && !l.compatible) return false;
+    if (f.noPassword && l.locked) return false;
     return true;
 }
 inline constexpr size_t kModeCardCount = kFormatCount + 2;   // the formats, then Brawl and Progression
@@ -144,9 +157,13 @@ struct LobbyScene {
     bool ready = false;                 // the Ready toggle: members (the host starts the match instead)
     bool readyOn = false;               // we are marked ready: the toggle is framed, our row shows the dot
     std::string readyLabel;
+    bool hostPassword = false;          // the host's password box (SET and CLEAR), in a lobby
+    std::string passwordNote;           // beside it: locked or open, and that changing it kicks nobody
     bool balance = false;               // Auto-balance: the host, in the formats with teams
     std::vector<ModeCard> modes;        // the grid's reading order, two to a row
     std::vector<SettingRow> settings;
+    SettingRow playerLimit;             // the Players stepper (LobbyRow::Players): the host steps it, members read it; in a lobby only
+    bool hasPlayerLimit = false;
     std::string hostOnly;               // members: "Only the host can change these."
     std::vector<MapCard> maps;          // the pickable maps, kMaps order; none for Progression
     bool start = false;                 // START MATCH: the host, while every known build matches (or the override is on)
@@ -203,7 +220,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             std::vector<int> o(std::begin(kClearGroundOptions), std::end(kClearGroundOptions));
             c.clearGroundMin = uint8_t(StepOf(o, c.clearGroundMin, dir)); break;
         }
-        case LobbyRow::MyTeam: break;
+        case LobbyRow::Players: case LobbyRow::MyTeam: break;   // the player limit is the lobby's (StepPlayerLimit); the team pick goes its own way
         case LobbyRow::Sync: c.hostPhysics = !c.hostPhysics; break;
     }
     return c;
@@ -309,6 +326,11 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
     r.id = s;
     r.enabled = l.host;
     switch (s) {
+        case LobbyRow::Players:
+            r.label = "Players";
+            r.value = std::to_string(l.maxPlayers);
+            r.hint = "How many players the lobby takes. It cannot go below the players already in; nobody is kicked.";
+            break;
         case LobbyRow::Limit:
             r.label = duel ? "Rounds to win" : "Score limit";
             r.value = std::to_string(c.scoreLimit);
@@ -453,7 +475,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
     if (s.idle) {
         s.filters = FilterChips(l.filter);
         std::vector<size_t> shown;
-        for (size_t i = 0; i < l.found.size(); ++i) if (PassesFilter(l.found[i], l.filter, l.maxPlayers)) shown.push_back(i);
+        for (size_t i = 0; i < l.found.size(); ++i) if (PassesFilter(l.found[i], l.filter)) shown.push_back(i);
         if (l.filter.mostPlayers)
             std::stable_sort(shown.begin(), shown.end(), [&](size_t a, size_t b) { return l.found[a].players > l.found[b].players; });
         if (!l.found.empty())
@@ -467,11 +489,13 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
             BrowserRow r;
             r.source = at;
             r.name = f.name.empty() ? "Unnamed lobby" : f.name;
-            r.players = std::to_string(f.players) + "/" + std::to_string(l.maxPlayers);
+            r.locked = f.locked;
+            if (f.locked) r.name = kLockedMarker + r.name;
+            r.players = std::to_string(f.players) + "/" + std::to_string(f.maxPlayers);
             r.detail = f.map;
             if (!f.mode.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mode;
             if (!f.compatible) r.note = {f.reason.empty() ? std::string("Incompatible") : f.reason, style::kWarn};
-            else if (f.players >= l.maxPlayers) r.note = {"Full", style::kWarn};
+            else if (LobbyIsFull(f.players, f.maxPlayers)) r.note = {"Full", style::kWarn};
             else { r.note = {"Join", style::kOk}; r.joinable = true; }
             s.browser.push_back(r);
         }
@@ -499,6 +523,9 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         for (const LobbyPlayer& p : l.players) if (p.me) s.readyOn = p.ready;
         s.readyLabel = s.readyOn ? "Ready \xC2\xB7 click to undo" : "Mark me ready";
     }
+    s.hostPassword = l.host;
+    if (l.host) s.passwordNote = l.locked ? "Locked: players need the password. Changing it kicks nobody."
+                                          : "Open: type a password and press SET to lock the lobby.";
     s.balance = l.host && HasTeams(f);
     for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f && !IsBrawl(c) && !l.progression, l.host});
     {
@@ -517,6 +544,8 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.modes.push_back(p);
     }
     for (size_t i = 0; i < s.modes.size(); ++i) s.modes[i].group = ModeGroupAt(i);
+    s.playerLimit = Row(l, LobbyRow::Players);
+    s.hasPlayerLimit = true;
     if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
     else s.settings.push_back(Row(l, LobbyRow::Damage));   // co-op fights take player damage too
     if (!l.host) s.hostOnly = "Only the host can change these.";

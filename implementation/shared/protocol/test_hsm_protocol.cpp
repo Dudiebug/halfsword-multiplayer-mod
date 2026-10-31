@@ -24,6 +24,18 @@ static void TestHello() {
     Hello noBuild; noBuild.name = "x";
     auto nb = Encode(noBuild); CHECK(Decode(nb.data(), nb.size(), o) && o.modBuild.empty() && o.name == "x");
     CHECK(nb.size() == Encode(Hello{}).size() + noBuild.name.size());   // an empty build costs its length byte only
+    // rev 35: the password ends the Hello (str, 32).
+    Hello pw = h; pw.password = "s3cret pass";
+    auto pb = Encode(pw); Hello po;
+    CHECK(Decode(pb.data(), pb.size(), po) && po.password == "s3cret pass" && po.name == "player" && po.modBuild == h.modBuild);
+    CHECK(pb.size() == b.size() + pw.password.size());                                  // an empty password costs its length byte only
+    CHECK(pb[pb.size() - 1 - pw.password.size()] == uint8_t(pw.password.size()));        // length byte, then the bytes, at the very end
+    for (size_t cut = 0; cut < pb.size(); ++cut) CHECK(!Decode(pb.data(), cut, po));
+    Hello longPw = h; longPw.password = std::string(100, 'p');
+    auto lpb = Encode(longPw); CHECK(Decode(lpb.data(), lpb.size(), po) && po.password == std::string(kMaxLobbyPassword, 'p'));
+    auto over = pb; over[over.size() - 1 - pw.password.size()] = uint8_t(kMaxLobbyPassword + 1); over.resize(over.size() + 40, 'x');   // a length past the cap
+    CHECK(!Decode(over.data(), over.size(), po));
+    auto old = b; old.pop_back(); CHECK(!Decode(old.data(), old.size(), po));         // the pre-35 layout (no password byte) is not a Hello
 }
 
 static void TestInput() {
@@ -60,10 +72,11 @@ static void TestEventAndReject() {
     auto bad = b; bad[8] = 99; CHECK(!Decode(bad.data(), bad.size(), o));
     Reject r; r.reason = RejectReason::BuildMismatch; auto rb = Encode(r); Reject ro;
     CHECK(Decode(rb.data(), rb.size(), ro) && ro.reason == RejectReason::BuildMismatch);
-    for (RejectReason k : {RejectReason::Kicked, RejectReason::Banned}) {   // rev 20
+    for (RejectReason k : {RejectReason::Kicked, RejectReason::Banned, RejectReason::WrongPassword, RejectReason::TooManyTries}) {   // rev 20; rev 35
         Reject rk; rk.reason = k; auto kb = Encode(rk); Reject ko;
         CHECK(Decode(kb.data(), kb.size(), ko) && ko.reason == k);
     }
+    CHECK(kMaxRejectReason == 8 && uint8_t(RejectReason::WrongPassword) == 7 && uint8_t(RejectReason::TooManyTries) == 8);
     { auto bad = rb; bad[4] = 0; CHECK(!Decode(bad.data(), bad.size(), ro)); bad[4] = kMaxRejectReason + 1; CHECK(!Decode(bad.data(), bad.size(), ro)); }
     Welcome w; w.snapshotHz = 0; auto wb = Encode(w); Welcome wo; CHECK(!Decode(wb.data(), wb.size(), wo));
     w.snapshotHz = 30; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; wb = Encode(w); CHECK(Decode(wb.data(), wb.size(), wo) && wo.map == w.map);
@@ -219,7 +232,7 @@ static void TestMatchInfoAndKill() {
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required
     // Reserved for M4-M6: numbers fixed, no decoder. A Welcome with the reserved flag 32 is rejected until M4 lands.
     CHECK(uint8_t(MsgType::ModList) == 48 && uint8_t(MsgType::SessionMods) == 49 && uint8_t(MsgType::ModMsg) == 50
-          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && uint8_t(MsgType::GroundClear) == 59 && kLastDecodedMsgType == 59 && kLastReservedMsgType == 59);
+          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && uint8_t(MsgType::GroundClear) == 59 && uint8_t(MsgType::LobbySecret) == 60 && kLastDecodedMsgType == 60 && kLastReservedMsgType == 60);
     {
         Welcome w; w.snapshotHz = 30; w.map = "m"; w.flags = 32;
         auto wb = Encode(w); Welcome back; CHECK(!Decode(wb.data(), wb.size(), back));

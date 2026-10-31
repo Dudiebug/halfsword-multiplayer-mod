@@ -37,6 +37,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard: case MsgType::PingTable:
             return BudgetClass::Control;
         case MsgType::ModMap: return BudgetClass::Control;   // rev 27: a host sends one per map pick (and one to each joiner)
+        case MsgType::LobbySecret: return BudgetClass::Control;   // rev 35: host -> client only, one per password change (and one to each joiner)
         case MsgType::LevelSeed: return BudgetClass::Control;   // rev 28: host -> client only, one per travel (and one to each joiner)
         case MsgType::HandOff: case MsgType::HandOffAsk:          // rev 32: a few per grab or stab (an ask every kAskEveryMs while unanswered)
             return BudgetClass::Combat;
