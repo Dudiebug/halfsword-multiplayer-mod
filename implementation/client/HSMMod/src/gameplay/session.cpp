@@ -87,6 +87,7 @@
 #include "session/hsm_gvas.h"
 #include "session/hsm_director.h"
 #include "session/hsm_level_gate.h"
+#include "session/hsm_ground_clear.h"
 #include "session/hsm_moderation.h"
 #include "session/hsm_reconnect.h"
 #include "session/hsm_report.h"
@@ -211,6 +212,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::Travel: { Travel m; return Decode(d, n, m); }
         case MsgType::ModMap: { ModMapMsg m; return Decode(d, n, m); }
         case MsgType::MapReset: { MapResetMsg m; return Decode(d, n, m); }
+        case MsgType::GroundClear: { GroundClearMsg m; return Decode(d, n, m); }
         case MsgType::LevelSeed: { dice::LevelSeedMsg m; return Decode(d, n, m); }
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
@@ -874,12 +876,14 @@ public:
         if (cmd.kind == ModCommandKind::Players) { ListPlayers(from); return true; }
         if (cmd.kind == ModCommandKind::VoteKick || cmd.kind == ModCommandKind::VoteBan || cmd.kind == ModCommandKind::Yes || cmd.kind == ModCommandKind::No) { VoteCommand(cmd, from); return true; }
         if (!IsAdmin(from)) {
+            if (cmd.kind == ModCommandKind::Clear) { Reply(from, "Only the host or an admin can /clear"); return true; }
             Reply(from, IsServer() ? (cfg_.serverVoteKick ? "Only the server's admins can do that. /votekick or /voteban <name> starts a vote."
                                                           : "Only the server's admins can do that.")
                                    : cfg_.serverVoteKick ? "Only the host can kick or ban. /votekick <name> starts a vote."
                                                          : "Only the host can kick or ban.");
             return true;
         }
+        if (cmd.kind == ModCommandKind::Clear) { HostClearGround(cmd.mask, from); return true; }
         LoadBans();
         if (cmd.kind == ModCommandKind::Bans) { ListBans(from); return true; }
         if (cmd.kind == ModCommandKind::Unban) {
@@ -1040,7 +1044,7 @@ public:
             pos = end + 1;
             if (line.empty()) continue;
             HSM_LOG("console: > %s", line.c_str());
-            if (!ModerationLine(line, 0, true)) HSM_LOG("console: unknown command; try players, kick <name>, ban <name> [30m|2h|7d|perm], unban <name>, bans, say <text>");
+            if (!ModerationLine(line, 0, true)) HSM_LOG("console: unknown command; try players, kick <name>, ban <name> [30m|2h|7d|perm], unban <name>, bans, clear [weapons|armor|rocks], say <text>");
         }
     }
 
@@ -1811,7 +1815,7 @@ private:
         ownBlobId_.fill(0);
         picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
         ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset();
         mirrorBlob_.clear(); ownBlob_ = 0;
         // client
@@ -1985,7 +1989,7 @@ private:
         director_.OnLevel(FighterLevel(), NowMs(), travelSeq_);
         serverTravelling_ = false; serverAnchor_.reset(); serverPawnSeenAt_ = serverStripAt_ = 0; serverStripped_ = 0; anchorSearch_.OnLevel(NowMs());
         if (net_ && !IsHost()) hostLoss_.Reset(NowMs());   // the load itself froze the loop: that silence is not the host's (N1)
-        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
+        bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
         tints_.clear();
         ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset(); ownDiedAt_ = 0; mirrorBlob_.clear(); ownBlob_ = 0;
         // Client side: puppets died with the level; the host re-announces them after Ready.
@@ -4347,21 +4351,37 @@ private:
 
     // Duel's new round, and free-for-all and teams' rematch, start without the weapons and armour pieces dropped before
     // (weapons piled up 5 -> 36 in test 13). Every machine clears its own copies; the prop sync lets go of the ones it
-    // was moving. Armour the level had at the match start stays (LooseTimer's baseline).
-    void ClearDroppedWeapons(const char* why = nullptr) {
+    // was moving. Armour the level had at the match start stays (LooseTimer's baseline). `mask` (kClear*): which passes run;
+    // the timer, the Duel round and the rematch clear weapons and armour, the host's /clear any of the three (rocks: moved props).
+    void ClearDroppedWeapons(uint8_t mask = kClearWeapons | kClearArmor, const char* why = nullptr) {
         if (!MatchLevel()) return;
-        const game::Adapter::DropClear weapons = adapter_.DestroyDroppedWeapons([this](UObject* w) { return props_.IsLevelWeaponAtStart(w); });
+        game::Adapter::DropClear weapons;
+        if (mask & kClearWeapons) weapons = adapter_.DestroyDroppedWeapons([this](UObject* w) { return props_.IsLevelWeaponAtStart(w); });
         int armor = 0;
-        if (looseOn_) {
+        if ((mask & kClearArmor) && looseOn_) {
             std::unordered_map<uint64_t, UObject*> byId;
             const std::vector<uint64_t> ids = LooseIds(byId);
             const double now = double(NowMs());
             looseTimer_.Sweep(ids, now);                                   // a piece dropped since the last sweep is timed too
             for (uint64_t id : looseTimer_.Sweep(ids, now + kIdleDespawnMs)) { adapter_.DestroyActor(byId[id]); ++armor; }   // all but the baseline
         }
-        HSM_LOG("drops: %s, cleared %d dropped weapon(s) (kept: held %d, sheathed %d, level %d) and %d armour piece(s)",
+        const size_t rocks = (mask & kClearRocks) ? props_.ClearMovedProps(game::SteadyNowMs()) : 0;
+        HSM_LOG("drops: %s, cleared %d dropped weapon(s) (kept: held %d, sheathed %d, level %d), %d armour piece(s) and %zu prop(s) [%s]",
                 why ? why : Format(info_.format) == Format::Duel ? "new round" : "rematch", weapons.destroyed, weapons.held,
-                weapons.sheathed, weapons.level, armor);
+                weapons.sheathed, weapons.level, armor, rocks, ClearMaskText(mask).c_str());
+    }
+
+    // The host's /clear [all|weapons|armor|rocks] (ModerationLine, after the admin gate): every machine clears its own copy of
+    // the ground (GroundClear), this one too, and everybody gets one SERVER line saying who did it.
+    void HostClearGround(uint8_t mask, uint32_t from) {
+        if (!mask) { Reply(from, "Usage: /clear [all|weapons|armor|rocks]"); return; }
+        if (!MatchLevel()) { Reply(from, "Nothing to clear: no match is running."); return; }
+        GroundClearMsg m;
+        m.seq = ++groundClearSeq_; m.mask = mask;
+        if (net_) net_->Broadcast(kChanReliable, Encode(m), true);
+        ClearDroppedWeapons(mask, "/clear");
+        HSM_LOG("moderation: %s cleared the ground (%s)", IssuerName(from).c_str(), ClearMaskText(mask).c_str());
+        ServerSay("Ground cleared (" + ClearMaskText(mask) + ") by " + IssuerName(from));
     }
 
     // The "Clear ground" lobby setting (free-for-all, teams, Brawl): every clearGroundMin minutes of a fought phase the host
@@ -4377,7 +4397,7 @@ private:
         GroundCleared();
     }
     void GroundCleared() {
-        ClearDroppedWeapons("timer");
+        ClearDroppedWeapons(kClearWeapons | kClearArmor, "timer");
         ui::ShowLine("MATCH", style::kBone, "Ground cleared");
     }
 
@@ -5896,6 +5916,13 @@ private:
                 mapGate_.Queue(m, NowMs());
                 break;
             }
+            case MsgType::GroundClear: {   // the host's /clear: this copy of the ground (the line saying who is a SERVER chat line)
+                GroundClearMsg m; if (!Decode(d, n, m)) break;
+                if (groundClearSeen_ && m.seq == groundClearLast_) break;   // a repeat
+                groundClearSeen_ = true; groundClearLast_ = m.seq;
+                ClearDroppedWeapons(m.mask, "/clear");
+                break;
+            }
             case MsgType::Spawn: {
                 Spawn sp; Decode(d, n, sp);
                 if (sp.entity <= kMaxWillies) clientLife_[sp.entity] = sp.life;
@@ -6103,6 +6130,9 @@ private:
     static constexpr uint32_t kDropClearDelayMs = 1500, kDropClearGiveUpMs = 5000;
     uint32_t nextGroundClear_ = 0;                   // host: when the Clear ground timer fires next, 0 = not running
     uint8_t clearCount_ = 0;                         // host: the ground clears so far (MatchInfo.clearCount)
+    uint8_t groundClearSeq_ = 0;                     // host: the /clear commands so far (GroundClear.seq)
+    uint8_t groundClearLast_ = 0;                    // client: the seq of the last GroundClear applied (groundClearSeen_: any yet)
+    bool groundClearSeen_ = false;
     bool groundSeen_ = false;                        // client: info_ holds a MatchInfo of this session (clearCount to compare)
     bool dropClearPending_ = false;                  // F5: client, a rematch / Duel round: ClearDroppedWeapons waits for the own body
     uint32_t dropClearDue_ = 0, dropClearGiveUp_ = 0;

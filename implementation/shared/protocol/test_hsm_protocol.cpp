@@ -219,7 +219,7 @@ static void TestMatchInfoAndKill() {
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required
     // Reserved for M4-M6: numbers fixed, no decoder. A Welcome with the reserved flag 32 is rejected until M4 lands.
     CHECK(uint8_t(MsgType::ModList) == 48 && uint8_t(MsgType::SessionMods) == 49 && uint8_t(MsgType::ModMsg) == 50
-          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && kLastDecodedMsgType == 58 && kLastReservedMsgType == 58);
+          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && uint8_t(MsgType::GroundClear) == 59 && kLastDecodedMsgType == 59 && kLastReservedMsgType == 59);
     {
         Welcome w; w.snapshotHz = 30; w.map = "m"; w.flags = 32;
         auto wb = Encode(w); Welcome back; CHECK(!Decode(wb.data(), wb.size(), back));
