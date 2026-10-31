@@ -194,6 +194,18 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 101; }));
     CHECK(bad([](MatchInfo& x) { x.timeLimitS = 3601; }));
     CHECK(bad([](MatchInfo& x) { x.respawnDelayS = 61; }));
+    // rev 35: the Teams format's team count rides every MatchInfo (2..4; 2 by default, other formats ignore it).
+    CHECK(MatchInfo{}.teams == 2 && o.teams == 2);
+    for (uint8_t t = 2; t <= 4; ++t) {
+        MatchInfo x = m; x.format = uint8_t(Format::TwoTeams); x.teams = t; x.scores = {{0, 1}, {3, 2}}; x.fighters[2].team = int8_t(t - 1);
+        auto e = Encode(x); MatchInfo y;
+        CHECK(Decode(e.data(), e.size(), y) && y.teams == t && y.format == uint8_t(Format::TwoTeams) && y.fighters[2].team == int8_t(t - 1) && y.scores.size() == 2);
+        for (size_t cut = 0; cut < e.size(); ++cut) CHECK(!Decode(e.data(), cut, y));
+    }
+    { MatchInfo x = m; x.format = uint8_t(Format::LastManStanding); x.teams = 4; auto e = Encode(x); MatchInfo y;   // not a teams format: carried, ignored
+      CHECK(Decode(e.data(), e.size(), y) && y.format == uint8_t(Format::LastManStanding) && y.teams == 4); }
+    CHECK(bad([](MatchInfo& x) { x.teams = 0; }) && bad([](MatchInfo& x) { x.teams = 1; }) && bad([](MatchInfo& x) { x.teams = 5; }) && bad([](MatchInfo& x) { x.teams = 255; }));
+    CHECK(bad([](MatchInfo& x) { x.format = uint8_t(Format::TwoTeams); x.teams = 5; }));
     CHECK(bad([](MatchInfo& x) { x.waveBreakS = 45; }));      // rev 28
     CHECK(bad([](MatchInfo& x) { x.clearGroundMin = 4; }));
     CHECK(bad([](MatchInfo& x) { x.damagePct = 1001; }));   // rev 24: past the most, not the stock marker

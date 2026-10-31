@@ -35,7 +35,7 @@ inline std::string Upper(std::string s) { for (char& c : s) c = char(std::touppe
 
 inline std::string TeamScores(const MatchInfo& m) {
     std::string s;
-    for (int t = 0; t < TeamCount(Format(m.format)); ++t) s += (t ? "   " : "") + TeamName(t) + " " + std::to_string(ScoreOf(m, t));
+    for (int t = 0; t < TeamCount(Format(m.format), m.teams); ++t) s += (t ? "   " : "") + TeamName(t) + " " + std::to_string(ScoreOf(m, t));
     return s;
 }
 
@@ -51,7 +51,7 @@ inline MatchInfo Extrapolate(const MatchInfo& m, uint32_t receivedAtMs, uint32_t
 }
 
 inline bool InRoundGap(const MatchInfo& m) {
-    return Format(m.format) == Format::Duel && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
+    return IsRoundFormat(Format(m.format)) && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
 }
 
 // The bot formats' break between waves: MatchInfo carries its time left in roundGapLeftMs and the players' votes to
@@ -81,7 +81,7 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFigh
             std::string who;
             if (f == Format::Zombies) who = "OVERRUN - survived " + std::to_string(ScoreOf(m, kHumanTeam)) + " waves";
             else if (f == Format::PlayersVsBots) who = m.winner == kBotTeam ? "BOTS WIN" : "PLAYERS WIN";
-            else if (f == Format::FreeForAll || f == Format::Duel) who = m.winner == int(myEntity) ? "YOU WIN" : Upper(NameOf(m, uint8_t(m.winner))) + " WINS";
+            else if (f == Format::FreeForAll || IsRoundFormat(f)) who = m.winner == int(myEntity) ? "YOU WIN" : Upper(NameOf(m, uint8_t(m.winner))) + " WINS";
             else who = TeamName(m.winner) + " WINS";
             return who + (oneFight && IsBotFormat(f) ? "   back to the Tavern in " : "   rematch in ") + Seconds(m.timeLeftMs);
         }
@@ -93,13 +93,14 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFigh
     if (IsBotFormat(f)) {
         int cleared = ScoreOf(m, kHumanTeam);
         s = "Wave " + std::to_string(cleared + 1) + "   " + std::to_string(cleared) + " cleared";
-    } else if (f == Format::FreeForAll || f == Format::Duel) {
+    } else if (f == Format::FreeForAll || IsRoundFormat(f)) {
         int mine = ScoreOf(m, myEntity), best = 0; uint8_t rival = 0;
         for (const ScoreEntry& e : m.scores) if (e.key != myEntity && (rival == 0 || e.score > best)) { best = e.score; rival = uint8_t(e.key); }
-        if (f == Format::Duel && !rival)
+        if (IsRoundFormat(f) && !rival)
             for (const FighterEntry& e : m.fighters) if (e.entity != myEntity) { rival = e.entity; break; }
         std::string scores = "You " + std::to_string(mine) + (rival ? "   " + NameOf(m, rival) + " " + std::to_string(best) : "");
-        s = f == Format::Duel ? "Rounds   " + scores + "   (best of " + std::to_string(2 * m.scoreLimit - 1) + ")" : scores + "   " + limit;
+        s = f == Format::Duel ? "Rounds   " + scores + "   (best of " + std::to_string(2 * m.scoreLimit - 1) + ")"
+          : f == Format::LastManStanding ? "Rounds   " + scores + "   " + limit : scores + "   " + limit;   // more than two fighters: no "best of"
     } else s = TeamScores(m) + "   " + limit;
     if (m.timeLeftMs) s += "   " + Clock(m.timeLeftMs);
     return s;
@@ -110,7 +111,7 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFigh
 inline std::string RespawnLine(const MatchInfo& m, uint32_t sinceDeathMs) {
     if (m.phase == uint8_t(MatchPhase::Idle) || m.phase == uint8_t(MatchPhase::Results)) return {};
     Format f = Format(m.format);
-    if (f == Format::Duel) return m.roundGapLeftMs ? "Round over   next round in " + Seconds(m.roundGapLeftMs) : "Round over";
+    if (IsRoundFormat(f)) return m.roundGapLeftMs ? "Round over   next round in " + Seconds(m.roundGapLeftMs) : "Round over";
     if (IsBotFormat(f)) return "Down   back next wave";
     uint32_t delay = uint32_t(m.respawnDelayS) * 1000u;
     return sinceDeathMs < delay ? "Respawning in " + Seconds(delay - sinceDeathMs) : "Respawning...";
@@ -149,17 +150,21 @@ inline std::string Scoreboard(const MatchInfo& m) {
 // Lobby panel labels and cycling.
 inline std::string FormatName(Format f) {
     switch (f) {
-        case Format::TwoTeams: return "2 teams";
-        case Format::ThreeTeams: return "3 teams";
+        case Format::TwoTeams: case Format::ThreeTeams: return "Teams";
         case Format::PlayersVsBots: return "Survival";
         case Format::Zombies: return "Zombies";
         case Format::Duel: return "Duel";
+        case Format::LastManStanding: return "Last man standing";
         default: return "Free-for-all";
     }
 }
 // What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name.
-inline std::string ModeName(Format f, Gear g) { return IsBrawl(f, g) ? "Brawl" : FormatName(f); }
-inline std::string ModeName(uint8_t format, uint8_t gear) { return ModeName(Format(format), Gear(gear)); }
+// `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
+inline std::string ModeName(Format f, Gear g, int teams = 0) {
+    if (IsBrawl(f, g)) return "Brawl";
+    return HasTeams(f) && teams > 0 ? FormatName(f) + " (" + std::to_string(TeamCount(f, teams)) + ")" : FormatName(f);
+}
+inline std::string ModeName(uint8_t format, uint8_t gear, int teams = 0) { return ModeName(Format(format), Gear(gear), teams); }
 // The value after `cur` in `options`, wrapping; the first option when `cur` is not one of them.
 inline int NextOf(const std::vector<int>& options, int cur) {
     if (options.empty()) return cur;
@@ -177,8 +182,8 @@ inline std::string GearLabel(Gear g, Format f) {
     if (!GearAllowed(f, g)) return "Own loadouts";
     if (g == Gear::Fists) return "Bare fists";
     if (IsBotFormat(f)) return g == Gear::RandomTier ? "Random by tier, kept all run" : g == Gear::Mirror ? "Everyone identical, kept all run" : "Own loadouts";
-    if (g == Gear::RandomTier) return f == Format::Duel ? "Random by tier, new each round" : "Random by tier, new each life";
-    if (g == Gear::Mirror) return f == Format::Duel ? "Everyone identical, new each round" : "Everyone identical";
+    if (g == Gear::RandomTier) return IsRoundFormat(f) ? "Random by tier, new each round" : "Random by tier, new each life";
+    if (g == Gear::Mirror) return IsRoundFormat(f) ? "Everyone identical, new each round" : "Everyone identical";
     return "Own loadouts";
 }
 inline std::string TimeLabel(uint16_t seconds) { return seconds ? std::to_string(seconds / 60) + " min" : "off"; }

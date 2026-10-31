@@ -291,6 +291,10 @@ public:
     void StartOnMap(const std::string& path) override {
         if (!lastGameMode_ || (net_ && !IsHost())) return;
         if (net_ && !BuildsAllowStart()) return;
+        if (!IsServer() && lobby_.IsHost() && !lobby_.Progression()) {   // Duel is for exactly 2 players, Last Man Standing needs 2 or more
+            const ModeAvail av = ModeAvailable(lobby_.config().format, lobby_.PlayerCount());
+            if (!av.ok) { HSM_LOG("session: not starting: %s", av.hint); ui::ShowLine("HSMMod", style::kBone, av.hint); return; }
+        }
         HSM_LOG("session: starting on %s", path.c_str());
         // The level manager destroys every spawner whose "Required Combatants Amount" exceeds foes + 1 (decomp
         // BP_LevelManager.cpp:385), the player's included: keep at least 2 until our fighters exist (StopStockFoes).
@@ -298,6 +302,21 @@ public:
         adapter_.PrepareFreeModeFight(std::max(savedFoes_, 2));
         HostTravel(path);
     }
+    // Duel is for 2 players: a lobby set to Duel that gets a third becomes Last Man Standing (the round count and the gear rows
+    // stay), and the host says so in the lobby chat. Checked when the player count changes; role=server sets its own format.
+    void LobbyPlayersTick() {
+        if (!lobby_.InLobby() || !lobby_.IsHost() || IsServer()) { lobbyPlayersSeen_ = -1; return; }
+        const int players = lobby_.PlayerCount();
+        if (players == lobbyPlayersSeen_) return;
+        lobbyPlayersSeen_ = players;
+        const MatchConfig c = lobby_.config();
+        if (!DuelOutgrown(c, players)) return;
+        lobby_.SetConfig(AdjustForPlayers(c, players));
+        lobby_.SendChat(kDuelOutgrownLine);
+        HSM_LOG("lobby: %d players: Duel switched to Last man standing", players);
+    }
+    int lobbyPlayersSeen_ = -1;
+
     // The lobby's Progression card: the stock Tavern hub with Free Mode off, so the game runs its own Progression
     // (the level manager and OnLevelLoaded key off the GI's "Free Mode Activated").
     void StartProgression() override {
@@ -483,6 +502,7 @@ public:
         }
         if (!selfTestOk_) return;
         if (steamMode()) lobby_.Tick();
+        if (steamMode()) LobbyPlayersTick();
         if (steamMode()) MigrationTick();
         if (SteamServer()) ServerLobbyTick();
         // Level change first: everything after this point must use the current world, never the old game mode.
@@ -872,7 +892,7 @@ public:
         std::string name;
         Rgba ink = style::kIron;
         for (const game::LobbyMember& m : lobby_.members())
-            if (m.id == from) { name = m.name; ink = LobbyChatInk(lobby_.config().format, m.team, m.hostOverride); }
+            if (m.id == from) { name = m.name; ink = LobbyChatInk(lobby_.config(), m.team, m.hostOverride); }
         if (name.empty()) name = steam::PersonaName(from);
         ui::ShowLine(name.empty() ? "?" : name, ink, text);
     }
@@ -1547,7 +1567,7 @@ public:
         f.transport = !net_ ? "none" : "steam";
         f.syncMode = HostPhysics() ? "host" : "owner";
         f.level = currentLevel_ + (progressionHub_ ? " (progression hub)" : "");
-        f.matchFormat = ModeName(info_.format, info_.gear);
+        f.matchFormat = ModeName(info_.format, info_.gear, info_.teams);
         f.matchPhase = info_.phase < std::size(kPhases) ? kPhases[info_.phase] : "?";
         f.players = !net_ ? 1 : IsHost() ? int(ConnectedSlots().size()) : int(info_.fighters.size());   // a client knows the fighters
         f.os = report::OsName();
@@ -1959,7 +1979,7 @@ private:
             }
             const MatchConfig shown = lobby_.config();
             lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1),
-                                  lobby_.Progression() ? "" : ModeName(shown.format, shown.gear));
+                                  lobby_.Progression() ? "" : ModeName(shown.format, shown.gear, shown.teams));
             HSM_LOG("host: travel #%u to %s (%zu settings) sent to lobby", t.seq, level.c_str(), t.settings.size());
             return true;
         }
@@ -2254,7 +2274,7 @@ private:
         if (adapter_.IsDead(w) || !EntityAlive(e) || (ringOutAt_.count(e) && now - ringOutAt_[e] < kRingOutEveryMs)) return;
         const MatchInfo mi = Extrapolate(info_, infoAt_, now);
         const bool fought = mi.phase == uint8_t(MatchPhase::Live) || mi.phase == uint8_t(MatchPhase::SuddenDeath);
-        if (!fought || (mi.format == uint8_t(Format::Duel) && InRoundGap(mi))) return;
+        if (!fought || (IsRoundFormat(Format(mi.format)) && InRoundGap(mi))) return;
         ringOutAt_[e] = now;
         const bool coop = oneFight_ && mi.format == uint8_t(Format::PlayersVsBots);
         HSM_LOG("match: #%u rang out (%s)%s", e, how, coop ? ": the fight is lost" : "");
@@ -3434,6 +3454,12 @@ private:
         for (uint8_t slot : due) {
             // K1/K2: a rejoiner the match counts down gets its body from the match's respawn (RespawnEntity), not at once:
             // it was invulnerable (hits on a fighter the match counts dead are ignored) for the rest of the round.
+            // A third player joining a fought Duel is added to the match here, down: Match::AddFighter benches it, so it gets no body
+            // (AwaitsRespawn below) and spectates until the match ends; the rematch is Last Man Standing.
+            if (slot != 0 && match_.config().format == Format::Duel && CombatPhase(match_.phase()) && !match_.Has(Roster::EntityForSlot(slot))) {
+                match_.AddFighter({Roster::EntityForSlot(slot), TeamOfSlot(slot), true, ScoreId(Roster::EntityForSlot(slot))});
+                infoDirty_ = true;
+            }
             if (slot != 0 && match_.AwaitsRespawn(Roster::EntityForSlot(slot))) continue;
             Spawn sp; sp.entity = Roster::EntityForSlot(slot); sp.ownerSlot = slot; sp.kind = EntityKind::Fighter;
             sp.team = TeamOfSlot(slot); sp.life = lifeBook_.Bump(sp.entity);
@@ -3975,7 +4001,7 @@ private:
         if (steamMode()) if (const RosterMember* m = roster_.BySlot(slot))
             for (const game::LobbyMember& lm : lobby_.members()) if (lm.id == m->key) { mine.pick = int8_t(lm.team); mine.hostOverride = int8_t(lm.hostOverride); }
         req.push_back(mine);
-        slotTeam_[slot] = ResolveTeams(req, match_.config().format)[slot];
+        slotTeam_[slot] = ResolveTeams(req, match_.config().format, match_.config().teams)[slot];
     }
 
     // Item 8: a match starts only while every joined player runs this mod build (their Hello), unless allow_build_mismatch=1.
@@ -4000,9 +4026,16 @@ private:
         if (!ParseServerFormat(cfg_.serverFormat, &f)) return Format::FreeForAll;
         return f;
     }
+    // server_teams, unless the format word (teams3, teams4) says the count.
+    int ServerTeams() const {
+        Format f = Format::FreeForAll; int teams = 2;
+        if (ParseServerFormat(cfg_.serverFormat, &f, &teams) && teams != 2) return teams;
+        return cfg_.serverTeams;
+    }
     MatchConfig ServerMatchConfig() const {
         MatchConfig c;
-        c.format = ServerFormat();
+        c.format = ServerFormatFor(ServerFormat(), int(roster_.size()));   // a duel runs as Last Man Standing unless exactly two are in
+        c.teams = uint8_t(ServerTeams());
         c.scoreLimit = cfg_.serverScoreLimit > 0 ? uint16_t(cfg_.serverScoreLimit) : DefaultScoreLimit(c.format);
         c.timeLimitS = uint16_t(cfg_.serverTimeLimitS);
         c.friendlyFire = false; c.gear = Gear::Own;
@@ -4021,9 +4054,9 @@ private:
 
     // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
     MatchConfig StartConfig() {
-        MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? lobby_.config() : MatchConfig{};
+        MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? AdjustForPlayers(lobby_.config(), int(roster_.size())) : MatchConfig{};   // a Duel with a third player is Last Man Standing
         if (!adapter_.FreeModeActive()) { cfg.format = Format::PlayersVsBots; cfg.scoreLimit = 100; cfg.timeLimitS = 0; }   // co-op against the event's opponents, no clock
-        if (cfg.format == Format::Duel) cfg.friendlyFire = true;   // two fighters, no teams: every hit counts
+        if (IsRoundFormat(cfg.format)) cfg.friendlyFire = true;   // no teams: every hit counts
         return cfg;
     }
 
@@ -4043,7 +4076,7 @@ private:
                 if (lm.id == (m.key == kHostKey ? steam::MySteamId() : m.key)) { r.pick = int8_t(lm.team); r.hostOverride = int8_t(lm.hostOverride); }
             req.push_back(r);
         }
-        slotTeam_ = ResolveTeams(req, cfg.format);
+        slotTeam_ = ResolveTeams(req, cfg.format, cfg.teams);
         std::vector<FighterInfo> list;
         for (const RosterMember& m : roster_.members()) list.push_back({m.entity, TeamOfSlot(m.slot), true, ScoreId(m.entity)});
         match_.Start(cfg, list, NowMs(), migrateBoard_);   // after a host migration: the old host's scores
@@ -4152,7 +4185,7 @@ private:
         CheckDraw(now);
         if (dropWatch_.Observe(match_.config().format, uint8_t(match_.phase()), uint16_t(match_.round()))) {
             ClearDroppedWeapons();
-            HostMapReset(ev.rematch || match_.config().format != Format::Duel);
+            HostMapReset(ev.rematch || !IsRoundFormat(match_.config().format));
         }
         GroundClearTick(now);
         if (ev.ended) HSM_LOG("host: match over, winner key %d", match_.winner());
@@ -4354,7 +4387,7 @@ private:
         // death that follows within kGaveUpWindowMs is scored as a give-up: the last attacker within a minute gets the
         // kill (in a Duel the round too), nobody otherwise. GiveUpFallbackTick ends it here if no death arrives.
         if (RespawnQueued(e) || !match_.Alive(e)) { HSM_LOG("match: #%u held G, but it is dead or waiting to respawn", e); return; }   // F6
-        if (match_.config().format == Format::Duel && !match_.RoundInPlay()) { HSM_LOG("match: #%u held G, but there is no Duel round to give up", e); return; }
+        if (IsRoundFormat(match_.config().format) && !match_.RoundInPlay()) { HSM_LOG("match: #%u held G, but there is no round to give up", e); return; }
         gaveUp_[e] = now;                                  // HandleDeath scores that death as a give-up (flag 8)
         HSM_LOG("match: #%u gives up (last attacker #%u)", e, kills_.KillerOf(e, now));
         KillDrivenBody(e);
@@ -4397,7 +4430,7 @@ private:
         }
         const size_t rocks = (mask & kClearRocks) ? props_.ClearMovedProps(game::SteadyNowMs()) : 0;
         HSM_LOG("drops: %s, cleared %d dropped weapon(s) (kept: held %d, sheathed %d, level %d), %d armour piece(s) and %zu prop(s) [%s]",
-                why ? why : Format(info_.format) == Format::Duel ? "new round" : "rematch", weapons.destroyed, weapons.held,
+                why ? why : IsRoundFormat(Format(info_.format)) ? "new round" : "rematch", weapons.destroyed, weapons.held,
                 weapons.sheathed, weapons.level, armor, rocks, ClearMaskText(mask).c_str());
     }
 
@@ -4538,7 +4571,7 @@ private:
                 if (IsServer()) { AnchorKind ak; if (!HostAnchor(c, ak)) c = FVector{}; }   // spreads with the wall checks);
                 sidePoints_.assign(2, Point3{c.x, c.y, c.z});   // never an unchecked ring, which lands past fences
             }
-            sides_ = PartitionSides(sidePoints_, std::max(TeamCount(match_.config().format), 1));
+            sides_ = PartitionSides(sidePoints_, std::max(TeamCount(match_.config().format, match_.config().teams), 1));
             sidesArea_ = AreaOf(sidePoints_);
             sidesValid_ = true;
         }
@@ -4764,7 +4797,7 @@ private:
         infoDirty_ = false; nextInfo_ = now + kInfoIntervalMs;
         MatchInfo m;
         const MatchConfig& c = match_.config();
-        m.format = uint8_t(c.format); m.scoreLimit = c.scoreLimit; m.timeLimitS = c.timeLimitS; m.respawnDelayS = c.respawnDelayS;
+        m.format = uint8_t(c.format); m.teams = c.teams; m.scoreLimit = c.scoreLimit; m.timeLimitS = c.timeLimitS; m.respawnDelayS = c.respawnDelayS;
         m.friendlyFire = c.friendlyFire; m.phase = uint8_t(match_.phase()); m.timeLeftMs = match_.TimeLeftMs(now);
         m.winner = int16_t(match_.winner());
         m.gear = uint8_t(c.gear); m.tier = c.tier;

@@ -63,8 +63,12 @@ static void TestNameInk() {
     CHECK(Same(ChatNameInk(teams, 4), kIron));           // no team
     CHECK(Same(ChatNameInk(teams, 5), kIron));           // the third team, in a two-team match
     CHECK(Same(ChatNameInk(teams, 9), kIron));           // not a fighter (a left player, a spectator)
-    MatchInfo three = teams; three.format = uint8_t(Format::ThreeTeams); three.fighters[2].team = 2;
-    CHECK(Same(ChatNameInk(three, 3), TeamInk(2)));
+    MatchInfo three = teams; three.teams = 3; three.fighters[2].team = 2;
+    CHECK(Same(ChatNameInk(three, 3), TeamInk(2)) && Same(ChatNameInk(three, 5), TeamInk(2)));
+    MatchInfo four = three; four.teams = 4; four.fighters[2].team = 3;
+    CHECK(Same(ChatNameInk(four, 3), TeamInk(3)));
+    MatchInfo old = teams; old.format = uint8_t(Format::ThreeTeams); old.fighters[2].team = 2;   // the old value still reads as 3 teams
+    CHECK(Same(ChatNameInk(old, 3), TeamInk(2)));
     MatchInfo ffa = teams; ffa.format = uint8_t(Format::FreeForAll);
     CHECK(Same(ChatNameInk(ffa, 1), kIron) && Same(ChatNameInk(ffa, 2), kIron));   // stale teams mean nothing here
     MatchInfo duel = teams; duel.format = uint8_t(Format::Duel);

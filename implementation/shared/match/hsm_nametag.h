@@ -39,7 +39,7 @@ inline NameTagView NameTagLayout(bool projectedOk, float sx, float sy, float vie
     v.x = sx / scale; v.y = sy / scale;
     v.fontSize = 22.f - 8.f * t;
     v.alpha = (1.f - 0.65f * t) * std::min(seen, 1.f);
-    v.ink = TeamCount(format) >= 2 && team >= 0 ? style::TeamInk(team) : style::kBone;
+    v.ink = TeamCount(format, kMinTeams) >= 2 && team >= 0 ? style::TeamInk(team) : style::kBone;
     return v;
 }
 

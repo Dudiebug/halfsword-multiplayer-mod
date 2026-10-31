@@ -20,11 +20,20 @@ static void TestSanitize() {
     MatchConfig s = Sanitize(c);
     CHECK(s.format == Format::FreeForAll && s.scoreLimit == 1 && s.timeLimitS == 3600 && s.respawnDelayS == 60);
     CHECK(s.gear == Gear::Own && s.tier == 7);
-    c.format = Format::Zombies; CHECK(Sanitize(c).format == Format::Zombies && TeamCount(Format::Zombies) == 2 && TeamCount(Format::Duel) == 0);
+    c.format = Format::Zombies; CHECK(Sanitize(c).format == Format::Zombies && TeamCount(Format::Zombies, 3) == 2 && TeamCount(Format::Duel, 3) == 0 && TeamCount(Format::LastManStanding, 3) == 0);
     CHECK(IsBotFormat(Format::Zombies) && IsBotFormat(Format::PlayersVsBots) && !IsBotFormat(Format::Duel));
     CHECK(DefaultScoreLimit(Format::Duel) == 3);
-    c = Cfg(Format::ThreeTeams, 250); CHECK(Sanitize(c).scoreLimit == 100 && Sanitize(c).format == Format::ThreeTeams);
-    CHECK(TeamCount(Format::FreeForAll) == 0 && TeamCount(Format::TwoTeams) == 2 && TeamCount(Format::ThreeTeams) == 3 && TeamCount(Format::PlayersVsBots) == 2);
+    c = Cfg(Format::TwoTeams, 250); c.teams = 3; CHECK(Sanitize(c).scoreLimit == 100 && Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3);
+    CHECK(TeamCount(Format::FreeForAll, 3) == 0 && TeamCount(Format::TwoTeams, 2) == 2 && TeamCount(Format::TwoTeams, 3) == 3 && TeamCount(Format::TwoTeams, 4) == 4
+          && TeamCount(Format::PlayersVsBots, 4) == 2);
+    CHECK(TeamCount(Format::TwoTeams, 0) == 2 && TeamCount(Format::TwoTeams, 9) == 4);   // out of range: clamped
+    for (int t : {0, 1, 5, 200}) { c = Cfg(Format::TwoTeams, 5); c.teams = uint8_t(t); CHECK(Sanitize(c).teams == (t < 2 ? 2 : t > 4 ? 4 : t)); }
+    // The old "3 teams" mode (lobby data hsm_fmt=2, server_format=teams3) loads as Teams with 3 teams.
+    c = Cfg(Format::ThreeTeams, 7); CHECK(Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3 && Sanitize(c).scoreLimit == 7);
+    c.teams = 4; CHECK(Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3);
+    c = Cfg(Format::LastManStanding, 250); CHECK(Sanitize(c).format == Format::LastManStanding && Sanitize(c).scoreLimit == 100 && kFormatCount == 7);
+    CHECK(DefaultScoreLimit(Format::LastManStanding) == 3 && IsRoundFormat(Format::Duel) && IsRoundFormat(Format::LastManStanding) && !IsRoundFormat(Format::FreeForAll));
+    c = Cfg(Format::LastManStanding, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);   // like Duel: cleared each round
     CHECK(DefaultScoreLimit(Format::FreeForAll) == 5 && DefaultScoreLimit(Format::TwoTeams) == 10);
     // The weapon filter: in range stays, out of range falls back to Any; the game-byte table covers every filter and Any is 0.
     c = MatchConfig{}; CHECK(c.weapons == WeaponFilter::Any);
@@ -40,22 +49,34 @@ static void TestSanitize() {
 
 static void TestResolveTeams() {
     std::vector<TeamRequest> m = {{0, -1, -1}, {1, 1, -1}, {2, -1, -1}, {3, 1, 0}, {4, 1, -1}, {5, -1, -1}};
-    auto two = ResolveTeams(m, Format::TwoTeams);
+    auto two = ResolveTeams(m, Format::TwoTeams, 2);
     // slot 3 override 0; slots 1,4 pick 1; unassigned 0,2,5 fill the smaller team in slot order.
     CHECK(T(two, 3) == 0 && T(two, 1) == 1 && T(two, 4) == 1);
     CHECK(T(two, 0) == 0 && T(two, 2) == 0 && T(two, 5) == 1);       // 0 -> team 0 (1 vs 2), 2 -> tie -> 0, 5 -> 1
-    auto three = ResolveTeams({{0, -1, -1}, {1, -1, -1}, {2, -1, -1}, {3, 2, -1}}, Format::ThreeTeams);
+    auto three = ResolveTeams({{0, -1, -1}, {1, -1, -1}, {2, -1, -1}, {3, 2, -1}}, Format::TwoTeams, 3);
     CHECK(T(three, 3) == 2 && T(three, 0) == 0 && T(three, 1) == 1 && T(three, 2) == 0);   // smallest team, ties lowest index
-    auto bad = ResolveTeams({{0, 5, 7}, {1, -3, -1}}, Format::TwoTeams);              // out-of-range picks ignored
+    auto old = ResolveTeams({{0, -1, -1}, {1, -1, -1}, {2, -1, -1}, {3, 2, -1}}, Format::ThreeTeams, 2);   // the old value is 3 teams whatever the count
+    CHECK(old == three);
+    // Four teams: eight players with no picks fill the teams two by two, in slot order; a pick of the fourth team is honoured.
+    std::vector<TeamRequest> eight;
+    for (uint8_t i = 0; i < 8; ++i) eight.push_back({i, -1, -1});
+    auto four = ResolveTeams(eight, Format::TwoTeams, 4);
+    for (uint8_t i = 0; i < 8; ++i) CHECK(T(four, i) == i % 4);
+    auto gold = ResolveTeams({{0, -1, -1}, {1, 3, -1}, {2, -1, 3}, {3, -1, -1}}, Format::TwoTeams, 4);
+    CHECK(T(gold, 1) == 3 && T(gold, 2) == 3 && T(gold, 0) == 0 && T(gold, 3) == 1);
+    auto clipped = ResolveTeams({{0, 3, -1}}, Format::TwoTeams, 3);                     // team 3 is not there with 3 teams: Auto
+    CHECK(T(clipped, 0) == 0);
+    auto bad = ResolveTeams({{0, 5, 7}, {1, -3, -1}}, Format::TwoTeams, 2);              // out-of-range picks ignored
     CHECK(T(bad, 0) == 0 && T(bad, 1) == 1);
-    auto uneven = ResolveTeams({{0, 0, -1}, {1, 0, -1}, {2, 0, -1}}, Format::TwoTeams);
+    auto uneven = ResolveTeams({{0, 0, -1}, {1, 0, -1}, {2, 0, -1}}, Format::TwoTeams, 2);
     CHECK(T(uneven, 0) == 0 && T(uneven, 1) == 0 && T(uneven, 2) == 0);            // picks are honoured, uneven allowed
-    auto ffa = ResolveTeams(m, Format::FreeForAll);
+    auto ffa = ResolveTeams(m, Format::FreeForAll, 2);
     for (auto& [s, t] : ffa) CHECK(t == kNoTeam);
-    auto pvb = ResolveTeams(m, Format::PlayersVsBots);
+    auto pvb = ResolveTeams(m, Format::PlayersVsBots, 2);
     for (auto& [s, t] : pvb) CHECK(t == kHumanTeam);
-    for (auto& [s, t] : ResolveTeams(m, Format::Zombies)) CHECK(t == kHumanTeam);
-    for (auto& [s, t] : ResolveTeams(m, Format::Duel)) CHECK(t == kNoTeam);
+    for (auto& [s, t] : ResolveTeams(m, Format::Zombies, 2)) CHECK(t == kHumanTeam);
+    for (auto& [s, t] : ResolveTeams(m, Format::Duel, 2)) CHECK(t == kNoTeam);
+    for (auto& [s, t] : ResolveTeams(m, Format::LastManStanding, 2)) CHECK(t == kNoTeam);
     CHECK(ffa.size() == 6 && pvb.size() == 6);
 }
 
@@ -914,6 +935,81 @@ static void TestResultsDuration() {
     CHECK(Match::kResultsMs == 10000);
 }
 
+// Four teams: a team's score is the sum of its kills, whoever the fighters are; the first team to the limit wins.
+static void TestFourTeams() {
+    MatchConfig c = Cfg(Format::TwoTeams, 2); c.teams = 4;
+    Match m; m.Start(c, {{1, 0, true}, {2, 1, true}, {3, 2, true}, {4, 3, true}, {5, 3, true}}, 0);
+    m.Tick(Match::kCountdownMs);
+    uint32_t t = Match::kCountdownMs;
+    CHECK(m.config().teams == 4 && m.TeamOf(4) == 3 && m.ScoreKeyOf(5) == 3);
+    m.OnDeath(1, 4, t + 1); m.OnDeath(2, 5, t + 2);
+    CHECK(m.Score(3) == 2 && m.Score(0) == 0 && m.Score(2) == 0 && m.winner() == 3 && m.phase() == MatchPhase::Results);   // the gold team wins at the limit
+    Match tk; tk.Start(c, {{1, 3, true}, {2, 3, true}, {3, 0, true}}, 0);
+    tk.Tick(Match::kCountdownMs);
+    tk.OnDeath(1, 2, t + 1);
+    CHECK(tk.Score(3) == -1 && tk.Kills(2) == 0);                                   // a teamkill on the fourth team counts against it
+    Match old; old.Start(Cfg(Format::ThreeTeams, 5), {{1, 0, true}, {2, 2, true}}, 0);   // the old value starts as Teams with 3 teams
+    CHECK(old.config().format == Format::TwoTeams && old.config().teams == 3);
+}
+
+// Last Man Standing: Duel's rounds for any number of fighters.
+static void TestLastManStanding() {
+    const MatchConfig c = Cfg(Format::LastManStanding, 2);
+    Match m; m.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}, {4, kNoTeam, true}}, 0);
+    CHECK(m.round() == 1 && m.config().format == Format::LastManStanding);
+    m.Tick(Match::kCountdownMs);
+    const uint32_t t = Match::kCountdownMs;
+    m.OnDeath(1, 2, t + 1); m.OnDeath(2, 3, t + 2); m.OnDeath(3, 4, t + 3);       // the round goes to the last alive
+    CHECK(m.roundWinner() == 4 && m.Score(4) == 1 && m.Score(2) == 0 && m.RoundInPlay() == false && m.RoundGapLeftMs(t + 3) == 5000);
+    CHECK(m.Kills(4) == 1 && m.Kills(2) == 1);
+    auto ev = m.Tick(t + 3 + 5000);
+    CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2, 3, 4}) && m.round() == 2 && m.RoundInPlay());
+    m.OnDeath(1, 0, t + 6000); m.OnDeath(2, 0, t + 6001);
+    CHECK(m.roundWinner() == 0 && m.RoundInPlay());                                // two still standing
+    CHECK(m.Forfeit(3, t + 6002) && m.roundWinner() == 4 && m.Score(4) == 2);      // give-up: as a fall, no kill
+    CHECK(m.phase() == MatchPhase::Results && m.winner() == 4 && m.Kills(4) == 1);   // first to 2 rounds wins the match
+    CHECK(DropClearFor(Format::LastManStanding) == DropClear::EachRound);
+
+    Match d; d.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+    CHECK(!d.Draw(5) && !d.Forfeit(1, 5));                                          // countdown
+    d.Tick(Match::kCountdownMs);
+    CHECK(d.RoundInPlay() && d.Draw(t + 10) && d.roundWinner() == 0 && !d.RoundInPlay());   // a drawn round: no point
+    CHECK(d.Score(1) == 0 && d.Score(2) == 0 && d.Score(3) == 0 && d.RoundGapLeftMs(t + 10) == 5000);
+    CHECK(d.Tick(t + 10 + 5000).roundReset && d.round() == 2);
+    d.OnDeath(1, 2, t + 6000); d.OnDeath(2, 3, t + 6001);
+    CHECK(d.roundWinner() == 3 && d.Score(3) == 1 && d.phase() == MatchPhase::Live);
+}
+
+// A third player joining a fought Duel sits out until it ends; the rematch is Last Man Standing. Joining a Duel's countdown,
+// or a round format with more than one other, is not benched.
+static void TestDuelBench() {
+    Match m; m.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    m.AddFighter({3, kNoTeam, true});                                               // in the countdown: a fighter like any
+    CHECK(m.Alive(3) && !m.AwaitsRespawn(3));
+    Match d; d.Start(Cfg(Format::Duel, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    d.Tick(Match::kCountdownMs);
+    const uint32_t t = Match::kCountdownMs;
+    d.AddFighter({3, kNoTeam, true});
+    CHECK(d.Has(3) && !d.Alive(3) && d.AwaitsRespawn(3) && d.Deaths(3) == 0);       // down, no body until the match respawns it
+    d.OnDeath(1, 2, t + 1);                                                         // the round is the one left standing's: the third does not count
+    CHECK(d.roundWinner() == 2 && d.Score(2) == 1);
+    auto ev = d.Tick(t + 1 + 5000);
+    CHECK(ev.roundReset && ev.respawn == std::vector<uint8_t>({1, 2}) && !d.Alive(3) && d.config().format == Format::Duel);
+    d.OnDeath(1, 2, t + 6000);
+    CHECK(d.phase() == MatchPhase::Results && d.winner() == 2);
+    ev = d.Tick(t + 6000 + Match::kResultsMs);
+    CHECK(ev.rematch && d.config().format == Format::LastManStanding && d.Alive(3) && d.Alive(1) && !d.AwaitsRespawn(3) && d.round() == 1);
+    Match two; two.Start(Cfg(Format::Duel, 1), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);   // two fighters: still a Duel after the rematch
+    two.Tick(Match::kCountdownMs); two.OnDeath(1, 2, t + 1);
+    CHECK(two.Tick(t + 2 + Match::kResultsMs).rematch && two.config().format == Format::Duel);
+    Match lms; lms.Start(Cfg(Format::LastManStanding, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+    lms.Tick(Match::kCountdownMs); lms.AddFighter({4, kNoTeam, true});
+    CHECK(lms.Alive(4));                                                            // Last Man Standing takes anyone in as it always did
+    Match rejoin; rejoin.Start(Cfg(Format::Duel, 3), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    rejoin.Tick(Match::kCountdownMs); rejoin.RemoveFighter(2); rejoin.AddFighter({2, kNoTeam, true});
+    CHECK(rejoin.Alive(2));                                                         // a player back in the second seat is not a third
+}
+
 int main() {
     TestResultsDuration();
     TestBrawl();
@@ -921,7 +1017,7 @@ int main() {
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
-    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
+    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestFourTeams(); TestLastManStanding(); TestDuelBench(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
     TestForcedBuild(); TestBotFormatGear(); TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;

@@ -233,6 +233,7 @@ constexpr float kPinnedPhysicsMax = 10.f;
 inline bool ValidPinnedPhysics(float v) { return v == -1.f || (v >= 0.f && v <= kPinnedPhysicsMax); }
 struct MatchInfo {
     uint8_t format = 0;                 // hsm::Format
+    uint8_t teams = 2;                  // rev 35: the Teams format's team count, 2..4 (always 2..4 on the wire; other formats ignore it: hsm::TeamCount)
     uint16_t scoreLimit = 5, timeLimitS = 0, respawnDelayS = 5;
     bool friendlyFire = false;
     uint8_t phase = 0;                  // hsm::MatchPhase
@@ -473,7 +474,7 @@ inline bool Decode(const uint8_t* d, size_t n, BlobChunk& m) {
 
 inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     Writer w; w.header(MsgType::MatchInfo);
-    w.u8(m.format); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
+    w.u8(m.format); w.u8(m.teams); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
     w.u8(m.phase); w.u32(m.timeLeftMs); w.i16(m.winner);
     w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner); w.u16(m.damagePct);
     w.u16(m.waveBreakS); w.u8(m.clearGroundMin); w.u8(m.clearCount); w.u8(m.syncMode); w.u8(m.forceStrength);
@@ -491,13 +492,13 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
 }
 inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
-    m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
+    m.format = r.u8(); m.teams = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
     m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8(); m.damagePct = r.u16();
     m.waveBreakS = r.u16(); m.clearGroundMin = r.u8(); m.clearCount = r.u8(); m.syncMode = r.u8(); m.forceStrength = r.u8();
     for (float& v : m.physics) { v = r.f32(); if (!ValidPinnedPhysics(v)) return false; }
     if (m.syncMode > 1 || m.forceStrength > 1) return false;
-    if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.format >= kFormatCount || m.teams < kMinTeams || m.teams > kMaxTeams || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
     if (m.gear >= kGearCount || m.tier > 7 || (m.damagePct != 0xFFFF && m.damagePct > 1000)) return false;
     if (!ValidWaveBreakS(m.waveBreakS) || !ValidClearGroundMin(m.clearGroundMin)) return false;
     m.friendlyFire = ff == 1;

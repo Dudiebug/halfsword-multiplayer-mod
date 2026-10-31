@@ -102,7 +102,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     DeathReport dr; dr.victim = 2; dr.killer = 1; dr.victimLife = 3; s.push_back(Encode(dr));
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
-    MatchInfo mi; mi.format = 1; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
+    MatchInfo mi; mi.format = 1; mi.teams = 4; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
     MatchInfo md; md.format = 4; md.scoreLimit = 3; md.phase = 2; md.gear = 3; md.tier = 4; md.round = 2; md.roundGapLeftMs = 3000; md.roundWinner = 1;
     md.scores = {{1, 1}}; md.fighters = {{1, -1, 1, 0, "a", 40, true}, {2, -1, 0, 1, "bb", 120, false}}; s.push_back(Encode(md));
     Kill kl; kl.killer = 1; kl.victim = 2; s.push_back(Encode(kl));

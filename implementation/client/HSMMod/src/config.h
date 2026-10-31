@@ -111,7 +111,8 @@ struct Config {
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
     // role=server only (see session/hsm_autoflow.h): a public Steam lobby.
-    std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
+    std::string serverFormat = "ffa";          // ffa | duel | lms | teams | teams3 | teams4 | survival | zombies
+    int serverTeams = 2;                       // server_teams: the teams of server_format=teams, 2..4 (teams3 / teams4 say it in the word)
     std::string serverMaps = "all";            // comma list of map display names, or all
     int serverScoreLimit = 0;                  // 0: the format's default
     int serverTimeLimitS = 0;                  // 0: none

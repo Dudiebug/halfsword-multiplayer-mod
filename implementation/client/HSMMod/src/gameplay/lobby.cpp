@@ -217,6 +217,7 @@ MatchConfig Lobby::config() const {
     MatchConfig c;
     if (!InLobby()) return c;
     c.format = Format(IntOr(steam::LobbyData(lobby_, "hsm_fmt"), 0));
+    c.teams = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_teams"), 2), 0, 255));   // none: two; hsm_fmt=2, the old "3 teams", is Teams with 3 (Sanitize)
     c.scoreLimit = uint16_t(IntOr(steam::LobbyData(lobby_, "hsm_lim"), DefaultScoreLimit(c.format)));
     c.timeLimitS = uint16_t(IntOr(steam::LobbyData(lobby_, "hsm_time"), 0));
     c.respawnDelayS = uint16_t(IntOr(steam::LobbyData(lobby_, "hsm_resp"), 5));
@@ -235,6 +236,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     if (!IsHost()) return;
     MatchConfig c = Sanitize(in);
     steam::SetLobbyData(lobby_, "hsm_fmt", std::to_string(int(c.format)));
+    steam::SetLobbyData(lobby_, "hsm_teams", std::to_string(c.teams));
     steam::SetLobbyData(lobby_, "hsm_lim", std::to_string(c.scoreLimit));
     steam::SetLobbyData(lobby_, "hsm_time", std::to_string(c.timeLimitS));
     steam::SetLobbyData(lobby_, "hsm_resp", std::to_string(c.respawnDelayS));

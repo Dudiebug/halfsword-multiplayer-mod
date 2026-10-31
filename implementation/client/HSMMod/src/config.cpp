@@ -1,4 +1,5 @@
 #include "config.h"
+#include "match/hsm_match.h"
 #include "session/hsm_cmdline.h"
 #include "session/hsm_roster.h"
 #include "session/hsm_ue4ss.h"
@@ -63,7 +64,8 @@ constexpr char kDefaultIni[] =
     "voice_cutoff=30\n"
     "voice_volume=100\n"
     "; role=server (a hosted retail instance with no fighter of its own that starts matches by itself):\n"
-    "; the server opens a public Steam lobby that shows in the game's lobby browser. server_format=ffa|duel|teams|survival|zombies,\n"
+    "; the server opens a public Steam lobby that shows in the game's lobby browser. server_format=ffa|duel|lms|teams|survival|zombies (teams3 / teams4: three or four teams; duel runs as lms unless exactly\n"
+    "; 2 players are in), server_teams=2..4 (teams for server_format=teams),\n"
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
     "; server_countdown_s=30, server_min_players=2 (1..8), server_damage=stock or a percent (player damage for everyone,\n"
     "; 100 = the game's rate 1.0, inside the game's own damage slider)\n"
@@ -71,6 +73,7 @@ constexpr char kDefaultIni[] =
     "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players,\n"
     "; clear and say (HSMMod.cmd)\n"
     "server_format=ffa\n"
+    "server_teams=2\n"
     "server_maps=all\n"
     "server_score_limit=0\n"
     "server_time_limit_s=0\n"
@@ -210,6 +213,7 @@ Config LoadConfig() {
     c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";   // already on: nothing to ask
     c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
+    c.serverTeams = Clamp(std::atoi(ReadString(ini, L"server_teams", "2").c_str()), kMinTeams, kMaxTeams);
     c.serverMaps = ReadString(ini, L"server_maps", "all");
     c.serverScoreLimit = Clamp(std::atoi(ReadString(ini, L"server_score_limit", "0").c_str()), 0, 100);
     c.serverTimeLimitS = Clamp(std::atoi(ReadString(ini, L"server_time_limit_s", "0").c_str()), 0, 3600);
@@ -249,8 +253,8 @@ Config LoadConfig() {
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)
-        HSM_LOG("config: server format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d",
-                c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
+        HSM_LOG("config: server format=%s teams=%d maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d",
+                c.serverFormat.c_str(), c.serverTeams, c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
     if (c.role == Role::Server)
         HSM_LOG("config: server admins=%s", c.serverAdmins.empty() ? "none (console only)" : "set");
     return c;

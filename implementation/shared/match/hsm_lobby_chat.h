@@ -26,9 +26,9 @@ private:
 
 // A sender's name colour: their team's ink in the team formats (the host's move over their own pick, as the roster
 // shows), else iron, as ChatNameInk does in a match.
-inline Rgba LobbyChatInk(Format f, int team, int hostOverride) {
-    if (lobby_detail::ValidTeam(hostOverride, f)) return style::TeamInk(hostOverride);
-    if (lobby_detail::ValidTeam(team, f)) return style::TeamInk(team);
+inline Rgba LobbyChatInk(const MatchConfig& c, int team, int hostOverride) {
+    if (lobby_detail::ValidTeam(hostOverride, c.format, c.teams)) return style::TeamInk(hostOverride);
+    if (lobby_detail::ValidTeam(team, c.format, c.teams)) return style::TeamInk(team);
     return style::kIron;
 }
 

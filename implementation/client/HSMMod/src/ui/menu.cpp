@@ -867,6 +867,7 @@ LobbyLocal Local(game::Lobby& lobby) {
         }
         l.modPickPending = l.host && game::modmaps::PickPending(l.mapPick);
         l.progression = lobby.Progression();
+        l.playerCount = lobby.PlayerCount();   // the cards: Duel is for exactly 2, Last Man Standing for 2 or more
         const bool server = lobby.ServerLobby();
         for (const game::LobbyMember& m : lobby.members()) {
             if (server && m.host) continue;   // role=server: the server is not a player
@@ -985,7 +986,7 @@ void Draw(const LobbyScene& s) {
         const ModeCard& m = s.modes[i];
         v.name.Set(m.name);
         v.name.Color(m.selected ? style::kMenuAccentInk : style::kMenuText);
-        v.blurb.Set(m.description);
+        v.blurb.Set(m.hint.empty() ? m.description : m.description + "\n" + m.hint);   // a card the player count rules out says why
         v.card.selected = m.selected;
         v.card.live = m.enabled;
         v.card.button.Enabled(m.enabled);
@@ -1314,7 +1315,7 @@ void HandleClicks(Session& session) {
     for (size_t i = 0; i < kTabCount; ++i) if (act(Clicked(g.tabs[i].card), s.in)) g.tab = i;
 
     MatchConfig c = lobby.config();
-    int teams = HasTeams(c.format) ? TeamCount(c.format) : 0;
+    int teams = HasTeams(c.format) ? TeamCount(c.format, c.teams) : 0;
     for (size_t i = 0; i < g.members.size(); ++i) {
         if (!act(Clicked(g.members[i].card), i < s.roster.size() && s.roster[i].movable && g.memberIds[i] && teams)) continue;
         for (const game::LobbyMember& m : lobby.members())
