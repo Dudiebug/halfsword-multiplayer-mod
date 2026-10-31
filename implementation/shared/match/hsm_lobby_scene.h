@@ -55,19 +55,20 @@ struct LobbyLocal {
     std::vector<LobbyModMap> modMaps;   // the custom maps found on this machine (modded maps, after the stock ones)
     bool modPickPending = false;        // the pick is a modded map whose pak is still being hashed: START waits
     std::vector<LobbyPlayer> players;
+    int playerCount = -1;               // the host's player count for the mode cards (game::Lobby::PlayerCount: a dedicated server's own seat is no player); -1: the roster's size
     std::vector<LobbyFound> found;
     BrowserFilter filter;
     int maxPlayers = 8;
 };
 
-// MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
+// Each section shows its rows in this order. Sync last: ui/menu.cpp makes one stepper per row up to it.
+enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, Teams, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
 enum class ModeGroup : uint8_t { Versus, Coop };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false;
-                  ModeGroup group = ModeGroup::Versus; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
+                  ModeGroup group = ModeGroup::Versus; std::string hint; };   // progression: the extra last card; brawl: free-for-all with gear = Fists; hint: why a card is disabled for the player count (ModeAvailable)
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
                  bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
 struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; size_t source = 0; };   // source: its index in LobbyLocal::found
@@ -83,7 +84,7 @@ inline constexpr size_t kBrowserRows = 6;
 enum class LobbySection : uint8_t { Match, Teams, Gear, World, Count };
 inline LobbySection SectionOf(LobbyRow r) {
     switch (r) {
-        case LobbyRow::FriendlyFire: case LobbyRow::MyTeam: return LobbySection::Teams;
+        case LobbyRow::Teams: case LobbyRow::FriendlyFire: case LobbyRow::MyTeam: return LobbySection::Teams;
         case LobbyRow::Gear: case LobbyRow::Tier: return LobbySection::Gear;
         case LobbyRow::WaveBreak: case LobbyRow::ClearGround: case LobbyRow::Sync: return LobbySection::World;
         default: return LobbySection::Match;
@@ -100,7 +101,7 @@ inline const char* SectionName(LobbySection s) {
 
 // The browser's mode chip steps through these (0: any).
 inline const std::vector<std::string>& BrowserModes() {
-    static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "2 teams", "3 teams", "Brawl", "Survival", "Zombies"};
+    static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "Last man standing", "Teams", "Brawl", "Survival", "Zombies"};
     return m;
 }
 inline constexpr size_t kFilterChips = 4;   // mode, has room, compatible only, most players first
@@ -121,14 +122,20 @@ inline BrowserFilter ToggleFilter(BrowserFilter f, size_t chip) {
     }
     return f;
 }
+// A lobby's mode string against a browser entry: equal, or the entry plus the detail the host adds ("Teams (3)" is "Teams").
+inline bool ModeMatches(const std::string& lobbyMode, const std::string& entry) {
+    return lobbyMode == entry || (lobbyMode.size() > entry.size() && lobbyMode.compare(0, entry.size(), entry) == 0 && lobbyMode.compare(entry.size(), 2, " (") == 0);
+}
 inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f, int maxPlayers) {
     const auto& modes = BrowserModes();
-    if (f.mode != 0 && f.mode < modes.size() && l.mode != modes[f.mode]) return false;
+    if (f.mode != 0 && f.mode < modes.size() && !ModeMatches(l.mode, modes[f.mode])) return false;
     if (f.hasRoom && l.players >= maxPlayers) return false;
     if (f.compatibleOnly && !l.compatible) return false;
     return true;
 }
-inline constexpr size_t kModeCardCount = kFormatCount + 2;   // the formats, then Brawl and Progression
+// The format cards: every format but ThreeTeams (the old value of the Teams card's 3 teams); then Brawl and Progression.
+inline constexpr size_t kModeOrderCount = kFormatCount - 1;
+inline constexpr size_t kModeCardCount = kModeOrderCount + 2;
 
 struct LobbyScene {
     Span pill;
@@ -166,7 +173,7 @@ inline int PrevOf(const std::vector<int>& options, int cur) {
 inline int StepOf(const std::vector<int>& options, int cur, int dir) { return dir < 0 ? PrevOf(options, cur) : NextOf(options, cur); }
 
 inline std::vector<int> LimitOptions(Format f) {
-    if (f == Format::Duel) return {1, 2, 3, 5, 7, 10};                 // rounds to win
+    if (IsRoundFormat(f)) return {1, 2, 3, 5, 7, 10};                 // rounds to win
     return {3, 5, 10, 15, 20, 30, 50};
 }
 inline const std::vector<int> kTimeOptions = {0, 300, 600, 900, 1200};
@@ -188,6 +195,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             break;
         }
         case LobbyRow::Tier: c.tier = uint8_t((std::min<uint8_t>(c.tier, 7) + (back ? 7 : 1)) % 8); break;
+        case LobbyRow::Teams: c.teams = uint8_t(StepOf({2, 3, 4}, c.teams, dir)); break;
         case LobbyRow::FriendlyFire: c.friendlyFire = !c.friendlyFire; break;
         case LobbyRow::Damage: c.damagePct = StepDamage(c.damagePct, dir, damage); break;
         case LobbyRow::WaveBreak: {
@@ -243,15 +251,13 @@ inline int8_t StepTeamPick(int8_t cur, int teams, int dir) {
 
 // ------------------------------------------------------------------ text
 
-inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams; }
-
 inline constexpr const char* kBrawlBlurb = "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.";
 
 inline const char* FormatBlurb(Format f) {
     switch (f) {
-        case Format::Duel: return "Rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.";
-        case Format::TwoTeams: return "Red against Blue. Every kill scores for the team; the first team to the limit wins.";
-        case Format::ThreeTeams: return "Red, Blue and Green. Every kill scores for the team; the first team to the limit wins.";
+        case Format::Duel: return "One on one, rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.";
+        case Format::LastManStanding: return "Rounds to the last one standing, for two or more players. Everybody respawns together; new gear each round with random or identical gear.";
+        case Format::TwoTeams: case Format::ThreeTeams: return "Two to four teams (Red, Blue, Green, Gold). Every kill scores for the team; the first team to the limit wins.";
         case Format::PlayersVsBots: return "Everyone against waves of bots that rank up. The fallen return when a wave is cleared.";
         case Format::Zombies: return "Zombie waves in the Abyss, one zombie at a time per player. The fallen return when a wave is cleared.";
         case Format::FreeForAll: break;
@@ -291,15 +297,15 @@ inline bool SamePath(std::string_view a, std::string_view pick) {
     return true;
 }
 
-inline bool ValidTeam(int t, Format f) { return HasTeams(f) && t >= 0 && t < TeamCount(f); }
-inline int EffectiveTeam(const LobbyPlayer& p, Format f) {
-    return ValidTeam(p.hostOverride, f) ? p.hostOverride : ValidTeam(p.team, f) ? p.team : kNoTeam;
+inline bool ValidTeam(int t, Format f, int teams) { return HasTeams(f) && t >= 0 && t < TeamCount(f, teams); }
+inline int EffectiveTeam(const LobbyPlayer& p, Format f, int teams) {
+    return ValidTeam(p.hostOverride, f, teams) ? p.hostOverride : ValidTeam(p.team, f, teams) ? p.team : kNoTeam;
 }
 
 inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
     const MatchConfig& c = l.config;
     Format f = c.format;
-    bool duel = f == Format::Duel, bots = IsBotFormat(f);
+    bool duel = IsRoundFormat(f), bots = IsBotFormat(f);
     SettingRow r;
     r.id = s;
     r.enabled = l.host;
@@ -340,6 +346,11 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.hint += c.gear == Gear::Own ? (bots ? "Also every player's strength." : "Sets every player's strength (muscle and grip).")
                                           : (bots ? "Also every player's strength and the random gear's budget." : "Sets every player's strength; the random gear is rolled within this budget.");
             break;
+        case LobbyRow::Teams:
+            r.label = "Teams";
+            r.value = std::to_string(TeamCount(c.format, c.teams)) + " teams";
+            r.hint = "Players without a pick go to the smallest team.";
+            break;
         case LobbyRow::FriendlyFire:
             r.label = "Friendly fire";
             r.value = c.friendlyFire ? "On" : "Off";
@@ -369,8 +380,8 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.enabled = true;                                        // everyone picks their own
             const LobbyPlayer* me = nullptr;
             for (const LobbyPlayer& p : l.players) if (p.me) me = &p;
-            r.value = TeamLabel(me && ValidTeam(me->team, f) ? me->team : kNoTeam);
-            r.hint = me && ValidTeam(me->hostOverride, f) ? "The host moved you to " + TeamLabel(me->hostOverride) + "."
+            r.value = TeamLabel(me && ValidTeam(me->team, f, c.teams) ? me->team : kNoTeam);
+            r.hint = me && ValidTeam(me->hostOverride, f, c.teams) ? "The host moved you to " + TeamLabel(me->hostOverride) + "."
                                                           : std::string("Auto puts you on the smallest team.");
             break;
         }
@@ -393,22 +404,38 @@ inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
     std::vector<LobbyRow> v = {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear};
     v.push_back(LobbyRow::Tier);                     // the tier is every player's strength, with own gear too
-    if (HasTeams(f)) v.push_back(LobbyRow::FriendlyFire);
+    if (HasTeams(f)) { v.push_back(LobbyRow::Teams); v.push_back(LobbyRow::FriendlyFire); }
     v.push_back(LobbyRow::Damage);
-    if (f != Format::Duel) v.push_back(LobbyRow::ClearGround);
+    if (!IsRoundFormat(f)) v.push_back(LobbyRow::ClearGround);
     if (HasTeams(f)) v.push_back(LobbyRow::MyTeam);
     v.push_back(LobbyRow::Sync);
     return v;
 }
 
-inline constexpr Format kModeOrder[kFormatCount] = {Format::FreeForAll, Format::Duel, Format::TwoTeams,
-                                                    Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies};
+inline constexpr Format kModeOrder[kModeOrderCount] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams,
+                                                       Format::PlayersVsBots, Format::Zombies};
+
+// Which formats a lobby with `players` players can run (the host's count, a dedicated server's own seat not counted).
+// Duel is one on one; Last Man Standing needs somebody to be the last of. `hint` says why not, for the card.
+struct ModeAvail { bool ok = true; const char* hint = ""; };
+inline ModeAvail ModeAvailable(Format f, int players) {
+    if (f == Format::Duel && players != 2) return {false, "Duel is for 2 players"};
+    if (f == Format::LastManStanding && players < 2) return {false, "Needs 2 or more players"};
+    return {};
+}
+// A third player joins a lobby set to Duel: it becomes Last Man Standing, keeping the round count and the gear rows.
+inline bool DuelOutgrown(const MatchConfig& c, int players) { return c.format == Format::Duel && players > 2; }
+inline MatchConfig AdjustForPlayers(MatchConfig c, int players) {
+    if (DuelOutgrown(c, players)) c.format = Format::LastManStanding;
+    return c;
+}
+inline constexpr const char* kDuelOutgrownLine = "Duel is for 2 players: switched to Last man standing";
 
 // The group of the i-th mode card (kModeOrder, then Brawl, then Progression): known before any scene, so the page can
 // build each card in its group's grid.
 inline ModeGroup ModeGroupAt(size_t i) {
-    if (i < size_t(kFormatCount)) return IsBotFormat(kModeOrder[i]) ? ModeGroup::Coop : ModeGroup::Versus;
-    return i == size_t(kFormatCount) ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl; Progression
+    if (i < kModeOrderCount) return IsBotFormat(kModeOrder[i]) ? ModeGroup::Coop : ModeGroup::Versus;
+    return i == kModeOrderCount ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl; Progression
 }
 
 inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
@@ -468,10 +495,10 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         r.name = p.name.empty() ? "?" : p.name;
         r.host = p.host; r.ready = p.ready; r.me = p.me;
         if (HasTeams(f)) {
-            int t = EffectiveTeam(p, f);
+            int t = EffectiveTeam(p, f, c.teams);
             r.team = TeamLabel(t);
             r.swatch = TeamColor(t);                                // none for Auto
-            r.moved = ValidTeam(p.hostOverride, f);
+            r.moved = ValidTeam(p.hostOverride, f, c.teams);
             r.movable = l.host;
         }
         s.roster.push_back(r);
@@ -482,7 +509,15 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.readyLabel = s.readyOn ? "Ready \xC2\xB7 click to undo" : "Mark me ready";
     }
     s.balance = l.host && HasTeams(f);
-    for (Format m : kModeOrder) s.modes.push_back({m, Upper(FormatName(m)), FormatBlurb(m), m == f && !IsBrawl(c) && !l.progression, l.host});
+    const int players = l.playerCount >= 0 ? l.playerCount : int(l.players.size());
+    for (Format m : kModeOrder) {
+        const ModeAvail av = ModeAvailable(m, players);
+        ModeCard mc;
+        mc.format = m; mc.name = Upper(FormatName(m)); mc.description = FormatBlurb(m);
+        mc.selected = m == f && !IsBrawl(c) && !l.progression; mc.enabled = l.host && av.ok;
+        if (!av.ok) mc.hint = av.hint;
+        s.modes.push_back(mc);
+    }
     {
         ModeCard b;
         b.format = Format::FreeForAll;
@@ -536,18 +571,20 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
     const std::string warn = BuildWarning(l.myBuild, others);
     s.buildMismatch = !warn.empty();
     s.start = l.host && MayStartMatch(l.myBuild, others, l.allowBuildMismatch);
+    const ModeAvail playable = l.progression ? ModeAvail{} : ModeAvailable(f, players);   // Duel needs exactly 2, Last Man Standing 2 or more
     const bool modWait = l.host && customChosen < l.modMaps.size() && l.modPickPending;
-    if (modWait) s.start = false;
+    if (modWait || !playable.ok) s.start = false;
     // The line beside START: what will be played.
     if (l.progression) s.summary = "PROGRESSION \xC2\xB7 the Tavern, together";
     else {
-        s.summary = Upper(ModeName(f, c.gear));
+        s.summary = Upper(ModeName(f, c.gear, c.teams));
         for (const MapCard& m : s.maps) if (m.selected) s.summary += " \xC2\xB7 " + m.name;
         if (!IsBrawl(c)) s.summary += " \xC2\xB7 " + std::string(GearName(c.gear));
         if (!IsBrawl(c) && c.gear != Gear::Own) s.summary += ", tier " + std::to_string(int(c.tier));
     }
     if (!l.host) s.waiting = "Waiting for the host";
     if (modWait) s.waiting = "Checking the map pack";
+    if (l.host && !playable.ok) s.waiting = playable.hint;
     if (s.buildMismatch) s.waiting = l.host && l.allowBuildMismatch ? warn + " (allowed: allow_build_mismatch=1)" : warn;
     return s;
 }

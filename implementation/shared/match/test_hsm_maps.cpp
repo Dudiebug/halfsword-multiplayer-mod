@@ -69,13 +69,13 @@ static void TestFormatFilter() {
     const MapInfo& cutting = *FindMap("Arena_Cutting_Map");
 
     // Arenas: everything, Duel included.
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Duel})
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Duel, Format::LastManStanding})
         CHECK(MapAllowsFormat(yard, f));
     CHECK(!MapAllowsFormat(yard, Format::Zombies));
     CHECK(MapAllowsFormat(cutting, Format::Duel));
 
-    // Big non-menu levels: every format except Duel, Zombies only on the abyss.
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots})
+    // Big non-menu levels: every format except Duel (Last Man Standing is free-for-all's), Zombies only on the abyss.
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::LastManStanding})
         CHECK(MapAllowsFormat(hub, f));
     CHECK(!MapAllowsFormat(hub, Format::Duel));
     CHECK(!MapAllowsFormat(hub, Format::Zombies));
@@ -84,7 +84,7 @@ static void TestFormatFilter() {
     CHECK(MapAllowsFormat(abyss, Format::Zombies));
     CHECK(!MapAllowsFormat(abyss, Format::PlayersVsBots));         // the picker's Abyss is Zombies only
     CHECK(!MapAllowsFormat(abyss, Format::FreeForAll));
-    CHECK(!MapAllowsFormat(abyss, Format::Duel));
+    CHECK(!MapAllowsFormat(abyss, Format::Duel) && !MapAllowsFormat(abyss, Format::LastManStanding));
 
     // Every catalog entry supports at least one format, and only abyss maps take Zombies.
     size_t zombie = 0;
@@ -93,6 +93,7 @@ static void TestFormatFilter() {
         if (MapAllowsFormat(m, Format::Zombies)) ++zombie;
         CHECK(MapAllowsFormat(m, Format::Zombies) == m.abyss);
         CHECK(MapAllowsFormat(m, Format::FreeForAll) == (m.arena || m.bigArena));
+        CHECK(MapAllowsFormat(m, Format::LastManStanding) == (m.arena || m.bigArena) && MapAllowsFormat(m, Format::Duel) == m.arena);
     }
     CHECK(zombie == 1);
     CHECK(!MapAllowsFormat(MapAt(0), Format(200)));                   // out-of-range enum allows nothing

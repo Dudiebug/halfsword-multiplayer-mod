@@ -82,6 +82,7 @@ inline bool MapAllowsFormat(const MapInfo& m, Format f) {
         case Format::Zombies: return m.abyss;
         case Format::Duel: return m.arena;
         case Format::FreeForAll:
+        case Format::LastManStanding:
         case Format::TwoTeams:
         case Format::ThreeTeams:
         case Format::PlayersVsBots: return m.arena || m.bigArena;

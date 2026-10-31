@@ -28,6 +28,7 @@ static LobbyLocal InLobby(bool host, Format f = Format::FreeForAll, Gear g = Gea
     l.players = {Player("Ann", true, host), Player("Bob", false, !host)};
     return l;
 }
+static LobbyLocal Teamed(bool host, int teams, Gear g = Gear::Own) { LobbyLocal l = InLobby(host, Format::TwoTeams, g); l.config.teams = uint8_t(teams); return l; }
 static std::vector<LobbyRow> Ids(const LobbyScene& s) { std::vector<LobbyRow> v; for (const SettingRow& r : s.settings) v.push_back(r.id); return v; }
 static const SettingRow* RowOf(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return &r; return nullptr; }
 static const SettingRow& Need(const LobbyScene& s, LobbyRow id) {
@@ -241,7 +242,7 @@ static void TestHostAgainstMember() {
 
     CHECK(!BuildLobbyScene(InLobby(true, Format::FreeForAll)).balance);
     CHECK(!BuildLobbyScene(InLobby(true, Format::PlayersVsBots)).balance);
-    CHECK(BuildLobbyScene(InLobby(true, Format::ThreeTeams)).balance);
+    CHECK(BuildLobbyScene(InLobby(true, Format::LastManStanding)).balance == false && BuildLobbyScene(Teamed(true, 4)).balance);
 }
 
 static void TestRowsPerFormat() {
@@ -250,9 +251,11 @@ static void TestRowsPerFormat() {
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::ThreeTeams, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(false, Format::ThreeTeams))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, Tier, Teams, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(true, 3, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Teams, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(false, 4))) == (V{Limit, Time, Respawn, Gear, Tier, Teams, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, Sync}));   // Duel's rows
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding, Gear::RandomTier))) == Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, Gear, Tier, WaveBreak, FriendlyFire, Damage, Sync}));
@@ -305,13 +308,13 @@ static void TestLabelsAndValues() {
 static std::string GearHint(Format f, Gear g) { return Need(BuildLobbyScene(InLobby(true, f, g)), LobbyRow::Gear).hint; }
 
 static void TestGearHint() {
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::Duel})
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::Duel, Format::LastManStanding})
         CHECK(GearHint(f, Gear::Own) == "Everyone fights in their own loadout.");
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams}) {
+    for (Format f : {Format::FreeForAll, Format::TwoTeams}) {
         CHECK(GearHint(f, Gear::RandomTier) == "Fresh random gear for each fighter every life.");
         CHECK(GearHint(f, Gear::Mirror) == "One random loadout for everyone, until the rematch.");   // RegearFor: Mirror rolls at a rematch
     }
-    CHECK(GearHint(Format::Duel, Gear::RandomTier) == "Fresh random gear for each fighter every round.");
+    CHECK(GearHint(Format::Duel, Gear::RandomTier) == "Fresh random gear for each fighter every round." && GearHint(Format::LastManStanding, Gear::RandomTier) == GearHint(Format::Duel, Gear::RandomTier));
     CHECK(GearHint(Format::Duel, Gear::Mirror) == "One random loadout for everyone, new each round.");
     // Survival and Zombies (0.8.0-pre20): the same three choices; the loadout is rolled at the start and kept for the run.
     for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
@@ -329,7 +332,7 @@ static void TestOtherHints() {
     auto ff = [](MatchConfig& c) { c.friendlyFire = true; };
     CHECK(hint(Format::FreeForAll, LobbyRow::Limit, none) == "The first to this many kills wins.");
     CHECK(hint(Format::TwoTeams, LobbyRow::Limit, none) == "The first team to this many kills wins.");
-    CHECK(hint(Format::ThreeTeams, LobbyRow::Limit, none) == "The first team to this many kills wins.");
+    CHECK(hint(Format::LastManStanding, LobbyRow::Limit, none) == "The first to win this many rounds takes the match.");
     CHECK(hint(Format::Duel, LobbyRow::Limit, none) == "The first to win this many rounds takes the match.");
     CHECK(hint(Format::FreeForAll, LobbyRow::Time, none) == "No clock: play to the limit.");
     CHECK(hint(Format::Duel, LobbyRow::Time, clock) == "When it runs out the leader wins; a tie goes to sudden death.");
@@ -345,7 +348,7 @@ static void TestOtherHints() {
     CHECK(hint(Format::Duel, LobbyRow::Tier, own) == "Sets every player's strength (muscle and grip).");
     CHECK(hint(Format::PlayersVsBots, LobbyRow::Tier, own) == "Bots start at this rank and rise one every 2 waves. Also every player's strength.");
     CHECK(hint(Format::TwoTeams, LobbyRow::FriendlyFire, none) == "Teammates cannot hurt each other.");
-    CHECK(hint(Format::ThreeTeams, LobbyRow::FriendlyFire, ff) == "Hits on teammates count.");
+    CHECK(hint(Format::TwoTeams, LobbyRow::FriendlyFire, ff) == "Hits on teammates count.");
     CHECK(hint(Format::PlayersVsBots, LobbyRow::FriendlyFire, none) == "Players cannot hurt each other.");
     CHECK(hint(Format::Zombies, LobbyRow::FriendlyFire, ff) == "Players can hurt each other.");
 }
@@ -359,13 +362,22 @@ static void TestMyTeam() {
     CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Blue");
     l.players[1].team = 2;                                   // Green, picked in three teams: Auto here
     CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Auto");
-    l.config.format = Format::ThreeTeams;
+    l.config.teams = 3;
     CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Green");
     l.players[1].hostOverride = 0;
     s = BuildLobbyScene(l);
     CHECK(Need(s, LobbyRow::MyTeam).value == "Green" && Need(s, LobbyRow::MyTeam).hint == "The host moved you to Red.");
     l.players[1].hostOverride = 3;                           // no fourth team: no move
     CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).hint == "Auto puts you on the smallest team.");
+    l.config.teams = 4;                                      // the fourth team: Gold
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).hint == "The host moved you to Gold.");
+    l.players[1].team = 3; l.players[1].hostOverride = -1;
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Gold");
+    l.config.teams = 2;                                      // a pick the count no longer has is Auto
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Auto");
+    l.config.teams = 3; l.config.format = Format::ThreeTeams;   // the old value is three teams
+    l.players[1].team = 2;
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Green");
     l.players[1].me = false;                                 // not in the list yet
     CHECK(Need(BuildLobbyScene(l), LobbyRow::MyTeam).value == "Auto");
 }
@@ -436,17 +448,19 @@ static void TestReady() {
 static void TestModes() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::Duel));
     CHECK(s.modes.size() == kModeCardCount);
-    const Format order[] = {Format::FreeForAll, Format::Duel, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies};
-    const char* names[] = {"FREE-FOR-ALL", "DUEL", "2 TEAMS", "3 TEAMS", "SURVIVAL", "ZOMBIES"};
-    for (size_t i = 0; i < s.modes.size() && i < kFormatCount; ++i) {
+    const Format order[] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::PlayersVsBots, Format::Zombies};
+    const char* names[] = {"FREE-FOR-ALL", "DUEL", "LAST MAN STANDING", "TEAMS", "SURVIVAL", "ZOMBIES"};
+    CHECK(kModeOrderCount == 6 && kModeCardCount == 8);
+    for (size_t i = 0; i < s.modes.size() && i < kModeOrderCount; ++i) {
         CHECK(s.modes[i].format == order[i] && s.modes[i].name == names[i] && !s.modes[i].description.empty());
         CHECK(s.modes[i].selected == (order[i] == Format::Duel));
     }
     if (s.modes.size() > 1)
-        CHECK(s.modes[1].description == "Rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.");
+        CHECK(s.modes[1].description == "One on one, rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.");
+    CHECK(std::string(FormatBlurb(Format::LastManStanding)) == "Rounds to the last one standing, for two or more players. Everybody respawns together; new gear each round with random or identical gear.");
     CHECK(std::string(FormatBlurb(Format::FreeForAll)) == "Everyone for themselves. Every kill scores; the first to the limit wins.");
-    CHECK(std::string(FormatBlurb(Format::TwoTeams)) == "Red against Blue. Every kill scores for the team; the first team to the limit wins.");
-    CHECK(std::string(FormatBlurb(Format::ThreeTeams)) == "Red, Blue and Green. Every kill scores for the team; the first team to the limit wins.");
+    CHECK(std::string(FormatBlurb(Format::TwoTeams)) == "Two to four teams (Red, Blue, Green, Gold). Every kill scores for the team; the first team to the limit wins.");
+    CHECK(std::string(FormatBlurb(Format::ThreeTeams)) == FormatBlurb(Format::TwoTeams));
     CHECK(std::string(FormatBlurb(Format::PlayersVsBots)) == "Everyone against waves of bots that rank up. The fallen return when a wave is cleared.");
     CHECK(std::string(FormatBlurb(Format::Zombies)) == "Zombie waves in the Abyss, one zombie at a time per player. The fallen return when a wave is cleared.");
 }
@@ -455,7 +469,7 @@ static void TestModes() {
 // Tier row; picking it and leaving it restore the settings.
 static void TestBrawl() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Fists));
-    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kFormatCount) + 2);
+    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kModeOrderCount) + 2);
     const ModeCard& card = s.modes[s.modes.size() - 2];                       // Brawl, then Progression
     CHECK(card.brawl && card.format == Format::FreeForAll && card.name == "BRAWL" && card.selected && card.enabled && !card.progression);
     CHECK(card.description == "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.");
@@ -631,10 +645,13 @@ static void TestGroupsAndSections() {
         const bool coop = c.progression || (!c.brawl && IsBotFormat(c.format));
         CHECK((c.group == ModeGroup::Coop) == coop);
     }
-    CHECK(ModeGroupAt(0) == ModeGroup::Versus && ModeGroupAt(size_t(kFormatCount)) == ModeGroup::Versus &&
-          ModeGroupAt(size_t(kFormatCount) + 1) == ModeGroup::Coop);
+    CHECK(ModeGroupAt(0) == ModeGroup::Versus && ModeGroupAt(kModeOrderCount) == ModeGroup::Versus &&
+          ModeGroupAt(kModeOrderCount + 1) == ModeGroup::Coop);
+    for (Format f : {Format::Duel, Format::LastManStanding, Format::TwoTeams}) {         // Duel, Last Man Standing and Teams are versus modes
+        for (size_t i = 0; i < kModeOrderCount; ++i) if (kModeOrder[i] == f) CHECK(ModeGroupAt(i) == ModeGroup::Versus);
+    }
     CHECK(SectionOf(LobbyRow::Limit) == LobbySection::Match && SectionOf(LobbyRow::Damage) == LobbySection::Match);
-    CHECK(SectionOf(LobbyRow::MyTeam) == LobbySection::Teams && SectionOf(LobbyRow::FriendlyFire) == LobbySection::Teams);
+    CHECK(SectionOf(LobbyRow::MyTeam) == LobbySection::Teams && SectionOf(LobbyRow::FriendlyFire) == LobbySection::Teams && SectionOf(LobbyRow::Teams) == LobbySection::Teams);
     CHECK(SectionOf(LobbyRow::Gear) == LobbySection::Gear && SectionOf(LobbyRow::Tier) == LobbySection::Gear);
     CHECK(SectionOf(LobbyRow::ClearGround) == LobbySection::World && SectionOf(LobbyRow::Sync) == LobbySection::World);
     CHECK(std::string(SectionName(LobbySection::Match)) == "MATCH" && std::string(SectionName(LobbySection::World)) == "WORLD");
@@ -643,7 +660,8 @@ static void TestGroupsAndSections() {
 
 static void TestSummary() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::TwoTeams, Gear::RandomTier));
-    CHECK(s.summary.rfind("2 TEAMS " + kDot + " ", 0) == 0);
+    CHECK(s.summary.rfind("TEAMS (2) " + kDot + " ", 0) == 0);
+    CHECK(BuildLobbyScene(Teamed(true, 4)).summary.rfind("TEAMS (4) " + kDot + " ", 0) == 0);
     CHECK(s.summary.find("Random by tier, tier ") != std::string::npos);
     LobbyScene own = BuildLobbyScene(InLobby(true));
     CHECK(own.summary.find("Own loadouts") != std::string::npos && own.summary.find("tier") == std::string::npos);
@@ -706,6 +724,119 @@ static void TestFilters() {
     CHECK(BuildLobbyScene(in).filters.empty());
 }
 
+// Teams 2..4: one Teams card with a Teams row (2, 3, 4 teams), the stepper, the value, and the browser filter.
+static void TestTeamsRow() {
+    MatchConfig c; c.format = Format::TwoTeams;
+    CHECK(c.teams == 2);
+    CHECK(StepSetting(c, LobbyRow::Teams, 1).teams == 3 && StepSetting(StepSetting(c, LobbyRow::Teams, 1), LobbyRow::Teams, 1).teams == 4);
+    c.teams = 4; CHECK(StepSetting(c, LobbyRow::Teams, 1).teams == 2 && StepSetting(c, LobbyRow::Teams, -1).teams == 3);   // wraps
+    c.teams = 2; CHECK(StepSetting(c, LobbyRow::Teams, -1).teams == 4);
+    CHECK(StepSetting(c, LobbyRow::Teams, 1).format == Format::TwoTeams && StepSetting(c, LobbyRow::Teams, 1).scoreLimit == c.scoreLimit);
+    LobbyLocal l = Teamed(true, 3);
+    const LobbyScene ts = BuildLobbyScene(l);
+    const SettingRow& row = Need(ts, LobbyRow::Teams);
+    CHECK(row.label == "Teams" && row.value == "3 teams" && row.enabled && !row.hint.empty());
+    CHECK(Need(BuildLobbyScene(Teamed(true, 4)), LobbyRow::Teams).value == "4 teams" && Need(BuildLobbyScene(Teamed(true, 2)), LobbyRow::Teams).value == "2 teams");
+    CHECK(!Need(BuildLobbyScene(Teamed(false, 3)), LobbyRow::Teams).enabled);                  // members see it, the host sets it
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies})
+        CHECK(RowOf(BuildLobbyScene(InLobby(true, f)), LobbyRow::Teams) == nullptr);            // only the Teams format has the row
+    // The roster shows four teams.
+    LobbyLocal r = Teamed(true, 4);
+    r.players = {Player("A", true, true, 3), Player("B", false, false, kNoTeam, 3), Player("C", false, false, 1)};
+    LobbyScene s = BuildLobbyScene(r);
+    CHECK(s.roster.size() == 3 && s.roster[0].team == "Gold" && s.roster[1].team == "Gold" && s.roster[1].moved && s.roster[2].team == "Blue");
+    r.config.teams = 3;
+    s = BuildLobbyScene(r);
+    CHECK(s.roster[0].team == "Auto" && !s.roster[1].moved);
+    // One Teams card, selected for the Teams format at any count; no ThreeTeams card.
+    for (int t = 2; t <= 4; ++t) {
+        int cards = 0, lit = 0;
+        for (const ModeCard& m : BuildLobbyScene(Teamed(true, t)).modes) { cards += m.format == Format::TwoTeams || m.format == Format::ThreeTeams; lit += m.selected; }
+        CHECK(cards == 1 && lit == 1);
+    }
+    CHECK(FormatName(Format::TwoTeams) == "Teams" && ModeName(Format::TwoTeams, Gear::Own, 3) == "Teams (3)" && ModeName(Format::TwoTeams, Gear::Own) == "Teams");
+    CHECK(ModeName(uint8_t(Format::TwoTeams), uint8_t(Gear::Own), 4) == "Teams (4)" && ModeName(Format::Duel, Gear::Own, 4) == "Duel");
+    CHECK(ModeName(Format::LastManStanding, Gear::Own) == "Last man standing");
+    // The browser: one "Teams" entry matches "Teams (2)", "Teams (3)" and "Teams (4)", and nothing else.
+    const auto& modes = BrowserModes();
+    size_t at = 0;
+    for (size_t i = 0; i < modes.size(); ++i) if (modes[i] == "Teams") at = i;
+    CHECK(at != 0 && std::find(modes.begin(), modes.end(), "2 teams") == modes.end() && std::find(modes.begin(), modes.end(), "3 teams") == modes.end());
+    BrowserFilter f; f.mode = uint8_t(at);
+    LobbyFound x; x.compatible = true;
+    for (const char* m : {"Teams", "Teams (2)", "Teams (3)", "Teams (4)"}) { x.mode = m; CHECK(PassesFilter(x, f, 8)); }
+    for (const char* m : {"Duel", "Teams of", "Teamsx (3)", "teams (3)", "", "Last man standing"}) { x.mode = m; CHECK(!PassesFilter(x, f, 8)); }
+    f.mode = uint8_t(std::find(modes.begin(), modes.end(), "Last man standing") - modes.begin());
+    x.mode = "Last man standing"; CHECK(PassesFilter(x, f, 8));
+    x.mode = "Duel"; CHECK(!PassesFilter(x, f, 8));
+}
+
+// Duel is for 2 players, Last Man Standing for 2 or more (the host's count).
+static void TestModeAvailability() {
+    for (int n : {0, 1, 3, 4, 8}) {
+        CHECK(!ModeAvailable(Format::Duel, n).ok && std::string(ModeAvailable(Format::Duel, n).hint) == "Duel is for 2 players");
+    }
+    CHECK(ModeAvailable(Format::Duel, 2).ok && std::string(ModeAvailable(Format::Duel, 2).hint).empty());
+    for (int n : {0, 1}) CHECK(!ModeAvailable(Format::LastManStanding, n).ok && std::string(ModeAvailable(Format::LastManStanding, n).hint) == "Needs 2 or more players");
+    for (int n : {2, 3, 8}) CHECK(ModeAvailable(Format::LastManStanding, n).ok);
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::PlayersVsBots, Format::Zombies})
+        for (int n : {0, 1, 2, 5}) CHECK(ModeAvailable(f, n).ok);
+
+    auto card = [](const LobbyScene& s, Format f) { for (const ModeCard& m : s.modes) if (m.format == f && !m.brawl && !m.progression) return m; return ModeCard{}; };
+    auto lobby = [](bool host, int n, Format f) {
+        LobbyLocal l = InLobby(host, f);
+        l.players.clear();
+        for (int i = 0; i < n; ++i) l.players.push_back(Player(i ? "P" : "Ann", i == 0, i == (host ? 0 : n - 1)));
+        return l;
+    };
+    LobbyScene one = BuildLobbyScene(lobby(true, 1, Format::FreeForAll));
+    CHECK(!card(one, Format::Duel).enabled && card(one, Format::Duel).hint == "Duel is for 2 players");
+    CHECK(!card(one, Format::LastManStanding).enabled && card(one, Format::LastManStanding).hint == "Needs 2 or more players");
+    CHECK(card(one, Format::FreeForAll).enabled && card(one, Format::FreeForAll).hint.empty() && card(one, Format::TwoTeams).enabled);
+    LobbyScene two = BuildLobbyScene(lobby(true, 2, Format::FreeForAll));
+    CHECK(card(two, Format::Duel).enabled && card(two, Format::Duel).hint.empty() && card(two, Format::LastManStanding).enabled);
+    LobbyScene three = BuildLobbyScene(lobby(true, 3, Format::FreeForAll));
+    CHECK(!card(three, Format::Duel).enabled && card(three, Format::Duel).hint == "Duel is for 2 players" && card(three, Format::LastManStanding).enabled);
+    LobbyScene member = BuildLobbyScene(lobby(false, 2, Format::FreeForAll));
+    CHECK(!card(member, Format::Duel).enabled && card(member, Format::Duel).hint.empty());     // a member's cards are off, with no hint to read into
+    // The server seat is no player: playerCount overrides the roster's size.
+    LobbyLocal srv = lobby(true, 3, Format::FreeForAll); srv.playerCount = 2;
+    CHECK(card(BuildLobbyScene(srv), Format::Duel).enabled);
+    srv.playerCount = 1;
+    CHECK(!card(BuildLobbyScene(srv), Format::LastManStanding).enabled);
+    // START: Duel needs exactly two, Last Man Standing two or more; the waiting line says why.
+    LobbyScene d1 = BuildLobbyScene(lobby(true, 1, Format::Duel));
+    CHECK(!d1.start && d1.waiting == "Duel is for 2 players" && d1.modes[1].selected);
+    CHECK(BuildLobbyScene(lobby(true, 2, Format::Duel)).start && BuildLobbyScene(lobby(true, 2, Format::Duel)).waiting.empty());
+    CHECK(!BuildLobbyScene(lobby(true, 3, Format::Duel)).start);
+    LobbyScene l1 = BuildLobbyScene(lobby(true, 1, Format::LastManStanding));
+    CHECK(!l1.start && l1.waiting == "Needs 2 or more players");
+    CHECK(BuildLobbyScene(lobby(true, 3, Format::LastManStanding)).start && BuildLobbyScene(lobby(true, 4, Format::LastManStanding)).start);
+    CHECK(BuildLobbyScene(lobby(true, 1, Format::FreeForAll)).start);                          // alone in free-for-all: as before
+    LobbyLocal prog = lobby(true, 1, Format::Duel); prog.progression = true;
+    CHECK(BuildLobbyScene(prog).start);                                                         // Progression ignores the mode
+    CHECK(BuildLobbyScene(lobby(false, 1, Format::Duel)).waiting == "Waiting for the host");   // a member waits for the host, whatever the mode
+}
+
+// A third player joins a lobby set to Duel: Last Man Standing, with the round count and the gear rows kept.
+static void TestDuelOutgrown() {
+    MatchConfig d; d.format = Format::Duel; d.scoreLimit = 5; d.gear = Gear::Mirror; d.tier = 4; d.timeLimitS = 300; d.respawnDelayS = 10; d.damagePct = 150;
+    for (int n : {0, 1, 2}) CHECK(!DuelOutgrown(d, n) && AdjustForPlayers(d, n).format == Format::Duel);
+    for (int n : {3, 4, 8}) {
+        CHECK(DuelOutgrown(d, n));
+        const MatchConfig a = AdjustForPlayers(d, n);
+        CHECK(a.format == Format::LastManStanding && a.scoreLimit == 5 && a.gear == Gear::Mirror && a.tier == 4 && a.timeLimitS == 300 && a.respawnDelayS == 10 && a.damagePct == 150);
+    }
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies}) {
+        MatchConfig o; o.format = f;
+        CHECK(!DuelOutgrown(o, 5) && AdjustForPlayers(o, 5).format == f);
+    }
+    CHECK(std::string(kDuelOutgrownLine) == "Duel is for 2 players: switched to Last man standing");
+    // A lobby back down to two players stays on Last Man Standing (the host picks Duel again).
+    MatchConfig l = AdjustForPlayers(d, 3);
+    CHECK(AdjustForPlayers(l, 2).format == Format::LastManStanding);
+}
+
 int main() {
     TestPrevNext();
     TestStepSetting();
@@ -715,6 +846,9 @@ int main() {
     TestPill();
     TestHeader();
     TestBrowser();
+    TestTeamsRow();
+    TestModeAvailability();
+    TestDuelOutgrown();
     TestOutOfLobby();
     TestHostAgainstMember();
     TestRowsPerFormat();

@@ -10,12 +10,14 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.scoreLimit = std::clamp<uint16_t>(c.scoreLimit, 1, 100);
     c.timeLimitS = std::min<uint16_t>(c.timeLimitS, 3600);
     c.respawnDelayS = std::min<uint16_t>(c.respawnDelayS, 60);
+    if (c.format == Format::ThreeTeams) { c.format = Format::TwoTeams; c.teams = 3; }   // the old "3 teams" mode
+    c.teams = uint8_t(std::clamp<int>(c.teams, kMinTeams, kMaxTeams));
     if (!GearAllowed(c.format, c.gear)) c.gear = Gear::Own;
     c.tier = std::min<uint8_t>(c.tier, 7);
     if (c.gear == Gear::Fists) c.tier = kBrawlTier;                     // Brawl: one fixed strength
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
-    if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || c.format == Format::Duel) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
+    if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || IsRoundFormat(c.format)) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
     return c;
 }
 
@@ -29,10 +31,10 @@ inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
 
 inline Regear JoinRegearFor(const MatchConfig& c) { return RegearFor(c, RespawnCause::Rematch) == Regear::Each ? Regear::Each : Regear::None; }
 
-inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f) {
+inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f, int teamsWanted) {
     std::map<uint8_t, int8_t> out;
-    int teams = TeamCount(f);
-    if (f == Format::FreeForAll || f == Format::Duel || IsBotFormat(f)) {
+    const int teams = TeamCount(f, teamsWanted);
+    if (f == Format::FreeForAll || IsRoundFormat(f) || IsBotFormat(f)) {
         for (const TeamRequest& m : members) out[m.slot] = IsBotFormat(f) ? kHumanTeam : kNoTeam;
         return out;
     }
@@ -71,6 +73,7 @@ inline void KillLog::ForgetAttacker(uint8_t entity) { std::erase_if(last_, [&](c
 
 inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs, const ScoreCarry& carry) {
     cfg_ = Sanitize(cfg); fighters_.clear(); score_.clear(); bank_.clear(); winner_ = kNoWinner; endedPending_ = false; ResetModeState();
+    phase_ = MatchPhase::Idle;                          // the fighters below start the match, even where one was fought before
     if (carry.format == cfg_.format) {                  // a host migration: the old host's scores, kept under each player's id
         for (const PlayerScore& p : carry.players) if (p.id) bank_[p.id] = p;
         score_ = carry.teams;
@@ -81,21 +84,24 @@ inline void Match::Start(const MatchConfig& cfg, const std::vector<FighterInfo>&
 }
 
 inline void Match::AddFighter(const FighterInfo& f) {
+    // A Duel is two fighters: a third joining a fought match sits out until it ends (the rematch is Last Man Standing).
+    const bool bench = cfg_.format == Format::Duel && CombatPhase(phase_) && f.human && !fighters_.count(f.entity) && fighters_.size() >= 2;
     F x; x.team = f.team; x.human = f.human; x.id = f.id; fighters_[f.entity] = x;
     if (auto b = f.id ? bank_.find(f.id) : bank_.end(); b != bank_.end()) {   // a player back: their score, kills and deaths
         F& added = fighters_[f.entity];
         added.kills = b->second.kills; added.deaths = b->second.deaths;
-        if (cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel) score_[int(f.entity)] = b->second.score;
+        if (cfg_.format == Format::FreeForAll || IsRoundFormat(cfg_.format)) score_[int(f.entity)] = b->second.score;
         bank_.erase(b);
     }
     if (!f.human && spawnOwed_ > 0) --spawnOwed_;
+    if (bench) { fighters_[f.entity].alive = false; benched_.insert(f.entity); }
 }
 inline void Match::RemoveFighter(uint8_t entity) {
     auto it = fighters_.find(entity);
-    const bool own = cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel;   // teams keep their score
+    const bool own = cfg_.format == Format::FreeForAll || IsRoundFormat(cfg_.format);   // teams keep their score
     if (it != fighters_.end() && it->second.id)
         bank_[it->second.id] = {it->second.id, own ? Score(int(entity)) : 0, it->second.kills, it->second.deaths};
-    fighters_.erase(entity); skipVotes_.erase(entity); gone_.erase(entity);
+    fighters_.erase(entity); skipVotes_.erase(entity); gone_.erase(entity); benched_.erase(entity);
     if (own) score_.erase(int(entity));
 }
 
@@ -113,7 +119,7 @@ inline bool Match::AwaitsRespawn(uint8_t e) const {
     return it != fighters_.end() && it->second.human && !it->second.alive && !gone_.count(e) && CombatPhase(phase_);
 }
 
-inline int Match::ScoreKeyOf(uint8_t entity) const { return cfg_.format == Format::FreeForAll || cfg_.format == Format::Duel ? int(entity) : int(TeamOf(entity)); }
+inline int Match::ScoreKeyOf(uint8_t entity) const { return cfg_.format == Format::FreeForAll || IsRoundFormat(cfg_.format) ? int(entity) : int(TeamOf(entity)); }
 
 inline void Match::AddPoints(int key, int points) { score_[key] += points; }
 
@@ -156,7 +162,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     // K7: two kills in one host tick (a trade at the score limit): the first one ended the match, the second still counts.
     // Level on the limit, neither wins yet: sudden death, the next kill decides.
     if (phase_ == MatchPhase::Results && endedPending_ && nowMs == phaseStart_ && winner_ != kNoWinner &&
-        (cfg_.format == Format::FreeForAll || TeamCount(cfg_.format) > 0) && !IsBotFormat(cfg_.format)) {
+        (cfg_.format == Format::FreeForAll || TeamCount(cfg_.format, cfg_.teams) > 0) && !IsBotFormat(cfg_.format)) {
         v.alive = false; v.diedAt = nowMs; ++v.deaths;
         auto k = fighters_.find(killer);
         if (killer == victim || k == fighters_.end() || (cfg_.format != Format::FreeForAll && k->second.team == v.team)) return;
@@ -173,7 +179,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     ++v.deaths;
     bool pvb = IsBotFormat(cfg_.format);
     auto kit = fighters_.find(killer);
-    if (cfg_.format == Format::Duel) {                     // rounds go to the last one standing, not to kills
+    if (IsRoundFormat(cfg_.format)) {                     // rounds go to the last one standing, not to kills
         if (kit != fighters_.end() && killer != victim) ++kit->second.kills;
         ResolveDuelRound(nowMs);
         return;
@@ -198,7 +204,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
 }
 
 inline bool Match::Forfeit(uint8_t entity, uint32_t nowMs) {
-    if (cfg_.format != Format::Duel || roundOver_) return false;
+    if (!IsRoundFormat(cfg_.format) || roundOver_) return false;
     if (phase_ != MatchPhase::Live && phase_ != MatchPhase::SuddenDeath) return false;
     if (!Alive(entity)) return false;
     OnDeath(entity, 0, nowMs);                             // as a fall: the round to whoever is left, no kill
@@ -214,7 +220,7 @@ inline bool Match::GiveUpFight(uint8_t entity, uint32_t nowMs) {
 }
 
 inline bool Match::RoundInPlay() const {
-    return cfg_.format == Format::Duel && !roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath);
+    return IsRoundFormat(cfg_.format) && !roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath);
 }
 
 inline bool Match::Draw(uint32_t nowMs) {
@@ -336,18 +342,19 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         score_.clear(); bank_.clear(); winner_ = kNoWinner; ResetModeState();
         std::erase_if(fighters_, [](const auto& kv) { return !kv.second.human; });   // last run's bots are gone
         for (auto& [e, f] : fighters_) { f.alive = true; f.kills = 0; f.deaths = 0; }
+        if (cfg_.format == Format::Duel && fighters_.size() > 2) cfg_.format = Format::LastManStanding;   // Duel is for 2: a third player joined
         phase_ = MatchPhase::Countdown; phaseStart_ = nowMs; ev.rematch = true;
         return ev;
     }
     if (endedPending_) { ev.ended = true; endedPending_ = false; }    // ended during this Tick (time limit)
     if (phase_ == MatchPhase::Idle || phase_ == MatchPhase::Results) return ev;
-    if (cfg_.format == Format::Duel) {
+    if (IsRoundFormat(cfg_.format)) {
         if (phase_ == MatchPhase::Countdown)                            // F2: a fall before the fight would never see a round reset
             for (auto& [e, f] : fighters_)
                 if (!f.alive && f.human && !gone_.count(e) && nowMs - f.diedAt >= 1000u) { f.alive = true; ev.respawn.push_back(e); }
         if (roundOver_ && nowMs - roundEnd_ >= uint32_t(cfg_.respawnDelayS) * 1000u) {
             roundOver_ = false; roundWinner_ = 0; ++round_; ev.roundReset = true;
-            for (auto& [e, f] : fighters_) { if (gone_.count(e)) continue; f.alive = true; ev.respawn.push_back(e); }
+            for (auto& [e, f] : fighters_) { if (gone_.count(e) || benched_.count(e)) continue; f.alive = true; ev.respawn.push_back(e); }
         }
         if (!roundOver_ && !gone_.empty() && CombatPhase(phase_)) ResolveDuelRound(nowMs);   // the opponent left: the round is the survivor's
         return ev;
@@ -453,7 +460,7 @@ inline void Match::StartWave(uint32_t nowMs, Events& ev) {
 }
 inline void Match::ResetModeState() {
     wave_ = 0; remaining_ = 0; waveRank_ = 0; spawnOwed_ = 0; inBreak_ = false; clearedPending_ = false; breakStart_ = 0; skipVotes_.clear();
-    revive_.clear(); gone_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = cfg_.format == Format::Duel ? 1 : 0;
+    revive_.clear(); gone_.clear(); benched_.clear(); roundOver_ = false; roundEnd_ = 0; roundWinner_ = 0; round_ = IsRoundFormat(cfg_.format) ? 1 : 0;
 }
 
 inline std::vector<int8_t> PartitionSides(const std::vector<Point3>& points, int teams) {

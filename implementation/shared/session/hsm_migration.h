@@ -24,7 +24,7 @@ inline ScoreCarry ScoreCarryFrom(const MatchInfo& m) {
     const auto phase = MatchPhase(m.phase);
     if (phase == MatchPhase::Idle || phase == MatchPhase::Results || m.format >= kFormatCount) return b;
     b.format = Format(m.format);
-    const bool own = b.format == Format::FreeForAll || b.format == Format::Duel;   // scored per entity; else per team
+    const bool own = b.format == Format::FreeForAll || IsRoundFormat(b.format);   // scored per entity; else per team
     for (const ScoreEntry& s : m.scores) if (!own) b.teams[s.key] = s.score;
     for (const FighterEntry& f : m.fighters) {
         if (!f.steamId) continue;

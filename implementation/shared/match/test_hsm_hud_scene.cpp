@@ -105,9 +105,14 @@ static void TestStrip() {
     }
     s = BuildHudScene(Teams(), Me(2), kAt);                       // your own team's block is marked
     CHECK(s.strip.size() == 2 && !s.strip[0].mine && s.strip[1].mine);
-    MatchInfo three = Teams(); three.format = uint8_t(Format::ThreeTeams); three.scores = {{0, 1}, {2, 4}};
+    MatchInfo three = Teams(); three.teams = 3; three.scores = {{0, 1}, {2, 4}};
     s = BuildHudScene(three, Me(1), kAt);
     CHECK(s.strip.size() == 3 && s.strip[2].label == "GREEN" && s.strip[2].score == 4 && s.strip[1].score == 0);
+    MatchInfo four = Teams(); four.teams = 4; four.scores = {{0, 1}, {3, 6}};
+    s = BuildHudScene(four, Me(1), kAt);
+    CHECK(s.strip.size() == 4 && s.strip[3].label == "GOLD" && s.strip[3].score == 6 && Same(s.strip[3].color, TeamInk(3)));
+    MatchInfo old = Teams(); old.format = uint8_t(Format::ThreeTeams);                    // the old value is three teams, whatever the count
+    CHECK(BuildHudScene(old, Me(1), kAt).strip.size() == 3);
 
     s = BuildHudScene(Survival(), Me(1), kAt);                    // standing humans against standing bots
     CHECK(s.strip.size() == 2);
@@ -522,7 +527,7 @@ static void TestFeedRows() {
     CHECK(r.spans.size() == 3 && Same(r.spans[0].color, kBloodInk) && Same(r.spans[2].color, kBone));
     CHECK(Same(FighterInk(Survival(), 1), kBone) && Same(FighterInk(Survival(), 11), kBloodInk));
     CHECK(Same(FighterInk(Teams(), 2), TeamInk(1)) && Same(FighterInk(Teams(), 99), kBone));
-    MatchInfo three = Teams(); three.format = uint8_t(Format::ThreeTeams); three.fighters.push_back({5, 2, 0, 0, "Ed"});
+    MatchInfo three = Teams(); three.teams = 3; three.fighters.push_back({5, 2, 0, 0, "Ed"});
     CHECK(Same(FighterInk(three, 5), TeamInk(2)) && Same(FighterInk(three, 1), TeamInk(0)));
     CHECK(Same(FighterInk(Duel(), 2), kBone) && Same(FighterInk(Duel(), 1), kBone));
     MatchInfo stale = Ffa(); stale.fighters[1].team = 1;              // free-for-all ignores a team left from before
@@ -610,6 +615,53 @@ static void TestBoard() {
     CHECK(s.board.footer == "REMATCH IN 6");
 }
 
+// Four teams and Last Man Standing in the HUD: the strip and the board carry every team; the round format's pill, banners and
+// board read like Duel's with more fighters.
+static void TestFourTeamsAndLms() {
+    MatchInfo four = Teams(); four.teams = 4; four.scores = {{0, 1}, {3, 6}};
+    four.fighters = {{1, 0, 3, 1, "Host"}, {2, 1, 5, 0, "Ann"}, {3, 2, 0, 4, "Bo"}, {4, 3, 2, 2, "Cy"}, {5, 3, 1, 0, "Di"}};
+    LocalHud tab = Me(); tab.tab = true;
+    HudScene s = BuildHudScene(four, tab, kAt);
+    CHECK(s.board.title == "TEAMS (4) \xC2\xB7 FIRST TO 10");
+    int bands = 0;
+    for (const BoardRow& r : s.board.rows) if (r.kind == BoardRow::Kind::Band) { ++bands; if (r.name == "GOLD") CHECK(r.score == 6 && Same(r.swatch, TeamColor(3))); }
+    CHECK(bands == 4 && s.board.rows.size() == 4 + 5);
+    CHECK(Same(FighterInk(four, 4), TeamInk(3)));
+    MatchInfo three = four; three.teams = 3;                                        // a fourth-team fighter left outside the teams comes last
+    s = BuildHudScene(three, tab, kAt);
+    CHECK(s.board.rows.size() == 3 + 5 && (s.board.rows.back().name == "Di" || s.board.rows.back().name == "Cy"));
+
+    MatchInfo l; l.format = uint8_t(Format::LastManStanding); l.scoreLimit = 3; l.phase = uint8_t(MatchPhase::Live); l.round = 2; l.respawnDelayS = 4;
+    l.scores = {{1, 1}, {2, 2}, {3, 0}};
+    l.fighters = {{1, -1, 1, 0, "Host", 0, true}, {2, -1, 2, 1, "Ann", 60, true}, {3, -1, 0, 2, "Bo", 60, false}};
+    s = BuildHudScene(l, Me(), kAt);
+    CHECK(s.pill.text == "ROUND 2" && s.strip.size() == 2 && s.strip[1].label == "ANN" && s.strip[1].score == 2);   // you against the top rival
+    l.scores = {{1, 2}, {2, 2}, {3, 0}};
+    CHECK(BuildHudScene(l, Me(), kAt).pill.text == "FINAL ROUND");
+    l.roundGapLeftMs = 2400; l.roundWinner = 2;
+    CHECK(BuildHudScene(l, Me(), kAt).pill.text == "NEXT ROUND IN 3");
+    LocalHud dead = Me(); dead.dead = true; dead.diedAtMs = kAt;
+    s = BuildHudScene(l, dead, kAt);
+    CHECK(s.dead.title == "ROUND OVER" && s.dead.detail == "next round in 3");
+    l.roundGapLeftMs = 0; l.round = 2; l.phase = uint8_t(MatchPhase::Live);
+    s = BuildHudScene(l, tab, kAt);
+    CHECK(Has(s.board.title, "LAST MAN STANDING") && Has(s.board.title, "FIRST TO 3") && !Has(s.board.title, "BEST OF"));
+
+    BannerTracker t; MatchInfo c = l; c.phase = uint8_t(MatchPhase::Countdown); c.round = 1; c.scores = {}; c.roundGapLeftMs = 0; c.roundWinner = 0;
+    t.Observe(c, 1, 100);
+    c.phase = uint8_t(MatchPhase::Live); t.Observe(c, 1, 200);
+    CHECK(t.shot().text == "FIGHT" && t.shot().sub == "ROUND 1");
+    c.roundGapLeftMs = 3500; c.roundWinner = 3; c.scores = {{3, 1}}; t.Observe(c, 1, 300);
+    CHECK(t.shot().text == "ROUND TO BO" && t.shot().sub == "ROUND 1");
+    c.roundGapLeftMs = 0; c.roundWinner = 0; c.round = 2; t.Observe(c, 1, 400);
+    CHECK(t.shot().text == "FIGHT" && t.shot().sub == "ROUND 2");
+    c.phase = uint8_t(MatchPhase::SuddenDeath); t.Observe(c, 1, 500);
+    CHECK(t.shot().text == "SUDDEN DEATH" && t.shot().sub == "NEXT ROUND WINS");
+    MatchInfo r = l; r.phase = uint8_t(MatchPhase::Results); r.winner = 2; r.timeLeftMs = 4200;
+    CHECK(BuildHudScene(r, Me(), kAt).pill.text == "ANN WINS");
+    r.winner = 1; CHECK(BuildHudScene(r, Me(), kAt).pill.text == "YOU WIN");
+}
+
 int main() {
     TestBannerLook();
     TestFeedOpacity();
@@ -627,6 +679,7 @@ int main() {
     TestFeedRows();
     TestFeedView();
     TestBoard();
+    TestFourTeamsAndLms();
     if (g_fail) { std::printf("%d hud scene checks failed\n", g_fail); return 1; }
     std::printf("all hud scene tests passed\n");
     return 0;

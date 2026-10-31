@@ -17,6 +17,19 @@ int main() {
     CHECK(ParseServerFormat("zombies", &f) && f == Format::Zombies);
     CHECK(ParseServerFormat("duel", &f) && f == Format::Duel);
     CHECK(!ParseServerFormat("bogus", &f));
+    int teams = 0;
+    CHECK(ParseServerFormat("lms", &f, &teams) && f == Format::LastManStanding && teams == 2);
+    CHECK(ParseServerFormat("Teams", &f, &teams) && f == Format::TwoTeams && teams == 2);
+    CHECK(ParseServerFormat("teams3", &f, &teams) && f == Format::TwoTeams && teams == 3);   // the old "3 teams" word
+    CHECK(ParseServerFormat("TEAMS4", &f, &teams) && f == Format::TwoTeams && teams == 4);
+    CHECK(ParseServerFormat("teams2", &f, &teams) && f == Format::TwoTeams && teams == 2);
+    CHECK(!ParseServerFormat("teams5", &f, &teams) && !ParseServerFormat("teams1", &f, &teams) && !ParseServerFormat("team3", &f, &teams) && !ParseServerFormat("", &f));
+    CHECK(ParseServerFormat("ffa", &f) && f == Format::FreeForAll);                          // the team count is optional
+    // A duel rotation is Last Man Standing unless exactly two players are in.
+    CHECK(ServerFormatFor(Format::Duel, 2) == Format::Duel);
+    for (int n : {0, 1, 3, 8}) CHECK(ServerFormatFor(Format::Duel, n) == Format::LastManStanding);
+    for (Format o : {Format::FreeForAll, Format::TwoTeams, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies})
+        for (int n : {1, 2, 5}) CHECK(ServerFormatFor(o, n) == o);
 
     // Map list parsing. "all" means every map the picker offers for the format (no Tavern, Cutting, Smithery).
     size_t ffaMaps = 0;
@@ -26,6 +39,7 @@ int main() {
     auto z = ParseServerMaps("all", Format::Zombies);
     CHECK(z.size() == 1 && z[0] == Idx("Abyss_Map_Open_EA"));
     CHECK(ParseServerMaps("all", Format::Duel).size() == 8);                             // arenas only
+    CHECK(ParseServerMaps("all", Format::LastManStanding).size() == ffaMaps);            // like free-for-all: arenas and big levels
     std::vector<std::string> unk;
     auto m = ParseServerMaps(" yard , EAST TOWER,Map_Arena_Cellar, nope, yard, Tavern", Format::FreeForAll, &unk);
     CHECK(m.size() == 4 && m[0] == Idx("Map_Arena_Yard") && m[1] == Idx("Map_Arena_EastTower") && m[2] == Idx("Map_Arena_Cellar"));

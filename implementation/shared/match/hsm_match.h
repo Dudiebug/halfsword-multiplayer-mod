@@ -18,9 +18,12 @@
 namespace hsm {
 
 // PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with the game's zombie Willies, one at a time
-// per player.
-enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5 };
-constexpr uint8_t kFormatCount = 6;
+// per player. TwoTeams is "Teams": MatchConfig::teams (2..4) says how many; ThreeTeams is only the old value of 3 teams
+// (Sanitize turns it into TwoTeams with teams = 3), never produced. LastManStanding: Duel's rounds for any number of
+// fighters; Duel itself is for exactly 2.
+enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5, LastManStanding = 6 };
+constexpr uint8_t kFormatCount = 7;
+constexpr int kMinTeams = 2, kMaxTeams = 4;
 // PvP gear: own loadout / random by tier / everyone identical / Fists: nobody wears or holds anything (the Brawl card,
 // free-for-all only). Fists is no choice of the Gear row (kGearRowCount): the mode card sets it.
 enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3 };
@@ -30,6 +33,7 @@ constexpr int8_t kHumanTeam = 0, kBotTeam = 1;   // players vs bots
 
 struct MatchConfig {
     Format format = Format::FreeForAll;
+    uint8_t teams = 2;                // the TwoTeams format: how many teams, kMinTeams..kMaxTeams (Sanitize)
     uint16_t scoreLimit = 5;
     uint16_t timeLimitS = 0;          // 0 = no time limit
     uint16_t respawnDelayS = 5;
@@ -78,8 +82,15 @@ inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Fo
 // The gear settings a format takes: own / random by tier / identical anywhere (Survival and Zombies too, 0.8.0-pre20);
 // Fists only for the Brawl card (free-for-all).
 inline bool GearAllowed(Format f, Gear g) { return g == Gear::Fists ? f == Format::FreeForAll : uint8_t(g) < kGearCount; }
-inline int TeamCount(Format f) { return f == Format::TwoTeams ? 2 : f == Format::ThreeTeams ? 3 : IsBotFormat(f) ? 2 : 0; }
-inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5 : f == Format::Duel ? 3 : 10; }
+// The Teams format; ThreeTeams is the old value of 3 teams, which still counts so a stale one cannot lose its colours.
+inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams; }
+// The Duel rules: rounds, the last one standing takes the round (Duel for two fighters, Last Man Standing for any number).
+inline bool IsRoundFormat(Format f) { return f == Format::Duel || f == Format::LastManStanding; }
+// Teams in a match: `teams` (2..4) for the Teams format, 3 for the old ThreeTeams value, 2 for the bot formats, else 0.
+inline int TeamCount(Format f, int teams) {
+    return f == Format::TwoTeams ? std::clamp(teams, kMinTeams, kMaxTeams) : f == Format::ThreeTeams ? 3 : IsBotFormat(f) ? 2 : 0;
+}
+inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5 : IsRoundFormat(f) ? 3 : 10; }
 MatchConfig Sanitize(MatchConfig c);
 
 // Generated gear at a respawn: None keeps the slot's loadout, Each gives every respawning fighter a fresh one, Shared
@@ -99,7 +110,7 @@ inline bool HitAllowed(bool victimOwnedHere, int8_t attackerTeam, int8_t victimT
 }
 
 struct TeamRequest { uint8_t slot = 0; int8_t pick = kNoTeam; int8_t hostOverride = kNoTeam; };
-std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f);
+std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f, int teams);
 
 struct Rgba { float r = 0, g = 0, b = 0, a = 0; };
 Rgba TeamColor(int team);             // a == 0: no tint (free-for-all keeps players' own colours)
@@ -162,7 +173,10 @@ public:
     // least one and at most kMaxBotsAlive; the host sets the count every tick from its roster. Other formats: kMaxBotsAlive.
     void SetPlayers(int players) { players_ = players; }
     int MaxBotsAlive() const;
-    void AddFighter(const FighterInfo& f);              // joins mid-match: alive; a player with an id comes back with the score they left with
+    // Joins mid-match: alive; a player with an id comes back with the score they left with. Duel is for two: a third human
+    // joining a fought Duel is down and out of every round (AwaitsRespawn, so the host spawns no body for it) until the match
+    // ends, and the rematch is Last Man Standing.
+    void AddFighter(const FighterInfo& f);
     // A fighter leaves for good. Its score goes with the slot (the slot's next player starts at 0), but a player with an id has
     // it kept under that id until the rematch (AddFighter), so a rejoin on any slot gets it back. Team scores stay with the team.
     void RemoveFighter(uint8_t entity);
@@ -238,6 +252,7 @@ private:
     std::map<int, int> score_;
     std::map<uint64_t, PlayerScore> bank_;              // by id: scores of players not in the match now (left, or not back since a migration)
     std::set<uint8_t> gone_;                            // K1: left mid-match, down until Return
+    std::set<uint8_t> benched_;                         // Duel: a third player who joined a fought match: down and out of every round until it ends
     int winner_ = kNoWinner;
     bool endedPending_ = false;
     // bot formats
@@ -292,7 +307,7 @@ private:
 // formats (fought over the fallen bots' loot) a minute after each piece was dropped (session/hsm_lease.h).
 enum class DropClear : uint8_t { EachRound = 0, EachMatch = 1, AfterIdle = 2 };
 inline DropClear DropClearFor(Format f) {
-    return f == Format::Duel ? DropClear::EachRound : IsBotFormat(f) ? DropClear::AfterIdle : DropClear::EachMatch;
+    return IsRoundFormat(f) ? DropClear::EachRound : IsBotFormat(f) ? DropClear::AfterIdle : DropClear::EachMatch;
 }
 // True once at the moment each machine clears (from the MatchInfo it sees): Duel's round moving on from one already seen
 // (the next round, or the rematch's round 1); free-for-all and teams' results giving way to the rematch. Never in the

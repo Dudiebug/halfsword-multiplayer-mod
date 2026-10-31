@@ -62,7 +62,7 @@ inline Rgba FighterInk(const MatchInfo& m, uint8_t entity) {
     if (!f) return style::kBone;
     Format fmt = Format(m.format);
     if (IsBotFormat(fmt)) return f->team == kBotTeam ? style::kBloodInk : style::kBone;
-    if (fmt == Format::TwoTeams || fmt == Format::ThreeTeams) return style::TeamInk(f->team);
+    if (HasTeams(fmt)) return style::TeamInk(f->team);
     return style::kBone;
 }
 
@@ -98,7 +98,7 @@ inline BannerShot ResultShot(const MatchInfo& m, uint8_t me) {
     if (f == Format::Zombies) return {"OVERRUN", "SURVIVED " + std::to_string(ScoreOf(m, kHumanTeam)) + " WAVES", style::kBloodInk};
     if (m.winner == Match::kNoWinner) return {"DRAW", "", style::kIron};
     if (f == Format::PlayersVsBots) return m.winner == kBotTeam ? BannerShot{"BOTS WIN", "", style::kBloodInk} : BannerShot{"PLAYERS WIN", "", style::kOk};
-    if (f == Format::FreeForAll || f == Format::Duel)
+    if (f == Format::FreeForAll || IsRoundFormat(f))
         return m.winner == int(me) ? BannerShot{"YOU WIN", "", style::kWarn} : BannerShot{Upper(NameOf(m, uint8_t(m.winner))) + " WINS", "", style::kBloodInk};
     return {TeamName(m.winner) + " WINS", "", style::TeamInk(m.winner)};
 }
@@ -117,12 +117,12 @@ public:
             MatchPhase p = MatchPhase(m.phase), prev = MatchPhase(phase_);
             bool fighting = p == MatchPhase::Live || p == MatchPhase::SuddenDeath;
             if (p != prev) {
-                if (p == MatchPhase::Live && prev == MatchPhase::Countdown) Fire("FIGHT", f == Format::Duel ? RoundName(m) : "", style::kBloodInk, nowMs);
+                if (p == MatchPhase::Live && prev == MatchPhase::Countdown) Fire("FIGHT", IsRoundFormat(f) ? RoundName(m) : "", style::kBloodInk, nowMs);
                 else if (p == MatchPhase::SuddenDeath)
-                    Fire("SUDDEN DEATH", f == Format::FreeForAll ? "NEXT KILL WINS" : f == Format::Duel ? "NEXT ROUND WINS"
+                    Fire("SUDDEN DEATH", f == Format::FreeForAll ? "NEXT KILL WINS" : IsRoundFormat(f) ? "NEXT ROUND WINS"
                                          : IsBotFormat(f) ? "CLEAR THE WAVE TO WIN" : "NEXT POINT WINS", style::kBloodInk, nowMs);
                 else if (p == MatchPhase::Results) { shot_ = ResultShot(m, me); shot_.atMs = nowMs; }
-            } else if (fighting && f == Format::Duel) {
+            } else if (fighting && IsRoundFormat(f)) {
                 if (gap && !gap_) {
                     if (!m.roundWinner) Fire("ROUND DRAWN", "ROUND " + std::to_string(m.round), style::kIron, nowMs);
                     else if (m.roundWinner == me) Fire("ROUND TO YOU", "ROUND " + std::to_string(m.round), style::kOk, nowMs);
@@ -213,7 +213,6 @@ struct HudScene {
 };
 
 namespace hud_detail {
-inline bool TeamFormat(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams; }
 
 inline std::vector<ScoreBlock> Strip(const MatchInfo& m, uint8_t me) {
     Format f = Format(m.format);
@@ -224,8 +223,8 @@ inline std::vector<ScoreBlock> Strip(const MatchInfo& m, uint8_t me) {
         return {{"SURVIVORS", humans, style::kBone, true}, {"BOTS", bots, style::kBloodInk, false}};
     }
     std::vector<ScoreBlock> s;
-    if (TeamFormat(f)) {
-        for (int t = 0; t < TeamCount(f); ++t) s.push_back({TeamName(t), ScoreOf(m, t), style::TeamInk(t), mine && mine->team == t});
+    if (HasTeams(f)) {
+        for (int t = 0; t < TeamCount(f, m.teams); ++t) s.push_back({TeamName(t), ScoreOf(m, t), style::TeamInk(t), mine && mine->team == t});
         return s;
     }
     s.push_back({"YOU", ScoreOf(m, me), style::kBone, true});
@@ -245,7 +244,7 @@ inline SceneText Pill(const MatchInfo& m, uint8_t me, bool oneFight) {
     if (InRoundGap(m)) { p.text = "NEXT ROUND IN " + Seconds(m.roundGapLeftMs); return p; }
     if (InWaveBreak(m)) { p.text = "NEXT WAVE IN " + Seconds(m.roundGapLeftMs); return p; }
     if (m.phase == uint8_t(MatchPhase::SuddenDeath)) { p.text = "SUDDEN DEATH"; p.color = style::kBloodInk; return p; }
-    if (f == Format::Duel) { p.text = RoundName(m); if (FinalRound(m)) p.color = style::kWarn; return p; }
+    if (IsRoundFormat(f)) { p.text = RoundName(m); if (FinalRound(m)) p.color = style::kWarn; return p; }
     if (IsBotFormat(f)) {
         int bots = 0;
         for (const FighterEntry& e : m.fighters) if (e.team == kBotTeam && e.alive) ++bots;
@@ -263,7 +262,7 @@ inline DeadPanel Dead(const MatchInfo& m, const LocalHud& l, uint32_t nowMs) {
     if (!l.dead || (m.phase != uint8_t(MatchPhase::Live) && m.phase != uint8_t(MatchPhase::SuddenDeath))) return d;
     d.visible = true;
     Format f = Format(m.format);
-    if (f == Format::Duel) {                     // the round is over; everybody returns together after the gap
+    if (IsRoundFormat(f)) {                      // the round is over; everybody returns together after the gap
         d.title = "ROUND OVER";
         if (m.roundGapLeftMs) {
             d.detail = "next round in " + Seconds(m.roundGapLeftMs);
@@ -302,18 +301,18 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
                       : IsBotFormat(f) ? "WAVE " + std::to_string(ScoreOf(m, kHumanTeam) + 1)
                       : "FIRST TO " + std::to_string(m.scoreLimit);
     bool oneFight = l.oneFight && IsBotFormat(f);               // Progression: back to the Tavern after the results
-    b.title = (oneFight ? std::string("PROGRESSION FIGHT") : Upper(ModeName(f, Gear(m.gear))) + " \xC2\xB7 " + limit)
+    b.title = (oneFight ? std::string("PROGRESSION FIGHT") : Upper(ModeName(f, Gear(m.gear), m.teams)) + " \xC2\xB7 " + limit)
             + (l.map.empty() ? "" : " \xC2\xB7 " + Upper(l.map));
     if (m.phase == uint8_t(MatchPhase::Results)) b.footer = (oneFight ? "BACK TO THE TAVERN IN " : "REMATCH IN ") + Seconds(m.timeLeftMs);
 
     // Fighters by score, then kills (free-for-all and Duel score per fighter; elsewhere a fighter's score is kills).
-    bool perEntity = f == Format::FreeForAll || f == Format::Duel;
+    bool perEntity = f == Format::FreeForAll || IsRoundFormat(f);
     std::vector<std::pair<int8_t, BoardRow>> rows;               // with the team, for grouping
     for (const FighterEntry& e : m.fighters) {
         if (IsBotFormat(f) && e.team == kBotTeam) continue;     // a wave of "Bot" rows says nothing
         BoardRow r;
         r.name = e.name.empty() ? "#" + std::to_string(e.entity) : e.name;
-        r.swatch = TeamFormat(f) ? TeamColor(e.team) : style::kIron;
+        r.swatch = HasTeams(f) ? TeamColor(e.team) : style::kIron;
         r.ink = e.alive ? style::kBone : style::kIron;
         r.kills = e.kills; r.deaths = e.deaths; r.score = perEntity ? ScoreOf(m, e.entity) : e.kills;
         r.pingMs = e.pingMs; r.host = e.entity == l.host; r.local = e.entity == l.me; r.dead = !e.alive;
@@ -323,12 +322,12 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
     std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& c) {
         return a.second.score != c.second.score ? a.second.score > c.second.score : a.second.kills > c.second.kills;
     });
-    if (!TeamFormat(f)) {
+    if (!HasTeams(f)) {
         for (auto& [team, r] : rows) b.rows.push_back(std::move(r));
         return b;
     }
     // Team formats: a band per team (its name, colour and score), its fighters under it; anyone outside the teams last.
-    int teams = TeamCount(f);
+    int teams = TeamCount(f, m.teams);
     for (int t = 0; t <= teams; ++t) {
         if (t < teams) {
             BoardRow band;
