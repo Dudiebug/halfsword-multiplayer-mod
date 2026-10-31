@@ -876,7 +876,24 @@ static void TestBrawl() {
     CHECK(m.phase() == MatchPhase::Results && m.winner() == 1);                       // first to the limit wins
 }
 
+// A Progression fight shows its results for 3 s (then the host travels to the Tavern); the rematch screen keeps 10 s.
+static void TestResultsDuration() {
+    for (uint32_t ms : {Match::kResultsMs, uint32_t(3000)}) {
+        Match m; m.Start(Cfg(Format::FreeForAll, 1), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+        if (ms != Match::kResultsMs) m.SetResultsMs(ms);
+        m.Tick(Match::kCountdownMs);
+        uint32_t t = Match::kCountdownMs + 100;
+        m.OnDeath(2, 1, t); m.Tick(t + 1);
+        CHECK(m.phase() == MatchPhase::Results);
+        CHECK(m.TimeLeftMs(t) == ms);
+        CHECK(!m.Tick(t + ms - 1).rematch && m.phase() == MatchPhase::Results && m.TimeLeftMs(t + ms - 1) == 1);
+        CHECK(m.Tick(t + ms).rematch && m.phase() == MatchPhase::Countdown);
+    }
+    CHECK(Match::kResultsMs == 10000);
+}
+
 int main() {
+    TestResultsDuration();
     TestBrawl();
     TestWaveBreakAndClearSettings();
     TestHitAllowed();

@@ -1615,7 +1615,7 @@ private:
                         ",\"fight\":" + (InFightLevel() ? "true" : "false") + ",\"match_level\":" + (MatchLevel() ? "true" : "false") +
                         ",\"paused\":" + (adapter_.GamePaused() ? "true" : "false") + ",\"mode_ticking\":" + (NowMs() - lastModeTick_ < 1000 ? "true" : "false");
         j += ",\"match\":{\"phase\":" + std::to_string(info_.phase) + ",\"format\":" + std::to_string(info_.format) + ",\"status\":" +
-             JsonString(StatusLine(info_, IsHost() ? HostEntity() : world_.myEntity())) + "}";
+             JsonString(StatusLine(info_, IsHost() ? HostEntity() : world_.myEntity(), oneFight_)) + "}";
         j += ",\"local\":" + FighterJson(IsHost() ? HostEntity() : world_.myEntity(), InFightLevel() ? adapter_.PlayerWillie(0) : nullptr);
         j += ",\"fighters\":[";
         bool first = true;
@@ -4022,6 +4022,7 @@ private:
         adapter_.SetBare(IsBrawl(match_.config()));      // every body from the match start on (RespawnAll below) comes up bare
         adapter_.SetBuild(ForcedWeight(match_.config()), cfg_.forceStrength && !progression, int(match_.config().tier));   // and in the tier's build
         progression_ = progression; oneFight_ = progression;
+        match_.SetResultsMs(progression ? 3000 : Match::kResultsMs);   // a Progression fight goes back to the Tavern after 3 s
         sidesValid_ = false;
         HSM_LOG("host: match started (format %d, limit %u, time %us, friendly fire %s)%s", int(cfg.format), cfg.scoreLimit, cfg.timeLimitS,
                 cfg.friendlyFire ? "on" : "off", progression ? " - Progression co-op" : "");

@@ -332,7 +332,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         int leader = UniqueLeader();
         if (leader != kNoWinner) End(leader, nowMs);
         else { phase_ = MatchPhase::SuddenDeath; phaseStart_ = nowMs; }
-    } else if (phase_ == MatchPhase::Results && elapsed >= kResultsMs) {
+    } else if (phase_ == MatchPhase::Results && elapsed >= resultsMs_) {
         score_.clear(); bank_.clear(); winner_ = kNoWinner; ResetModeState();
         std::erase_if(fighters_, [](const auto& kv) { return !kv.second.human; });   // last run's bots are gone
         for (auto& [e, f] : fighters_) { f.alive = true; f.kills = 0; f.deaths = 0; }
@@ -411,7 +411,7 @@ inline bool Match::VoteSkip(uint8_t entity, uint32_t nowMs) {
 inline uint32_t Match::TimeLeftMs(uint32_t nowMs) const {
     uint32_t elapsed = nowMs - phaseStart_, total = 0;
     if (phase_ == MatchPhase::Countdown) total = kCountdownMs;
-    else if (phase_ == MatchPhase::Results) total = kResultsMs;
+    else if (phase_ == MatchPhase::Results) total = resultsMs_;
     else if (phase_ == MatchPhase::Live) total = uint32_t(cfg_.timeLimitS) * 1000u;
     return total > elapsed ? total - elapsed : 0;
 }
