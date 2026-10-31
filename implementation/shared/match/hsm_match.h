@@ -25,6 +25,24 @@ constexpr uint8_t kFormatCount = 6;
 // free-for-all only). Fists is no choice of the Gear row (kGearRowCount): the mode card sets it.
 enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3 };
 constexpr uint8_t kGearCount = 4, kGearRowCount = 3;
+// The Weapons row: which weapons the generated gear (RandomTier, Mirror) may hold, by the game's own weapon-type filter
+// (GameWeaponTypeByte). Any leaves the game's fields alone.
+enum class WeaponFilter : uint8_t { Any = 0, Swords1H = 1, Swords2H = 2, Polearms = 3, AxesMaces = 4 };
+constexpr uint8_t kWeaponFilterCount = 5;
+// Our filter -> the byte the game's weapon-type fields take (GI "Free Mode Opponents Weapons Type", "NPC Weapons Type";
+// Enum_WeaponType). ASSUMPTION pending the in-game test: Enum_WeaponType runs 0 Any, 1 1H swords, 2 2H swords, 3 Polearms,
+// 4 Axes & maces. The enum's names are not known offline; this table is the one place to correct once they are.
+inline constexpr uint8_t kGameWeaponTypeByte[kWeaponFilterCount] = {0, 1, 2, 3, 4};
+inline uint8_t GameWeaponTypeByte(WeaponFilter w) { return kGameWeaponTypeByte[uint8_t(w) < kWeaponFilterCount ? uint8_t(w) : 0]; }
+inline const char* WeaponFilterName(WeaponFilter w) {
+    switch (w) {
+        case WeaponFilter::Swords1H: return "1H swords";
+        case WeaponFilter::Swords2H: return "2H swords";
+        case WeaponFilter::Polearms: return "Polearms";
+        case WeaponFilter::AxesMaces: return "Axes & maces";
+        default: return "Any";
+    }
+}
 constexpr int8_t kNoTeam = -1;        // free-for-all: everyone on their own
 constexpr int8_t kHumanTeam = 0, kBotTeam = 1;   // players vs bots
 
@@ -36,6 +54,7 @@ struct MatchConfig {
     bool friendlyFire = false;
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
+    WeaponFilter weapons = WeaponFilter::Any;   // random / identical gear only: the weapon types it may roll (lobby key hsm_wpn); host-side, never on the wire
     uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
     uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
     uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
@@ -271,20 +290,21 @@ private:
     float progress_ = 0.0f;
 };
 
-// Generated loadouts made ahead, for one tier at a time: another tier empties it.
+// Generated loadouts made ahead, for one (tier, weapon filter) at a time: another tier or filter empties it.
 // Before the match starts, while its fighters come in: how many loadouts its start will generate for `humans` players
 // (the start regears like a rematch, RegearFor), so the host can make them ahead in that wait.
 size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans);
 
 class GearPool {
 public:
-    bool Wants(uint8_t tier, size_t ahead);                 // true while it holds fewer than `ahead` for `tier`
-    void Put(uint8_t tier, std::vector<uint8_t> blob);      // an empty blob (a failed generation) is not kept
-    std::vector<uint8_t> Take(uint8_t tier);                // the oldest one made for `tier`; empty when none
+    bool Wants(uint8_t tier, WeaponFilter weapons, size_t ahead);                 // true while it holds fewer than `ahead` for `tier` under `weapons`
+    void Put(uint8_t tier, WeaponFilter weapons, std::vector<uint8_t> blob);      // an empty blob (a failed generation) is not kept
+    std::vector<uint8_t> Take(uint8_t tier, WeaponFilter weapons);                // the oldest one made for them; empty when none
     size_t size() const { return blobs_.size(); }
 private:
-    void Use(uint8_t tier);
+    void Use(uint8_t tier, WeaponFilter weapons);
     uint8_t tier_ = 0xFF;
+    WeaponFilter weapons_ = WeaponFilter::Any;
     std::vector<std::vector<uint8_t>> blobs_;
 };
 

@@ -178,6 +178,7 @@ MatchConfig Lobby::config() const {
     c.friendlyFire = steam::LobbyData(lobby_, "hsm_ff") == "1";
     c.gear = Gear(IntOr(steam::LobbyData(lobby_, "hsm_gear"), 0));
     c.tier = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tier"), 2), 0, 7));
+    c.weapons = WeaponFilter(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wpn"), 0), 0, int(kWeaponFilterCount) - 1));   // none: Any
     c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
     c.waveBreakS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wbrk"), 0), 0, 600));      // 0: the format's own
     c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
@@ -195,6 +196,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_ff", c.friendlyFire ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_gear", std::to_string(int(c.gear)));
     steam::SetLobbyData(lobby_, "hsm_tier", std::to_string(int(c.tier)));
+    steam::SetLobbyData(lobby_, "hsm_wpn", std::to_string(int(c.weapons)));
     steam::SetLobbyData(lobby_, "hsm_dmg", std::to_string(c.damagePct));
     steam::SetLobbyData(lobby_, "hsm_wbrk", std::to_string(c.waveBreakS));
     steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(c.clearGroundMin));

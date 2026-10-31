@@ -4647,9 +4647,9 @@ private:
         const double t0 = game::SteadyNowMs();
         int ahead = 0;
         auto next = [&] {                                // one made ahead in the gap if there is one, else made now
-            std::vector<uint8_t> b = gearPool_.Take(cfg.tier);
+            std::vector<uint8_t> b = gearPool_.Take(cfg.tier, cfg.weapons);
             if (!b.empty()) { ++ahead; return b; }
-            return game::RandomPassportBlob(adapter_, cfg.tier);
+            return game::RandomPassportBlob(adapter_, cfg.tier, cfg.weapons);
         };
         std::vector<uint8_t> shared;
         if (mode == Regear::Shared) shared = next();
@@ -4679,11 +4679,11 @@ private:
         if (now < nextGearAhead_) return;
         const MatchConfig cfg = StartConfig();
         const size_t want = StartLoadoutsAhead(cfg, roster_.size());
-        if (!want || !gearPool_.Wants(cfg.tier, want)) return;
-        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, cfg.tier);
+        if (!want || !gearPool_.Wants(cfg.tier, cfg.weapons, want)) return;
+        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, cfg.tier, cfg.weapons);
         nextGearAhead_ = now + (blob.empty() ? 1000 : 250);
         if (blob.empty()) return;
-        gearPool_.Put(cfg.tier, std::move(blob));
+        gearPool_.Put(cfg.tier, cfg.weapons, std::move(blob));
         HSM_LOG("host: start loadout %zu of %zu made ahead (tier %u)", gearPool_.size(), want, unsigned(cfg.tier));
     }
 
@@ -4692,13 +4692,14 @@ private:
     // The first waits a second into the gap (not on the deciding blow), the next a quarter second after it.
     void MakeGearAhead(uint32_t now) {
         const uint8_t tier = match_.config().tier;
+        const WeaponFilter weapons = match_.config().weapons;
         const size_t want = match_.LoadoutsAhead();
         if (!want) { nextGearAhead_ = now + 1000; return; }
-        if (now < nextGearAhead_ || !gearPool_.Wants(tier, want)) return;
-        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, tier);
+        if (now < nextGearAhead_ || !gearPool_.Wants(tier, weapons, want)) return;
+        std::vector<uint8_t> blob = game::RandomPassportBlob(adapter_, tier, weapons);
         nextGearAhead_ = now + (blob.empty() ? 1000 : 250);
         if (blob.empty()) return;
-        gearPool_.Put(tier, std::move(blob));
+        gearPool_.Put(tier, weapons, std::move(blob));
         HSM_LOG("host: loadout %zu of %zu made ahead (tier %u)", gearPool_.size(), want, unsigned(tier));
     }
 

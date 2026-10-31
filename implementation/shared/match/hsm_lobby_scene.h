@@ -61,7 +61,7 @@ struct LobbyLocal {
 };
 
 // MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
+enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, Weapons, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
@@ -84,7 +84,7 @@ enum class LobbySection : uint8_t { Match, Teams, Gear, World, Count };
 inline LobbySection SectionOf(LobbyRow r) {
     switch (r) {
         case LobbyRow::FriendlyFire: case LobbyRow::MyTeam: return LobbySection::Teams;
-        case LobbyRow::Gear: case LobbyRow::Tier: return LobbySection::Gear;
+        case LobbyRow::Gear: case LobbyRow::Tier: case LobbyRow::Weapons: return LobbySection::Gear;
         case LobbyRow::WaveBreak: case LobbyRow::ClearGround: case LobbyRow::Sync: return LobbySection::World;
         default: return LobbySection::Match;
     }
@@ -188,6 +188,11 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             break;
         }
         case LobbyRow::Tier: c.tier = uint8_t((std::min<uint8_t>(c.tier, 7) + (back ? 7 : 1)) % 8); break;
+        case LobbyRow::Weapons: {
+            uint8_t w = uint8_t(c.weapons) < kWeaponFilterCount ? uint8_t(c.weapons) : 0;
+            c.weapons = WeaponFilter((w + (back ? kWeaponFilterCount - 1 : 1)) % kWeaponFilterCount);
+            break;
+        }
         case LobbyRow::FriendlyFire: c.friendlyFire = !c.friendlyFire; break;
         case LobbyRow::Damage: c.damagePct = StepDamage(c.damagePct, dir, damage); break;
         case LobbyRow::WaveBreak: {
@@ -340,6 +345,12 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.hint += c.gear == Gear::Own ? (bots ? "Also every player's strength." : "Sets every player's strength (muscle and grip).")
                                           : (bots ? "Also every player's strength and the random gear's budget." : "Sets every player's strength; the random gear is rolled within this budget.");
             break;
+        case LobbyRow::Weapons:
+            r.label = "Weapons";
+            r.value = WeaponFilterName(c.weapons);
+            r.hint = c.weapons == WeaponFilter::Any ? "The random gear may hold any weapon."
+                   : "The random gear's weapons are only of this kind (the game's own weapon filter).";
+            break;
         case LobbyRow::FriendlyFire:
             r.label = "Friendly fire";
             r.value = c.friendlyFire ? "On" : "Off";
@@ -389,10 +400,17 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 // The rows the format uses, in page order. Every format has Damage (Progression co-op shows it alone).
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     Format f = c.format;
-    if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::Sync};   // endless, back at a wave clear in the run's loadout
+    const bool rolled = c.gear == Gear::RandomTier || c.gear == Gear::Mirror;   // the Weapons row filters generated gear only
+    if (IsBotFormat(f)) {                            // endless, back at a wave clear in the run's loadout
+        std::vector<LobbyRow> b = {LobbyRow::Time, LobbyRow::Gear, LobbyRow::Tier};
+        if (rolled) b.push_back(LobbyRow::Weapons);
+        for (LobbyRow r : {LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::Sync}) b.push_back(r);
+        return b;
+    }
     if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
     std::vector<LobbyRow> v = {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear};
     v.push_back(LobbyRow::Tier);                     // the tier is every player's strength, with own gear too
+    if (rolled) v.push_back(LobbyRow::Weapons);
     if (HasTeams(f)) v.push_back(LobbyRow::FriendlyFire);
     v.push_back(LobbyRow::Damage);
     if (f != Format::Duel) v.push_back(LobbyRow::ClearGround);
@@ -545,6 +563,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         for (const MapCard& m : s.maps) if (m.selected) s.summary += " \xC2\xB7 " + m.name;
         if (!IsBrawl(c)) s.summary += " \xC2\xB7 " + std::string(GearName(c.gear));
         if (!IsBrawl(c) && c.gear != Gear::Own) s.summary += ", tier " + std::to_string(int(c.tier));
+        if (!IsBrawl(c) && c.gear != Gear::Own && c.weapons != WeaponFilter::Any) s.summary += ", " + std::string(WeaponFilterName(c.weapons));
     }
     if (!l.host) s.waiting = "Waiting for the host";
     if (modWait) s.waiting = "Checking the map pack";

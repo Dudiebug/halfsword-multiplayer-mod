@@ -12,6 +12,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.respawnDelayS = std::min<uint16_t>(c.respawnDelayS, 60);
     if (!GearAllowed(c.format, c.gear)) c.gear = Gear::Own;
     c.tier = std::min<uint8_t>(c.tier, 7);
+    if (uint8_t(c.weapons) >= kWeaponFilterCount) c.weapons = WeaponFilter::Any;
     if (c.gear == Gear::Fists) c.tier = kBrawlTier;                     // Brawl: one fixed strength
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
@@ -260,18 +261,18 @@ inline size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans) {
     return r == Regear::Each ? humans : 0;
 }
 
-inline void GearPool::Use(uint8_t tier) {
-    if (tier == tier_) return;
+inline void GearPool::Use(uint8_t tier, WeaponFilter weapons) {
+    if (tier == tier_ && weapons == weapons_) return;
     blobs_.clear();
-    tier_ = tier;
+    tier_ = tier; weapons_ = weapons;
 }
-inline bool GearPool::Wants(uint8_t tier, size_t ahead) { Use(tier); return blobs_.size() < ahead; }
-inline void GearPool::Put(uint8_t tier, std::vector<uint8_t> blob) {
-    Use(tier);
+inline bool GearPool::Wants(uint8_t tier, WeaponFilter weapons, size_t ahead) { Use(tier, weapons); return blobs_.size() < ahead; }
+inline void GearPool::Put(uint8_t tier, WeaponFilter weapons, std::vector<uint8_t> blob) {
+    Use(tier, weapons);
     if (!blob.empty()) blobs_.push_back(std::move(blob));
 }
-inline std::vector<uint8_t> GearPool::Take(uint8_t tier) {
-    Use(tier);
+inline std::vector<uint8_t> GearPool::Take(uint8_t tier, WeaponFilter weapons) {
+    Use(tier, weapons);
     if (blobs_.empty()) return {};
     std::vector<uint8_t> b = std::move(blobs_.front());
     blobs_.erase(blobs_.begin());
