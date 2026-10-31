@@ -269,6 +269,51 @@ static void TestPlayerLimit() {
     CHECK(stepped.scoreLimit == c.scoreLimit && stepped.format == c.format);
 }
 
+// Locked lobbies: the row says so in plain text and can be hidden with the No password chip.
+static void TestPasswordFilter() {
+    LobbyLocal l; l.phase = LobbyPhase::Idle; l.version = "0.2.0";
+    LobbyFound open; open.name = "Open"; open.players = 1; open.compatible = true;
+    LobbyFound lockedL; lockedL.name = "Private"; lockedL.players = 2; lockedL.compatible = true; lockedL.locked = true;
+    LobbyFound noName; noName.players = 1; noName.compatible = true; noName.locked = true;
+    l.found = {open, lockedL, noName};
+    LobbyScene s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 3 && s.filters.size() == 5 && kFilterChips == 5);
+    if (s.browser.size() == 3) {
+        CHECK(s.browser[0].name == "Open" && !s.browser[0].locked);
+        CHECK(s.browser[1].name == std::string(kLockedMarker) + "Private" && s.browser[1].locked && s.browser[1].joinable && s.browser[1].note.text == "Join");
+        CHECK(s.browser[2].name == std::string(kLockedMarker) + "Unnamed lobby" && s.browser[2].locked);
+        CHECK(s.browser[0].name.find(kLockedMarker) == std::string::npos);
+    }
+    for (unsigned char ch : std::string(kLockedMarker)) CHECK(ch >= 0x20 && ch < 0x80);   // plain ASCII: no glyph the font may lack
+    CHECK(s.filters[4].label == "No password" && !s.filters[4].on);
+    BrowserFilter f = ToggleFilter(BrowserFilter{}, 4);
+    CHECK(f.noPassword && !f.hasRoom && !f.compatibleOnly && !f.mostPlayers && f.mode == 0);
+    CHECK(!ToggleFilter(f, 4).noPassword);
+    CHECK(PassesFilter(open, f) && !PassesFilter(lockedL, f) && PassesFilter(lockedL, BrowserFilter{}));
+    l.filter = f;
+    s = BuildLobbyScene(l);
+    CHECK(s.filters[4].on && s.browser.size() == 1 && s.browser[0].name == "Open" && s.browserCount == "1 of 3 lobbies shown");
+    BrowserFilter both = ToggleFilter(f, 1);                                           // with Has room: both apply
+    LobbyFound fullOpen = open; fullOpen.players = 8;
+    CHECK(PassesFilter(open, both) && !PassesFilter(fullOpen, both) && !PassesFilter(lockedL, both));
+}
+
+// The host's password box: host only, in a lobby; its note says whether the lobby is locked.
+static void TestHostPassword() {
+    LobbyLocal h = InLobby(true);
+    LobbyScene s = BuildLobbyScene(h);
+    CHECK(s.hostPassword && s.passwordNote.rfind("Open", 0) == 0);
+    h.locked = true;
+    s = BuildLobbyScene(h);
+    CHECK(s.hostPassword && s.passwordNote.rfind("Locked", 0) == 0 && s.passwordNote.find("kicks nobody") != std::string::npos);
+    LobbyLocal m = InLobby(false); m.locked = true;
+    s = BuildLobbyScene(m);
+    CHECK(!s.hostPassword && s.passwordNote.empty());                      // members have no box
+    LobbyLocal idle; idle.phase = LobbyPhase::Idle; idle.host = true; idle.locked = true;
+    s = BuildLobbyScene(idle);
+    CHECK(!s.hostPassword && s.passwordNote.empty());
+}
+
 static void TestOutOfLobby() {
     LobbyLocal l; l.phase = LobbyPhase::Idle; l.version = "0.2.0"; l.players = {Player("Ann", true, true)};
     LobbyScene s = BuildLobbyScene(l);
@@ -769,6 +814,8 @@ int main() {
     TestHeader();
     TestBrowser();
     TestPlayerLimit();
+    TestPasswordFilter();
+    TestHostPassword();
     TestOutOfLobby();
     TestHostAgainstMember();
     TestRowsPerFormat();

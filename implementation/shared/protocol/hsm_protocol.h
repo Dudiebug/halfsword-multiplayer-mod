@@ -85,10 +85,12 @@ enum class MsgType : uint8_t {
     RemoteWrite = 56, // sender -> host -> target's owner, reliable (rev 31): a write the game made onto a stand-in, for its owner to make (sync/hsm_remote.h)
     HandOff = 57,     // writer -> host -> everyone, reliable (rev 32): lease entries, who simulates a fighter coupled to another (sync/hsm_handoff.h)
     HandOffAsk = 58,  // asker -> host -> victim's owner, reliable (rev 32): my fighter grabbed or stabbed yours (sync/hsm_handoff.h)
+    // 59 belongs to another feature (merged by the integrator).
+    LobbySecret = 60, // host -> client, reliable (rev 35): the lobby's password, handed to every player let in so a new host keeps the lobby locked (session/hsm_password.h)
 };
-// The highest type that has a decoder (HandOffAsk); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
-constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::HandOffAsk);
-constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::HandOffAsk);
+// The highest type that has a decoder (LobbySecret); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
+constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::LobbySecret);
+constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::LobbySecret);
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
 enum class Axis : uint8_t {
@@ -106,8 +108,10 @@ constexpr size_t kAxisCount = static_cast<size_t>(Axis::Count);
 constexpr size_t kActionCount = static_cast<size_t>(Action::Count);
 static_assert(kActionCount <= 32, "action bitmask is 32 bits");
 
-enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4, Kicked = 5, Banned = 6 };
-constexpr uint8_t kMaxRejectReason = 6;
+enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4, Kicked = 5, Banned = 6,
+                                     WrongPassword = 7, TooManyTries = 8 };   // rev 35: a locked lobby (session/hsm_password.h)
+constexpr uint8_t kMaxRejectReason = 8;
+constexpr size_t kMaxLobbyPassword = 32;   // Hello.password / LobbySecret bytes
 
 enum class EventKind : uint8_t {
     Spawned = 1,       // a = entity, b = slot
@@ -123,6 +127,7 @@ struct Hello {
     uint64_t buildKey = 0;   // PE TimeDateStamp << 32 | SizeOfImage of the game exe
     std::string name;
     std::string modBuild;    // rev 17: the client's mod build (session/hsm_build.h ModBuildString)
+    std::string password;    // rev 35: the lobby password the player typed (empty: none); the host compares it when the lobby is locked
 };
 struct Welcome {
     uint32_t sessionId = 0;
@@ -285,10 +290,10 @@ private:
 inline bool PeekType(const uint8_t* d, size_t n, MsgType& t) { Reader r(d, n); return r.header(t); }
 
 // ---------------------------------------------------------------- encoders / decoders
-inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); w.str(m.modBuild, kMaxModBuild); return w.buf; }
+inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); w.str(m.modBuild, kMaxModBuild); w.str(m.password, kMaxLobbyPassword); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Hello& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Hello) return false;
-    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); return r.done();
+    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); m.password = r.str(kMaxLobbyPassword); return r.done();
 }
 
 inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); w.str(m.modBuild, kMaxModBuild); w.u8(m.flags); return w.buf; }

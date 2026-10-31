@@ -26,6 +26,7 @@ struct LobbyListing {
     std::string name, map, mode;
     int players = 0;      // players: a role=server lobby's server is not counted
     int maxPlayers = kMaxLobbyMembers;   // the host's player limit (hsm_max); 8 when the lobby has none
+    bool locked = false;  // asks for a password (hsm_lock); the password is never listed
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
 };
@@ -46,7 +47,7 @@ public:
     void Tick();                                   // drives Steam init + callback processing
 
     void Host(steam::LobbyType type, bool server = false);   // server: role=server, one member more (hsm_srv=1)
-    void Join(steam::SteamId lobby);
+    void Join(steam::SteamId lobby, const std::string& password = std::string());   // password: for a locked lobby (kept for this lobby only)
     void Leave();
     void Invite();
     bool SendChat(const std::string& text);        // to every member (Steam lobby chat); false: not in a lobby or Steam refused
@@ -56,6 +57,18 @@ public:
     // nobody is kicked by it. Before the lobby exists it is what Host creates it with.
     int MaxPlayers() const;
     void SetMaxPlayers(int n);
+    // Lobby password. Locked is the public flag (hsm_lock); the password itself is never in lobby data. The host sets it
+    // (SetPassword, "" clears; nobody is kicked), a joiner has the one it joined with, and every member keeps the host's
+    // latest (RememberPassword, from LobbySecret) so a new host after a migration keeps the lobby locked.
+    bool Locked() const;
+    const std::string& Password() const;            // this lobby's; empty: none known
+    void SetPassword(const std::string& password);  // host
+    void RememberPassword(const std::string& password);   // member: the host's latest
+    // A locked lobby was joined without (or with a wrong) password: the page asks for it, then Join(lobby, password).
+    void AskPassword(steam::SteamId lobby, const std::string& note = std::string());
+    steam::SteamId PasswordAsk() const { return askLobby_; }
+    const std::string& PasswordNote() const { return askNote_; }
+    void CancelPasswordAsk() { askLobby_ = 0; askNote_.clear(); }
     void SetPublicState(const std::string& state, const std::string& map, const std::string& mode);
     void RefreshList();
     // Match settings (lobby data, host writes) and teams (own pick in member data, host moves in lobby data).
@@ -86,6 +99,10 @@ private:
     void RefreshMembers();
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
+    std::string password_;                // the lobby's password as this machine knows it, for passwordLobby_
+    steam::SteamId passwordLobby_ = 0;
+    steam::SteamId askLobby_ = 0;         // the lobby the page should ask a password for
+    std::string askNote_;                 // why it asks again ("Wrong password")
     int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads
     bool server_ = false;   // Host(type, true): this machine runs role=server
     State state_ = State::Offline;

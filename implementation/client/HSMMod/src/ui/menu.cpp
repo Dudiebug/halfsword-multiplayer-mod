@@ -13,6 +13,7 @@
 #include "match/hsm_hud_style.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
+#include "session/hsm_password.h"
 #include "util/hsm_bmp.h"
 #include <windows.h>
 #include <algorithm>
@@ -106,6 +107,16 @@ struct State {
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
     Flat askYes, askNo;
     bool askOpen = false, escDown = false;
+    Panel pw;                                // the lobby password question over the whole menu: joining a locked lobby
+    Text pwNote;                             // why it asks again ("Wrong password")
+    EditBox pwText;
+    Flat pwOk, pwCancel;
+    bool pwOpen = false, pwEscDown = false, pwEnterDown = false, pwFocused = false;
+    Box pwHostBox;                           // the host's password row in the lobby (SET / CLEAR); only the host sees it
+    EditBox pwHostText;
+    Flat pwSet, pwClear;
+    Text pwHostNote;
+    bool pwHostFocused = false, pwHostEnterDown = false;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
     std::array<ChatRow, kChatLogLines> chatRows;
@@ -385,6 +396,31 @@ void BuildIdleRight() {
     if (g.browserEmpty) { g.browserEmpty.Wrap(true); list.Add(g.browserEmpty).Padding({0, 6, 0, 0}); }
 }
 
+// The host's password row under the lobby's buttons: a text box with SET and CLEAR, and a line saying whether the lobby is
+// locked. Shown to the host only (Draw). Setting or clearing it kicks nobody (Session::SetLobbyPassword).
+void BuildPasswordRow(Box& left) {
+    g.pwHostBox = g.kit.MakeColumn();
+    Box input = g.kit.MakeRow();
+    g.pwHostText = g.kit.MakeEditBox();
+    g.pwSet = MakeFlat("SET", 15, {14, 5, 14, 5});
+    g.pwClear = MakeFlat("CLEAR", 15, {14, 5, 14, 5});
+    g.pwHostNote = NewText("", 13, style::kMenuDim);
+    if (!g.pwHostBox || !input || !g.pwHostText || !g.pwSet.card || !g.pwClear.card || !g.pwHostNote) {
+        HSM_LOG("ui: the lobby password row could not be made");
+        g.pwHostBox = Box{};
+        return;
+    }
+    Section(g.pwHostBox, "LOBBY PASSWORD", 0);
+    g.pwHostText.Hint("Password (up to 32 characters)");
+    AddToHorizontalBox(input, g.pwHostText, 1, 8).Align(HAlign::Fill, VAlign::Center);
+    AddFlatH(input, g.pwSet, 8); AddFlatH(input, g.pwClear, 0);
+    AddToVerticalBox(g.pwHostBox, input, 6);
+    g.pwHostNote.Wrap(true);
+    AddToVerticalBox(g.pwHostBox, g.pwHostNote, 4);
+    AddToVerticalBox(left, g.pwHostBox, 14);
+    g.pwHostBox.Show(false);
+}
+
 // In a lobby, left: the players (the host clicks one to move them to the next team), the lobby's buttons, the chat.
 void BuildInLeft() {
     Box& col = g.inLeft;
@@ -420,6 +456,7 @@ void BuildInLeft() {
         AddFlatH(actions1, g.invite, 8); AddFlatH(actions1, g.readyUp, 0);
         AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.leave, 0);
     }
+    BuildPasswordRow(col);
     BuildChat(col);
 }
 
@@ -463,6 +500,48 @@ void BuildAsk(Canvas& root) {
     AddToHorizontalBox(buttons, g.askYes.card.button, 0, 14);
     AddToHorizontalBox(buttons, g.askNo.card.button, 0, 0);
     g.ask.Show(false);
+}
+
+// The password question (a locked lobby: clicked in the browser, an invite, or a wrong password): the same modal as the
+// help-improve question, with a text box. JOIN (or Enter) tries the password, CANCEL (or Esc) drops the join.
+void BuildPassword(Canvas& root) {
+    g.pw = g.kit.MakePanel();
+    Fixed width = g.kit.MakeFixed();
+    Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
+    Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
+    Text title = NewText("THIS LOBBY IS LOCKED", 30, style::kMenuText);
+    Text body = NewText("Type the lobby's password to join. The host gave it to you.", 17, style::kMenuText);
+    g.pwNote = NewText("", 17, style::kMenuWarn);
+    g.pwText = g.kit.MakeEditBox();
+    g.pwOk = MakeFlat("JOIN", 18);
+    g.pwCancel = MakeFlat("CANCEL", 18);
+    if (!g.pw || !width || !frame || !face || !column || !buttons || !title || !body || !g.pwNote || !g.pwText || !g.pwOk.card || !g.pwCancel.card) {
+        HSM_LOG("ui: the lobby password question could not be made; locked lobbies cannot be joined from this page");
+        g.pw = Panel{};
+        return;
+    }
+    root.Add(g.pw).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(111);
+    g.pw.Color({0, 0, 0, 0.80f});
+    g.pw.ContentAlign(HAlign::Center, VAlign::Center);
+    g.pw.Content(width);
+    width.Width(620);
+    width.Content(frame);
+    frame.Color(style::kMenuAccent);
+    frame.Padding({2, 2, 2, 2});
+    frame.Content(face);
+    face.Color(style::kMenuPanel);
+    face.Padding({36, 28, 36, 28});
+    face.Content(column);
+    title.Font(30, 1, {0, 0, 0, 0.85f});
+    AddToVerticalBox(column, title, 0);
+    body.Wrap(true); AddToVerticalBox(column, body, 14);
+    g.pwText.Hint("Password");
+    AddToVerticalBox(column, g.pwText, 14);
+    g.pwNote.Wrap(true); AddToVerticalBox(column, g.pwNote, 10);
+    AddToVerticalBox(column, buttons, 20);
+    AddToHorizontalBox(buttons, g.pwOk.card.button, 0, 14);
+    AddToHorizontalBox(buttons, g.pwCancel.card.button, 0, 0);
+    g.pw.Show(false);
 }
 
 // MODE tab: the cards two to a row, in their groups (VERSUS, CO-OP).
@@ -705,6 +784,7 @@ bool BuildPanel() {
     if (Box settings = AddColumn(settingsRow, 1, 0, true)) BuildSettingsView(settings);
     g.settingsView.Show(false);
     BuildAsk(root);
+    BuildPassword(root);
 
     // REPORT A BUG opens a text box over the footer: SEND and CANCEL; the text becomes a public GitHub issue
     // (net/report_client).
@@ -777,6 +857,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     l.allowBuildMismatch = game::AllowBuildMismatch();
     l.damage = game::VanillaDamageRange();
     l.maxPlayers = lobby.MaxPlayers();
+    l.locked = lobby.Locked();
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
@@ -797,7 +878,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     }
     for (const game::LobbyListing& f : lobby.listings()) {
         LobbyFound o;
-        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.compatible = f.compatible; o.reason = f.reason;
+        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
         l.found.push_back(o);
     }
     return l;
@@ -896,6 +977,7 @@ void Draw(const LobbyScene& s) {
     g.readyUp.label.Color(s.readyOn ? style::kMenuOk : style::kMenuText);   // the dot's green
     g.readyUp.card.selected = s.readyOn;
     g.balance.card.button.Show(s.balance);
+    if (g.pwHostBox) { g.pwHostBox.Show(s.hostPassword); g.pwHostNote.Set(s.passwordNote); }
     g.leave.card.button.Show(s.in);
 
     for (size_t i = 0; i < g.modes.size() && i < s.modes.size(); ++i) {
@@ -1070,6 +1152,32 @@ void HandleChat(Session& session, bool in) {
     g.nextText = 0;
 }
 
+// The host's password row: SET (or Enter in the box) locks the lobby with what is typed, CLEAR opens it. Nobody is kicked.
+// While the box has the keyboard the game's hotkeys stay off, as in the chat box.
+void HandlePassword(Session& session, bool host) {
+    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    const bool enterEdge = enter && !g.pwHostEnterDown;
+    g.pwHostEnterDown = enter;
+    if (!g.pwHostBox || !host) { g.pwHostFocused = false; return; }
+    const bool focused = g.pwHostText.Focused();
+    const bool set = Clicked(g.pwSet.card) || (enterEdge && (focused || g.pwHostFocused));
+    const bool clear = Clicked(g.pwClear.card);
+    g.pwHostFocused = focused;
+    if (focused) SetLobbyTyping(true);          // after HandleChat's own call: either box keeps the hotkeys off
+    Paint(g.pwSet.card); Paint(g.pwClear.card);
+    if (set) {
+        const std::string typed = CleanPassword(g.pwHostText.Value());
+        if (typed.empty()) { g.pwHostNote.Set("Type a password first, or press CLEAR to open the lobby."); return; }
+        g.pwHostText.Clear();
+        session.SetLobbyPassword(typed);
+        g.nextText = 0;
+    } else if (clear) {
+        g.pwHostText.Clear();
+        session.SetLobbyPassword("");
+        g.nextText = 0;
+    }
+}
+
 // START: the accent face, a little toward its ink under the mouse.
 void PaintStart() {
     if (!g.start) return;
@@ -1103,6 +1211,37 @@ void HandleClicks(Session& session) {
         HSM_LOG("ui: help-improve question answered: %s", yes ? "yes" : "no");
         session.SetHelpImprove(yes);
         openPage();
+        return;
+    }
+    // The password question: a locked lobby was clicked (or invited to, or the password was wrong). Nothing else on the menu
+    // until it is answered; Enter joins, Esc drops the join.
+    if (!g.pwOpen && g.pw && lobby.PasswordAsk()) {
+        g.pwOpen = true; g.pw.Show(true);
+        g.pwText.Clear(); g.pwText.Focus();
+        g.pwNote.Set(lobby.PasswordNote());
+        g.pwEscDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        g.pwEnterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+        g.pwFocused = true;
+        if (!g.panelOpen) openPage();                  // an invite arrived on the bare main menu
+    }
+    if (g.pwOpen) {
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.pwEscDown;
+        const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !g.pwEnterDown;
+        g.pwEscDown = esc; g.pwEnterDown = enter;
+        const bool focused = g.pwText.Focused();
+        const bool ok = Clicked(g.pwOk.card) || (enterEdge && (focused || g.pwFocused));   // the box commits on Enter, so it may have lost the keyboard this frame
+        const bool cancel = Clicked(g.pwCancel.card) || escEdge || !lobby.PasswordAsk();
+        g.pwFocused = focused;
+        Paint(g.pwOk.card); Paint(g.pwCancel.card);
+        SetLobbyTyping(focused);
+        if (!ok && !cancel) return;
+        const steam::SteamId id = lobby.PasswordAsk();
+        const std::string typed = CleanPassword(g.pwText.Value());
+        if (ok && !cancel && typed.empty()) { g.pwNote.Set("Type the password first."); g.pwText.Focus(); return; }
+        g.pwOpen = false; g.pw.Show(false); g.pwText.Clear(); SetLobbyTyping(false);
+        lobby.CancelPasswordAsk();
+        if (ok && !cancel && id) { HSM_LOG("ui: joining a locked lobby with a password"); lobby.Join(id, typed); }
+        g.nextText = 0;
         return;
     }
     if (openClicked && !g.panelOpen && !session.HelpImproveAsked() && g.ask) {
@@ -1153,6 +1292,7 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
     if (g.settingsShown) g.voice.Tick(session);
     HandleChat(session, s.in && !g.settingsShown);
+    HandlePassword(session, s.hostPassword && !g.settingsShown);
 
     // Not in a lobby: hosting, the browser and its filters.
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
@@ -1161,7 +1301,10 @@ void HandleClicks(Session& session) {
     for (size_t i = 0; i < g.chips.size(); ++i)
         if (act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) g.filter = ToggleFilter(g.filter, i);
     for (size_t i = 0; i < g.rows.size(); ++i)
-        if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) lobby.Join(g.rowLobbies[i]);
+        if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) {
+            if (s.browser[i].locked) lobby.AskPassword(g.rowLobbies[i]);   // the question opens next frame; JOIN there joins
+            else lobby.Join(g.rowLobbies[i]);
+        }
 
     // In a lobby: the players' buttons, the tabs, and what each tab offers.
     if (act(Clicked(g.invite.card), s.in)) lobby.Invite();

@@ -2,6 +2,7 @@
 #include "hsm_protocol.h"
 #include "log.h"
 #include "session/hsm_build.h"
+#include "session/hsm_password.h"
 #include "session/hsm_player_limit.h"
 #include "ue/engine.h"
 #include <algorithm>
@@ -62,6 +63,7 @@ void Lobby::Tick() {
                 steam::SetLobbyData(e.lobby, "state", "menu");
                 steam::SetLobbyData(e.lobby, "hsm_srv", server_ ? "1" : "0");
                 steam::SetLobbyData(e.lobby, "hsm_max", std::to_string(maxPlayers_));
+                steam::SetLobbyData(e.lobby, "hsm_lock", "0");
                 Enter(e.lobby);
                 break;
             case steam::Event::LobbyEntered:
@@ -79,6 +81,12 @@ void Lobby::Tick() {
                 if (state_ != State::InLobby || lobby_ != e.lobby) {
                     LobbyListing l = Describe(e.lobby);
                     if (!l.compatible) { steam::LeaveLobby(e.lobby); state_ = State::Idle; SetStatus("Cannot join: " + l.reason); break; }
+                    if (l.locked && passwordLobby_ != e.lobby) {   // an invite or a friend's Join Game: no password was typed yet
+                        steam::LeaveLobby(e.lobby); state_ = State::Idle;
+                        SetStatus("This lobby needs a password");
+                        AskPassword(e.lobby);
+                        break;
+                    }
                     Enter(e.lobby);
                 }
                 break;
@@ -126,12 +134,14 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     else if (build != BuildKeyHex()) l.reason = "different game version";
     else if (LobbyIsFull(l.players, l.maxPlayers) && std::find(members.begin(), members.end(), steam::MySteamId()) == members.end())
         l.reason = "lobby full";   // a full lobby we are already in is not full to us
+    l.locked = steam::LobbyData(lobby, "hsm_lock") == "1";
     l.compatible = l.reason.empty();
     return l;
 }
 
 void Lobby::Host(steam::LobbyType type, bool server) {
     if (state_ != State::Idle) return;
+    password_.clear(); passwordLobby_ = 0; askLobby_ = 0; askNote_.clear();
     type_ = type; server_ = server; state_ = State::Creating; SetStatus("Creating lobby...");
     steam::CreateLobby(type, maxPlayers_ + (server ? 1 : 0));
 }
@@ -139,6 +149,26 @@ void Lobby::Host(steam::LobbyType type, bool server) {
 bool Lobby::ServerLobby() const { return InLobby() && steam::LobbyData(lobby_, "hsm_srv") == "1"; }
 
 int Lobby::PlayerCount() const { return int(members_.size()) - (ServerLobby() && !members_.empty() ? 1 : 0); }
+
+bool Lobby::Locked() const { return InLobby() && steam::LobbyData(lobby_, "hsm_lock") == "1"; }
+
+const std::string& Lobby::Password() const {
+    static const std::string none;
+    return passwordLobby_ && passwordLobby_ == lobby_ && InLobby() ? password_ : none;
+}
+
+void Lobby::SetPassword(const std::string& password) {
+    if (!IsHost()) return;
+    password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby_;
+    steam::SetLobbyData(lobby_, "hsm_lock", password_.empty() ? "0" : "1");   // only whether, never the password
+}
+
+void Lobby::RememberPassword(const std::string& password) {
+    if (!InLobby() || IsHost()) return;
+    password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby_;
+}
+
+void Lobby::AskPassword(steam::SteamId lobby, const std::string& note) { askLobby_ = lobby; askNote_ = note; }
 
 int Lobby::MaxPlayers() const { return InLobby() ? ParsePlayerLimit(steam::LobbyData(lobby_, "hsm_max")) : maxPlayers_; }
 
@@ -149,8 +179,10 @@ void Lobby::SetMaxPlayers(int n) {
     steam::SetLobbyData(lobby_, "hsm_max", std::to_string(maxPlayers_));
 }
 
-void Lobby::Join(steam::SteamId lobby) {
+void Lobby::Join(steam::SteamId lobby, const std::string& password) {
     if (state_ != State::Idle || !lobby) return;
+    password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby;
+    askLobby_ = 0; askNote_.clear();
     joining_ = lobby; state_ = State::Joining; SetStatus("Joining lobby...");
     steam::JoinLobby(lobby);
 }
@@ -172,6 +204,7 @@ void Lobby::Leave() {
     steam::LeaveLobby(state_ == State::Joining ? joining_ : lobby_);
     for (const LobbyMember& m : members_) if (m.id != steam::MySteamId() && onMemberLeft) onMemberLeft(m.id);
     members_.clear(); lobby_ = owner_ = joining_ = 0; state_ = State::Idle;
+    password_.clear(); passwordLobby_ = 0;
     steam::SetRichPresence("connect", ""); steam::SetRichPresence("status", "");
     SetStatus("Left lobby");
     if (onLeft) onLeft();
