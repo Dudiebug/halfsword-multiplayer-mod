@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "gameplay/combat_sync.h"
 #include "gameplay/damage_pin.h"
+#include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "log.h"
 #include "match/hsm_match.h"
@@ -384,7 +385,7 @@ std::wstring Adapter::SaveGamesDir() {
     FStringArg full = abs.get<FStringArg>("ReturnValue");
     std::string path = ReadFString(&full);
     if (path.empty()) return {};
-    saveDir_.assign(path.begin(), path.end());
+    { const std::u16string u = Utf16FromUtf8(path); saveDir_.assign(u.begin(), u.end()); }   // UTF-8 back to UTF-16 (a non-ASCII profile path)
     if (saveDir_.back() != L'/' && saveDir_.back() != L'\\') saveDir_ += L'/';
     saveDir_ += L"SaveGames/";
     // Sweep temporary slots a crashed session may have left in the player's save folder.

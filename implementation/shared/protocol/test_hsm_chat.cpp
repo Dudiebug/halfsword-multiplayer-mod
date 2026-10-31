@@ -388,7 +388,75 @@ static void TestUtf16() {
     CHECK(Utf16FromUtf8(std::string("a\0b", 3)) == std::u16string(u"a\0b", 3));   // NUL is kept; callers terminate
 }
 
+static void TestUtf8FromUtf16() {
+    const std::string cases[] = {"", "gg wp", "caf\xC3\xA9", "\xE2\x82\xAC 5", "\xE2\x99\xA5", "\xF0\x9F\x94\xA5 fire",
+                                 "a\xF0\x9F\x98\x84\xF0\x9F\x98\x82z", "\xEF\xBF\xBD", "\xF4\x8F\xBF\xBF"};
+    for (const std::string& c : cases) CHECK(Utf8FromUtf16(Utf16FromUtf8(c)) == c);          // round trip
+    const std::u16string u = Utf16FromUtf8("x\xF0\x9F\x94\xA5y");
+    CHECK(Utf16FromUtf8(Utf8FromUtf16(u)) == u);
+    const char16_t pair[] = {0xD83D, 0xDD25};                                                // U+1F525
+    CHECK(Utf8FromUtf16(pair, 2) == "\xF0\x9F\x94\xA5");
+    const char16_t loneHi[] = {u'a', 0xD83D, u'b'}, loneLo[] = {u'a', 0xDD25, u'b'}, endHi[] = {u'a', 0xD83D};
+    const char16_t swapped[] = {0xDD25, 0xD83D};
+    CHECK(Utf8FromUtf16(loneHi, 3) == "a\xEF\xBF\xBD" "b");
+    CHECK(Utf8FromUtf16(loneLo, 3) == "a\xEF\xBF\xBD" "b");
+    CHECK(Utf8FromUtf16(endHi, 2) == "a\xEF\xBF\xBD");
+    CHECK(Utf8FromUtf16(swapped, 2) == "\xEF\xBF\xBD\xEF\xBF\xBD");
+    CHECK(Utf8FromUtf16(nullptr, 0).empty());
+    std::mt19937 rng(7);                                                                     // any units give valid UTF-8
+    for (int i = 0; i < 2000; ++i) {
+        std::u16string v;
+        for (int k = 0, n = int(rng() % 12); k < n; ++k) v.push_back(char16_t((rng() & 1) ? 0xD7F0 + rng() % 0x900 : rng() % 0x10000));
+        CHECK(ValidUtf8(Utf8FromUtf16(v)));
+    }
+}
+
+static void TestPasteText() {
+    CHECK(PasteText("hello", 120) == "hello");
+    CHECK(PasteText("a\r\nb", 120) == "a b");                         // CRLF is one space
+    CHECK(PasteText("a\nb\rc\td", 120) == "a b c d");
+    CHECK(PasteText("a\r\n\r\n\t b", 120) == "a  b");                 // a run is one space, then the typed one
+    CHECK(PasteText("a\x01" "b\x7F" "c\x1B" "d", 120) == "abcd");     // controls dropped
+    CHECK(PasteText("a\xC2\x85" "b\xC2\x9F" "c", 120) == "abc");      // C1 dropped
+    CHECK(PasteText("a\xFF" "b\xC3" "c\xE2\x82", 120) == "abc");      // invalid and truncated sequences dropped
+    CHECK(PasteText("\xF0\x9F\x94\xA5!", 120) == "\xF0\x9F\x94\xA5!");   // emoji kept
+    CHECK(PasteText("", 120).empty());
+    CHECK(PasteText("abc", 0).empty());
+    CHECK(PasteText("abc", 2) == "ab");
+    const std::string e = "\xF0\x9F\x94\xA5\xF0\x9F\x98\x82";         // two 4-byte emoji: truncation never splits one
+    CHECK(PasteText(e, 8) == e);
+    CHECK(PasteText(e, 7) == "\xF0\x9F\x94\xA5");
+    CHECK(PasteText(e, 4) == "\xF0\x9F\x94\xA5");
+    CHECK(PasteText(e, 3).empty());
+    CHECK(PasteText("a\xE2\x99\xA5", 3) == "a");
+    CHECK(PasteText("ab\r\ncd", 3) == "ab ");
+    CHECK(PasteText(std::string(500, 'x'), kMaxChatBytes).size() == kMaxChatBytes);
+    std::string many; for (int i = 0; i < 100; ++i) many += "\xE2\x99\xA5\n";
+    for (size_t room = 0; room <= 130; ++room) {
+        std::string p = PasteText(many, room);
+        CHECK(p.size() <= room && ValidUtf8(p));
+    }
+    // Into a session: freeBytes, then the paste fits whole.
+    ChatSession s;
+    s.On(ChatEvent::Enter, 0);
+    CHECK(s.freeBytes() == kMaxChatBytes);
+    s.On(ChatEvent::Char, 0, "gg ");
+    CHECK(s.freeBytes() == kMaxChatBytes - 3);
+    s.On(ChatEvent::Char, 0, PasteText(std::string(300, 'y') + "\xF0\x9F\x94\xA5", s.freeBytes()));
+    CHECK(s.draft().size() == kMaxChatBytes && s.freeBytes() == 0);
+    s.On(ChatEvent::Char, 0, PasteText("more", s.freeBytes()));       // nothing left: nothing typed
+    CHECK(s.draft().size() == kMaxChatBytes);
+    ChatSession t;
+    t.On(ChatEvent::Enter, 0);
+    t.On(ChatEvent::Char, 0, std::string(118, 'a'));
+    t.On(ChatEvent::Char, 0, PasteText("\xF0\x9F\x94\xA5 x\r\ny", t.freeBytes()));   // 2 bytes left: the emoji does not fit
+    CHECK(t.draft().size() == 118);
+    CHECK(PasteText("\xF0\x9F\x94\xA5 x\r\ny", 2).empty());
+}
+
 int main() {
+    TestUtf8FromUtf16();
+    TestPasteText();
     TestUtf16();
     TestRoundTrip();
     TestTruncationLoop();

@@ -632,10 +632,11 @@ FStringArgHolder::FStringArgHolder(const std::string& s) {
 
 std::string ReadFString(const void* fstring) {
     const FString* s = static_cast<const FString*>(fstring);
-    std::string out;
-    if (!s || !s->data) return out;
-    for (int32_t i = 0; i < s->num && s->data[i]; ++i) out.push_back(s->data[i] < 128 ? char(s->data[i]) : '?');
-    return out;
+    if (!s || !s->data) return std::string();
+    int32_t n = 0;
+    while (n < s->num && s->data[n]) ++n;
+    static_assert(sizeof(wchar_t) == sizeof(char16_t), "FString is UTF-16");
+    return Utf8FromUtf16(reinterpret_cast<const char16_t*>(s->data), size_t(n));   // lossless: emoji and non-ASCII text survive
 }
 
 bool SelfTest() {

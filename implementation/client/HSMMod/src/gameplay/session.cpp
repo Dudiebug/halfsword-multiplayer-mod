@@ -55,6 +55,7 @@
 #include "ue4ss_load.h"
 #include "ue/profiler.h"
 #include "match/hsm_draw.h"
+#include "match/hsm_emoji.h"
 #include "match/hsm_giveup_action.h"
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_input_mode.h"
@@ -526,7 +527,7 @@ public:
         PauseReportTick();
         ReportTick();   // before the solo return: reports work in the menus and offline too (R1)
         UpdateNoticeTick();
-        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && net_)
+        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && !EmojiCommandLine(*line) && net_)
             if (!IsHost() || !ModerationLine(*line, 0, false)) SendChat(*line);
         if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
         if (!net_) { if (localFighter_) VoiceIdleTick(); ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
@@ -783,10 +784,18 @@ public:
 
     // The host stamps the sender's real slot and relays every line; it shows its own lines directly.
     void SendChat(const std::string& text) {
-        ChatLine c; c.fromSlot = 0; c.text = SanitizeChat(text);
+        ChatLine c; c.fromSlot = 0; c.text = SanitizeChat(ExpandChatLine(text));   // shortcodes become emoji here, on send only
         if (c.text.empty()) return;
         if (IsHost()) { net_->Broadcast(kChanReliable, Encode(c), true); ui::ShowLine(MyName(), ChatNameInk(info_, 1), c.text); }
         else if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(c), true);
+    }
+
+    // "/emoji" typed in the match or lobby chat: the shortcode list as local lines. Never sent, never a moderation command.
+    bool EmojiCommandLine(const std::string& line) {
+        if (!IsEmojiCommand(line)) return false;
+        ui::ShowLine("HSMMod", style::kBone, "Emoji: type the code in a line, it turns into the picture when you send it.");
+        for (const std::string& l : EmojiListLines()) ui::ShowLine("HSMMod", style::kBone, l);
+        return true;
     }
 
     // ------------------------------------------------------------------ in-game bug reports (net/report_client.h)
@@ -837,8 +846,8 @@ public:
     // The lobby chat box (menu.cpp). The text goes out as a Steam lobby chat message: the session transport carries slots
     // and no names before a match, and only to members the host has welcomed. Commands run here, as in the match chat.
     void LobbyChatLine(const std::string& typed) override {
-        const std::string line = SanitizeChat(typed);
-        if (line.empty() || ReportCommandLine(line)) return;
+        const std::string line = SanitizeChat(ExpandChatLine(typed));
+        if (line.empty() || ReportCommandLine(line) || EmojiCommandLine(line)) return;
         if (ParseModCommand(line).kind != ModCommandKind::None) {   // kick, ban, vote: the session host runs them
             if (net_ && IsHost()) ModerationLine(line, 0, false);
             else if (net_ && hostPeer_) SendChat(line);
