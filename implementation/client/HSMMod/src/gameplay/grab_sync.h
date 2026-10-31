@@ -31,7 +31,10 @@ public:
         std::function<bool(uint8_t)> dead;                                  // a remote entity's latest vitals say dead
         std::function<bool(uint8_t)> down;                                  // ... say dead, fallen, knocked out or 0 health
         std::function<void(const std::vector<uint8_t>&, bool reliable)> send;   // a GrabState made here (the session routes it)
+        std::function<void(uint8_t held, uint8_t grabber, uint8_t hand)> sendBreak;   // my fighter broke free: the grabber's owner lets go (item 7)
+        bool drag = true;                                                   // grab_drag: sync::DragYieldBones and GrabSpread
     };
+    void OnBreak(ue::UObject* grabber, uint8_t held, uint8_t hand);       // my fighter's hold on a stand-in it broke free of: let go
     void Start(Adapter& adapter, Env env);
     void Stop();                                                            // unmarks my held fighters
     bool Active() const { return active_; }
@@ -48,12 +51,18 @@ private:
     struct Grabber { ue::UObject* willie = nullptr; bool live = false; sync::GrabSender sender; };
     struct Mark { ue::UObject* willie = nullptr; int32_t index = -1; ue::UObject* by = nullptr; bool native = false; };   // a fighter of mine marked held; native: a local grab owns its flags
     struct Counters { uint64_t changes = 0, refreshes = 0, heard = 0, stale = 0, pulls = 0, grabs = 0, released = 0, broke = 0, farSkips = 0,
-                      noAnchor = 0, noBone = 0; };
+                      noAnchor = 0, noBone = 0, letGo = 0, noCollide = 0; };
+    // Item 6: a hold on my fighter, its body's collision with the grabber's hand and forearm off (Willie_BP W:17454).
+    struct NoCollide { ue::UObject* mine = nullptr; int32_t mineIndex = -1; ue::UObject* hand = nullptr; int32_t handIndex = -1; uint8_t side = 0; bool seen = false; };
     void SendFor(uint8_t entity, const std::array<GrabHand, kGrabHands>& reads, double nowMs);
     std::array<GrabHand, kGrabHands> ReadHands(ue::UObject* willie);
     bool Pull(const sync::GrabPull& p, ue::UObject* me, bool down, double nowMs, float dt);   // true while the hold pulls
     bool DownHere(uint8_t entity, ue::UObject* me);                         // my fighter is dead, fallen, knocked out or at 0 health
-    void SetMark(uint8_t entity, ue::UObject* willie, ue::UObject* by, bool newGrab);
+    void SetMark(uint8_t entity, ue::UObject* willie, ue::UObject* by, bool newGrab, const std::string& bone, uint8_t hand);
+    void SetLimbFlags(ue::UObject* willie, const std::string& bone, uint8_t hand);
+    void KeepNoCollide(const sync::GrabPull& p, ue::UObject* me);
+    bool Collide(NoCollide& c, bool off);
+    void RestoreUnseen();
     void Unmark(uint8_t entity);
     bool Ready(ue::UObject* mesh);                                          // the per-frame calls, resolved on first use
     bool BoneWorld(ue::UObject* mesh, ue::FName bone, ue::FTransform& out);
@@ -70,6 +79,8 @@ private:
     sync::GrabInbox inbox_;
     std::array<std::array<uint32_t, kGrabHands>, kMaxWillies + 1> lastGrab_{};   // per remote grabber and hand: last grab pulled
     std::map<uint8_t, Mark> marks_;
+    std::map<uint16_t, NoCollide> noCollide_;                               // by grabber << 8 | hand
+    ue::UObject* collisionLib_ = nullptr;
     std::array<uint32_t, kMaxWillies + 1> heldBones_{};
     Counters n_, reported_;
 };

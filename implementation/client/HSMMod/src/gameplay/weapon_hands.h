@@ -3,6 +3,7 @@
 // of. The functions are members of the prop class (weapon_hands.cpp); these are the records they keep.
 #pragma once
 #include "sync/hsm_handmatch.h"
+#include "sync/hsm_late_drop.h"
 #include "ue/engine.h"
 #include <array>
 #include <cstdint>
@@ -53,6 +54,12 @@ struct PendingDrop {                   // a drop heard of (its Touch Grant), not
     double deadlineMs = 0;
     ue::UObject* witness = nullptr;    // the weapon that hand of the stand-in held when it was heard (sync::DropFacts)
     int32_t witnessIndex = -1;
+    uint32_t heardClass = 0;           // the class the owner's hand showed when it was heard (0: not known): GiveUp's late match
+};
+struct LateDrop {                      // a drop given up on: its stream will say where the weapon is (sync/hsm_late_drop.h)
+    double givenUpMs = 0;
+    double triedMs = 0;
+    uint32_t classHint = 0;
 };
 struct Loose {                         // a weapon a stand-in let go of here that is not a prop (yet)
     ue::UObject* actor = nullptr;

@@ -266,7 +266,7 @@ struct GrabPullParams {
     double stiffness = 600.0;    // 1/s^2: a soft handle the victim can struggle against
     double damping = 75.0;       // 1/s; zeta = 75 / (2 sqrt 600) ~ 1.5, overdamped: never past the hand
     double leadUu = 30.0;        // the spring's stretch is capped here: pull <= stiffness x lead (grab_lead)
-    double maxDvUu = 300.0;      // cm/s per step at most: a glitch never launches a body
+    double maxDvUu = 300.0;      // cm/s per 60 Hz step at most (kGrabCapRefDtS): a glitch never launches a body
     double minDtS = 0.004, maxDtS = 0.080;   // the stand-in servo's frame-time clamp
     // The held bone is never driven upward faster than this (cm/s); negative: no cap. 0.8.0-pre7 (#83, #84): a carried
     // body followed the grabber's hand straight up through a jump, and the gravity-free stand-in of that body, seen a
@@ -299,9 +299,16 @@ inline V3 GrabAnchor(const V3& hand, const V3& handVel, double leadS = kGrabAnch
     return Add(hand, ClampLen(Scale(handVel, std::max(leadS, 0.0)), capUu));
 }
 
-// The pose bone index of a held bone name, or -1.
+// The pose bone index of a held bone name, or -1. Any case, as FNames compare: the game's head bone is "Head", and up to
+// 0.8.0-pre16 a head grab matched no pose bone, so the grabber's screen left nothing to the hold.
 inline int PoseBoneIndex(const std::string& name) {
-    for (int i = 0; i < kPoseBones; ++i) if (name == kPoseBoneNames[i]) return i;
+    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; };
+    for (int i = 0; i < kPoseBones; ++i) {
+        const char* n = kPoseBoneNames[size_t(i)];
+        size_t k = 0;
+        while (k < name.size() && n[k] && lower(name[k]) == n[k]) ++k;
+        if (k == name.size() && !n[k]) return i;
+    }
     return -1;
 }
 // The pose bones (bit per index) the held fighter's stand-in leaves to the grabber's native hold on the grabber's screen,
@@ -316,6 +323,41 @@ inline uint32_t YieldBones(int bone, bool down) {
     return m ? m : (1u << bone);
 }
 
+// grab_drag (the default from 0.8.0-pre17): every hold, standing or down, yields the way a carried body's foot does (the
+// grab that dragged well in 0.8.0-pre7). A limb, the neck or the head: the chain up to the torso, which swings on one
+// joint the way a dragged leg does. A torso bone: itself and its torso neighbours, so no lone body sits between two
+// servoed ones, pulled three ways. Still never the whole body.
+inline uint32_t DragYieldBones(int bone) {
+    if (bone < 0 || bone >= kPoseBones) return 0;
+    if (bone == kBonePelvis) return 1u | (1u << 2);   // and spine_02 (spine_01 has no body)
+    if (bone <= 5) {
+        uint32_t m = 1u << bone;
+        for (int b = std::max(bone - 1, 2); b <= std::min(bone + 1, 5); ++b) m |= 1u << b;
+        return m;
+    }
+    return YieldBones(bone, true);
+}
+
+// The share of the held bone's pull also given to the pelvis and chest. A carried body: kGrabDownSpread. A standing one
+// under grab_drag: a smaller share, so the body comes along and the held bone is not pulled out of its joints alone,
+// while the fighter can still struggle free. grab_drag=0: none, as up to 0.8.0-pre16.
+constexpr double kGrabStandSpread = 0.25;
+inline double GrabSpread(bool down, bool drag) { return down ? kGrabDownSpread : drag ? kGrabStandSpread : 0.0; }
+
+// A stand-in my fighter holds is not snapped onto its owner's pose (grab_drag) unless its pelvis was this far off at the
+// last step: a dragged body lags its owner's pose by a round trip, past the servo's 150 uu snap error, and the snap
+// teleported it under the hand, yanking the hold and both fighters. A blade stuck in a stand-in has the same rule
+// (owner_sync.cpp kStuckNoShiftUu).
+constexpr double kGrabNoSnapUu = 300.0;
+inline bool GrabBlocksSnap(uint32_t heldMask, double lastPelvisErrUu) { return heldMask != 0 && lastPelvisErrUu < kGrabNoSnapUu; }
+
+// maxDvUu is a cap per 60 Hz step. A slower machine takes longer steps, so its cap grows with the step (up to
+// kGrabCapMaxSteps of them): the same cm/s per second whatever the grabber's frame rate. At 20 fps a held body
+// otherwise got a third of the pull a 60 fps grabber gave it (0.8.0-pre19 reports #294, #295, #301).
+constexpr double kGrabCapRefDtS = 1.0 / 60.0;
+constexpr double kGrabCapMaxSteps = 4.0;
+inline double GrabCapScale(double dtS) { return std::isfinite(dtS) ? std::clamp(dtS / kGrabCapRefDtS, 1.0, kGrabCapMaxSteps) : 1.0; }
+
 // The velocity change for the held bone this step (SetPhysicsLinearVelocity, added): backward Euler of the handle's
 // spring-damper toward the grabber's hand, the hand advanced by its own velocity over the step and the damping
 // relative to it, so a bone moving with the hand needs nothing and a moving hand is followed without lag. Stable at
@@ -329,7 +371,7 @@ inline V3 GrabPullDv(const V3& grip, const V3& gripVel, const V3& hand, const V3
     const V3 drive = Add(Scale(stretch, p.stiffness), Scale(handVel, p.damping));
     V3 v = Scale(Add(gripVel, Scale(drive, dt)), 1.0 / (1.0 + p.damping * dt + p.stiffness * dt * dt));
     if (p.maxUpUu >= 0.0 && v.z > p.maxUpUu) v.z = p.maxUpUu;   // the bone's velocity after this step, not the change
-    const V3 dv = ClampLen(Sub(v, gripVel), p.maxDvUu);
+    const V3 dv = ClampLen(Sub(v, gripVel), p.maxDvUu * GrabCapScale(dt));
     return Finite(dv) ? dv : V3{};
 }
 

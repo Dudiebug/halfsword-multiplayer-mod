@@ -657,6 +657,11 @@ void Severs::Forget(uint8_t entity) {
         if (h.stuck && (key.first == entity || h.victim == entity)) SendFreed(key.first, StrikeSource(key.second), h);
 }
 
+void Severs::LetGo(uint8_t victim) {
+    if (!ValidEntity(victim)) return;
+    for (const combat::StuckBlades::Key& k : blades_.Forget(victim)) Let(k.attacker, k.source);
+}
+
 // ---------------------------------------------------------------- stuck blades: the attacker
 
 // The first live sticking of each hand of a fighter simulated here whose Hit Actor is a stand-in. Reported when it
@@ -849,6 +854,11 @@ void Severs::Hold(const StuckBladeMsg& m) {
     if (!collisionOff) ++n_.collisionKept;
     const size_t rigidCount = j.rigid.size(), nearCount = j.near.size();
     joints_[{m.attacker, uint8_t(m.source)}] = std::move(j);
+    // Item 8: what the blade's Stuck writes on its victim (ModularWeaponBP.cpp:717-721): a just-grabbed fighter, whose
+    // limb joints the dislocation check makes unbreakable a moment.
+    SetBool(me, "Was Just Grabbed", true);
+    Call(me, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", false).invoke();
+    Call(me, "Event Check Bone Dislocation Status").invoke();
     ++n_.held;
     if (n_.held <= kLogFirst)
         HSM_LOG("severs: holding the blade of e%u (%s '%s') in my bone %s, seq %u; its collision with %zu rigid and %zu "

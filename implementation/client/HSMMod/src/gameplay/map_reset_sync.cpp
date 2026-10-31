@@ -1,5 +1,6 @@
 #include "gameplay/object_sync.h"
 #include "log.h"
+#include "session/hsm_ground_clear.h"
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -65,6 +66,17 @@ void ObjectSync::MarkBaseline() {
     HSM_LOG("reset: the match began here; %zu level weapon(s) recorded", levelWeapons_.size());
 }
 
+bool ObjectSync::IsLevelWeaponAtStart(UObject* actor) {
+    if (!actor || !adapter_) return false;
+    for (const LevelWeapon& w : levelWeapons_) {
+        if (w.actor != actor || !adapter_->StillValid(w.actor, w.index)) continue;
+        const FVector now = adapter_->ActorLocation(actor);
+        const double dx = now.x - w.at.x, dy = now.y - w.at.y, dz = now.z - w.at.z;
+        return Finite(now) && AtLevelStart(dx * dx + dy * dy + dz * dz);
+    }
+    return false;
+}
+
 void ObjectSync::RecordStart(Prop& p) {
     p.startTried = true;
     // After the match began a prop may lie anywhere: where it is now is not where the level had it.
@@ -94,6 +106,7 @@ void ObjectSync::MapReset(double nowMs, uint8_t flags) {
     size_t noStart = 0, broken = 0;
     for (auto& [id, p] : props_) {
         if (!p.level && !p.spawned) continue;
+        if (OwnCopy(id, p)) { ++n_.structResetSkipped; resetTally_.Count(ResetAction::Leave); continue; }   // a structure is never teleported
         ResetCandidate c;
         c.kind = p.level ? ResetKind::LevelProp : ResetKind::Spawned;
         c.alive = adapter_->StillValid(p.actor, p.index);

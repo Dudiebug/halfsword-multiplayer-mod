@@ -181,6 +181,7 @@ MatchConfig Lobby::config() const {
     c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
     c.waveBreakS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wbrk"), 0), 0, 600));      // 0: the format's own
     c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
+    c.hostPhysics = steam::LobbyData(lobby_, "hsm_sync") == "host";                                  // none: per player
     return Sanitize(c);
 }
 
@@ -197,6 +198,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_dmg", std::to_string(c.damagePct));
     steam::SetLobbyData(lobby_, "hsm_wbrk", std::to_string(c.waveBreakS));
     steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(c.clearGroundMin));
+    steam::SetLobbyData(lobby_, "hsm_sync", c.hostPhysics ? "host" : "owner");
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }

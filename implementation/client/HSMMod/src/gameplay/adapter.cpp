@@ -5,6 +5,7 @@
 #include "hsm_owner.h"
 #include "log.h"
 #include "match/hsm_match.h"
+#include "session/hsm_ground_clear.h"
 #include "session/hsm_gvas.h"
 #include "sync/hsm_gore.h"
 #include "ue/hook.h"
@@ -54,6 +55,10 @@ constexpr const char* kBoneCandidates[] = {
     "thigh_l", "calf_l", "foot_l", "thigh_r", "calf_r", "foot_r",
 };
 constexpr const char* kPartHealth[7] = { "Head Health", "Body Upper Health", "Body Lower Health", "Arm_R Health", "Arm_L Health", "Leg_R Health", "Leg_L Health" };
+// VitalsMsg.state bit i is field i (protocol/hsm_owner.h kVitalsState*).
+constexpr const char* kStateBoolFields[] = { "Downed", "Any_Guarding", "R_Guarding", "L_Guarding", "Is Crouched",
+                                             "R_Thrusting", "Threatening Stance", "Give Up" };
+static_assert(std::size(kStateBoolFields) == 8, "one name per state bit");
 
 // Velocity tracking gains: reach the target over ~tau seconds, with caps so a bad sample cannot fling bodies.
 constexpr double kTau = 0.05, kMaxLinear = 3000.0, kMaxAngularDeg = 1500.0;   // 50 ms: puppets keep up with fast swings
@@ -334,9 +339,21 @@ bool Adapter::ControlRotation(int localIndex, float& yaw, float& pitch) {
     return std::isfinite(yaw) && std::isfinite(pitch);
 }
 
+bool Adapter::SetControlRotation(int localIndex, float yaw, float pitch) {
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", localIndex);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    return ctrl && Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitch, yaw, 0}).invoke();
+}
+
 UObject* Adapter::GameInstance() {
+    // A full scan of the object array (hundreds of thousands) each call, and the host's DriveFighter asks for the mouse
+    // look settings once per driven fighter per frame: the instance is kept and checked at its slot (drive_lean).
+    if (lean_ && gi_ && ObjectAt(giIndex_) == gi_ && ClassOf(gi_) == giClass_ && !IsGarbage(gi_)) return gi_;
     std::vector<UObject*> gis = FindInstances(kGameInstanceClass);
-    return gis.empty() ? nullptr : gis[0];
+    UObject* gi = gis.empty() ? nullptr : gis[0];
+    gi_ = gi; giIndex_ = gi ? ObjectIndex(gi) : -1; giClass_ = gi ? ClassOf(gi) : nullptr;
+    return gi;
 }
 
 // HSMMP_tmp_<pid>_<n>.sav: a slot of another running instance (a local host + client test) is still in use.
@@ -502,7 +519,7 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
     if (UObject* st = FindObject(kPassportStruct, "UserDefinedStruct"))
         if (FProperty* h = FindPropertyPrefix(st, "Height_"); h && PropertySize(h) == sizeof(double)) std::memcpy(&height, from + PropertyOffset(h), sizeof height);
     if (!std::isfinite(height)) height = 0.5;
-    if (muscleTier_ >= 0) ApplyMuscle(willie, dst);
+    ApplyBuild(willie, dst, o.bot);
     if (bare_) StripEquipment(willie, dst);
     return true;
 }
@@ -525,9 +542,12 @@ void Adapter::StripEquipment(UObject* willie, FProperty* passport) {
     HSM_LOG("adapter: %s spawned bare (%d equipment map(s) cleared)", ObjectName(willie).c_str(), cleared);
 }
 
-// The rank's build on the spawned fighter's own copy of the passport (never the save or the generator's). Weight is
-// taken to run 0..1 like Height; any other value is left alone and logged, so a test log shows the real range.
-void Adapter::ApplyMuscle(UObject* willie, FProperty* passport) {
+// The tier's build on the spawned fighter's own copy of the passport (never the save or the generator's). The Weight
+// is the Muscle Rate in the game's Willie_BP: the body's mass scale runs 1..1.25 over 0..1 and the grip's hold limit
+// 1..1.5, so two players with different Weights are different bodies (a Free Mode 2.0 made one fighter 33% heavier with a 60%
+// stronger grip: #294 #295 #301). A player gets exactly the forced Weight (SetBuild); a bot, or any fighter with
+// force_strength=0, its own clamped to 0..1.
+void Adapter::ApplyBuild(UObject* willie, FProperty* passport, bool bot) {
     UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
     FProperty* w = st ? FindPropertyPrefix(st, "Weight_") : nullptr;
     if (!w || PropertySize(w) != sizeof(double)) {
@@ -539,14 +559,63 @@ void Adapter::ApplyMuscle(UObject* willie, FProperty* passport) {
     uint8_t* at = reinterpret_cast<uint8_t*>(willie) + PropertyOffset(passport) + PropertyOffset(w);
     double own = 0;
     std::memcpy(&own, at, sizeof own);
-    if (!std::isfinite(own) || own < 0.0 || own > 1.0) {
-        HSM_LOG("adapter: %s's passport Weight is %.3f, outside 0..1; build left as it is", ObjectName(willie).c_str(), own);
+    const bool force = buildOn_ && !bot;
+    const double want = BuildWeight(own, buildWeight_, force);
+    if (want != own) std::memcpy(at, &want, sizeof want);          // a NaN own compares unequal too
+    const std::string name = ObjectName(willie);
+    if (force)
+        HSM_LOG("adapter: %s build forced (Weight %.3f -> %.3f, tier %d, mass x%.2f, grip x%.2f)", name.c_str(), own, want, buildTier_,
+                MassScaleFor(want), GripScaleFor(want));
+    else if (want != own)
+        HSM_LOG("adapter: %s build clamped (Weight %.3f -> %.3f, mass x%.2f, grip x%.2f)%s", name.c_str(), own, want, MassScaleFor(want), GripScaleFor(want),
+                bot ? " (bot)" : "");
+    else if (!bot)
+        HSM_LOG("adapter: %s build kept (Weight %.3f, mass x%.2f, grip x%.2f)", name.c_str(), own, MassScaleFor(want), GripScaleFor(want));
+}
+
+// The forced build on a live fighter: the game read the save's Weight at BeginPlay (Muscle Rate, UserConstructionScript)
+// and set the mass scale from it 0.2 s later (Willie_BP: SetAllMassScale(1..1.25 over the Muscle Rate)); worn armour and
+// held weapons then added their weight per bone, scaled by that same "Mass Scale (Set in BP)" (Add and Remove Weapon
+// Weights). So every body's mass scale is multiplied by new/old, which keeps the armour's share. Before the 0.2 s set
+// (mass scale still 0) only the Muscle Rate and the passport change, and the game builds the mass from them.
+void Adapter::ApplyBuildLive(UObject* willie) {
+    if (!willie || !buildOn_) return;
+    bool zombie = false;
+    if (GetBool(willie, "Is Zombie?", zombie) && zombie) return;
+    UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
+    FProperty* passport = FindProperty(ClassOf(willie), "Character Passport");
+    FProperty* w = st ? FindPropertyPrefix(st, "Weight_") : nullptr;
+    double* rate = Field<double>(willie, "Muscle Rate");
+    double* mass = Field<double>(willie, "Mass Scale (Set in BP)");
+    const std::string name = ObjectName(willie);
+    if (!passport || !w || PropertySize(w) != sizeof(double) || !rate || !mass) {
+        HSM_LOG("adapter: %s live build not set (passport %d, Weight %d, Muscle Rate %d, mass scale %d)", name.c_str(), passport != nullptr,
+                w != nullptr, rate != nullptr, mass != nullptr);
         return;
     }
-    const double want = MuscleFor(own, muscleTier_);
-    if (want == own) return;
+    uint8_t* at = reinterpret_cast<uint8_t*>(willie) + PropertyOffset(passport) + PropertyOffset(w);
+    double own = 0;
+    std::memcpy(&own, at, sizeof own);
+    const double want = BuildWeight(own, buildWeight_, true);
+    const double oldRate = *rate, oldMass = *mass, newMass = MassScaleFor(want);
     std::memcpy(at, &want, sizeof want);
-    HSM_LOG("adapter: %s built for tier %d (Weight %.2f -> %.2f)", ObjectName(willie).c_str(), muscleTier_, own, want);
+    *rate = want;
+    int bodies = 0;
+    UObject* mesh = MeshOf(willie);
+    if (std::isfinite(oldMass) && oldMass > 0.0 && mesh && ResolveBones(mesh)) {
+        const double k = newMass / oldMass;
+        for (const FName& bone : bones_) {
+            Call g(mesh, "GetMassScale");
+            if (!g.valid() || !g.setName("BoneName", bone).invoke()) continue;
+            const float s = g.get<float>("ReturnValue");
+            if (!std::isfinite(s) || s <= 0.f) continue;
+            Call set(mesh, "SetMassScale");
+            if (set.valid() && set.setName("BoneName", bone).set<float>("InMassScale", float(s * k)).invoke()) ++bodies;
+        }
+        *mass = newMass;
+    }
+    HSM_LOG("adapter: %s live build forced (Weight %.3f -> %.3f, Muscle Rate %.3f, tier %d, mass x%.2f -> x%.2f on %d bodies, grip x%.2f)",
+            name.c_str(), own, want, oldRate, buildTier_, oldMass, newMass, bodies, GripScaleFor(want));
 }
 
 // #36 evidence: how the spawned fighter's head is set up (Face Type, the passport's Weight, the head material's
@@ -614,8 +683,89 @@ UObject* Adapter::ControllerOf(UObject* pawn) {
 
 void Adapter::KeepRemoteFighter(UObject* willie, float yawDeg, float pitchDeg) {
     SetBool(willie, "Player", true);   // Willie computes Player once from local player 0/1; mod fighters are players too
+    // No lock-on here (sync audit item 18): it reads the host's Camera Lock On and writes its own SetControlRotation over
+    // the client's sent one (Willie_BP.cpp:16529, 16549). The client's camera is its own.
+    if (double* lock = Field<double>(willie, "Lock on Strength")) *lock = 0.0;
     game::RefreshDamageCache(willie);   // its cached damage rate was set before that (gameplay/damage_pin.h)
-    if (UObject* ctrl = ControllerOf(willie)) Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitchDeg, yawDeg, 0}).invoke();
+    UObject* ctrl = nullptr;
+    if (lean_) if (UObject** c = Field<UObject*>(willie, "Controller")) ctrl = *c;   // the pawn's own field: no GetController call
+    if (!ctrl) ctrl = ControllerOf(willie);
+    if (!ctrl) return;
+    if (lean_) {
+        // The rotation stays once set (hsm_drivelean.h ControlRotationGate); the table forgets fighters long gone.
+        if (rotationGate_.size() > 32) rotationGate_.clear();
+        const double nowMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!rotationGate_[willie].Needed(ctrl, yawDeg, pitchDeg, nowMs)) return;
+    }
+    Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitchDeg, yawDeg, 0}).invoke();
+}
+
+bool Adapter::EnsureBrain(UObject* willie) {
+    if (!willie) return false;
+    if (ControllerOf(willie)) return true;
+    UClass* aiCtrl = FindClass("AIController");
+    if (UClass** cls = Field<UClass*>(willie, "AIControllerClass"); cls && aiCtrl) *cls = aiCtrl;
+    Call(willie, "SpawnDefaultController").invoke();
+    UObject* ctrl = ControllerOf(willie);
+    if (ctrl) SetBool(ctrl, "bSetControlRotationFromPawnOrientation", false);   // aim comes from the remote player
+    HSM_LOG("adapter: %s %s a controller for the hand-off", ObjectName(willie).c_str(), ctrl ? "got" : "could not get");
+    return ctrl != nullptr;
+}
+
+// The game's mouse look scale (GI_Settings: Willie_BP.cpp:11407, 11542 multiply the mouse axes by it, Y also by the
+// invert). Host physics: a client's mouse axes go out multiplied by its own, and the host divides its own back out
+// (sync audit item 16).
+bool Adapter::MouseLook(float& sensitivity, bool& invert) {
+    UObject* gi = GameInstance();
+    double* sens = gi ? Field<double>(gi, "Mouse Sensitivity") : nullptr;
+    if (!sens || !std::isfinite(*sens)) return false;
+    sensitivity = float(*sens);
+    invert = false;
+    GetBool(gi, "Invert Mouse", invert);
+    return true;
+}
+
+// Willie_BP ReceiveTick (Willie_BP.cpp:16513): FInterpTo(Look Sensiticity, Any_Guarding ? 0.25 : 1, dt, Any_Guarding ? 0 : 5);
+// an FInterpTo at speed 0 is the target at once.
+std::vector<UObject*> Adapter::StuckTargets(UObject* willie) {
+    std::vector<UObject*> out;
+    if (!willie) return out;
+    for (const char* hand : {"Weapon R", "Weapon L"}) {
+        UObject** wp = Field<UObject*>(willie, hand);
+        UObject* weapon = wp ? *wp : nullptr;
+        if (!weapon || !StillValid(weapon, ObjectIndex(weapon))) continue;
+        const auto* arr = Field<FObjArray>(weapon, "Stuck Constraints Array");
+        if (!arr || !arr->data || arr->num <= 0 || arr->num > 256) continue;
+        for (int32_t i = 0; i < arr->num; ++i) {
+            UObject* k = arr->data[i];
+            if (!k || !StillValid(k, ObjectIndex(k))) continue;
+            bool on = false;
+            UObject** hit = Field<UObject*>(k, "Hit Actor");
+            if (hit && *hit && GetBool(k, "Activate Constraint", on) && on && std::find(out.begin(), out.end(), *hit) == out.end())
+                out.push_back(*hit);
+        }
+    }
+    return out;
+}
+
+void Adapter::TickLookSensitivity(UObject* willie, float dt) {
+    double* sens = willie ? Field<double>(willie, "Look Sensiticity") : nullptr;
+    if (!sens) return;
+    bool guarding = false;
+    GetBool(willie, "Any_Guarding", guarding);
+    const double target = guarding ? 0.25 : 1.0;
+    if (!std::isfinite(*sens) || guarding) { *sens = target; return; }
+    const double step = std::clamp(double(dt) * 5.0, 0.0, 1.0);
+    *sens += (target - *sens) * step;
+    if (std::fabs(target - *sens) < 1e-4) *sens = target;
+}
+
+// Every fighter with Player set points player 0's audio listener at its own head once (a DoOnce, Willie_BP.cpp:19304-
+// 19317), so under host physics each client's fighter took the host's ears (sync audit item 17). Points it back.
+void Adapter::KeepAudioListener(UObject* mine) {
+    UObject* ctrl = ControllerOf(mine);
+    UObject** cam = Field<UObject*>(mine, "First Person Camera");
+    if (ctrl && cam && *cam) Call(ctrl, "SetAudioListenerAttenuationOverride").set<UObject*>("AttachToComponent", *cam).invoke();   // location left zero, as the game's
 }
 
 void Adapter::DestroyActor(UObject* actor) {
@@ -954,7 +1104,59 @@ bool Adapter::ReadVitals(UObject* willie, uint8_t entity, VitalsMsg& out) {
     static_assert(std::size(kDislocatedBoolFields) == sync::kGoreJoints, "one name per gore joint bit");
     for (uint32_t j = 0; j < sync::kGoreJoints; ++j)
         if (GetBool(willie, kDislocatedBoolFields[j], b) && b) out.dislocated |= 1u << j;
+    // What other fighters' code reads on this fighter (sync audit items 1, 9, 23, 30; Willie_BP.cpp:400-1310).
+    for (size_t i = 0; i < std::size(kStateBoolFields); ++i)
+        if (GetBool(willie, kStateBoolFields[i], b) && b) out.state |= uint8_t(1u << i);
+    out.weaponSkill = d("Weapon Skill (Temp)"); out.tonus = d("All Body Tonus"); out.noise = d("Total Noise");
+    out.light = d("In Light Meter"); out.exhaustion = d("Exhaustion");
+    if (FVector* md = Field<FVector>(willie, "Movement Dislocation")) {
+        const double m = std::sqrt(md->x * md->x + md->y * md->y + md->z * md->z);
+        out.moveDislocation = std::isfinite(m) ? float(m) : 0.f;
+    }
     return true;
+}
+
+// The owner's state on its stand-in, for the game code that reads another fighter: the attacker's parry roll
+// (ModularWeaponBP:918 reads Weapon Skill, Fallen and Any_Guarding), bots' target choice (Fallen, Downed, Give Up), and
+// their sight and hearing (noise, light, movement, crouch). The stand-in's tick is blocked, so nothing overwrites them.
+// All Body Tonus is left out: the rig zeroes it every frame, and only the parry roll needs it (WriteParryState).
+void Adapter::ApplyStandInVitals(UObject* willie, const VitalsMsg& v) {
+    auto put = [&](const char* name, float x) { if (double* p = Field<double>(willie, name)) *p = x; };
+    put("Health", v.health); put("Consciousness", v.consciousness); put("Stamina", v.stamina); put("Bleeding", v.bleeding);
+    for (size_t i = 0; i < 7; ++i) put(kPartHealth[i], v.partHealth[i]);
+    put("Weapon Skill (Temp)", v.weaponSkill); put("Total Noise", v.noise); put("In Light Meter", v.light);
+    put("Exhaustion", v.exhaustion);
+    if (FVector* md = Field<FVector>(willie, "Movement Dislocation")) *md = FVector{ v.moveDislocation, 0, 0 };   // read as VSize
+    SetBool(willie, "Fallen", (v.flags & 2u) != 0);
+    for (size_t i = 0; i < std::size(kStateBoolFields); ++i) SetBool(willie, kStateBoolFields[i], (v.state >> i) & 1u);
+}
+
+// The owner's tonus as the attacker's parry roll is about to read it (ModularWeaponBP:918: Consciousness + All Body
+// Tonus >= 150; guard, skill and Fallen are already on the stand-in). The rig zeroes it again on the next frame.
+void Adapter::WriteParryTonus(UObject* willie, const VitalsMsg& v) {
+    if (double* p = Field<double>(willie, "All Body Tonus")) *p = v.tonus;
+}
+
+// Willie_BP Get_Up_Pal (W:4718), as a teammate's grab runs it on its pal: bleeding stopped, health at least 20, give-up
+// cleared, and a bot's surrender and retreat reset. Being Grabbed is GrabSync's (the hold is still on).
+void Adapter::Revive(UObject* willie) {
+    if (double* p = Field<double>(willie, "Bleeding")) *p = 0;
+    if (double* p = Field<double>(willie, "Health"); p && *p < 20) *p = 20;
+    SetBool(willie, "Give Up", false);
+    SetBool(willie, "Give Up 2 (Temp)", false);
+    if (UObject* ai = ControllerOf(willie); ai && ObjectName(reinterpret_cast<UObject*>(ClassOf(ai))).rfind("AI_BP", 0) == 0) {
+        SetBool(ai, "My Give Up", false);
+        SetBool(ai, "Retreat", false);
+        if (double* p = Field<double>(ai, "Give Up Meter")) *p = 0;
+        if (double* p = Field<double>(ai, "Retreat Intent")) *p = 0;
+    }
+}
+
+// Pushes are solver contact in the game (Get_Damage applies no impulse): the one the sender's stand-in took, on my body.
+bool Adapter::Push(UObject* willie, const std::string& bone, const FVector& impulse) {
+    UObject* mesh = MeshOf(willie);
+    if (!mesh || bone.empty()) return false;
+    return Call(mesh, "AddImpulse").set<FVector>("Impulse", impulse).setName("BoneName", MakeName(bone)).set<bool>("bVelChange", false).invoke();
 }
 
 void Adapter::DriveTowards(UObject* willie, const WillieState& target, float dt) {
@@ -1075,6 +1277,14 @@ void Adapter::PrepareFreeModeFight(int foes) {
     if (uint8_t* m = Field<uint8_t>(gi, "Current Game Mode enum")) *m = 1;
 }
 
+bool Adapter::EndErrandMode() {
+    UObject* gi = GameInstance();
+    uint8_t* m = gi ? Field<uint8_t>(gi, "Current Game Mode enum") : nullptr;
+    if (!m || *m != 2) return false;
+    *m = 1;
+    return true;
+}
+
 int Adapter::FreeModeFoes() {
     UObject* gi = GameInstance();
     int32_t* f = gi ? Field<int32_t>(gi, "Free Mode Foes Amount") : nullptr;
@@ -1092,6 +1302,14 @@ bool Adapter::GamePaused() {
 
 void Adapter::SetGamePaused(bool paused) {
     Call(statics_, "SetGamePaused").set<UObject*>("WorldContextObject", world_).set<bool>("bPaused", paused).invoke();
+}
+
+bool Adapter::ResetTimeDilation() {
+    Call g(statics_, "GetGlobalTimeDilation");
+    g.set<UObject*>("WorldContextObject", world_);
+    if (!g.invoke() || g.get<float>("ReturnValue") == 1.f) return false;
+    Call(statics_, "SetGlobalTimeDilation").set<UObject*>("WorldContextObject", world_).set<float>("TimeDilation", 1.f).invoke();
+    return true;
 }
 
 void Adapter::QuitGame() {
@@ -1173,17 +1391,31 @@ std::vector<UObject*> Adapter::WeaponActors() {
     return out;
 }
 
-int Adapter::DestroyDroppedWeapons() {
-    int destroyed = 0;
+Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObject*)>& levelStart) {
+    DropClear out;
     for (UObject* w : WeaponActors()) {
-        if (IsBodyWeapon(w)) continue;
         UObject** parent = Field<UObject*>(w, "Parent Actor");
-        UObject** last = Field<UObject*>(w, "Last Parent");
-        if (!parent || *parent || !last || !*last) continue;
-        DestroyActor(w);
-        ++destroyed;
+        if (!parent) continue;                                   // not a modular weapon after all
+        DropCandidate c;
+        c.bodyWeapon = IsBodyWeapon(w);
+        c.beingDestroyed = BeingDestroyed(w);
+        c.hasParent = *parent != nullptr;
+        if (c.hasParent) {
+            UObject** right = Field<UObject*>(*parent, "Weapon R");
+            UObject** left = Field<UObject*>(*parent, "Weapon L");
+            c.inHand = (right && *right == w) || (left && *left == w);
+        } else if (!c.bodyWeapon) {
+            c.levelStart = levelStart && levelStart(w);
+        }
+        switch (ClearableDrop(c)) {
+            case DropVerdict::Clear: DestroyActor(w); ++out.destroyed; break;
+            case DropVerdict::KeepHeld: ++out.held; break;
+            case DropVerdict::KeepSheathed: ++out.sheathed; break;
+            case DropVerdict::KeepLevel: ++out.level; break;
+            case DropVerdict::KeepOther: break;
+        }
     }
-    return destroyed;
+    return out;
 }
 
 std::vector<UObject*> Adapter::LevelWeapons() {
@@ -1367,7 +1599,7 @@ UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamI
         .set<bool>("Is Mercenary", false).set<bool>("Ignore Budget", false);
     UObject* bot = nullptr;
     if (make.invoke()) {
-        SpawnOptions o; o.at = at; o.yawDeg = yawDeg; o.teamInt = teamInt; o.brain = true; o.stockBrain = true;
+        SpawnOptions o; o.at = at; o.yawDeg = yawDeg; o.teamInt = teamInt; o.brain = true; o.stockBrain = true; o.bot = true;
         o.passport = make.paramPtr("Character Passport");
         bot = o.passport ? SpawnFighter(o) : nullptr;
     }

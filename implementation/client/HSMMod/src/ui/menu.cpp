@@ -479,7 +479,7 @@ void BuildMatchColumn() {
         }
     }
     Section(g.middle, "SETTINGS", 18);
-    for (int i = 0; i <= int(LobbyRow::MyTeam); ++i) {
+    for (int i = 0; i <= int(LobbyRow::Sync); ++i) {
         StepperView v;
         v.box = g.kit.MakeColumn();
         Box row = g.kit.MakeRow();

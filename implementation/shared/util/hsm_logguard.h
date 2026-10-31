@@ -12,7 +12,7 @@
 
 namespace hsm::util {
 
-constexpr size_t kLogMaxBytes = 32u * 1024 * 1024;   // per session; the previous session's file is kept apart (HSMMod.prev.log)
+constexpr size_t kLogMaxBytes = 32u * 1024 * 1024;   // per session; the last three sessions' files are kept apart (HSMMod.prev.log, .prev2.log, .prev3.log)
 constexpr int kLogMaxLinesPerSec = 1000;             // more are dropped, and counted in a note
 constexpr int kLogRepeatInFull = 2;                  // an identical line is written this many times in a row, then collapsed
 constexpr double kLogRepeatSummaryMs = 5000.0;       // a line repeating without end gets its tally at least this often

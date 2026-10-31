@@ -1,6 +1,8 @@
 // HSMMod.ini next to the game exe. Missing file or role=off keeps the game fully vanilla.
 #pragma once
 #include "hsm_chat.h"
+#include "hsm_inputdelay.h"
+#include "session/hsm_structure.h"
 #include "voice/hsm_voice_ui.h"
 #include <cstdint>
 #include <string>
@@ -16,10 +18,46 @@ struct Config {
     std::string playerName = "Player";
     int snapshotHz = 30;
     int inputHz = 60;
+    // role=server only (0.9.0): sync_mode=host runs host physics (the server simulates every fighter, SyncMode::Host);
+    // owner (the default) is per player. A Steam lobby host picks it on the lobby page (the Sync row) instead.
+    bool hostPhysics = false;
     // true: clients also send Pose and Vitals straight to each other (Steam lobbies only; session/hsm_mesh.h), and the host
     // stops relaying what a client already hears directly (default from 0.7.0-pre6). false (mesh=0): every stream goes
     // through the host, as in 0.6.5. Used where the host and the client both have it on.
     bool mesh = true;
+    // false (the default after 0.8.0-pre14): no hand-off (sync/hsm_handoff.h, rev 32). Every fighter stays with its own player,
+    // grabs included, as in 0.8.0-pre7. hand_off=1 turns it back on; it happens only where the host and both players have it.
+    bool handOff = false;
+    // true (default from 0.8.0-pre17): a grab on any bone drags the way a down body's foot did in 0.8.0-pre7: the held
+    // limb or torso part left to the hold on the grabber's screen, part of the pull on the held player's pelvis and
+    // chest, and no snap of a held stand-in (sync/hsm_grab.h DragYieldBones). grab_drag=0: as 0.8.0-pre16. Per machine.
+    bool grabDrag = true;
+    // How a level prop built of several bodies joined by physics constraints (the Pit's bridge, a chain) is synced
+    // (session/hsm_structure.h). soft (default from 0.8.0-pre18): the host streams all its bodies as one snapshot at 20 Hz and
+    // the others steer their copy toward it with velocity, never teleporting a body; the map reset leaves it be. local: every
+    // machine simulates its own copy, nothing streams it. full: as 0.8.0-pre17 (streamed and teleported). The old 0 reads as
+    // soft, 1 as full. Per machine.
+    StructureMode syncStructures = StructureMode::Soft;
+    // true (default from 0.8.0-pre19): under host physics a client's camera lock-on works again (sync/hsm_lockon.h): the client
+    // aims at its target itself, as the game's lock-on does, and tells the host which fighter it holds. host_lock_on=0: no lock-on
+    // for a client under host physics, as up to 0.8.0-pre18. Per machine (the client's).
+    bool hostLockOn = true;
+    // true (default from 0.8.0-pre19): the host plays other players' input on their fighters with fewer game calls
+    // (sync/hsm_drivelean.h: a held guard is fed once, an unchanged aim is not set again, the game instance is found
+    // once). drive_lean=0: fed as in 0.8.0-pre17. Host only.
+    bool driveLean = true;
+    // true (default from 0.8.0-pre20): every player's build (the passport's Weight: body mass and grip strength) is forced to
+    // the lobby tier's, as a bot of that tier is built (shared match/hsm_match.h ForcedWeight; Brawl: the default 0.5), so no
+    // player is heavier or stronger-gripped than another because of their Free Mode passport (#294 #295 #301). force_strength=0:
+    // each keeps their own build, clamped to 0..1. The host's value rules the match (MatchInfo.forceStrength).
+    bool forceStrength = true;
+    // Host physics, the host's own input (hsm_inputdelay.h): auto (default) delays its fighter's buttons and movement by
+    // the clients' median input lag so the fight is even; 0 off; <ms> fixed (0-200). INI only, never in the lobby. Host only.
+    HostDelaySetting hostInputDelay;
+    // true (default from 0.8.0-pre19): a sheathed weapon that hangs in a scabbard has the scabbard's own joint moved to the
+    // Mesh (not the slot constraint) and a watchdog puts a slot weapon that stays 40 cm from its socket back
+    // (standin_slots.h). scabbard_fix=0: as 0.8.0-pre18. Per machine; owner sync too.
+    bool scabbardFix = true;
     // true (default from 0.7.0-pre6): with the mesh on, the host also plans each client pair's fastest path from the
     // measured pings and a client may pass another pair's Pose and Vitals on (detours, session/hsm_detour.h). detour=0
     // turns it off; nothing happens with mesh=0.
@@ -89,6 +127,8 @@ struct Config {
     // before HSMMod's ProcessEvent hook is installed, after (default) once the hook is in.
     bool ue4ss = true;
     bool ue4ssBefore = false;
+    // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
+    bool record = false;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

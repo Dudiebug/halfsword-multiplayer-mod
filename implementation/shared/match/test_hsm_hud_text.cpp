@@ -122,7 +122,8 @@ static void TestRoundsText() {
     CHECK(GearLabel(Gear::RandomTier, Format::Duel) == "Random by tier, new each round");
     CHECK(GearLabel(Gear::RandomTier, Format::FreeForAll) == "Random by tier, new each life");
     CHECK(GearLabel(Gear::RandomTier, Format::ThreeTeams) == "Random by tier, new each life");
-    CHECK(GearLabel(Gear::Mirror, Format::Zombies) == "Own loadouts" && GearLabel(Gear::RandomTier, Format::PlayersVsBots) == "Own loadouts");
+    CHECK(GearLabel(Gear::Mirror, Format::Zombies) == "Everyone identical, kept all run" && GearLabel(Gear::RandomTier, Format::PlayersVsBots) == "Random by tier, kept all run");
+    CHECK(GearLabel(Gear::Own, Format::Zombies) == "Own loadouts" && GearLabel(Gear::Own, Format::PlayersVsBots) == "Own loadouts");
     CHECK(GearLabel(Gear(9), Format::Duel) == "Own loadouts");                  // an unknown setting is Own
     CHECK(GearLabel(Gear::Fists, Format::FreeForAll) == "Bare fists" && GearLabel(Gear::Fists, Format::Zombies) == "Own loadouts");
     // Brawl is a free-for-all with bare fists: it has its own name wherever the mode is named.

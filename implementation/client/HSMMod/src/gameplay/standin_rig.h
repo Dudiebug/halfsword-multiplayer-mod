@@ -62,6 +62,12 @@ public:
     // motors, physical animation, physics handles, root constraints, gravity, world collision, BoneCore and capsule
     // collision on a schedule (every 0.5 s for the first 6 s after binding, then every 2 s, and after a weapon change).
     void Neutralise(double nowMs);
+    // Hand-off (sync/hsm_handoff.h): undoes Neutralise, as the game's own start-up arms a fighter (Willie_BP BeginPlay,
+    // W:14190-14212): the fields as Neutralise first found them, the joint motors' profile, physical animation, gravity
+    // and world collision, the held weapons' collision (ModularWeaponBP Turn On Collision), BoneCore and capsule
+    // collision, walking, and the pelvis-to-capsule constraints made again where the capsule stands. The session stops
+    // blocking the Willie's tick, which takes over from the next frame. Then Unbind: nothing here drives it any more.
+    void Revive();
 
     // Stand-in: writes the owner's grip state into this Willie, so its fingers and animation follow the owner's hands (the
     // left hand of a two-handed grip never holds a Weapon L; the game marks it with L Hand In Offhand Attached). The two
@@ -112,18 +118,21 @@ private:
         ue::PreparedCall headToWorld;
         // this frame
         bool read = false, haveTip = false, driven = false;
+        bool wasHeld = false, farFromHand = false;   // read last frame / this frame's read failed for being out of the hand's reach
         sync::V3 pos{}, basePos{}, tipPos{};
         sync::Q4 rot{};
     };
     ue::UObject* FieldAt(int32_t offset) const;   // UObject* field of the bound Willie at a cached offset
     void RefreshWeapon(int w);                    // re-resolves slot w when its field changed
     bool ReadWeapon(int w, const sync::V3& handPos);
+    void CheckHandLoss(int w, const Weapon& wp);  // #249: logs the own live fighter's weapon leaving its hand unasked
     bool ReadHead(Weapon& wp, sync::BoneSample& out);   // the flail head of a held weapon, world
     void ScanParts(Weapon& wp);                         // a component chain's simulating parts and head (Weapon::parts)
     ue::UObject* HeadBody(const Weapon& wp) const;      // the component the head is read from and driven on, or nullptr
     ue::UObject* ChainBody(const Weapon& wp) const;     // one body of the chain, to check its collision policy, or nullptr
     void ChainPolicy(const Weapon& wp);                 // SetChainPolicy on every body of the chain
     void RearmChain(const Weapon& wp);                  // RearmFlail, and a component chain simulating again and still
+    void RearmDropped(const Weapon& wp);                // gravity and every channel back: a dropped weapon's physics
     bool GripWanted(int hand) const;
     bool GripLoose(int hand) const;
     void FreeGrip(int hand);
@@ -178,8 +187,17 @@ private:
     bool MakeGripJoint(ue::UObject* joint, ue::UObject* root, const char* socket, bool lowerArm);   // right hand, at the socket
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
+    bool sendsFrames_ = false;                               // the last Read streamed a pose: the player's own live fighter
+    double lastReadMs_ = -1.0, readGapMs_ = 0.0;             // steady clock of the last Read / the gap before it
     uint32_t pinned_ = 0;                                    // SetPinnedWeapons
     std::vector<ue::UObject*> brokenRoots_;                  // root constraints already broken
+    // What Neutralise found before its first write (Revive puts it back).
+    std::vector<double> savedDoubles_;
+    std::vector<bool> savedTrue_, savedFalse_;
+    bool savedFields_ = false, savedPolicy_ = false;
+    uint8_t savedMeshResponse_[2] = {2, 2};                  // WorldStatic, WorldDynamic (ECR_Block)
+    uint8_t savedCore_ = 3, savedCapsule_ = 1;               // ECollisionEnabled: BoneCore QueryAndPhysics, the capsule QueryOnly
+    bool savedGravity_ = true;
     bool typesLogged_ = false;
     sync::V3 pelvis_{};                                      // this frame's Read
     bool pelvisRead_ = false;

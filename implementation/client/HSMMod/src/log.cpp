@@ -19,7 +19,11 @@ void LogInit() {
     std::lock_guard<std::mutex> lock(g_mu);
     if (g_file) return;
     std::wstring path = InstanceFilePath(L"HSMMod", L".log");
-    MoveFileExW(path.c_str(), InstanceFilePath(L"HSMMod", L".prev.log").c_str(), MOVEFILE_REPLACE_EXISTING);   // keep the last session
+    // Keep the last three sessions (a bug report sends them all): prev2 -> prev3, prev -> prev2, log -> prev.
+    const std::wstring prev = InstanceFilePath(L"HSMMod", L".prev.log"), prev2 = InstanceFilePath(L"HSMMod", L".prev2.log");
+    MoveFileExW(prev2.c_str(), InstanceFilePath(L"HSMMod", L".prev3.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    MoveFileExW(prev.c_str(), prev2.c_str(), MOVEFILE_REPLACE_EXISTING);
+    MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
     g_file = _wfopen(path.c_str(), L"w");
     if (g_file && path.size() < MAX_PATH) std::wcscpy(g_exitPath, path.c_str());
 }

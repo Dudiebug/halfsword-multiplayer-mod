@@ -45,6 +45,7 @@ struct Data {
     std::function<bool()> paused;
     int openVk = VK_RETURN;
     int swallowVk = 0;                      // the letter key that opened the chat, not typed until it is let go of
+    bool stale = true;                      // keys were not read (another window in front, no HUD): Drain before Poll
     Key keys[256];
     bool hudShown = false; uint32_t hudAt = 0;   // the match HUD's last state, and when it came up (the idle hint)
     uint32_t typingAt = 0;                  // the caret's phase: when the line opened or was last typed into
@@ -168,6 +169,18 @@ void BuildKeyState(BYTE (&ks)[256], const SHORT (&st)[256]) {
     if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] |= 1;
 }
 
+// Back from a stretch with no Poll: what the keys did meanwhile is not ours. GetAsyncKeyState's "pressed since last asked"
+// bit still holds an Enter pressed in another window (Discord), in a menu or in the lobby's chat box, which opened the
+// chat on the first Poll back with no key pressed in the fight (#136). Every key is asked once and forgotten, and a key
+// still held counts as down already (it fires only once pressed again).
+void Drain() {
+    for (int vk = 0x08; vk <= 0xFE; ++vk) {
+        const SHORT st = GetAsyncKeyState(vk);
+        d.keys[vk] = Key{};
+        d.keys[vk].down = (st & 0x8000) != 0;
+    }
+}
+
 void Poll(uint32_t now) {
     if (!d.session.typing()) {
         if (!Fires(d.openVk, now, false)) return;
@@ -289,8 +302,10 @@ void ChatTick(const HudScene& m) {
         // and the keyboard given back.
         for (Key& k : d.keys) k.down = false;
         d.swallowVk = 0;
+        d.stale = true;
         if (d.session.typing()) Feed(!Foreground() ? hsm::ChatEvent::FocusLost : hsm::ChatEvent::HudHidden, now);
     } else {
+        if (d.stale) { Drain(); d.stale = false; }
         if (d.pending) OpenPending(now);
         Poll(now);
     }
@@ -332,6 +347,7 @@ uint32_t ChatLinesAdded() { return d.added; }
 void ChatClearLines() { d.lines.clear(); }
 
 void ChatDrop(const char* why) {
+    d.stale = true;   // no ChatTick this frame (no session): the keys go unread
     if (!d.session.typing()) return;
     d.swallowVk = 0;
     Feed(hsm::ChatEvent::HudHidden, NowMs(), std::string(), why);

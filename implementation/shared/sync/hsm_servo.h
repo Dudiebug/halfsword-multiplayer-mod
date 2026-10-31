@@ -71,6 +71,18 @@ struct ServoParams {
     double snapMs = 150.0;      // ... sustained this long before a rigid snap; main.lua:139 SNAP_BODY_MS
 };
 
+// Host physics (0.9.0): a client's copy of a fighter is only ever the host's picture. No soft start, no yield to contacts
+// (a contact here is not the host's), no caps: the whole remaining error is corrected each step, so every body sits on
+// the buffered host pose one step later. The rest (dt clamp, extrapolation, snap) as for a stand-in.
+inline ServoParams ReplicaServoParams() {
+    ServoParams p;
+    p.gain = 1.0; p.legGain = 1.0;
+    p.capLinUu = 1e6; p.capAngDeg = 1e6;
+    p.rampMs = 0.0; p.rampStartFrac = 1.0;
+    p.impactDvUu = 0.0;
+    return p;
+}
+
 // Current state of one driven body: bone origin, bone rotation (both world), and the body's
 // centre of mass in the bone's own local frame (constant per body; same vector servo.rs/avatars_pure
 // call `com`).
@@ -259,7 +271,7 @@ public:
     // The start ramp is still narrowing the caps at nowMs (impact detection is off meanwhile: main.lua:4188
     // `not body.ramp_at`).
     bool Ramping(double nowMs, const ServoParams& params) const {
-        if (!rampActive_) return false;
+        if (!rampActive_ || !(params.rampMs > 0.0)) return false;   // rampMs 0: no ramp (ReplicaServoParams), never 0/0
         const double k = (nowMs - rampStartMs_) / params.rampMs;
         return k >= 0.0 && k < 1.0;
     }
@@ -276,6 +288,7 @@ public:
             capLin = std::min(capLin, params.impactCapUu);
             capAng = std::min(capAng, params.impactCapUu);
         }
+        if (rampActive_ && !(params.rampMs > 0.0)) rampActive_ = false;
         if (rampActive_) {
             const double k = (nowMs - rampStartMs_) / params.rampMs;
             if (k >= 1.0 || k < 0.0) {

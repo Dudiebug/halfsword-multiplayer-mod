@@ -10,6 +10,7 @@
 //   kill feed     top right: the newest four rows, each fading on its own
 //   scoreboard    on Tab, and at results
 #pragma once
+#include "match/hsm_giveup_action.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_hud_text.h"
 #include <algorithm>
@@ -358,8 +359,10 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
     // A Progression co-op fight has no stock give-up screen in a session: G gives the fight up (Match::GiveUpFight).
     // Free-for-all, teams and Duel: G ends this life at any time; the last attacker within a minute gets the kill.
-    const bool coop = l.oneFight && Format(m.format) == Format::PlayersVsBots && fought && !InWaveBreak(m);
-    const bool pvp = !IsBotFormat(Format(m.format)) && fought && !InRoundGap(m);
+    // Survival and Zombies waves: G ends this life too (the fighter comes back when the wave is cleared).
+    const GiveUpAction act = GiveUpActionFor(m, !l.dead, l.dead, l.oneFight);
+    const bool coop = act == GiveUpAction::GiveUpFight;
+    const bool pvp = act == GiveUpAction::GiveUp;
     if (const FighterEntry* mine = FighterOf(m, l.me); mine && mine->alive && mine->down && fought && !InRoundGap(m) && !l.dead)
         s.pill = {true, coop || pvp ? "DOWN - GET UP OR HOLD G" : "DOWN - GET UP", style::kBloodInk, 1, 1};
     const float held = std::clamp(l.giveUp, 0.f, 1.f);
@@ -377,6 +380,7 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
             if (!IsBotFormat(Format(m.format))) s.bannerSub = {true, "HOLD G TO GIVE UP - YOUR LAST ATTACKER GETS THE KILL", style::kIron, look.opacity, 1};
             else if (l.oneFight && Format(m.format) == Format::PlayersVsBots)
                 s.bannerSub = {true, "HOLD G TO GIVE UP THE FIGHT", style::kIron, look.opacity, 1};
+            else s.bannerSub = {true, "STUCK? HOLD G TO GIVE UP", style::kIron, look.opacity, 1};
         }
     } else if (!l.banner.text.empty()) {
         uint32_t age = AgeMs(l.banner.atMs, nowMs);

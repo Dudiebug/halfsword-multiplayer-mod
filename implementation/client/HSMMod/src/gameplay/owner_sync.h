@@ -37,6 +37,8 @@ public:
     // Once per frame: reads and sends every owned fighter that is due. owned: (entity, its live Willie).
     void Tick(Adapter& adapter, double nowMs, float dt, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned, const Send& send);
     bool PelvisOf(uint8_t entity, sync::V3& out) const;   // as of the latest read (the snap clearance)
+    // The hand-off epoch each Pose and Vitals carries for its entity (sync/hsm_handoff.h); 0 when unset.
+    void SetEpochOf(std::function<uint8_t(uint8_t)> epochOf) { epochOf_ = std::move(epochOf); }
     uint64_t PosesSent() const { return posesSent_; }
     uint64_t VitalsSent() const { return vitalsSent_; }
 
@@ -51,6 +53,7 @@ private:
     std::array<std::unique_ptr<Owned>, kMaxWillies + 1> owned_{};
     double startMs_ = 0, prevDtS_ = 0;
     sync::SlowFrameMeter slowFrames_;   // item 7a: this machine's frames past 25 ms (a pose still goes each one)
+    std::function<uint8_t(uint8_t)> epochOf_;
     uint64_t posesSent_ = 0, vitalsSent_ = 0, readFailed_ = 0;
 };
 
@@ -60,8 +63,16 @@ class StandIns {
 public:
     void OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double nowMs);
     void OnVitals(const VitalsMsg& v);
-    void Attach(uint8_t entity, ue::UObject* willie);   // the session spawned willie as entity's stand-in
+    // The session spawned willie as entity's stand-in. replica: an exact replica of the host's stream, whatever
+    // SetReplica says (hand-off: this client's own fighter while the host simulates it).
+    void Attach(uint8_t entity, ue::UObject* willie, bool replica = false);
     void Detach(uint8_t entity);                        // unbinds; the session destroys the actor
+    // Hand-off: the stand-in becomes a live fighter again (FighterRig::Revive) and is unbound; the actor stays. False
+    // when entity had no bound stand-in (nothing was neutralised: nothing to undo).
+    bool Release(uint8_t entity);
+    // Hand-off: entity's stream comes from another machine now (its clock and its jitter differ): the feed starts again
+    // from that source's next pose. The actor stays as it is until then.
+    void ResetFeed(uint8_t entity);
     void Forget(uint8_t entity);                        // the entity left: its feed goes too
     void Clear();
 
@@ -96,6 +107,7 @@ public:
     // held, so the servo and the grab constraint do not pull them two ways.
     void SetHeldBones(std::function<uint32_t(uint8_t)> heldBones) { heldBones_ = std::move(heldBones); }
     void SetStuckBones(std::function<uint32_t(uint8_t)> stuckBones) { stuckBones_ = std::move(stuckBones); }   // bones my blades are stuck in
+    void SetGrabNoSnap(bool on) { grabNoSnap_ = on; }   // grab_drag: a stand-in my fighter holds is not snapped (sync::GrabBlocksSnap)
     // Called after every driven step of a stand-in with what the servo read, the target and the rig (the mirror bench's
     // tracking measures, mirror.h). Optional.
     using StepObserver = std::function<void(uint8_t entity, const sync::DriverStep& step, const sync::FighterNow& now,
@@ -103,6 +115,11 @@ public:
     void SetStepObserver(StepObserver observer) { stepObserver_ = std::move(observer); }
     // Once per frame, before the physics step. avoid: local pelvises a stand-in must never be snapped onto.
     void Tick(Adapter& adapter, double nowMs, float dt, const std::vector<sync::V3>& avoid);
+    // Host physics, client (0.9.0): stand-ins attached from now on are exact replicas of the host's fighters
+    // (sync::ReplicaServoParams: full gain, no caps, no contact yield). Off: the owner-sync servo.
+    void SetReplica(bool on) { replica_ = on; }
+    void SetAudit(bool on) { audit_ = on; }   // T2: log stand-in fields changed here between two Vitals (help-improve)
+    bool Replica() const { return replica_; }
     std::string HealthLine();                            // since the previous call; empty with no stand-in
     int Count() const;
 
@@ -111,7 +128,7 @@ private:
         sync::PosePlayer player;
         sync::RootTrack root;
         VitalsMsg vitals{};
-        bool haveVitals = false;
+        bool haveVitals = false, vitalsFresh = false;   // fresh: not yet applied to the stand-in
         std::array<uint32_t, sync::kPoseWeapons> handClass{};   // newest pose's weapon class per hand (0 = empty, 1 = unknown)
         std::array<uint32_t, sync::kPoseWeapons> handPrevClass{};   // the class each hand showed before that
         std::array<double, sync::kPoseWeapons> handSinceMs{};   // local time each hand's class last changed
@@ -132,12 +149,17 @@ private:
         bool deadShown = false;   // DED set on the stand-in from the owner's vitals
         bool downShown = false;   // the owner is dead, fallen, knocked out or at 0 health: the capsule follows the body, the beacon is off
         sync::V3 lastTargetPelvis{};
+        double lastPelvisErrUu = -1.0;   // the last step's, -1 unknown
         uint32_t shownTs = 0;
         bool haveShown = false;
+        VitalsMsg applied{};   // T2: the owner's vitals as last applied, and what local code changed since
+        bool haveApplied = false;
+        std::array<uint32_t, 9> drift{};
+        double nextDriftLogMs = 0;
     };
     struct Window {
         sync::ErrorStats pelvis, hands;
-        uint64_t frames = 0, targeted = 0, extrapolated = 0, stale = 0, cuts = 0, snaps = 0, placed = 0, struck = 0;
+        uint64_t frames = 0, targeted = 0, extrapolated = 0, stale = 0, cuts = 0, snaps = 0, placed = 0, struck = 0, grabNoSnap = 0;
         double delaySum = 0, j95Max = 0;
     };
     struct Slot {
@@ -146,15 +168,19 @@ private:
         Window window;
     };
     void TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, float dt, const std::vector<sync::V3>& avoid);
+    void NoteDrift(Adapter& adapter, uint8_t entity, Actor& a, double nowMs);
     void Record(Slot& s, const sync::DriverStep& step, const sync::FighterNow& now, const sync::PoseFrame& target);
     std::array<Slot, kMaxWillies + 1> slots_{};
     std::function<uint32_t(uint8_t)> deadBones_;
     std::function<uint32_t(uint8_t)> heldWeapons_;
     std::function<uint32_t(uint8_t)> heldBones_;
     std::function<uint32_t(uint8_t)> stuckBones_;
+    bool grabNoSnap_ = false;
     StepObserver stepObserver_;
     double costSumMs_ = 0, costMaxMs_ = 0;
     uint64_t ticks_ = 0;
+    bool audit_ = false;
+    bool replica_ = false;
 };
 
 }  // namespace hsm::game

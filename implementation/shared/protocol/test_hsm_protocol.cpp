@@ -130,6 +130,20 @@ static void TestMatchInfoAndKill() {
     { MatchInfo cw = m; cw.waveBreakS = 120; cw.clearGroundMin = 5; cw.clearCount = 7; auto e = Encode(cw); MatchInfo y;   // rev 28
       CHECK(Decode(e.data(), e.size(), y) && y.waveBreakS == 120 && y.clearGroundMin == 5 && y.clearCount == 7); }
     CHECK(o.waveBreakS == 0 && o.clearGroundMin == 0 && o.clearCount == 0);
+    { MatchInfo sm = m; sm.syncMode = 0; auto e = Encode(sm); MatchInfo y; CHECK(Decode(e.data(), e.size(), y) && y.syncMode == 0);   // rev 29
+      sm.syncMode = 2; e = Encode(sm); CHECK(!Decode(e.data(), e.size(), y)); }
+    CHECK(o.syncMode == 1);                                                   // per player unless the host says so
+    CHECK(o.forceStrength == 1 && MatchInfo{}.forceStrength == 1);            // rev 34: builds forced unless the host says so
+    { MatchInfo fm = m; fm.forceStrength = 0; auto e = Encode(fm); MatchInfo y; CHECK(Decode(e.data(), e.size(), y) && y.forceStrength == 0);
+      fm.forceStrength = 1; e = Encode(fm); CHECK(Decode(e.data(), e.size(), y) && y.forceStrength == 1 && y.syncMode == o.syncMode && y.physics == o.physics);
+      fm.forceStrength = 2; e = Encode(fm); CHECK(!Decode(e.data(), e.size(), y));
+      fm.forceStrength = 0xFF; e = Encode(fm); CHECK(!Decode(e.data(), e.size(), y)); }
+    CHECK(o.physics[0] == -1.f && o.physics[1] == -1.f && o.physics[2] == -1.f);   // rev 31: each its own
+    { MatchInfo pm = m; pm.physics = { 0.5f, 1.f, 0.f }; auto e = Encode(pm); MatchInfo y;
+      CHECK(Decode(e.data(), e.size(), y) && y.physics[0] == 0.5f && y.physics[1] == 1.f && y.physics[2] == 0.f);
+      pm.physics[1] = -0.5f; e = Encode(pm); CHECK(!Decode(e.data(), e.size(), y));
+      pm.physics[1] = std::numeric_limits<float>::quiet_NaN(); e = Encode(pm); CHECK(!Decode(e.data(), e.size(), y));
+      pm.physics[1] = 11.f; e = Encode(pm); CHECK(!Decode(e.data(), e.size(), y)); }
     { MatchInfo dm = m; dm.damagePct = 150; auto e = Encode(dm); MatchInfo y;
       CHECK(Decode(e.data(), e.size(), y) && y.damagePct == 150); }
     { MatchInfo dm = m; dm.damagePct = 1000; auto e = Encode(dm); MatchInfo y;
@@ -190,7 +204,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 18 && kProtocolRevision == 28);   // rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 18 && kProtocolRevision == 34);   // rev 34: MatchInfo.forceStrength; rev 33: Input/RelayInput toggle counts and lock-on target; rev 32: HandOff, HandOffAsk, Pose/Vitals epoch; rev 31: MatchInfo.physics; rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so
@@ -205,7 +219,7 @@ static void TestMatchInfoAndKill() {
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required
     // Reserved for M4-M6: numbers fixed, no decoder. A Welcome with the reserved flag 32 is rejected until M4 lands.
     CHECK(uint8_t(MsgType::ModList) == 48 && uint8_t(MsgType::SessionMods) == 49 && uint8_t(MsgType::ModMsg) == 50
-          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && kLastDecodedMsgType == 55 && kLastReservedMsgType == 55);
+          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && kLastDecodedMsgType == 58 && kLastReservedMsgType == 58);
     {
         Welcome w; w.snapshotHz = 30; w.map = "m"; w.flags = 32;
         auto wb = Encode(w); Welcome back; CHECK(!Decode(wb.data(), wb.size(), back));

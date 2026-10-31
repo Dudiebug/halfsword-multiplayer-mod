@@ -27,7 +27,8 @@ for f in src/*.cpp src/*/*.cpp; do
   "$CXX" -std=c++20 $COMMON -Werror $INC -DHSM_GIT_DESCRIBE="\"$DESCRIBE\"" -c "$f" -o "$o"
   objs+=("$o")
 done
-LINK_FLAGS="-fstack-protector-strong -s"
+# The map keeps symbol addresses for crash reports even though the DLL itself is stripped.
+LINK_FLAGS="-fstack-protector-strong -s -Wl,-Map,build/dwmapi.map"
 # Try control flow guard if supported. tools/check_dll.py requires the GUARD_CF bit exactly when build/guard_cf says 1.
 echo 0 > build/guard_cf
 if "$CXX" -c -x c++ /dev/null -o /dev/null -mguard=cf 2>/dev/null; then

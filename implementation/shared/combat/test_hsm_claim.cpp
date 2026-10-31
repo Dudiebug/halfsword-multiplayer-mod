@@ -856,8 +856,21 @@ static void TestDecidePropContact() {
     CHECK(DecidePropContact(true, false) == PropContact::Block);
 }
 
+// A bite's (6,6,6) marker crosses unturned, so the victim's Get Damage still skips the consciousness loss (audit item 21).
+static void TestBiteNormal() {
+    Xform standIn; standIn.pos = {100, 200, 300}; standIn.rot = AxisAngleDeg(0, 0, 1, 37.0);
+    Xform victimBone; victimBone.pos = {-40, 10, 90}; victimBone.rot = AxisAngleDeg(1, 0, 0, 80.0);
+    DcdInputs in; in.hitBone = "neck_01"; in.location = {110, 205, 330}; in.normal = {6, 6, 6};
+    HitClaim c = MakeClaim(in, standIn, 1, 10, 2, 1000, StrikeSource::Body, "", "");
+    CHECK(IsBiteNormal(c.normal));
+    CHECK(IsBiteNormal(ReplayInputs(c, victimBone).normal));
+    in.normal = {0, 0, 1};
+    CHECK(!IsBiteNormal(ReplayInputs(MakeClaim(in, standIn, 2, 10, 2, 1000, StrikeSource::Body, "", ""), victimBone).normal));
+}
+
 int main() {
     TestBoneFrameRoundTrip();
+    TestBiteNormal();
     TestScaledBoneFrame();
     TestGateTruthTable();
     TestLimiter();

@@ -70,6 +70,7 @@ public:
     void OnVitals(const VitalsMsg& v, double nowMs);            // a stand-in's owner vitals (newly severed parts)
     void OnStuck(const combat::StuckBladeMsg& m, double nowMs); // a blade stuck in / freed from a fighter simulated here
     void Forget(uint8_t entity);                                // left, respawned or despawned
+    void LetGo(uint8_t victim);                                 // my fighter is simulated elsewhere now (a hand-off): blades held to it let go
     uint32_t HeldWeapons(uint8_t attacker) const;   // weapon slots of that stand-in held to my fighter (bit 0 R, bit 1 L)
     uint32_t StuckBones(uint8_t victim) const;      // pose bones of that stand-in a blade of a fighter here is stuck in (and their parents)
     std::string HealthLine();                                   // since the previous call

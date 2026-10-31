@@ -457,6 +457,35 @@ static void TestClampToOwnerSpeed() {
     CHECK(Near(Dist3(ClampToOwnerSpeed(onTarget, off, tg).vel, onTarget.vel), 0, 1e-12));
 }
 
+// -------------------------------------------------------------------------------------------
+// Host physics (0.9.0): a replica takes the whole error each step, with no caps, no ramp and no yield: one step
+// lands it on the target, even right after a restart (rampMs 0 must not divide 0 by 0) or a hard contact.
+static void TestReplicaParams() {
+    const ServoParams p = ReplicaServoParams();
+    ServoState st;
+    st.StartRamp(1000.0);
+    EffectiveParams e = st.Effective(1000.0, p);   // the same frame as the restart
+    CHECK(std::isfinite(e.capLinUu) && std::isfinite(e.capAngDeg));
+    CHECK(Near(e.gain, 1.0) && Near(e.legGain, 1.0) && e.capLinUu >= 1e6 && e.capAngDeg >= 1e6);
+    CHECK(!st.Ramping(1000.0, p) && !st.Ramping(1000.5, p));
+    BodyNow body;
+    body.pos = V3{ 0, 0, 0 };
+    body.rot = Q4{ 0, 0, 0, 1 };
+    body.comLocal = V3{ 3, -2, 1 };
+    BodyTarget tg;
+    tg.pos = V3{ 400, -250, 90 };   // far off, as after a hit on the host
+    tg.rot = QAxisAngle(V3{ 0.2, 1, 0.3 }, 70);
+    const double dt = 1.0 / 60.0;
+    const ServoCommand cmd = ServoBody(body, tg, dt, e.gain, e.capLinUu, e.capAngDeg);
+    body = IntegrateBody(body, cmd, dt);
+    CHECK(Dist3(body.pos, tg.pos) < 0.5);
+    CHECK(QAngleDeg(body.rot, tg.rot) < 0.5);
+    // The stand-in default still ramps (unchanged).
+    ServoState sd;
+    sd.StartRamp(1000.0);
+    CHECK(sd.Ramping(1100.0, ServoParams{}) && Near(sd.Effective(1000.0, ServoParams{}).capLinUu, ServoParams{}.capLinUu * 0.3));
+}
+
 int main() {
     TestRestConverges();
     TestConstantVelocityTracking();
@@ -473,6 +502,7 @@ int main() {
     TestParityAdvance();
     TestQRotAgainstMatrixFormula();
     TestClampToOwnerSpeed();
+    TestReplicaParams();
     if (g_fail) { std::printf("test_hsm_servo: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_servo: all passed\n");
     return 0;

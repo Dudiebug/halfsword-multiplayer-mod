@@ -37,7 +37,25 @@ void ObjectSync::DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, 
                     ++n_.minted;
                     if (!Track(id, prev)) continue;
                 }
-                if (auto p = props_.find(id); p != props_.end()) p->second.lastContactMs = nowMs;   // Touch now
+                if (auto p = props_.find(id); p != props_.end()) {
+                    Prop& dropped = p->second;
+                    dropped.lastContactMs = nowMs;   // Touch now
+                    // 0.8.0-pre18: the owner's drop falls whatever policy the weapon still carries (the stand-in paths below
+                    // re-arm theirs; a weapon left with gravity off hung in the air, rested there and was released FREE).
+                    // Only a weapon with gravity off is re-armed: the full restore also blocks Pawn and PhysicsBody, which
+                    // would undo the game's own ignore of the last holder right after a normal drop.
+                    bool gravity = true;
+                    if (adapter_->StillValid(dropped.root, dropped.rootIndex)) {
+                        Call g(dropped.root, "IsGravityEnabled");
+                        if (g.valid() && g.invoke()) gravity = g.get<bool>("ReturnValue");
+                    }
+                    if (!gravity) {
+                        dropped.restoreTicks = kRestoreTicks;
+                        RestorePhysics(dropped.actor, dropped.root, dropped.rootIndex);
+                        ++n_.dropRestored;
+                        HSM_LOG("props: dropped %s had no gravity; physics restored", ObjectName(dropped.actor).c_str());
+                    }
+                }
             }
         }
         h = Hands{};   // a new fighter (respawn) starts clean: nothing it never held is a drop
@@ -118,7 +136,76 @@ void ObjectSync::GiveUp(uint64_t id, uint8_t owner, int hand, const PendingDrop&
                                                                  : std::string("a weapon in it, destroyed since");
     const std::string holds = copy ? ObjectName(copy) : std::string("nothing untracked");
     HSM_LOG("props: drop %016llx (entity %u, hand %d) not found on its stand-in (heard with %s; that hand holds %s now); that "
-            "weapon stays local here", static_cast<unsigned long long>(id), owner, hand, heard.c_str(), holds.c_str());
+            "weapon stays local here until its stream places it", static_cast<unsigned long long>(id), owner, hand, heard.c_str(), holds.c_str());
+    // 0.8.0-pre18: its stream will say where the weapon is (TickLate); the class the owner's hand showed narrows the match.
+    for (auto l = late_.begin(); l != late_.end();) l = sync::LateDropExpired(l->second.givenUpMs, nowMs) ? late_.erase(l) : std::next(l);
+    uint32_t cls = d.heardClass;
+    StandIns::PoseHandView pose;
+    if ((cls == sync::kHandEmpty || cls == sync::kHandUnknown) && standIns_->PoseHandInfo(owner, hand, pose)) cls = pose.prevClassHash;
+    LateDrop& l = late_[id];
+    l = LateDrop{};
+    l.givenUpMs = nowMs;
+    l.classHint = cls;
+}
+
+// Given-up drops (late_): once the owner's stream has said where the dropped weapon is, the loose weapon here nearest to
+// that place (sync::PickLateMatch) becomes the drop's prop: streamed, driven to the stream, despawned when idle. A weapon
+// that is a prop here under another id is not taken (aliased, logged once). Tried every kLateTryMs, from the cached weapon list.
+void ObjectSync::TickLate(double nowMs) {
+    constexpr double kLateTryMs = 500.0;
+    for (auto it = late_.begin(); it != late_.end();) {
+        const uint64_t id = it->first;
+        LateDrop& l = it->second;
+        if (props_.count(id)) { it = late_.erase(it); continue; }   // tracked by another path since
+        if (sync::LateDropExpired(l.givenUpMs, nowMs)) {
+            ++n_.lateExpired;
+            HSM_LOG("props: drop %016llx never matched a weapon here (%s)", static_cast<unsigned long long>(id),
+                    view_.Find(id) ? "its stream placed it, nothing of its class lay there" : "no stream was heard");
+            it = late_.erase(it);
+            continue;
+        }
+        const BodyStateMsg* st = view_.Find(id);
+        if (!st || nowMs - l.triedMs < kLateTryMs) { ++it; continue; }
+        l.triedMs = nowMs;
+        if (nowMs - weaponsMs_ >= kWeaponsRefreshMs) {
+            weaponsMs_ = nowMs;
+            weapons_.clear();
+            for (UObject* w : adapter_->WeaponActors())
+                if (!adapter_->IsBodyWeapon(w)) weapons_.push_back(Candidate{w, ObjectIndex(w), ClassHashOf(w)});
+        }
+        std::vector<sync::LateCandidate> cands;
+        std::vector<UObject*> actors;
+        for (const Candidate& c : weapons_) {
+            if (!adapter_->StillValid(c.actor, c.index) || ObjectField(c.actor, 0)) continue;   // gone, held or sheathed
+            const FVector at = adapter_->ActorLocation(c.actor);
+            sync::LateCandidate lc;
+            lc.pos = sync::V3{at.x, at.y, at.z};
+            lc.classHash = c.classHash;
+            lc.propElsewhere = byActor_.count(c.actor) != 0;
+            cands.push_back(lc);
+            actors.push_back(c.actor);
+        }
+        const sync::LatePick pick = sync::PickLateMatch(cands, l.classHint, sync::V3{st->px, st->py, st->pz});
+        if (pick.index < 0) { ++it; continue; }
+        UObject* w = actors[size_t(pick.index)];
+        if (pick.aliased) {
+            ++n_.lateAliased;
+            HSM_LOG("props: drop %016llx streams %.0f cm from %s, which is prop %016llx here already; not bound",
+                    static_cast<unsigned long long>(id), pick.distUu, ObjectName(w).c_str(),
+                    static_cast<unsigned long long>(byActor_[w]));
+            it = late_.erase(it);
+            continue;
+        }
+        Prop* p = Track(id, w);
+        if (!p) { it = late_.erase(it); continue; }   // no physics body (Track logged it)
+        p->restoreTicks = kRestoreTicks;
+        RestorePhysics(p->actor, p->root, p->rootIndex);
+        p->dirty = true;              // Drive it to the stream's place now
+        ++n_.lateRecovered;
+        HSM_LOG("props: drop %016llx matched late to %s (%.0f cm from its stream)", static_cast<unsigned long long>(id),
+                ObjectName(w).c_str(), pick.distUu);
+        it = late_.erase(it);
+    }
 }
 
 // A drop whose deadline passed while the stand-in still holds its witness. Let go of (forced), unless the owner holds

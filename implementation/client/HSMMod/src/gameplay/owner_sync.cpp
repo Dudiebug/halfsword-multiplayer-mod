@@ -1,6 +1,7 @@
 #include "gameplay/owner_sync.h"
 #include "log.h"
 #include "session/hsm_authority.h"
+#include "sync/hsm_grab.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -34,7 +35,7 @@ void OwnerStreams::Start(double nowMs) {
     startMs_ = nowMs;
 }
 
-void OwnerStreams::Clear() { *this = OwnerStreams{}; }
+void OwnerStreams::Clear() { auto epochOf = std::move(epochOf_); *this = OwnerStreams{}; epochOf_ = std::move(epochOf); }
 
 uint32_t OwnerStreams::ClockMs(double nowMs) const {
     return static_cast<uint32_t>(std::llround(std::max(0.0, nowMs - startMs_))) + 1000u;   // as the mirror bench
@@ -67,6 +68,7 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
                 const FVector at = adapter.ActorLocation(w);
                 PoseMsg m;
                 m.entity = e;
+                m.epoch = epochOf_ ? epochOf_(e) : 0;
                 m.rootX = float(at.x); m.rootY = float(at.y); m.rootZ = float(at.z);
                 m.yawDeg = float(adapter.ActorYaw(w));
                 m.pose = sync::EncodePose(f);
@@ -84,7 +86,7 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
         if (nowMs >= o.nextVitalsMs) {
             o.nextVitalsMs = std::max(o.nextVitalsMs + kVitalsEveryMs, nowMs);
             VitalsMsg v;
-            if (adapter.ReadVitals(w, e, v)) { send(Encode(v)); ++vitalsSent_; }
+            if (adapter.ReadVitals(w, e, v)) { v.epoch = epochOf_ ? epochOf_(e) : 0; send(Encode(v)); ++vitalsSent_; }
         }
     }
 }
@@ -135,22 +137,37 @@ void StandIns::OnVitals(const VitalsMsg& v) {
     Slot& s = slots_[v.entity];
     if (!s.feed) s.feed = std::make_unique<Feed>();
     s.feed->vitals = v;
-    s.feed->haveVitals = true;
+    s.feed->haveVitals = s.feed->vitalsFresh = true;
 }
 
-void StandIns::Attach(uint8_t entity, UObject* willie) {
+void StandIns::Attach(uint8_t entity, UObject* willie, bool replica) {
     if (!ValidEntity(entity) || !willie) return;
     Slot& s = slots_[entity];
     s.actor = std::make_unique<Actor>();
     s.actor->willie = willie;
     s.actor->index = ObjectIndex(willie);
     s.actor->bindDeadlineMs = SteadyNowMs() + kBindGraceMs;
+    if (replica_ || replica) s.actor->driver = sync::StandInDriver(sync::ReplicaServoParams());
     s.window = Window{};
-    HSM_LOG("standins: entity %u -> %s", entity, ObjectName(willie).c_str());
+    HSM_LOG("standins: entity %u -> %s%s", entity, ObjectName(willie).c_str(), replica_ || replica ? " (replica)" : "");
 }
 
 void StandIns::Detach(uint8_t entity) {
     if (ValidEntity(entity)) slots_[entity].actor.reset();
+}
+
+bool StandIns::Release(uint8_t entity) {
+    if (!ValidEntity(entity) || !slots_[entity].actor) return false;
+    Actor& a = *slots_[entity].actor;
+    const bool bound = a.rig.Bound();
+    if (bound) a.rig.Revive();
+    HSM_LOG("standins: entity %u's stand-in %s released (%s)", entity, ObjectName(a.willie).c_str(), bound ? "revived" : "never bound");
+    slots_[entity].actor.reset();
+    return bound;
+}
+
+void StandIns::ResetFeed(uint8_t entity) {
+    if (ValidEntity(entity)) slots_[entity].feed.reset();
 }
 
 void StandIns::Forget(uint8_t entity) {
@@ -237,6 +254,29 @@ void StandIns::Tick(Adapter& adapter, double nowMs, float dt, const std::vector<
     costMaxMs_ = std::max(costMaxMs_, costMs);
 }
 
+// T2 (sync audit): the stand-in read back just before the next Vitals is applied, against the last one applied. A field
+// that differs was written on this machine in between: a cross-actor write the owner never sees (audit items 9, 22, 27).
+void StandIns::NoteDrift(Adapter& adapter, uint8_t entity, Actor& a, double nowMs) {
+    VitalsMsg here;
+    if (!a.haveApplied || !adapter.ReadVitals(a.willie, entity, here)) return;
+    const VitalsMsg& was = a.applied;
+    auto off = [](float x, float y) { return std::fabs(x - y) > 0.5f; };
+    const bool d[] = { off(here.health, was.health), off(here.consciousness, was.consciousness), off(here.stamina, was.stamina),
+                       off(here.bleeding, was.bleeding), off(here.weaponSkill, was.weaponSkill), ((here.flags ^ was.flags) & 2u) != 0,
+                       here.state != was.state, here.severed != was.severed, here.dislocated != was.dislocated };
+    static_assert(std::size(d) == std::tuple_size_v<decltype(a.drift)>, "one counter per field");
+    for (size_t i = 0; i < std::size(d); ++i) a.drift[i] += d[i];
+    if (nowMs < a.nextDriftLogMs) return;
+    a.nextDriftLogMs = nowMs + 10000.0;
+    uint32_t any = 0;
+    for (uint32_t n : a.drift) any += n;
+    if (!any) return;
+    const auto& n = a.drift;
+    HSM_LOG("standins: e%u fields changed here between vitals (10 s): health %u consciousness %u stamina %u bleeding %u "
+            "skill %u fallen %u state %u severed %u dislocated %u", entity, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], n[8]);
+    a.drift = {};
+}
+
 void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, float dt, const std::vector<V3>& avoid) {
     Actor& a = *s.actor;
     if (!adapter.StillValid(a.willie, a.index)) {
@@ -291,6 +331,14 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
                 HSM_LOG("standins: entity %u's lock-on beacon %s", entity, down ? "off; a lock-on on it releases" : "back on");
             }
         }
+        // Health, guard, skill, Fallen, Downed, noise and light as the owner has them (sync audit items 9, 23, 27, 30):
+        // the attacker's parry roll, bots' target choice and their sight and hearing read these on the stand-in.
+        if (s.feed->vitalsFresh) {
+            if (audit_) NoteDrift(adapter, entity, a, nowMs);
+            adapter.ApplyStandInVitals(a.willie, v);
+            a.applied = v; a.haveApplied = true;
+            s.feed->vitalsFresh = false;
+        }
         if (!dead && v.health <= 0.f)
             if (double* hp = Field<double>(a.willie, "Health"); hp && *hp > 0.0) *hp = 0.0;
     }
@@ -303,10 +351,15 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     bool snapBlocked = false;
     if (a.haveTarget)
         for (const V3& p : avoid) snapBlocked = snapBlocked || Dist(a.lastTargetPelvis, p) < kSnapClearUu;
+    const uint32_t grabbed = heldBones_ ? heldBones_(entity) : 0u;
+    const bool grabHolds = grabNoSnap_ && !snapBlocked && sync::GrabBlocksSnap(grabbed, a.lastPelvisErrUu);
+    snapBlocked = snapBlocked || grabHolds;
     sync::PoseFrame target;
     const sync::DriverStep st = a.driver.Step(s.feed->player, nowMs, now, dt, snapBlocked, target);
+    if (st.have) a.lastPelvisErrUu = st.pelvisErrUu;
+    if (grabHolds && st.have && !st.place && st.pelvisErrUu > a.driver.Params().snapErrUu) ++s.window.grabNoSnap;
     // Bones my fighter's grab holds, and bones my blade is stuck in: left to the grab and the lodged blade (0.8.0-pre7).
-    const uint32_t held = (heldBones_ ? heldBones_(entity) : 0u) | (stuckBones_ ? stuckBones_(entity) : 0u);
+    const uint32_t held = grabbed | (stuckBones_ ? stuckBones_(entity) : 0u);
     if (st.have) {
         // The capsule goes where the owner's capsule was at the shown time, facing its way; first, since a teleporting
         // capsule may carry the Mesh, then Shift (HSMP main.lua:4773 drive_root, then :4791 snap_mesh).
@@ -371,11 +424,11 @@ std::string StandIns::HealthLine() {
         const unsigned long long rejected = s.feed ? static_cast<unsigned long long>(s.feed->rejected) : 0ull;
         std::snprintf(buf, sizeof buf,
                       "%s e%zu%s: pelvis avg %.1f p99 %.1f max %.1f | hands avg %.1f max %.1f uu | delay %.0f ms j95 %.0f | extrap %.1f%% "
-                      "stale %.1f%% | cuts %llu snaps %llu placed %llu struck %llu | poses %llu rejected %llu",
+                      "stale %.1f%% | cuts %llu snaps %llu (held, not snapped %llu) placed %llu struck %llu | poses %llu rejected %llu",
                       out.empty() ? "" : " ||", e, s.actor ? "" : " (no actor)", w.pelvis.Mean(), w.pelvis.Percentile(0.99), w.pelvis.Max(),
                       w.hands.Mean(), w.hands.Max(), w.delaySum / nt, w.j95Max, 100.0 * double(w.extrapolated) / nt,
                       100.0 * double(w.stale) / nt, static_cast<unsigned long long>(w.cuts), static_cast<unsigned long long>(w.snaps),
-                      static_cast<unsigned long long>(w.placed), static_cast<unsigned long long>(w.struck), poses, rejected);
+                      static_cast<unsigned long long>(w.grabNoSnap), static_cast<unsigned long long>(w.placed), static_cast<unsigned long long>(w.struck), poses, rejected);
         out += buf;
         s.window = Window{};
     }

@@ -146,6 +146,11 @@ struct DcdInputs {
 // a claim. ids/meta (claimId, attacker, victim, attackerTsMs, source, strikeComponent, strikeBone)
 // are not part of the DCD call itself (they come from the claim pipeline / the component pointers
 // DcdInputs omits), so they are supplied separately.
+// A zombie bite's Deal Complex Damage passes the normal Vec(6,6,6) as a marker (BP_Constraint_Bite.cpp:63), and Get
+// Damage skips the consciousness loss only on that exact value (Willie_BP.cpp:3929, 3931). No real normal is that
+// long, so the marker crosses the wire as it is instead of turning with the bone (sync audit item 21).
+inline bool IsBiteNormal(const V3& n) { return n.x == 6.0 && n.y == 6.0 && n.z == 6.0; }
+
 inline HitClaim MakeClaim(const DcdInputs& in, const Xform& hitBoneWorld, uint32_t claimId, uint8_t attacker,
                            uint8_t victim, uint32_t attackerTsMs, StrikeSource source,
                            const std::string& strikeComponent, const std::string& strikeBone) {
@@ -156,7 +161,7 @@ inline HitClaim MakeClaim(const DcdInputs& in, const Xform& hitBoneWorld, uint32
     c.attackerTsMs = attackerTsMs;
     c.hitBone = in.hitBone;
     c.location = hitBoneWorld.ToLocal(in.location);
-    c.normal = hitBoneWorld.ToLocalDir(in.normal);
+    c.normal = IsBiteNormal(in.normal) ? in.normal : hitBoneWorld.ToLocalDir(in.normal);
     c.hitVelocity = hitBoneWorld.ToLocalDir(in.hitVelocity);
     c.hitImpulse = hitBoneWorld.ToLocalDir(in.hitImpulse);
     c.cuttingPower = in.cuttingPower;
@@ -189,7 +194,7 @@ inline DcdInputs ReplayInputs(const HitClaim& c, const Xform& victimBoneWorld) {
     DcdInputs out;
     out.hitBone = c.hitBone;
     out.location = victimBoneWorld.FromLocal(c.location);
-    out.normal = victimBoneWorld.FromLocalDir(c.normal);
+    out.normal = IsBiteNormal(c.normal) ? c.normal : victimBoneWorld.FromLocalDir(c.normal);
     out.hitVelocity = victimBoneWorld.FromLocalDir(c.hitVelocity);
     out.hitImpulse = victimBoneWorld.FromLocalDir(c.hitImpulse);
     out.cuttingPower = c.cuttingPower;

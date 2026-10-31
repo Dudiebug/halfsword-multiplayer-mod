@@ -171,10 +171,11 @@ inline std::string TeamLabel(int team) {
     static const char* kNames[] = {"Red", "Blue", "Green", "Gold"};
     return team >= 0 && team < 4 ? kNames[team] : "Auto";
 }
-// The lobby's gear setting, with when it changes (RegearFor). The bot formats have no gear option: own loadouts.
+// The lobby's gear setting, with when it changes (RegearFor). The bot formats roll once, at the run's start.
 inline std::string GearLabel(Gear g, Format f) {
-    if (IsBotFormat(f)) return "Own loadouts";
+    if (!GearAllowed(f, g)) return "Own loadouts";
     if (g == Gear::Fists) return "Bare fists";
+    if (IsBotFormat(f)) return g == Gear::RandomTier ? "Random by tier, kept all run" : g == Gear::Mirror ? "Everyone identical, kept all run" : "Own loadouts";
     if (g == Gear::RandomTier) return f == Format::Duel ? "Random by tier, new each round" : "Random by tier, new each life";
     if (g == Gear::Mirror) return f == Format::Duel ? "Everyone identical, new each round" : "Everyone identical";
     return "Own loadouts";

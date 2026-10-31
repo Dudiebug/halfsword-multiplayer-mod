@@ -24,8 +24,10 @@
 #include "session/hsm_object_event.h"
 #include "session/hsm_object_skip.h"
 #include "session/hsm_prop_census.h"
+#include "session/hsm_structure.h"
 #include "session/hsm_walk_cache.h"
 #include "sync/hsm_handmatch.h"
+#include "sync/hsm_soft_correct.h"
 #include "ue/engine.h"
 #include <array>
 #include <cstdint>
@@ -63,6 +65,10 @@ public:
         // Whether this machine is in a fight level, whose physics props the census covers (a client ticks props only
         // once its level gate is open). Without it no level prop is synced.
         std::function<bool()> fightLevel;
+        // sync_structures (default soft): how constraint-built level props are synced (session/hsm_structure.h). full is
+        // 0.8.0-pre17 (streamed, teleported, leased, reset); local keeps every machine's copy to itself; soft streams it from the
+        // host as one snapshot and steers the receivers' copies (sync/hsm_soft_correct.h).
+        StructureMode syncStructures = StructureMode::Soft;
     };
     void Start(Adapter& adapter, StandIns& standIns, Env env);
     void Stop();                                                     // everything, the drop sequences too
@@ -123,6 +129,17 @@ public:
     // MapReset: put this machine's copy of the map back as it began, a few items a frame (StepReset, from Tick).
     void MarkBaseline();
     void MapReset(double nowMs, uint8_t flags);
+    // The ground clear keeps these: a weapon MarkBaseline recorded that still lies within a metre and a half of its spot.
+    // False for any other weapon, and for a level weapon that was picked up and put down elsewhere (it is a drop then).
+    bool IsLevelWeaponAtStart(ue::UObject* actor);
+
+    // The recorder's level walk (recorder.cpp keeps an ObjectSync of its own for it that is never started): every physics
+    // object of the level here as WalkLevel finds it, with its movable primitive bodies, root first. Nothing is tracked,
+    // sent or logged.
+    struct WalkedObject { ue::UObject* actor = nullptr; int32_t index = -1; std::vector<ue::UObject*> bodies; };
+    std::vector<WalkedObject> WalkForRecorder(Adapter& adapter);
+    // An actor's movable primitive bodies the same way (a dropped weapon's root and a flail's chain and head).
+    std::vector<ue::UObject*> RecorderBodies(Adapter& adapter, ue::UObject* actor);
 
 private:
     struct RootCalls {
@@ -132,6 +149,8 @@ private:
         ue::UObject* comp = nullptr;
         int32_t index = -1;
         bool dirty = false;                // a fresh state from the streamer was applied to the view since the last drive
+        double rxMs = 0;                   // when the state in the view for this body arrived here (SteadyNowMs); soft structures extrapolate from it
+        double steerMs = -1e18;            // when this body was last steered toward a state (soft structures)
         bool detached = false;             // left the object (a Detached event): it is its own object now
         uint64_t readTick = 0;             // the tick `read` was taken in
         bool readOk = false;
@@ -176,11 +195,14 @@ private:
         double bornMs = 0;                 // when it was first tracked here (a spawned object born in the round is destroyed by a map reset)
         bool startTried = false;           // a level prop: its start was read (once)
         std::vector<StartBody> start;      // a level prop: each body's transform as the level began (map reset)
+        sync::StuckTimer stuck;            // a soft structure: how long some body has been far from the host's pose
+        double lastSnapMs = -1e18;         // a soft structure: when all its bodies were last placed at once
     };
     using Hands = hands::Hands;
     using StandInHand = hands::StandInHand;
     using StandInHands = hands::StandInHands;
     using PendingDrop = hands::PendingDrop;
+    using LateDrop = hands::LateDrop;
     using Loose = hands::Loose;
     using Candidate = hands::Candidate;
     using DropResult = hands::DropResult;
@@ -212,7 +234,9 @@ private:
                  eventsSent = 0, eventsApplied = 0, eventsQueued = 0, eventsRejected = 0, jointsBroken = 0, bodiesDetached = 0,
                  destroyedSent = 0, destroyedApplied = 0, rechecks = 0, bodyDriven = 0,
                  skippedClasses = 0, attachHeld = 0, letGoSent = 0, letGoApplied = 0, adoptKnown = 0, adoptBound = 0, adoptExpired = 0,
-                 simAsked = 0, simCached = 0, simCapped = 0;
+                 simAsked = 0, simCached = 0, simCapped = 0, structStatesSkipped = 0, structResetSkipped = 0,
+                 structCorrected = 0, structSnapped = 0;
+        uint64_t lateRecovered = 0, lateAliased = 0, lateExpired = 0, dropRestored = 0;   // 0.8.0-pre18 (weapon_hands.cpp)
     };
 
     static constexpr double kCensusRefreshMs = 5000.0;  // the host walks again this often; a client retries its misses this often
@@ -223,6 +247,17 @@ private:
     static constexpr double kEventKeepMs = 20000.0;     // an event for an object not found here yet is kept this long
     static constexpr size_t kMaxQueuedEvents = 128, kMaxHistory = 128, kProposalsPerPass = 4, kSpawnsPerPass = 8;
     uint8_t MySlot() const { return env_.mySlot ? env_.mySlot() : kHostSlot; }
+    // A constraint-built level prop (session/hsm_structure.h), by mode. Kept: sync_structures=local, never streamed, driven,
+    // claimed or reset here. Soft: the host streams it, a receiver steers it. OwnCopy: either, nobody leases, claims a blow on or
+    // resets it.
+    bool Kept(uint64_t id, const Prop& p) const { return StructureLocal(env_.syncStructures, id, p.sub, p.bodies.size(), p.constraints.size()); }
+    bool Soft(uint64_t id, const Prop& p) const { return StructureSoft(env_.syncStructures, id, p.sub, p.bodies.size(), p.constraints.size()); }
+    bool OwnCopy(uint64_t id, const Prop& p) const { return StructureOwnCopy(env_.syncStructures, id, p.sub, p.bodies.size(), p.constraints.size()); }
+    void LogStructureBreak(const Prop& p, size_t constraint);        // once per structure: its first joint broke
+    void LogStructures();                                            // once per level: how many are kept local / soft (shatter_sync.cpp)
+    void LogStructureSnap(const Prop& p, double worstCm);            // a soft structure was placed at once (rate limited)
+    double snapLogWindowMs_ = -1e18;                                 // LogStructureSnap's minute
+    int snapLogCount_ = 0;
     void DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned);
     void ResolvePending(double nowMs);
     void DeadlineRelease(uint64_t id, uint8_t owner, int hand, ue::UObject* standIn, ue::UObject* copy);
@@ -257,6 +292,7 @@ private:
     size_t StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8_t me, double nowMs);
     void StreamLevel(const std::vector<uint64_t>& due, uint64_t& cursor, size_t& budget, bool countDeferred, uint8_t me, double nowMs);
     bool Drive(uint64_t id, Prop& p);                                // every body with a fresh state from the streamer
+    bool SoftDrive(uint64_t id, Prop& p, double nowMs);              // soft structure: steer every body with a fresh state (object_sync.cpp)
     bool DriveBody(Prop& p, size_t body, const BodyStateMsg& s);
     bool BuildBodies(Prop& p, bool multi);                           // BodyIndex over the actor's movable primitives
     bool LooseParts(ue::UObject* actor, ue::UObject* root);          // a simulating movable primitive besides the root (a flail's chain)
@@ -309,6 +345,7 @@ private:
     bool ShatterBroken(uint64_t id) const;                           // a geometry collection of it has broken
     // A dropped weapon FREE for a minute goes (session/hsm_lease.h IdleDespawnDue); every kIdleCheckMs, while SetIdleDespawn.
     void DespawnIdle(double nowMs);
+    void TickLate(double nowMs);                                     // weapon_hands.cpp: bind given-up drops to the weapon at their stream
 
     bool active_ = false;
     Adapter* adapter_ = nullptr;
@@ -323,6 +360,7 @@ private:
     // Drops given up as unresolved -> when: a later Grant of the id does not open another window (test 5: one came back
     // with every Grant and fired its deadline 18 s after the drop); forgotten after kLooseKeepMs.
     std::unordered_map<uint64_t, double> givenUp_;
+    std::unordered_map<uint64_t, LateDrop> late_;                    // given-up drops waiting for their stream to place the weapon
     std::unordered_map<uint64_t, double> heardMs_;                   // last BodyState heard per id (minting skips live ids)
     std::unordered_map<uint64_t, double> freeSince_;                 // when each lease went FREE here (its first FREE Grant)
     double idleCheckMs_ = 0;                                         // DespawnIdle: the next check
@@ -333,6 +371,7 @@ private:
     std::array<StandInHands, kMaxWillies + 1> standInHands_{};
     std::vector<Loose> loose_;
     std::vector<Candidate> weapons_;
+    bool logWalks_ = true;                 // false for the recorder's walks
     std::vector<Candidate> idle_;          // the level's movable objects at rest at the last walk (no census prop): Attach's last resort (#88)
     double weaponsMs_ = -1e18;                                       // when weapons_ was last refreshed
     std::unordered_map<uint32_t, std::pair<ue::UClass*, int32_t>> weaponClasses_;   // class hash -> loaded class, its slot

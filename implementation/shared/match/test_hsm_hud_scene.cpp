@@ -206,8 +206,18 @@ static void TestWaveBreakPill() {
     HudScene s = BuildHudScene(m, l, kAt);
     CHECK(s.hold.visible && s.hold.text == "SKIPPING THE BREAK 50%" && Same(s.hold.color, kOk) && s.hold.bar && Near(s.hold.frac, 0.5f));
     CHECK(s.pill.text == "NEXT WAVE IN 45");                                     // the pill keeps the countdown
-    m.roundGapLeftMs = 0;                                                        // fighting: G does nothing here
-    CHECK(!BuildHudScene(m, l, kAt).hold.visible);
+    m.roundGapLeftMs = 0;                                                        // fighting: G gives the wave up
+    s = BuildHudScene(m, l, kAt);
+    CHECK(s.hold.visible && s.hold.text == "GIVING UP 50%" && Same(s.hold.color, kBloodInk) && s.hold.bar);
+    m.format = uint8_t(Format::Zombies);                                         // Abyss too
+    CHECK(BuildHudScene(m, l, kAt).hold.text == "GIVING UP 50%");
+    m.format = uint8_t(Format::PlayersVsBots);
+    LocalHud dead = l; dead.dead = true; dead.diedAtMs = kAt;                    // out of the wave: nothing to give up
+    CHECK(!BuildHudScene(m, dead, kAt).hold.visible);
+    LocalHud fight = l; fight.oneFight = true;                                   // a Progression fight keeps its wording
+    CHECK(BuildHudScene(m, fight, kAt).hold.text == "GIVING UP THE FIGHT 50%");
+    m.fighters[0].down = true;                                                   // downed in a wave: the pill says G works
+    CHECK(BuildHudScene(m, Me(), kAt).pill.text == "DOWN - GET UP OR HOLD G");
 }
 
 // Hold G to give up: while held in a fought round the middle of the screen says so, with a bar for how far the hold
@@ -276,7 +286,9 @@ static void TestDuelCountdownHint() {
     MatchInfo f = Ffa(); f.phase = uint8_t(MatchPhase::Countdown); f.timeLeftMs = 3000;
     CHECK(BuildHudScene(f, Me(), kAt).bannerSub.visible);                                // free-for-all too
     f = Survival(); f.phase = uint8_t(MatchPhase::Countdown); f.timeLeftMs = 3000;
-    CHECK(!BuildHudScene(f, Me(), kAt).bannerSub.visible);                               // not against bots
+    CHECK(BuildHudScene(f, Me(), kAt).bannerSub.text == "STUCK? HOLD G TO GIVE UP");     // against bots: for getting unstuck
+    LocalHud one = Me(); one.oneFight = true;
+    CHECK(BuildHudScene(f, one, kAt).bannerSub.text == "HOLD G TO GIVE UP THE FIGHT");   // a Progression fight: unchanged
 }
 
 static void TestBannerFromShot() {

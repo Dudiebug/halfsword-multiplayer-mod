@@ -182,24 +182,26 @@ struct MeshMsgFacts {
 // them for every relayed copy): the sender speaks only for its own fighter, a blow has a real victim that is not the
 // attacker, a claim the victim's owner replays (HitClaim, StuckBlade) only reaches that owner, and a HitFx (the cosmetic
 // copy of a blow) only reaches a machine that does not own the victim. myEntity: this machine's fighter.
-inline bool MeshSenderOk(MsgType t, uint8_t fromSlot, const MeshMsgFacts& f, uint8_t myEntity) {
+inline bool MeshSenderOk(MsgType t, uint8_t fromSlot, const MeshMsgFacts& f, uint8_t myEntity, const Holders& h = Holders()) {
     const bool stream = t == MsgType::Pose || t == MsgType::Vitals;
     if ((!stream && !MeshDirectType(t)) || fromSlot == kHostSlot || fromSlot >= kMaxFighters) return false;
-    if (!MayStream(fromSlot, f.actor) || f.stripRequest) return false;
+    if (!MayStream(fromSlot, f.actor, h) || f.stripRequest) return false;
     const bool blow = t == MsgType::HitClaim || t == MsgType::HitFx || t == MsgType::SeverClaim || t == MsgType::StuckBlade;
     if (!blow) return true;
     if (!ValidEntity(f.victim) || f.victim == f.actor) return false;
-    if (t == MsgType::HitClaim || t == MsgType::StuckBlade) return f.victim == myEntity;
-    if (t == MsgType::HitFx) return f.victim != myEntity;
+    // The victim is mine to replay: my own fighter, or one held here (a hand-off).
+    const bool victimMine = ValidEntity(myEntity) && myEntity <= kMaxFighters && OwnerSlotOf(f.victim, h) == uint8_t(myEntity - 1);
+    if (t == MsgType::HitClaim || t == MsgType::StuckBlade) return victimMine;
+    if (t == MsgType::HitFx) return !victimMine;
     return true;
 }
 
 // Which mesh peers get a direct copy of a message this client sends: a HitClaim or StuckBlade goes to the victim's owner
 // alone (nobody else replays it), a HitFx to every peer but the victim's owner, the rest to every peer. Slots, in
 // peerSlots order; the host is never one (it gets its own copy).
-inline std::vector<uint8_t> MeshDirectSlots(MsgType t, uint8_t victim, const std::vector<uint8_t>& peerSlots) {
+inline std::vector<uint8_t> MeshDirectSlots(MsgType t, uint8_t victim, const std::vector<uint8_t>& peerSlots, const Holders& h = Holders()) {
     std::vector<uint8_t> out;
-    const uint8_t victimSlot = ValidEntity(victim) ? OwnerSlotOf(victim) : uint8_t(0xFF);
+    const uint8_t victimSlot = ValidEntity(victim) ? OwnerSlotOf(victim, h) : uint8_t(0xFF);
     for (uint8_t s : peerSlots) {
         if (s == kHostSlot || s >= kMaxFighters) continue;
         if (t == MsgType::HitClaim || t == MsgType::StuckBlade) { if (s == victimSlot) out.push_back(s); }

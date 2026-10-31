@@ -12,6 +12,17 @@ using combat::Xform;
 using sync::V3;
 
 namespace {
+struct FNameArray { const FName* data = nullptr; int32_t num = 0, max = 0; };   // TArray<FName>
+constexpr int32_t kMaxListNames = 1024;
+bool InList(UObject* w, const char* field, const std::string& bone) {
+    const FNameArray* l = Field<FNameArray>(w, field);
+    if (!l || !l->data || l->num <= 0 || l->num > kMaxListNames) return false;
+    for (int32_t i = 0; i < l->num; ++i) if (NameToString(l->data[i]) == bone) return true;
+    return false;
+}
+}  // namespace
+
+namespace {
 
 constexpr uint64_t kLogFirst = 10;                  // the first grabs, holds and releases are logged in full (test evidence)
 constexpr size_t kMaxNames = 128;                   // bone names cached: the 22 bodies seeded, then what peers name (identifiers only)
@@ -37,7 +48,7 @@ void GrabSync::Start(Adapter& adapter, Env env) {
     adapter_ = &adapter;
     env_ = std::move(env);
     active_ = true;
-    HSM_LOG("grabs: on (holds on stand-ins are streamed; holds on my fighters pull them)");
+    HSM_LOG("grabs: on (holds on stand-ins are streamed; holds on my fighters pull them; grab_drag=%d)", env_.drag ? 1 : 0);
 }
 
 void GrabSync::Stop() {
@@ -45,6 +56,8 @@ void GrabSync::Stop() {
         std::vector<uint8_t> marked;
         for (const auto& [e, m] : marks_) marked.push_back(e);
         for (uint8_t e : marked) Unmark(e);
+        for (auto& [k, c] : noCollide_) c.seen = false;
+        RestoreUnseen();
         HSM_LOG("grabs: off (%s)", HealthLine().c_str());
     }
     *this = GrabSync{};
@@ -57,6 +70,8 @@ void GrabSync::Clear() {
     for (const auto& [e, m] : marks_) marked.push_back(e);
     for (uint8_t e : marked) Unmark(e);
     marks_.clear();
+    for (auto& [k, c] : noCollide_) c.seen = false;
+    RestoreUnseen();
     lastGrab_ = {};
     heldBones_ = {};
 }
@@ -105,14 +120,16 @@ void GrabSync::Tick(double nowMs, float dt, const std::vector<std::pair<uint8_t,
     for (const sync::GrabPull& p : inbox_.Pulls(nowMs, isMine, dead)) {
         if (down[p.target] < 0) down[p.target] = DownHere(p.target, mine[p.target]) ? 1 : 0;
         if (!Pull(p, mine[p.target], down[p.target] == 1, nowMs, dt)) continue;
+        KeepNoCollide(p, mine[p.target]);
         const bool fresh = lastGrab_[p.grabber][p.hand] != p.grabId;
         lastGrab_[p.grabber][p.hand] = p.grabId;
         if (fresh && n_.grabs < kLogFirst)
             HSM_LOG("grabs: e%u held by e%u (hand %s, bone %s, grab %u%s)", p.target, p.grabber, kHandTag[p.hand], p.bone.c_str(), p.grabId,
                     down[p.target] == 1 ? ", a down body: carried" : "");
-        SetMark(p.target, mine[p.target], env_.standInActor ? env_.standInActor(p.grabber) : nullptr, fresh);
+        SetMark(p.target, mine[p.target], env_.standInActor ? env_.standInActor(p.grabber) : nullptr, fresh, p.bone, p.hand);
         held[p.target] = true;
     }
+    RestoreUnseen();
     std::vector<uint8_t> loose;
     for (const auto& [e, m] : marks_) if (!held[e]) loose.push_back(e);
     for (uint8_t e : loose) Unmark(e);
@@ -159,7 +176,8 @@ std::array<GrabHand, kGrabHands> GrabSync::ReadHands(UObject* willie) {
         out[i].target = target;
         out[i].bone = name;
         out[i].grip = ToXform(b).ToLocal(ToV(hand.translation));   // the sender clamps it to kGripMaxUu
-        heldBones_[target] |= sync::YieldBones(sync::PoseBoneIndex(name), env_.down && env_.down(target));
+        const int pb = sync::PoseBoneIndex(name);
+        heldBones_[target] |= env_.drag ? sync::DragYieldBones(pb) : sync::YieldBones(pb, env_.down && env_.down(target));
     }
     return out;
 }
@@ -175,7 +193,8 @@ bool GrabSync::DownHere(uint8_t entity, UObject* me) {
 }
 
 // A down body (dead, fallen, knocked out) is carried: the stiffer DownPullParams, part of the pull on its pelvis and
-// chest as well, and it breaks free only on a glitch (kGrabDownBreakUu/Ms).
+// chest as well, and it breaks free only on a glitch (kGrabDownBreakUu/Ms). With grab_drag a standing body's pelvis and
+// chest get a smaller share too (sync::GrabSpread).
 bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowMs, float dt) {
     UObject* mesh = me ? adapter_->Mesh(me) : nullptr;
     if (!mesh || !Ready(mesh)) return false;
@@ -200,6 +219,7 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
     const double dist = Dist(grip, hand);
     if (down ? inbox_.NoteDistance(p, dist, nowMs, sync::kGrabDownBreakUu, sync::kGrabDownBreakMs) : inbox_.NoteDistance(p, dist, nowMs)) {
         if (++n_.broke <= kLogFirst) HSM_LOG("grabs: e%u broke free of e%u's hand %s (%.0f cm)", p.target, p.grabber, kHandTag[p.hand], dist);
+        if (env_.sendBreak) env_.sendBreak(p.target, p.grabber, p.hand);   // item 7: the grabber's hand still closed on my stand-in there
         return false;
     }
     // A hand far past the break distance is a glitch in the grabber's stream (a teleport, a burst of stale poses), no
@@ -212,10 +232,11 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
     const V3 dv = sync::GrabPullDv(grip, ToV(velAt_.take<FVector>(2)), hand, handVel, dt, down ? sync::DownPullParams() : sync::GrabPullParams{});
     addVel_.put(0, ToF(dv)).put(1, true).put(2, bone);   // bAddToCurrent: the change, on that body only
     if (addVel_.invoke(mesh)) ++n_.pulls;
-    if (down) {
-        const V3 share{dv.x * sync::kGrabDownSpread, dv.y * sync::kGrabDownSpread, dv.z * sync::kGrabDownSpread};
+    if (const double spread = sync::GrabSpread(down, env_.drag); spread > 0.0) {
+        const V3 share{dv.x * spread, dv.y * spread, dv.z * spread};
+        const int held = sync::PoseBoneIndex(p.bone);
         for (const char* torso : {"pelvis", "spine_03"}) {
-            if (p.bone == torso) continue;
+            if (held == sync::PoseBoneIndex(torso)) continue;
             addVel_.put(0, ToF(share)).put(1, true).put(2, NameOf(torso));
             addVel_.invoke(mesh);
         }
@@ -229,7 +250,7 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
 // A fighter simulated here that grabbed mine natively has set those itself and clears them on its release: while
 // "Being Grabbed" is set and "Grabbed By Willie" names something other than what my last mark wrote or a stand-in, the
 // flags are its own, and only the event (a new grab on top of it) and the pull are mine.
-void GrabSync::SetMark(uint8_t entity, UObject* willie, UObject* by, bool newGrab) {
+void GrabSync::SetMark(uint8_t entity, UObject* willie, UObject* by, bool newGrab, const std::string& bone, uint8_t hand) {
     auto it = marks_.find(entity);
     const bool first = it == marks_.end() || it->second.willie != willie;
     if (!first && !newGrab) return;
@@ -244,8 +265,83 @@ void GrabSync::SetMark(uint8_t entity, UObject* willie, UObject* by, bool newGra
     if (!native) {
         if (by && holder) *holder = by;
         SetBool(willie, "Being Grabbed", true);
+        SetLimbFlags(willie, bone, hand);
     }
     Call(willie, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", true).invoke();
+    Call(willie, "Event Check Bone Dislocation Status").invoke();   // W:17402: the grab's joints (items 28, 2)
+}
+
+// Items 28 and 2: what the grab sets on the held fighter by the bone taken (W:17410-17440): an arm's bones its arm's
+// flag, either leg's "R Leg Being Grabbed" (the game has no left one), the neck the throat flag of the grabbing hand.
+void GrabSync::SetLimbFlags(UObject* willie, const std::string& bone, uint8_t hand) {
+    if (InList(willie, "R Arm Bones", bone)) SetBool(willie, "R Arm Being Grabbed", true);
+    else if (InList(willie, "L Arm Bones", bone)) SetBool(willie, "L Arm Being Grabbed", true);
+    else if (InList(willie, "R Leg Bones", bone) || InList(willie, "L Leg Bones", bone)) SetBool(willie, "R Leg Being Grabbed", true);
+    else if (bone == "neck_02") SetBool(willie, hand == 0 ? "My Throat Is Held R" : "My Throat Is Held L", true);
+}
+
+// Item 6: a hold on my fighter turns its body's collision with the grabber's hand and forearm off, as the game does on
+// the grabber's own machine (W:17454, W:17696): the stand-in's hand no longer shoves the body it holds.
+void GrabSync::KeepNoCollide(const sync::GrabPull& p, UObject* me) {
+    UObject* standIn = env_.standInActor ? env_.standInActor(p.grabber) : nullptr;
+    UObject* hand = standIn ? adapter_->Mesh(standIn) : nullptr;
+    UObject* mine = me ? adapter_->Mesh(me) : nullptr;
+    if (!hand || !mine) return;
+    const uint16_t key = uint16_t((p.grabber << 8) | p.hand);
+    auto it = noCollide_.find(key);
+    if (it != noCollide_.end() && (it->second.mine != mine || it->second.hand != hand)) {   // another body: the old pair first
+        it->second.seen = false;
+        Collide(it->second, false);
+        noCollide_.erase(it);
+        it = noCollide_.end();
+    }
+    if (it == noCollide_.end()) {
+        NoCollide c{ mine, ObjectIndex(mine), hand, ObjectIndex(hand), p.hand, true };
+        if (!Collide(c, true)) return;
+        if (++n_.noCollide <= kLogFirst) HSM_LOG("grabs: my e%u's collision with e%u's hand %s off while held", p.target, p.grabber, kHandTag[p.hand]);
+        noCollide_[key] = c;
+        return;
+    }
+    it->second.seen = true;
+}
+
+bool GrabSync::Collide(NoCollide& c, bool off) {
+    if (!collisionLib_)
+        if (UClass* lib = FindClass("CollisionDisablerFunctionLibrary")) collisionLib_ = DefaultObject(lib);
+    if (!collisionLib_ || !adapter_->StillValid(c.mine, c.mineIndex) || !adapter_->StillValid(c.hand, c.handIndex)) return false;
+    UObject* owner = OuterOf(c.mine);
+    const FNameArray* rigid = owner ? Field<FNameArray>(owner, "Rigid Bones") : nullptr;
+    if (!rigid || !rigid->data || rigid->num <= 0 || rigid->num > kMaxListNames) return false;
+    const FName arm[2] = { hands_[c.side], MakeName(c.side == 0 ? "lowerarm_r" : "lowerarm_l") };
+    const FNameArray bonesB{ arm, 2, 2 };
+    const FNameArray bonesA{ rigid->data, rigid->num, rigid->num };
+    if (off)
+        return Call(collisionLib_, "DisableCollision_SkeletalVsSkeletal").set<UObject*>("SkeletalMeshA", c.mine).set<FNameArray>("SkeletalMeshBonesA", bonesA)
+            .set<UObject*>("SkeletalMeshB", c.hand).set<FNameArray>("SkeletalMeshBonesB", bonesB).setReal("TimeToExpiration", -1).invoke();
+    return Call(collisionLib_, "EnableCollision_SkeletalVsSkeletal").set<UObject*>("SkeletalMeshA", c.mine).set<FNameArray>("SkeletalMeshBonesA", bonesA)
+        .set<UObject*>("SkeletalMeshB", c.hand).set<FNameArray>("SkeletalMeshBonesB", bonesB).invoke();
+}
+
+// A hold not pulled this tick: the collision comes back (Release Grab's timeline does it on the grabber's machine).
+void GrabSync::RestoreUnseen() {
+    for (auto it = noCollide_.begin(); it != noCollide_.end();) {
+        if (it->second.seen) { it->second.seen = false; ++it; continue; }
+        Collide(it->second, false);
+        it = noCollide_.erase(it);
+    }
+}
+
+// Item 7: my fighter holds a stand-in that broke free on its owner's screen. Let go natively, as Release Grab R/L does,
+// if this hand still holds that stand-in's body.
+void GrabSync::OnBreak(UObject* grabber, uint8_t held, uint8_t hand) {
+    if (!active_ || !grabber || hand > 1) return;
+    bool grabbed = false;
+    if (!GetBool(grabber, hand == 0 ? "Grabbed R" : "Grabbed L", grabbed) || !grabbed) return;
+    UObject** comp = Field<UObject*>(grabber, hand == 0 ? "Grab Component R" : "Grab Component L");
+    UObject* standIn = comp && *comp ? OuterOf(*comp) : nullptr;
+    if (!standIn || !env_.standInEntity || env_.standInEntity(standIn) != held) return;
+    if (Call(grabber, hand == 0 ? "Release Grab R" : "Release Grab L").invoke() && ++n_.letGo <= kLogFirst)
+        HSM_LOG("grabs: e%u broke free of my hand %s on its owner's screen; let go", held, kHandTag[hand]);
 }
 
 // Released as Release Grab R/L does it ("Being Grabbed" false, "Event Is Grabbed(false)"), unless a fighter simulated
@@ -260,7 +356,10 @@ void GrabSync::Unmark(uint8_t entity) {
     UObject** by = Field<UObject*>(m.willie, "Grabbed By Willie");
     if (by && *by != m.by) return;
     SetBool(m.willie, "Being Grabbed", false);
+    for (const char* f : {"R Arm Being Grabbed", "L Arm Being Grabbed", "R Leg Being Grabbed", "My Throat Is Held R", "My Throat Is Held L"})
+        SetBool(m.willie, f, false);
     Call(m.willie, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", false).invoke();
+    Call(m.willie, "Event Check Bone Dislocation Status").invoke();
 }
 
 // ---------------------------------------------------------------- engine calls
@@ -300,12 +399,12 @@ std::string GrabSync::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[320];
+    char line[400];
     std::snprintf(line, sizeof line,
                   "grabs: sent %llu changes %llu refreshes | heard %llu (stale %llu) | held %llu grabs, %llu pull steps, "
-                  "%llu released, %llu broke free (no anchor %llu, no bone %llu)",
+                  "%llu released, %llu broke free, %llu let go, %llu no-collide (no anchor %llu, no bone %llu)",
                   d(a.changes, b.changes), d(a.refreshes, b.refreshes), d(a.heard, b.heard), d(a.stale, b.stale), d(a.grabs, b.grabs),
-                  d(a.pulls, b.pulls), d(a.released, b.released), d(a.broke, b.broke), d(a.noAnchor, b.noAnchor), d(a.noBone, b.noBone));
+                  d(a.pulls, b.pulls), d(a.released, b.released), d(a.broke, b.broke), d(a.letGo, b.letGo), d(a.noCollide, b.noCollide), d(a.noAnchor, b.noAnchor), d(a.noBone, b.noBone));
     reported_ = n_;
     return line;
 }

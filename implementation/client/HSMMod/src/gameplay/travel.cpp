@@ -35,6 +35,9 @@ constexpr const char* kSettings[] = {
     "Free Mode Tier", "Free Mode Carnage", "Free Mode Brawling", "Free Mode Opponents Height", "Free Mode Opponents Weight",
     "Free Mode Opponents Weapons Type", "Free Mode Rendom Equipment Tier", "Free Mode Blossfechten", "Sparring Partner ID",
     "Progression Multiplayer", "FreeMode Multiplayer",
+    // The level scripts read these too (audit item 39): Lose Condition 3 spawns BP_Fence_Bags in Pit, Yard and Cellar;
+    // Day Time (Progression) and Current FreeMode Time (Free Mode) pick the lighting sublevel and ambience.
+    "Current Lose Condition", "Day Time", "Current FreeMode Time",
 };
 bool PlainType(const std::string& t) {
     return t == "BoolProperty" || t == "ByteProperty" || t == "EnumProperty" || t == "IntProperty" || t == "FloatProperty" || t == "DoubleProperty";

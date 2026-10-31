@@ -103,6 +103,7 @@ void ObjectSync::ShatterPoll(double nowMs) {
     if (!shatter_.breakablesLogged && (env_.host ? haveSent_ : matched_) && env_.fightLevel && env_.fightLevel()) {
         shatter_.breakablesLogged = true;
         LogBreakables();
+        LogStructures();
     }
 }
 
@@ -266,6 +267,48 @@ void ObjectSync::LogBreakables() {
         else
             HSM_LOG("objects: breakables on %s: %s x%zu (BPI_Destructible)", level.c_str(), key.first.c_str(), c.n);
     }
+}
+
+// ---------------------------------------------------------------- structures (session/hsm_structure.h)
+
+// Once per fight level, after the breakables line: the constraint-built level props, and what is done with them (the mode).
+void ObjectSync::LogStructures() {
+    if (env_.syncStructures == StructureMode::Full) { HSM_LOG("props: sync_structures=full: constraint-built props are streamed and teleported as in 0.8.0-pre17"); return; }
+    std::map<std::string, size_t> classes;
+    size_t total = 0;
+    for (const auto& [id, p] : props_) {
+        if (p.provisional || !OwnCopy(id, p) || !adapter_->StillValid(p.actor, p.index)) continue;
+        ++classes[ObjectName(reinterpret_cast<const UObject*>(ClassOf(p.actor)))];
+        ++total;
+    }
+    if (!total) return;
+    std::string list;
+    size_t shown = 0;
+    for (const auto& [name, n] : classes) {
+        if (shown++ >= kMaxBreakableLines) { list += " ..."; break; }
+        list += " " + name + " x" + std::to_string(n);
+    }
+    if (env_.syncStructures == StructureMode::Soft)
+        HSM_LOG("props: sync_structures=soft: %zu structure(s) streamed by the host (all bodies at once, %d Hz while moving) and steered, not teleported, on the others:%s",
+                total, int(1000.0 / kStructureStreamMs + 0.5), list.c_str());
+    else
+        HSM_LOG("props: sync_structures=local: %zu structure(s) kept local (not streamed while intact):%s", total, list.c_str());
+}
+
+// A soft structure was badly off here and all its bodies were placed at once. At most kSnapLogsPerMinute lines a minute, however many
+// structures there are (the counter in the health line still counts every one).
+void ObjectSync::LogStructureSnap(const Prop& p, double worstCm) {
+    constexpr int kSnapLogsPerMinute = 4;
+    const double now = SteadyNowMs();
+    if (now - snapLogWindowMs_ >= 60000.0 || now < snapLogWindowMs_) { snapLogWindowMs_ = now; snapLogCount_ = 0; }
+    if (snapLogCount_++ >= kSnapLogsPerMinute) return;
+    HSM_LOG("props: structure %s snapped (%.0f cm off)", ObjectName(p.actor).c_str(), worstCm);
+}
+
+// A structure's first broken joint (any later one is part of the same break): its loose bodies stream from here on.
+void ObjectSync::LogStructureBreak(const Prop& p, size_t constraint) {
+    if (p.brokenMask) return;
+    HSM_LOG("props: structure %s broke (constraint %zu); its loose bodies stream", ObjectName(p.actor).c_str(), constraint);
 }
 
 }  // namespace hsm::game

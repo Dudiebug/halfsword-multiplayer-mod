@@ -419,13 +419,17 @@ void ObjectSync::PollEvents(double nowMs) {
     std::vector<uint64_t> gone;
     for (auto& [id, p] : props_) {
         if (IsWeaponId(id) || p.provisional || p.sub || !adapter_->StillValid(p.actor, p.index)) continue;
-        if (view_.Streamer(id) != me) continue;
+        // A structure kept local (sync_structures=local, hsm_structure.h) is streamed by nobody, so every machine reports the joints
+        // that break in its own copy; the host alone sees bodies come off it. A soft one is the host's to report, like any prop.
+        const bool kept = Kept(id, p);
+        if (view_.Streamer(id) != me && !kept) continue;
         for (size_t ci = 0; ci < p.constraints.size(); ++ci) {
             const uint64_t bit = uint64_t(1) << ci;
             const ConstraintRef& c = p.constraints[ci];
             if ((p.brokenMask & bit) || !adapter_->StillValid(c.comp, c.index)) continue;
             Call ib(c.comp, "IsBroken");
             if (!ib.invoke() || !ib.get<bool>("ReturnValue")) continue;
+            if (OwnCopy(id, p)) LogStructureBreak(p, ci);
             p.brokenMask |= bit;
             ObjectEventMsg e;
             e.objId = id;
@@ -433,6 +437,7 @@ void ObjectSync::PollEvents(double nowMs) {
             e.constraint = uint8_t(ci);
             SendEvent(e);
         }
+        if (view_.Streamer(id) != me) continue;
         for (size_t b = 1; b < p.bodies.size(); ++b) {
             const uint64_t bit = uint64_t(1) << b;
             BodyRef& r = p.bodies[b];
@@ -504,10 +509,16 @@ bool ObjectSync::OnObjectEvent(const uint8_t* d, size_t n, uint8_t fromSlot) {
     ObjectEventMsg m;
     if (!Decode(d, n, m) || (IsLevelProp(m.objId) && !InCensus(m.objId))) { ++n_.eventsRejected; return false; }
     const double now = SteadyNowMs();
+    // A joint of a structure kept local (hsm_structure.h) that broke on any machine: nobody streams it, so any machine speaks for it.
+    const bool structJoint = [&] {
+        if (m.kind != ObjectEventKind::JointBroke) return false;
+        const auto q = props_.find(m.objId);
+        return q != props_.end() && Kept(q->first, q->second);
+    }();
     if (env_.host) {
         if (fromSlot == kHostSlot || fromSlot >= kMaxFighters) { ++n_.eventsRejected; return false; }
         // Only the object's streamer speaks for it, and only about objects the host knows.
-        if (m.kind != ObjectEventKind::Custom && table_.Streamer(m.objId) != fromSlot) { ++n_.eventsRejected; return false; }
+        if (m.kind != ObjectEventKind::Custom && !structJoint && table_.Streamer(m.objId) != fromSlot) { ++n_.eventsRejected; return false; }
         if (IsSpawnedId(m.objId) && !reconciler_.Knows(m.objId) && !detached_.count(m.objId)) { ++n_.eventsRejected; return false; }
         if (m.kind == ObjectEventKind::Detached && m.body != 0) {   // body 0: the whole object let go of its parent; otherId is the parent
             if (!ValidSpawnedId(m.otherId) || SpawnedIdSlot(m.otherId) != fromSlot || detached_.size() >= kMaxKnownObjects) { ++n_.eventsRejected; return false; }
@@ -520,7 +531,7 @@ bool ObjectSync::OnObjectEvent(const uint8_t* d, size_t n, uint8_t fromSlot) {
             history_.emplace_back(d, d + n);
         }
         if (m.kind == ObjectEventKind::Destroyed && IsSpawnedId(m.objId)) reconciler_.Remove(m.objId);
-    } else if (fromSlot != kHostSlot && view_.Streamer(m.objId) != fromSlot) {   // mesh: straight from the object's streamer
+    } else if (fromSlot != kHostSlot && !structJoint && view_.Streamer(m.objId) != fromSlot) {   // mesh: straight from the object's streamer
         ++n_.eventsRejected;
         return false;
     }
@@ -559,6 +570,7 @@ bool ObjectSync::ReplayNow(const ObjectEventMsg& m, double nowMs) {
             Prop& p = it->second;
             if (m.constraint >= p.constraints.size()) return true;
             const ConstraintRef& c = p.constraints[m.constraint];
+            if (OwnCopy(it->first, p)) LogStructureBreak(p, m.constraint);
             p.brokenMask |= uint64_t(1) << m.constraint;   // set first: breaking it here is not an event of mine
             if (!adapter_->StillValid(c.comp, c.index)) return true;
             Call ib(c.comp, "IsBroken");

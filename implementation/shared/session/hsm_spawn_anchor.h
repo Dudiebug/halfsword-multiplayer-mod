@@ -10,6 +10,7 @@
 // its pawn appear a moment after the load), then a pass every kAnchorRetryMs. Game-independent, unit-tested.
 #pragma once
 #include "session/hsm_spawn.h"
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <vector>

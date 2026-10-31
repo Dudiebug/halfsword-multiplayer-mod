@@ -8,8 +8,9 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre7 tries out object and shatter sync, modded maps, UE4SS loading, a map reset every round
-> and shared map randomness, with fixes from the latest play-session reports. It connects only to 0.8.0-pre7.
+> **Prerelease:** v0.8.0-pre21 tries out optional host physics, the same strength for every player by tier, steadier
+> bridges and chains, Zombies on the Abyss and give-up in Survival and Zombies, with fixes from the latest play-session
+> reports. It connects only to 0.8.0-pre21.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 

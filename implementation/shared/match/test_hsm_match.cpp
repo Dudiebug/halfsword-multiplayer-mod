@@ -1,11 +1,13 @@
 // AC-1 / AC-2: match rules, team resolution, kill attribution, waves, spawn sides.
 #include "match/hsm_match.h"
 #include <cstdio>
+#include <limits>
 #include <set>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 using namespace hsm;
+static bool Near(double a, double b, double eps) { return std::fabs(a - b) <= eps; }
 static int T(const std::map<uint8_t, int8_t>& m, uint8_t slot) { auto it = m.find(slot); return it == m.end() ? -99 : it->second; }
 
 static MatchConfig Cfg(Format f, uint16_t limit, uint16_t timeS = 0, uint16_t respawnS = 5) {
@@ -65,13 +67,71 @@ static void TestKillLog() {
     k.OnHit(5, 5, 100); CHECK(k.KillerOf(5, 200) == 0);                // self contact ignored
     k.OnHit(6, 0, 100); CHECK(k.KillerOf(6, 200) == 0);
     k.Forget(2); CHECK(k.KillerOf(2, 2500) == 0);
-    k.OnHit(7, 3, 1000); CHECK(k.KillerOf(7, 1000 + 45000) == 3);
-    for (int t = 0; t < 7; ++t) CHECK(MuscleForTier(t) < MuscleForTier(t + 1));   // more muscle every rank up
-    CHECK(MuscleForTier(-3) == MuscleForTier(0) && MuscleForTier(12) == MuscleForTier(7) && MuscleForTier(7) == 1.0);
-    CHECK(MuscleForTier(0) > 0.0 && MuscleFor(0.1, 0) == MuscleForTier(0));
-    CHECK(MuscleFor(0.95, 2) == 0.95 && MuscleFor(0.3, 7) == 1.0);                // never lowers a heavier build    // a bleed-out 45 s after the blow is still a kill
+    k.OnHit(7, 3, 1000); CHECK(k.KillerOf(7, 1000 + 45000) == 3);   // a bleed-out 45 s after the blow is still a kill
     CHECK(!CombatPhase(MatchPhase::Idle) && !CombatPhase(MatchPhase::Countdown) && !CombatPhase(MatchPhase::Results));
     CHECK(CombatPhase(MatchPhase::Live) && CombatPhase(MatchPhase::SuddenDeath));
+}
+
+// 0.8.0-pre20 (#294 #295 #301): every player's build is forced per tier. A Free Mode passport with Weight 2.0 made one
+// fighter 33% heavier with a 60% stronger grip than a 0.5 one, so one player could lift the other and not back.
+static void TestForcedBuild() {
+    for (int t = 0; t < 7; ++t) CHECK(TierWeight(t) < TierWeight(t + 1));                       // more muscle every rank up
+    CHECK(TierWeight(0) == 0.0 && TierWeight(7) == 1.0 && TierWeight(-3) == TierWeight(0) && TierWeight(12) == TierWeight(7));
+    CHECK(TierWeight(3) == 0.45 && TierWeight(4) == 0.60);                                       // the game's bot table
+    MatchConfig c = Cfg(Format::FreeForAll, 5);
+    for (int t = 0; t < 8; ++t) {
+        c.tier = uint8_t(t);
+        CHECK(ForcedWeight(c) == kTierWeight[t] && ForcedWeight(Format::TwoTeams, Gear::Own, t) == kTierWeight[t]);
+    }
+    c.tier = 7; c.gear = Gear::Fists;
+    CHECK(ForcedWeight(c) == kTierWeight[7] && TierWeight(kBrawlTier) == 0.75);                 // Brawl: its tier's too
+    CHECK(ForcedWeight(Format::TwoTeams, Gear::Fists, 7) == kTierWeight[7]);                     // only free-for-all is Brawl
+    // On: exactly the forced value, up and down, whatever the passport holds.
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    CHECK(BuildWeight(0.1, 0.45, true) == 0.45 && BuildWeight(0.95, 0.45, true) == 0.45 && BuildWeight(0.45, 0.45, true) == 0.45);
+    CHECK(BuildWeight(2.0, 0.45, true) == 0.45 && BuildWeight(-1.0, 0.0, true) == 0.0 && BuildWeight(2.0, 1.0, true) == 1.0);
+    CHECK(BuildWeight(nan, 0.6, true) == 0.6 && BuildWeight(inf, 0.6, true) == 0.6);
+    CHECK(BuildWeight(0.3, 7.0, true) == 1.0 && BuildWeight(0.3, nan, true) == kDefaultWeight);   // a forced value out of range is clamped too
+    // Off (a bot, or force_strength=0): their own, but never outside 0..1.
+    CHECK(BuildWeight(0.3, 0.9, false) == 0.3 && BuildWeight(0.0, 0.9, false) == 0.0 && BuildWeight(1.0, 0.0, false) == 1.0);
+    CHECK(BuildWeight(2.0, 0.45, false) == 1.0 && BuildWeight(-0.5, 0.45, false) == 0.0);       // the 2.0 Free Mode passport
+    CHECK(BuildWeight(nan, 0.45, false) == kDefaultWeight && BuildWeight(-inf, 0.45, false) == kDefaultWeight);
+    // Two players in one match are one build whatever their passports hold: same mass, same grip.
+    for (int t = 0; t < 8; ++t) {
+        c.tier = uint8_t(t); c.gear = Gear::Own;
+        const double a = BuildWeight(2.0, ForcedWeight(c), true), b = BuildWeight(0.5, ForcedWeight(c), true);
+        CHECK(a == b && MassScaleFor(a) == MassScaleFor(b) && GripScaleFor(a) == GripScaleFor(b));
+    }
+    // What the game makes of it (Willie_BP): the 2.0 passport against the 0.5 one, and the log line's example.
+    CHECK(Near(MassScaleFor(2.0) / MassScaleFor(0.5), 1.5 / 1.125, 1e-12) && Near(GripScaleFor(2.0) / GripScaleFor(0.5), 2.0 / 1.25, 1e-12));
+    CHECK(Near(MassScaleFor(0.45), 1.1125, 1e-12) && Near(GripScaleFor(0.45), 1.225, 1e-12));
+    CHECK(MassScaleFor(0.0) == 1.0 && MassScaleFor(1.0) == 1.25 && GripScaleFor(0.0) == 1.0 && GripScaleFor(1.0) == 1.5);
+}
+
+// Survival and Zombies take the gear setting like PvP (Own / Random by tier / Everyone identical, never Fists); the
+// loadout is rolled at the run's start and kept through every wave and respawn.
+static void TestBotFormatGear() {
+    using C = RespawnCause;
+    for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
+        for (Gear g : {Gear::Own, Gear::RandomTier, Gear::Mirror}) {
+            MatchConfig c = Cfg(f, 10); c.gear = g; c.tier = 4;
+            CHECK(GearAllowed(f, g) && Sanitize(c).gear == g && Sanitize(c).tier == 4);
+            for (C cause : {C::Individual, C::RoundReset, C::WaveCleared}) CHECK(RegearFor(c, cause) == Regear::None);   // the run's loadout stays
+            CHECK(RegearFor(c, C::Rematch) == (g == Gear::Own ? Regear::None : g == Gear::Mirror ? Regear::Shared : Regear::Each));
+            CHECK(JoinRegearFor(c) == (g == Gear::RandomTier ? Regear::Each : Regear::None));
+            CHECK(StartLoadoutsAhead(c, 3) == (g == Gear::Own ? 0u : g == Gear::Mirror ? 1u : 3u));
+        }
+        MatchConfig fists = Cfg(f, 10); fists.gear = Gear::Fists;
+        CHECK(!GearAllowed(f, Gear::Fists) && Sanitize(fists).gear == Gear::Own);              // Brawl is free-for-all's
+        MatchConfig odd = Cfg(f, 10); odd.gear = Gear(9);
+        CHECK(Sanitize(odd).gear == Gear::Own);
+    }
+    CHECK(GearAllowed(Format::FreeForAll, Gear::Fists) && !GearAllowed(Format::Duel, Gear::Fists) && !GearAllowed(Format::TwoTeams, Gear::Fists));
+    CHECK(GearAllowed(Format::Duel, Gear::Mirror) && !GearAllowed(Format::Duel, Gear(4)));
+    MatchConfig pvp = Cfg(Format::Duel, 3); pvp.gear = Gear::RandomTier;
+    CHECK(JoinRegearFor(pvp) == Regear::Each);                                                 // PvP joiners: as before
+    pvp.gear = Gear::Fists; pvp.format = Format::FreeForAll;
+    CHECK(JoinRegearFor(pvp) == Regear::None);
 }
 
 static std::vector<FighterInfo> Teams2() { return {{1, 0, true}, {2, 1, true}, {3, 0, true}, {4, 1, true}}; }
@@ -186,21 +246,34 @@ static void TestSurvivalWaves() {
     CHECK(m.phase() == MatchPhase::Results && m.winner() == kBotTeam);
 }
 
+// Zombies: one zombie alive per player (the host's own fighter too), at least one; a dead one makes room.
 static void TestSurvivalAliveCap() {
     uint32_t t = 0;
     Match m = LiveSurvival(Format::Zombies, t);
+    CHECK(m.MaxBotsAlive() == 1);                                               // no player counted yet: one
+    m.SetPlayers(2); CHECK(m.MaxBotsAlive() == 2);
+    m.SetPlayers(50); CHECK(m.MaxBotsAlive() == Match::kMaxBotsAlive);
+    m.SetPlayers(1);
     Wave w = WaveFor(Format::Zombies, 0, 2, 2);
-    CHECK(w.count > Match::kMaxBotsAlive);                                      // hordes exceed the alive cap
-    for (int i = 0; i < Match::kMaxBotsAlive; ++i) {
-        CHECK(m.Tick(t + 1).spawnBots == 1);                                    // one bot per tick (TestWavePacing)
-        m.AddFighter({uint8_t(7 + i), kBotTeam, false});
-    }
-    CHECK(m.Tick(t + 2).spawnBots == 0);
-    m.OnDeath(7, 1, t + 3); m.RemoveFighter(7);                                 // one dies and is cleaned up
-    CHECK(m.Tick(t + 4).spawnBots == 1);                                        // refill from the wave's remainder
+    CHECK(w.count >= 3);
+    CHECK(m.Tick(t + 1).spawnBots == 1);
+    m.AddFighter({7, kBotTeam, false});
+    CHECK(m.Tick(t + 2).spawnBots == 0);                                        // one player: one zombie at a time
+    m.SetPlayers(2);                                                            // a second player joins
+    CHECK(m.Tick(t + 3).spawnBots == 1);
+    m.AddFighter({8, kBotTeam, false});
+    CHECK(m.Tick(t + 4).spawnBots == 0);
+    m.OnDeath(7, 1, t + 5); m.RemoveFighter(7);                                 // one dies and is cleaned up
+    CHECK(m.Tick(t + 6).spawnBots == 1);                                        // refill from the wave's remainder
     CHECK(m.Score(kHumanTeam) == 0 && m.botsLeft() == w.count - 1);
-    m.OnDeath(1, 8, t + 5);
-    CHECK(m.Tick(t + 6).respawn.empty());                                       // no timed respawns
+    m.OnDeath(1, 8, t + 7);
+    CHECK(m.Tick(t + 8).respawn.empty());                                       // no timed respawns
+    m.SetPlayers(1);
+    CHECK(m.Tick(t + 9).spawnBots == 0);                                        // a player left: no more until one dies
+    uint32_t s = 0;
+    Match v = LiveSurvival(Format::PlayersVsBots, s);
+    v.SetPlayers(1);
+    CHECK(v.MaxBotsAlive() == Match::kMaxBotsAlive);                            // Survival keeps its own cap
 }
 
 // A wave spawns one bot per Tick (the host ticks once a frame): test 5 spawned a whole Abyss horde in one frame and the
@@ -208,15 +281,17 @@ static void TestSurvivalAliveCap() {
 static void TestWavePacing() {
     uint32_t t = 0;
     Match m = LiveSurvival(Format::Zombies, t);
+    const int cap = 3;
+    m.SetPlayers(cap);
     Wave w = WaveFor(Format::Zombies, 0, 2, 2);
-    CHECK(w.count >= Match::kMaxBotsAlive + 2);
-    for (int i = 0; i < Match::kMaxBotsAlive; ++i) {
+    CHECK(w.count >= cap + 2);
+    for (int i = 0; i < cap; ++i) {
         auto ev = m.Tick(t + 1 + uint32_t(i));
         CHECK(ev.spawnBots == 1 && ev.botRank == w.rank);
-        if (i < Match::kMaxBotsAlive - 1) m.AddFighter({uint8_t(7 + i), kBotTeam, false});
+        if (i < cap - 1) m.AddFighter({uint8_t(7 + i), kBotTeam, false});
     }
     CHECK(m.Tick(t + 19).spawnBots == 0);                                       // a requested bot not added yet counts
-    m.AddFighter({uint8_t(7 + Match::kMaxBotsAlive - 1), kBotTeam, false});     // against the alive cap
+    m.AddFighter({uint8_t(7 + cap - 1), kBotTeam, false});     // against the alive cap
     CHECK(m.Tick(t + 20).spawnBots == 0 && m.botsLeft() == w.count);            // at the alive cap
     m.OnDeath(7, 1, t + 21); m.OnDeath(8, 1, t + 21);                           // two die at once: refilled one at a time
     CHECK(m.Tick(t + 22).spawnBots == 1);
@@ -238,9 +313,9 @@ static void TestWaves() {
     Wave s0 = WaveFor(Format::PlayersVsBots, 0, 2, 2), s3 = WaveFor(Format::PlayersVsBots, 3, 2, 2);
     CHECK(s0.count == 2 && s0.rank == 2 && s3.count == 5 && s3.rank == 3);      // humans + wave; tier + wave/2
     Wave z0 = WaveFor(Format::Zombies, 0, 2, 0), z6 = WaveFor(Format::Zombies, 6, 2, 0);
-    CHECK(z0.count == 12 && z6.count == 36 && z0.rank == 0 && z6.rank == 2);   // 6 per human + 4 per wave; tier + wave/3
+    CHECK(z0.count == 6 && z6.count == 18 && z0.rank == 0 && z6.rank == 2);    // 3 per human + 2 per wave; tier + wave/3
     CHECK(WaveFor(Format::PlayersVsBots, 100, 6, 7).rank == 7 && WaveFor(Format::PlayersVsBots, 100, 6, 7).count == 30);
-    CHECK(WaveFor(Format::Zombies, 100, 6, 0).count == 60 && WaveFor(Format::PlayersVsBots, 0, 0, 0).count == 1);
+    CHECK(WaveFor(Format::Zombies, 100, 6, 0).count == 40 && WaveFor(Format::PlayersVsBots, 0, 0, 0).count == 1);
 }
 
 // Spec revision (rounds plan 1.1): the gap between Duel rounds is the lobby's respawn delay (default 5 s), not a fixed
@@ -384,7 +459,7 @@ static void TestStartLoadoutsAhead() {
     MatchConfig oc = c; oc.gear = Gear::Own;
     CHECK(StartLoadoutsAhead(oc, 2) == 0);                                      // own gear: nothing generated
     MatchConfig bc = c; bc.format = Format::PlayersVsBots;
-    CHECK(StartLoadoutsAhead(bc, 2) == 0);                                      // gear is a PvP option
+    CHECK(StartLoadoutsAhead(bc, 2) == 2);                                      // Survival rolls one each at the run's start too
     MatchConfig tc = c; tc.format = Format::TwoTeams;
     CHECK(StartLoadoutsAhead(tc, 4) == 4);
 }
@@ -607,7 +682,7 @@ static void TestSuddenDeathEnds() {
     CHECK(lost.phase() == MatchPhase::Results && lost.winner() == kBotTeam);
 }
 
-// Rounds plan 1.1: which respawns bring a new loadout. Own gear and the bot formats never do.
+// Rounds plan 1.1: which respawns bring a new loadout. Own gear never does; the bot formats only at the run's start (TestBotFormatGear).
 static void TestRegear() {
     using C = RespawnCause;
     auto R = [](Format f, Gear g, C cause) { MatchConfig c = Cfg(f, 5); c.gear = g; return RegearFor(c, cause); };
@@ -616,7 +691,11 @@ static void TestRegear() {
         for (C cause : {C::Individual, C::RoundReset, C::WaveCleared, C::Rematch}) {
             ++cells;
             CHECK(R(f, Gear::Own, cause) == Regear::None);
-            if (IsBotFormat(f)) { CHECK(R(f, Gear::RandomTier, cause) == Regear::None && R(f, Gear::Mirror, cause) == Regear::None); continue; }
+            if (IsBotFormat(f)) {                                               // the run's loadout lasts: only a (re)start rolls it
+                CHECK(R(f, Gear::RandomTier, cause) == (cause == C::Rematch ? Regear::Each : Regear::None));
+                CHECK(R(f, Gear::Mirror, cause) == (cause == C::Rematch ? Regear::Shared : Regear::None));
+                continue;
+            }
             CHECK(R(f, Gear::RandomTier, cause) == Regear::Each);                // every respawning fighter, every time
             bool together = cause == C::RoundReset || cause == C::Rematch;      // everybody reset at once
             CHECK(R(f, Gear::Mirror, cause) == (together ? Regear::Shared : Regear::None));
@@ -671,7 +750,7 @@ static void TestRegearEvents() {
     Match o; o.Start(f, two, 0); o.Tick(t);
     o.OnDeath(2, 1, t + 10); o.OnDeath(2, 1, t + 11);
     CHECK(o.Tick(t + 10 + 5000).regear == Regear::None);
-    // Survival with a gear setting left over from a PvP lobby: the downed come back at wave clear in their own gear.
+    // Survival with a gear setting: the downed come back at wave clear in the loadout they started the run with.
     MatchConfig s = Cfg(Format::PlayersVsBots, 10); s.gear = Gear::RandomTier;
     Match v; v.Start(s, {{1, kHumanTeam, true}, {2, kHumanTeam, true}}, 0);
     CHECK(v.Tick(t).waveStarted);
@@ -768,23 +847,23 @@ static void TestDuelDraw() {
     CHECK(!ffa.RoundInPlay() && !ffa.Draw(t + 1));                              // Duel only
 }
 
-// Brawl: free-for-all with gear = Fists. Only free-for-all can be one, it is tier 0, it never regears (the bodies are
+// Brawl: free-for-all with gear = Fists. Only free-for-all can be one, its tier is fixed (kBrawlTier), it never regears (the bodies are
 // stripped at the spawn), and it is scored, respawned and ended like free-for-all.
 static void TestBrawl() {
     MatchConfig b = Cfg(Format::FreeForAll, 3); b.gear = Gear::Fists; b.tier = 5;
     CHECK(IsBrawl(b) && IsBrawl(Format::FreeForAll, Gear::Fists) && !IsBrawl(Format::FreeForAll, Gear::Own));
     MatchConfig s = Sanitize(b);
-    CHECK(s.gear == Gear::Fists && s.tier == 0 && s.format == Format::FreeForAll);   // tier 0: the lowest build and budget
+    CHECK(s.gear == Gear::Fists && s.tier == kBrawlTier && s.format == Format::FreeForAll);   // one fixed strength
     for (Format f : {Format::Duel, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies}) {
         MatchConfig o = b; o.format = f; o.tier = 4;
         CHECK(Sanitize(o).gear == Gear::Own && Sanitize(o).tier == 4 && !IsBrawl(Sanitize(o)));   // only free-for-all is Brawl
     }
     MatchConfig own = Cfg(Format::FreeForAll, 3); own.tier = 5;
-    CHECK(Sanitize(own).tier == 5 && Sanitize(own).gear == Gear::Own);                // the tier is only forced for Brawl
+    CHECK(Sanitize(own).tier == 5 && Sanitize(own).gear == Gear::Own);
     for (RespawnCause cause : {RespawnCause::Individual, RespawnCause::RoundReset, RespawnCause::WaveCleared, RespawnCause::Rematch})
         CHECK(RegearFor(s, cause) == Regear::None);                                   // no generated loadout: not own gear's blob either
     CHECK(DropClearFor(s.format) == DropClear::EachMatch);                            // the free-for-all rule: the drops go at the rematch
-    CHECK(MuscleFor(0.1, s.tier) == MuscleForTier(0) && MuscleFor(0.9, s.tier) == 0.9);   // tier 0 raises nobody's build, lowers none
+    CHECK(ForcedWeight(s) == 0.75 && BuildWeight(2.0, ForcedWeight(s), true) == 0.75);   // Brawl: every build tier 5's
 
     Match m; m.Start(s, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
     m.Tick(Match::kCountdownMs);
@@ -804,7 +883,7 @@ int main() {
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
     TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
     TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
+    TestForcedBuild(); TestBotFormatGear(); TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

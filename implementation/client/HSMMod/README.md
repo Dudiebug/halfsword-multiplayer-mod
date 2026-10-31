@@ -17,12 +17,39 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 .venv/bin/python tools/mutate_shared.py     # from the repo root: the tests must kill known bugs
 ```
 
-Output: `build/dwmapi.dll`. The repo's workflow (`AGENTS.md`) runs every sensor with
-`.agents/workflow/tools/workflowctl.py verify`.
+Output: `build/dwmapi.dll` and `build/dwmapi.map`. `tools/check.sh all` from the repo root runs every offline check
+(see `AGENTS.md`).
 
 ## New in 0.7.0 (pre-release)
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.
+- **Same strength for everyone** (from 0.8.0-pre20; `force_strength=0` under `[net]` turns it off, the host's setting rules the match): every player is built like a fighter of the lobby's tier (Brawl: always tier 5), whatever their own character, so nobody is heavier or has a stronger grip than another and a grab works the same both ways. The lobby's Tier row sets it, with your own gear too. Survival and Zombies have a Gear row (own loadouts, random by tier, everyone identical), kept for the whole run. `force_strength=0`: everyone keeps their own build.
+- **Scabbard fix** (on by default after 0.8.0-pre18; `scabbard_fix=0` under `[net]` turns it off): belt weapons that hang in
+  a scabbard (most swords and maces) stay at the other player's hip on host physics and owner sync alike, and a belt weapon
+  that ends up far from its socket is put back. `scabbard_fix=0` gives the 0.8.0-pre18 behaviour.
+- **Grab drag** (on by default after 0.8.0-pre16; `grab_drag=0` under `[net]` turns it off): a grab on any part of
+  another player drags them the way a grab on a down body's foot does; the held part follows the hand without the
+  rest of the body pulling it apart.
+- **Structures stream softly** (from 0.8.0-pre18; `sync_structures` under `[net]`): things built of several parts joined
+  together, such as the Pit's bridge or the Cellar's chains, are simulated by the host and sent to the others as one
+  snapshot, 20 times a second while any part moves. The other players' games never teleport a part: they steer it toward
+  the host's with velocity, so the joints hold and the bridge swings the same on every screen. Only when a copy is far
+  off (more than 1.5 m, or stuck far off for 2 s) are all its parts placed at once, at most every 5 s. Nobody takes over
+  a structure when they touch it (their own game pushes their copy, and their fighter pushes the host's), the map reset
+  leaves it as it is, and when a part breaks off it breaks for everyone and then moves as any loose piece.
+  `sync_structures=soft` (default), `local` (nothing is sent: every game simulates its own copy) or `full` (as
+  0.8.0-pre17: sent and teleported like loose pieces). An old `sync_structures=0` reads as `soft` and `1` as `full`.
+- **Lock-on under host sync** (on by default after 0.8.0-pre18; `host_lock_on=0` under `[net]` turns it off, per machine): a client
+  in a Host-sync match gets the camera lock back: guarding with the camera lock on turns your camera towards the fighter
+  in front of you, and your fighter faces it on every screen. Short key taps (back, run, jump) are no longer lost
+  when the network drops a packet.
+- **Lighter host (after 0.8.0-pre18; host physics, host only):** `drive_lean=0` under `[net]` goes back to playing the
+  other players' input the old way (default 1: a held guard is not fed again every frame, an unchanged aim is not set
+  again). `host_input_delay` under `[net]` (HSMMod.ini only, not in the lobby) delays the host's own buttons and
+  movement by what the other players' input loses on the way (half the round trip plus half a send interval, the
+  median over the players, re-measured every 5 s, at most 10 ms more or less each time) so the fight is even:
+  `auto` (default), `0` (off, as before) or a number of milliseconds (0 to 200). Turning and aiming are never delayed,
+  so the camera answers at once. Nothing changes under owner sync.
 - **Mesh (experimental, on by default from 0.7.0-pre6; `mesh=0` under `[net]` turns it off):** in a Steam lobby the
   players also send their movement straight to each other, which should cut the delay between two clients. It is used
   where the host and the client both have it on. The host stops relaying movement a client already receives directly and relays it again within a few
@@ -333,6 +360,15 @@ and a table lookup on the game thread; the report prints the measured cost per c
 is included in the times shown, so frames run somewhat slower while recording. Stopping writes the files on the
 game thread (a short hitch; the timeline is capped at 1 million calls). The agent bridge's `prof start 120 50`
 records for 120 s (at most 300) with a 50 µs timeline threshold (`0` keeps every call).
+
+## Recorder (testing)
+
+`record=1` under `[mod]` in `HSMMod.ini` records every fight level to `HSMRec-<date>-<time>.hsmrec` next to
+`HSMMod.log`: every fighter's physics bodies, held weapons and grip at 60 Hz, vitals at 15 Hz, every physics object of
+the level (furniture, dropped weapons, loose armour) while it moves, your own input (axes, buttons, camera) at 60 Hz, and
+events (grabs, pick-ups, drops, grip changes, falls, damage, severs, hits, deaths, breaks, button presses). Off by default;
+nothing is uploaded. Files are about 40 MB a minute with 6 fighters. Read them with `tools/hsmrec.py` (`summary`,
+`events`, `csv`). Format and limits: `docs/PLAN_RECORDER.md`.
 
 ## In-game test harness
 

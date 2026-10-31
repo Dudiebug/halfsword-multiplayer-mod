@@ -18,8 +18,9 @@ struct Result {
 void Configure(bool enabled, const std::string& url);
 bool Enabled();
 bool Busy();   // one request at a time
-// Each reads this instance's HSMMod.log and HSMMod.prev.log on the worker, sends their tails redacted with a fresh
-// salt, and queues the Result. false: off or busy. job: Report (/bug, the Report buttons) or Crash (the report at start).
+// Each reads this instance's logs on the worker and sends them redacted with a fresh salt: gzipped, up to 16 MB of each
+// of the last four sessions' logs; to a relay that refuses that, the 3 MB tails of HSMMod.log and HSMMod.prev.log
+// plain. Then it queues the Result. false: off or busy. job: Report (/bug, the Report buttons) or Crash (the report at start).
 bool Submit(const std::string& description, const ReportFacts& facts, ReportJob job = ReportJob::Report);
 bool Attach(const std::string& id, const std::string& token, const ReportFacts& facts);
 std::optional<Result> Poll();   // game thread

@@ -16,6 +16,8 @@ using combat::kEquipSlots;
 
 namespace {
 
+bool g_scabbardFix = true;   // scabbard_fix (SetStandInScabbardFix): off is 0.8.0-pre18's anchoring, no watchdog
+
 constexpr double kLogAtMs[3] = {0.0, 1000.0, 3000.0};   // after the first pass: at bind, then ~1 s and ~3 s later
 constexpr const char* kSlotLabel[kEquipSlots] = {"R1", "R2", "Back", "L1", "L2"};
 constexpr int kBackSlot = 2;                             // its constraint already holds the Mesh
@@ -93,8 +95,17 @@ const char* SocketOf(UObject* weapon, int slot) {
     return sheathSlot ? SlotSocket(*sheathSlot, slot) : nullptr;
 }
 
-// How far up its shaft the weapon hangs from its sheath socket (combat::SheathHang, as the game's Sheathe on Spawn).
+// A weapon with SheathSlot 0 hangs in a physics scabbard (Sheathe on Spawn's scabbard branch, Willie_BP.cpp:7114-7160): both
+// bodies are put at the socket's own transform, no hang.
+bool InScabbard(UObject* weapon) {
+    const uint8_t* sheathSlot = weapon ? Field<uint8_t>(weapon, "SheathSlot") : nullptr;
+    return sheathSlot && *sheathSlot == 0;
+}
+
+// How far up its shaft the weapon hangs from its sheath socket (combat::SheathHang, as the game's Sheathe on Spawn); none
+// for a scabbard weapon.
 double HangOf(UObject* weapon) {
+    if (g_scabbardFix && InScabbard(weapon)) return 0.0;
     const double* length = weapon ? Field<double>(weapon, "Length to Top R Default") : nullptr;
     const uint8_t* grip = weapon ? Field<uint8_t>(weapon, "Grip R Hand Default") : nullptr;
     return length ? combat::SheathHang(*length, grip ? *grip : uint8_t(0)) : 0.0;
@@ -129,6 +140,7 @@ struct Slot {
     UObject* weapon = nullptr;
     UObject* constraint = nullptr;
     UObject* body = nullptr;   // the weapon's BaseMesh
+    UObject* scabbard = nullptr;   // a scabbard weapon's "Scabbard" body (it holds the weapon, and hangs from the waist), else null
     bool live = false;         // the constraint is there and not being destroyed
     bool own = false;          // the weapon's "Parent Actor" is this stand-in
     bool held = false;         // in a hand (a draw grabs it while the slot variable still holds it)
@@ -155,6 +167,7 @@ std::array<Slot, kEquipSlots> ReadSlots(UObject* willie) {
         Slot& s = out[size_t(k)];
         if (!s.weapon) continue;
         s.body = ObjField(s.weapon, "BaseMesh");
+        if (g_scabbardFix && s.body && InScabbard(s.weapon)) s.scabbard = ObjField(s.weapon, "Scabbard");
         s.own = ObjField(s.weapon, "Parent Actor") == willie;
         s.held = s.weapon == hands[0] || s.weapon == hands[1];
         s.anchor = plan[size_t(k)] && s.own && s.body;
@@ -218,6 +231,41 @@ bool SnapToSocket(UObject* mesh, UObject* body, const char* socket, double hang)
     return true;
 }
 
+// Distance in cm from the slot's weapon (or, if farther, its scabbard) to where they hang at that socket; -1 when unreadable.
+double SlotDistance(UObject* mesh, const Slot& s, const char* socket, double hang) {
+    double cm = SocketDistance(mesh, s.body, socket, hang);
+    if (s.scabbard) cm = std::max(cm, SocketDistance(mesh, s.scabbard, socket, hang));
+    return cm;
+}
+
+// The weapon and its scabbard back at the socket, at rest.
+bool SnapSlot(UObject* mesh, const Slot& s, const char* socket, double hang) {
+    const bool body = SnapToSocket(mesh, s.body, socket, hang);
+    const bool scabbard = !s.scabbard || SnapToSocket(mesh, s.scabbard, socket, hang);
+    return body && scabbard;
+}
+
+// The sheath joint that holds a scabbard to the waist: the scabbard's first child component (the game's own lookup,
+// Willie_BP.cpp:1450 and 1499), a PhysicsConstraintComponent made as the weapon was sheathed (BoneCore 'pelvis' on the
+// other end). Null when there is none. The slot variable "Slot R 1 Constraint" etc. is the other joint, scabbard to weapon.
+UObject* ScabbardJoint(UObject* scabbard) {
+    if (!ComponentLive(scabbard)) return nullptr;
+    Call child(scabbard, "GetChildComponent");
+    child.set<int32_t>("ChildIndex", 0);
+    UObject* joint = child.invoke() ? child.get<UObject*>("ReturnValue") : nullptr;
+    if (!joint || ObjectName(reinterpret_cast<UObject*>(ClassOf(joint))).find("PhysicsConstraint") == std::string::npos) return nullptr;
+    return ComponentLive(joint) ? joint : nullptr;
+}
+
+// Moves a constraint component to the origin of another component (unscaled), so SetConstrainedComponents makes its frames there.
+void PlaceJointAt(UObject* joint, UObject* at) {
+    Call where(at, "K2_GetComponentToWorld");
+    if (!where.invoke()) return;
+    FTransform t = where.get<FTransform>("ReturnValue");
+    t.scale = FVector{1.0, 1.0, 1.0};
+    Call(joint, "K2_SetWorldTransform").set("NewTransform", t).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
+}
+
 // rig: <willie> slots: R1 <weapon or -> c=<constraint live> sim=<BaseMesh simulating> <distance to its socket>cm | R2 ...
 void LogSlots(UObject* willie) {
     UObject* mesh = ObjField(willie, "Mesh");
@@ -237,15 +285,20 @@ void LogSlots(UObject* willie) {
 
 }  // namespace
 
+void StandInSlots::Track(UObject* willie, double now) {
+    if (willie == willie_ && ObjectIndex(willie) == index_) return;
+    willie_ = willie;
+    index_ = ObjectIndex(willie);
+    firstMs_ = now;
+    logged_ = 0;
+    lastWatchMs_ = -1e18;
+    drift_.Clear();
+}
+
 void StandInSlots::Maintain(UObject* willie) {
     if (!willie) return;
     const double now = NowMs();
-    if (willie != willie_ || ObjectIndex(willie) != index_) {
-        willie_ = willie;
-        index_ = ObjectIndex(willie);
-        firstMs_ = now;
-        logged_ = 0;
-    }
+    Track(willie, now);
     if (logged_ < 3 && now - firstMs_ >= kLogAtMs[logged_]) {
         LogSlots(willie);
         ++logged_;
@@ -259,7 +312,50 @@ void StandInSlots::Shift(UObject* willie, const sync::V3& d) {
         if (s.anchor) {
             MoveBy(s.body, d);
             HoldStill(s.body);
+            if (s.scabbard) {   // the scabbard goes with its weapon, or the joint between them drags it back
+                MoveBy(s.scabbard, d);
+                HoldStill(s.scabbard);
+            }
         }
+}
+
+// rig: <willie> slot <R1..> <weapon> <cm> cm from its socket (visible <0/1>, hidden in game <0/1>, parent <name>, simulating <0/1>)
+static void LogFar(UObject* willie, int k, const Slot& s, double cm) {
+    bool visible = false, hidden = false;
+    Call vis(s.body, "IsVisible");
+    if (vis.invoke()) visible = vis.get<bool>("ReturnValue");
+    GetBool(s.body, "bHiddenInGame", hidden);
+    Call attach(s.body, "GetAttachParent");
+    UObject* parent = attach.invoke() ? attach.get<UObject*>("ReturnValue") : nullptr;
+    HSM_LOG("rig: %s slot %s %s %.0f cm from its socket (visible %d, hidden in game %d, parent %s, simulating %d)",
+            ObjectName(willie).c_str(), kSlotLabel[k], ObjectName(s.weapon).c_str(), cm, visible ? 1 : 0, hidden ? 1 : 0,
+            parent ? ObjectName(parent).c_str() : "none", Simulating(s.body) ? 1 : 0);
+}
+
+void StandInSlots::Watch(UObject* willie) {
+    if (!willie) return;
+    const double now = NowMs();
+    Track(willie, now);
+    if (now - lastWatchMs_ < combat::kSlotWatchMs) return;
+    lastWatchMs_ = now;
+    UObject* mesh = ObjField(willie, "Mesh");
+    if (!mesh) return;
+    const std::array<Slot, kEquipSlots> slots = ReadSlots(willie);
+    for (int k = 0; k < kEquipSlots; ++k) {
+        const Slot& s = slots[size_t(k)];
+        if (!s.anchor && !s.place) continue;   // an own sheathed weapon with a body (a drawn one is in a hand)
+        const char* socket = SocketOf(s.weapon, k);
+        const double hang = HangOf(s.weapon);
+        const double cm = SlotDistance(mesh, s, socket, hang);
+        const uint64_t key = (uint64_t(uint32_t(ObjectIndex(s.weapon))) << 8) | uint64_t(k);
+        const combat::SlotDriftVerdict v = drift_.Observe(key, cm, now);
+        if (v.report) LogFar(willie, k, s, cm);
+        if (!v.snap || !g_scabbardFix) continue;   // the lines above stay on with scabbard_fix=0
+        Anchor(willie, false);   // a joint still waiting to be moved to the Mesh goes first
+        if (SnapSlot(mesh, s, socket, hang) && v.snaps <= 2)
+            HSM_LOG("rig: %s slot %s %s drifted %.0f cm from its socket, put back (%d)", ObjectName(willie).c_str(), kSlotLabel[k],
+                    ObjectName(s.weapon).c_str(), cm, v.snaps);
+    }
 }
 
 void StandInSlots::Anchor(UObject* willie, bool logLost) {
@@ -271,8 +367,35 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
         const Slot& s = slots[size_t(k)];
         if (s.anchor) {
             SetSheathPolicy(s.body);
-            // The waist slots hold BoneCore, whose collision the rig switches off; the pelvis body is the one it drives.
-            if (k != kBackSlot && !Remembered(retargeted, s.constraint)) {
+            if (s.scabbard) SetSheathPolicy(s.scabbard);
+            // A scabbard weapon (SheathSlot 0): the weapon hangs from its scabbard by the slot constraint, and the scabbard
+            // from BoneCore by a joint of its own. That joint moves to the Mesh; the slot constraint stays as the game
+            // made it. (Retargeting the slot constraint like the waist slots below pinned the weapon to a point 3 m under
+            // the pelvis: it is left where the game spawned it, not at the socket, and the new joint frames came from there.)
+            if (s.scabbard) {
+                UObject* joint = ScabbardJoint(s.scabbard);   // none yet: tried again on the next pass
+                if (joint && !Remembered(retargeted, joint)) {
+                    const char* socket = SocketOf(s.weapon, k);
+                    const double away = SlotDistance(mesh, s, socket, 0.0);
+                    if (away > kSnapBackCm && SnapSlot(mesh, s, socket, 0.0) && !Remembered(snapped, s.weapon)) {
+                        Remember(snapped, s.weapon);
+                        HSM_LOG("rig: %s slot %s snapped back from %.0fcm", ObjectName(willie).c_str(), kSlotLabel[k], away);
+                    }
+                    // The joint's own place first: the game attached it to the scabbard keeping its relative transform, which
+                    // moved it away from the scabbard, and SetConstrainedComponents makes the joint frames from where the
+                    // component stands.
+                    PlaceJointAt(joint, s.scabbard);
+                    Call c(joint, "SetConstrainedComponents");
+                    c.set<UObject*>("Component1", s.scabbard).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh)
+                        .setName("BoneName2", MakeName("pelvis"));
+                    if (c.invoke()) {
+                        Remember(retargeted, joint);
+                        HSM_LOG("rig: %s slot %s scabbard joint moved to the Mesh (%s, was %.0fcm from its socket)",
+                                ObjectName(willie).c_str(), kSlotLabel[k], ObjectName(s.weapon).c_str(), away);
+                    }
+                }
+            } else if (k != kBackSlot && !Remembered(retargeted, s.constraint)) {
+                // The waist slots hold BoneCore, whose collision the rig switches off; the pelvis body is the one it drives.
                 // The new constraint keeps the weapon where it is: one that fell while BoneCore had no collision (the game
                 // makes the constraint a moment after spawning the weapon) goes back to its socket first.
                 const char* socket = SocketOf(s.weapon, k);
@@ -318,5 +441,7 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
         }
     }
 }
+
+void SetStandInScabbardFix(bool on) { g_scabbardFix = on; }
 
 }  // namespace hsm::game

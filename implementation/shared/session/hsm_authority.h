@@ -5,6 +5,7 @@
 #pragma once
 #include "hsm_protocol.h"
 #include "session/hsm_roster.h"
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -13,21 +14,32 @@ namespace hsm {
 constexpr uint8_t kHostSlot = 0;
 
 enum class SyncMode : uint8_t {
-    Host = 0,    // the host simulates every fighter from its player's inputs (protocol rev 8 behaviour)
+    Host = 0,    // host physics (0.9.0, rev 29): the host simulates every fighter from its player's inputs; every client shows
+                 // the host's stream for every fighter, its own included (rev 8 had this with a soft copy)
     Owner = 1,   // every machine simulates its own fighter and streams it; others are stand-ins
 };
 
 inline bool ValidEntity(uint8_t entity) { return entity >= 1 && entity <= kMaxWillies; }
 
-// The roster slot whose machine simulates entity (kHostSlot for bots); 0xFF for an invalid entity.
-inline uint8_t OwnerSlotOf(uint8_t entity) {
+// Hand-offs (sync/hsm_handoff.h): the slot whose machine simulates each entity for now, kNoSlot where its owner does.
+constexpr uint8_t kNoSlot = 0xFF;
+struct Holders {
+    std::array<uint8_t, kMaxWillies + 1> slot;
+    Holders() { slot.fill(kNoSlot); }
+    uint8_t Of(uint8_t entity) const { return entity <= kMaxWillies ? slot[entity] : kNoSlot; }
+};
+
+// The roster slot whose machine simulates entity (kHostSlot for bots, the holder while it is handed off); 0xFF for an
+// invalid entity.
+inline uint8_t OwnerSlotOf(uint8_t entity, const Holders& h = Holders()) {
     if (!ValidEntity(entity)) return 0xFF;
+    if (h.Of(entity) < kMaxFighters) return h.Of(entity);
     return entity <= kMaxFighters ? uint8_t(entity - 1) : kHostSlot;
 }
 
 // May the machine in senderSlot stream (Pose, Vitals) or claim hits with (HitClaim attacker) this entity?
-inline bool MayStream(uint8_t senderSlot, uint8_t entity) {
-    return senderSlot < kMaxFighters && OwnerSlotOf(entity) == senderSlot;
+inline bool MayStream(uint8_t senderSlot, uint8_t entity, const Holders& h = Holders()) {
+    return senderSlot < kMaxFighters && OwnerSlotOf(entity, h) == senderSlot;
 }
 
 // Where the host sends a Pose or Vitals that the machine in fromSlot streamed: every other connected slot.
@@ -65,10 +77,11 @@ struct ClaimRoute {
     std::vector<uint8_t> fxSlots;         // connected slots that get it as HitFx (cosmetic), host excluded
     bool hostFx = false;                  // the host shows it cosmetically (it is neither attacker nor victim owner)
 };
-inline ClaimRoute RouteClaim(uint8_t senderSlot, uint8_t attacker, uint8_t victim, const std::vector<uint8_t>& connectedSlots) {
+inline ClaimRoute RouteClaim(uint8_t senderSlot, uint8_t attacker, uint8_t victim, const std::vector<uint8_t>& connectedSlots,
+                             const Holders& h = Holders()) {
     ClaimRoute r;
-    if (attacker == victim || !ValidEntity(victim) || !MayStream(senderSlot, attacker)) return r;
-    const uint8_t victimSlot = OwnerSlotOf(victim);
+    if (attacker == victim || !ValidEntity(victim) || !MayStream(senderSlot, attacker, h)) return r;
+    const uint8_t victimSlot = OwnerSlotOf(victim, h);
     bool victimHere = victimSlot == kHostSlot;
     for (uint8_t s : connectedSlots) victimHere = victimHere || s == victimSlot;
     if (!victimHere) return r;            // nobody owns that fighter any more

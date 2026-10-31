@@ -19,6 +19,7 @@
 // copy of the prop as the striker; my fighter struck by a copy driven from elsewhere is blocked, the streamer's claim
 // brings that blow.
 #pragma once
+#include "sync/hsm_remote.h"
 #include "combat/hsm_claim.h"
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
@@ -48,6 +49,8 @@ public:
         std::function<bool(ue::UObject* actor, ObjectSync::Touch& out)> prop;
         std::function<ue::UObject*(uint64_t propId)> propActor;
         std::function<uint8_t()> myEntity;
+        // Sync audit T3: a write the game made here onto a stand-in (a push, a teammate helped up), for its owner.
+        std::function<void(const sync::RemoteWriteMsg&)> sendRemote;
     };
     // Installs the hooks (owner "claims"; they resolve on every level load). False when the script VM hook is
     // unavailable: nothing is guarded then (the host does not offer owner sync without it).
@@ -58,15 +61,14 @@ public:
 
     void Replay(const combat::HitClaim& c, double nowMs);            // a claim against a fighter simulated here: queued
     void Effect(const combat::HitClaim& c);                          // someone else's claim: shown on the stand-in
-    void NoteClash(uint8_t attacker, ue::UObject* theirWeapon, double nowMs);   // my weapon met that weapon of attacker's stand-in
+    void NoteClash(uint8_t defender, ue::UObject* theirWeapon);   // my weapon met that weapon of defender's stand-in: its parry state
     uint8_t RecentAttacker(uint8_t victim, double nowMs) const;      // last replayed attacker within 10 s, else 0
     void Forget(uint8_t entity) {                                    // left, respawned or rejoined: its ids may restart
         dedupe_.Forget(entity);
         coalescer_.Forget(entity);
         stuckLimiter_.Forget(entity);
         queue_.Forget(entity);                                       // blows queued against its old body are dropped
-        parry_.Forget(entity);
-        if (entity <= kMaxWillies) { lastClashMs_[entity] = {}; recent_[entity] = {}; lastDcdMs_[entity] = 0.0; }   // K4: a new body has no recent attacker
+        if (entity <= kMaxWillies) { recent_[entity] = {}; resetDcdMs_[entity] = 0.0; }   // K4: a new body has no recent attacker
     }
     std::string HealthLine();                                        // since the previous call
     // C0 (0.8.0-pre7): the hit audit, kept only while on (help_improve). AuditLine: since the previous call; empty when
@@ -88,6 +90,8 @@ private:
     bool OnGetDamage(ue::ScriptCall& c);
     void OnStuckDamage(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim);   // a lodged blade of mine, on a stand-in
     void AfterDealComplexDamage(ue::ScriptCall& c);
+    void GatherPush(ue::ScriptCall& c, ue::UObject* striker, uint8_t attacker, uint8_t victim);   // item 3: its impulse, for the owner
+    void OnGetUpPal(ue::ScriptCall& c);                              // item 22: my fighter helps a stand-in up
     void SendPending(ue::ScriptCall& c);                             // the claim made before the body ran, coalesced by its damage
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
                    const ObjectSync::Touch* prop);
@@ -118,15 +122,17 @@ private:
     combat::BlowCoalescer coalescer_;
     combat::StuckDamageLimiter stuckLimiter_;
     combat::ReplayQueue queue_;
-    combat::ParryWindow parry_;
+    sync::PushGather pushes_;
+    sync::RemoteGate reviveSent_;
+    uint64_t frame_ = 0;
+    uint64_t pushesSent_ = 0, revivesSent_ = 0;
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
     // The claim just made (no id yet), until its stand-in's own run of the blow returns: its Damage Out decides whether
     // the claim is sent (combat::BlowCoalescer) and ranks it.
     struct Pending { ue::UObject* standIn = nullptr; combat::HitClaim claim; combat::BlowKey key; bool prop = false; std::string audit; };
     Pending pending_;
     std::array<Recent, kMaxWillies + 1> recent_{};
-    std::array<double, kMaxWillies + 1> lastDcdMs_{};                    // per stand-in victim: the last blow through its DCD gate
-    std::array<std::array<double, 3>, kMaxWillies + 1> lastClashMs_{};   // per attacker and StrikeSource
+    std::array<double, kMaxWillies + 1> resetDcdMs_{};                   // per stand-in victim: when its DCD gate clears (0: no reset pending)
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box
     Counters n_, reported_;
     // C0: blows on stand-ins by what struck them, and their fate; claims replayed on my fighter by striking component.

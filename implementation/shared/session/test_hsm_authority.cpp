@@ -29,6 +29,19 @@ static void TestMayStream() {
     CHECK(!MayStream(kHostSlot, 2));
     CHECK(!MayStream(1, uint8_t(kMaxFighters + 1)));              // a client never owns a bot
     CHECK(!MayStream(uint8_t(kMaxFighters), uint8_t(kMaxFighters + 1)));   // no such slot
+    // A hand-off: entity 3 (slot 2's) is the host's for now, entity 1 (the host's) slot 3's.
+    Holders held; held.slot[3] = kHostSlot; held.slot[1] = 3;
+    Holders other; other.slot[4] = kHostSlot;
+    CHECK(MayStream(kHostSlot, 3, held) && !MayStream(2, 3, held) && MayStream(2, 3, other));
+    CHECK(OwnerSlotOf(3, held) == kHostSlot && OwnerSlotOf(3, other) == 2 && OwnerSlotOf(1, held) == 3 && !MayStream(kHostSlot, 1, held));
+    const ClaimRoute h = RouteClaim(kHostSlot, 3, 4, {kHostSlot, 2, 3}, held);    // handed 3 hits client 4: slot 3 replays it
+    CHECK(h.accept && h.replaySlot == 3 && !h.hostFx);
+    const ClaimRoute v = RouteClaim(3, 4, 3, {kHostSlot, 2, 3}, held);            // client 4 hits handed 3: the host replays it
+    CHECK(v.accept && v.replaySlot == kHostSlot);
+    CHECK(!RouteClaim(2, 3, 4, {kHostSlot, 2, 3}, held).accept);                  // slot 2 claims with 3 it does not have now
+    Holders hostHeld; hostHeld.slot[1] = 3;
+    const ClaimRoute b = RouteClaim(2, 3, 1, {kHostSlot, 2, 3}, hostHeld);        // client 3 hits the host's fighter slot 3 holds
+    CHECK(b.accept && b.replaySlot == 3 && b.hostFx);
     CHECK(!MayStream(0xFF, 0));
     CHECK(!MayStream(kHostSlot, 0));
 }

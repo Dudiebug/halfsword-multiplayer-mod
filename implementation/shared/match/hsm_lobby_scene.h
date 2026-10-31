@@ -53,7 +53,7 @@ struct LobbyLocal {
 };
 
 // MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam };
+enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false; };   // progression: the extra last card; brawl: free-for-all with gear = Fists
@@ -134,6 +134,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             c.clearGroundMin = uint8_t(StepOf(o, c.clearGroundMin, dir)); break;
         }
         case LobbyRow::MyTeam: break;
+        case LobbyRow::Sync: c.hostPhysics = !c.hostPhysics; break;
     }
     return c;
 }
@@ -146,7 +147,7 @@ inline MatchConfig SelectFormat(MatchConfig c, Format f) {
     return c;
 }
 
-// A mode card picked: the Brawl card is free-for-all with bare fists (gear Fists, tier 0, free-for-all's default limit);
+// A mode card picked: the Brawl card is free-for-all with bare fists (gear Fists, kBrawlTier, free-for-all's default limit);
 // the format cards are SelectFormat, and leaving Brawl puts the gear and tier back at their defaults (even for the
 // free-for-all card: the same format, other rules).
 inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl) {
@@ -155,7 +156,7 @@ inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl) {
         c.format = Format::FreeForAll;
         c.scoreLimit = DefaultScoreLimit(c.format);
         c.gear = Gear::Fists;
-        c.tier = 0;
+        c.tier = kBrawlTier;
         return c;
     }
     if (c.gear == Gear::Fists) {                     // leaving Brawl
@@ -187,7 +188,7 @@ inline const char* FormatBlurb(Format f) {
         case Format::TwoTeams: return "Red against Blue. Every kill scores for the team; the first team to the limit wins.";
         case Format::ThreeTeams: return "Red, Blue and Green. Every kill scores for the team; the first team to the limit wins.";
         case Format::PlayersVsBots: return "Everyone against waves of bots that rank up. The fallen return when a wave is cleared.";
-        case Format::Zombies: return "Endless zombie hordes in the Abyss. The fallen return when a wave is cleared.";
+        case Format::Zombies: return "Zombie waves in the Abyss, one zombie at a time per player. The fallen return when a wave is cleared.";
         case Format::FreeForAll: break;
     }
     return "Everyone for themselves. Every kill scores; the first to the limit wins.";
@@ -258,16 +259,21 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
         case LobbyRow::Gear:
             r.label = "Gear";
             r.value = GearName(c.gear);
-            if (c.gear == Gear::RandomTier) r.hint = duel ? "Fresh random gear for each fighter every round." : "Fresh random gear for each fighter every life.";
-            else if (c.gear == Gear::Mirror) r.hint = duel ? "One random loadout for everyone, new each round." : "One random loadout for everyone, until the rematch.";
+            if (c.gear == Gear::RandomTier) r.hint = bots ? "A random loadout for each player at the start, kept for the whole run."
+                                                    : duel ? "Fresh random gear for each fighter every round." : "Fresh random gear for each fighter every life.";
+            else if (c.gear == Gear::Mirror) r.hint = bots ? "One random loadout for everyone, kept for the whole run."
+                                                  : duel ? "One random loadout for everyone, new each round." : "One random loadout for everyone, until the rematch.";
             else r.hint = "Everyone fights in their own loadout.";
             break;
         case LobbyRow::Tier:
             r.label = bots ? "Starting tier" : "Gear tier";
             r.value = "tier " + std::to_string(int(c.tier));
-            if (!bots) r.value += " \xC2\xB7 budget " + std::to_string(TierBudget(c.tier));
-            r.hint = f == Format::Zombies ? "Zombies start at this rank and rise one every 3 waves."
-                   : bots ? "Bots start at this rank and rise one every 2 waves." : "The random gear is rolled within this budget.";
+            if (c.gear != Gear::Own) r.value += " \xC2\xB7 budget " + std::to_string(TierBudget(c.tier));
+            // 0.8.0-pre20: the tier is every player's strength (muscle and grip, forced: ForcedWeight), with any gear.
+            r.hint = f == Format::Zombies ? "Zombies start at this rank and rise one every 3 waves. "
+                   : bots ? "Bots start at this rank and rise one every 2 waves. " : "";
+            r.hint += c.gear == Gear::Own ? (bots ? "Also every player's strength." : "Sets every player's strength (muscle and grip).")
+                                          : (bots ? "Also every player's strength and the random gear's budget." : "Sets every player's strength; the random gear is rolled within this budget.");
             break;
         case LobbyRow::FriendlyFire:
             r.label = "Friendly fire";
@@ -303,6 +309,12 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
                                                           : std::string("Auto puts you on the smallest team.");
             break;
         }
+        case LobbyRow::Sync:
+            r.label = "Sync";
+            r.value = c.hostPhysics ? "Host physics" : "Per player";
+            r.hint = c.hostPhysics ? "The host runs every fighter's physics, so every screen shows the same fight. Your own moves show about one ping late. From the next map."
+                                   : "Each player runs their own fighter: no delay on your own moves, but hits and grabs can differ between screens. From the next map.";
+            break;
     }
     return r;
 }
@@ -312,14 +324,15 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 // The rows the format uses, in page order. Every format has Damage (Progression co-op shows it alone).
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     Format f = c.format;
-    if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Tier, LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage};   // endless, own gear, back at a wave clear
-    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround};            // nothing to choose in gear: everyone is bare
+    if (IsBotFormat(f)) return {LobbyRow::Time, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::Sync};   // endless, back at a wave clear in the run's loadout
+    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
     std::vector<LobbyRow> v = {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear};
-    if (c.gear != Gear::Own) v.push_back(LobbyRow::Tier);
+    v.push_back(LobbyRow::Tier);                     // the tier is every player's strength, with own gear too
     if (HasTeams(f)) v.push_back(LobbyRow::FriendlyFire);
     v.push_back(LobbyRow::Damage);
     if (f != Format::Duel) v.push_back(LobbyRow::ClearGround);
     if (HasTeams(f)) v.push_back(LobbyRow::MyTeam);
+    v.push_back(LobbyRow::Sync);
     return v;
 }
 

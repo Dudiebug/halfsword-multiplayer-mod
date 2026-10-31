@@ -27,6 +27,9 @@ constexpr char kDefaultIni[] =
     "standin_grip=lock\n"
     "; 1: the host starts a match even when another player runs a different mod build (testing only)\n"
     "allow_build_mismatch=0\n"
+    "; 1: every player is built like a fighter of the lobby's tier (same body mass and grip strength), whatever their own\n"
+    "; character; 0: each keeps their own build. The host's setting rules the match.\n"
+    "force_strength=1\n"
     "; 1: show the other fighters' names over their heads in a match; 0: off\n"
     "name_tags=1\n"
     "; 0 turns off the armour paint crash guard (armour is destroyed at once, as in the stock game)\n"
@@ -82,7 +85,10 @@ constexpr char kDefaultIni[] =
     "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it); 0: do not.\n"
     "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
     "ue4ss=1\n"
-    "ue4ss_order=after\n";
+    "ue4ss_order=after\n"
+    "; record=1: write a 60 Hz recording of every fighter, prop and gameplay event in each fight level to HSMRec-<date>-<time>.hsmrec\n"
+    "; next to HSMMod.log (tools/hsmrec.py reads it; for mod development, about 40 MB a minute). Off by default.\n"
+    "record=0\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -148,8 +154,24 @@ Config LoadConfig() {
     c.playerName = ReadString(ini, L"name", "Player").substr(0, 32);
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
-    if (!ReadString(ini, L"sync_mode", "").empty()) HSM_LOG("config: sync_mode is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
+    {
+        const std::string sm = ReadString(ini, L"sync_mode", "owner");
+        c.hostPhysics = sm == "host";
+        if (sm != "host" && sm != "owner") HSM_LOG("config: sync_mode=%s is not host or owner; owner", sm.c_str());
+    }
     c.mesh = ReadString(ini, L"mesh", "1") != "0";
+    c.handOff = ReadString(ini, L"hand_off", "0") != "0";
+    c.grabDrag = ReadString(ini, L"grab_drag", "1") != "0";
+    c.syncStructures = ParseStructureMode(ReadString(ini, L"sync_structures", "soft"));
+    c.hostLockOn = ReadString(ini, L"host_lock_on", "1") != "0";
+    c.driveLean = ReadString(ini, L"drive_lean", "1") != "0";
+    c.forceStrength = ReadString(ini, L"force_strength", "1") != "0";
+    {
+        const std::string hd = ReadString(ini, L"host_input_delay", "auto");
+        c.hostInputDelay = ParseHostInputDelay(hd);
+        if (!c.hostInputDelay.valid) HSM_LOG("config: host_input_delay=%s is not auto, 0 or a number of milliseconds; using auto", hd.c_str());
+    }
+    c.scabbardFix = ReadString(ini, L"scabbard_fix", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
@@ -201,6 +223,8 @@ Config LoadConfig() {
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
+    c.record = ReadModString(ini, L"record", "0") != "0";
+    if (c.record) HSM_LOG("config: record=1: fight levels are recorded to HSMRec-*.hsmrec next to this log");
     // Command-line overrides (several instances may share one ini).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags
@@ -209,15 +233,19 @@ Config LoadConfig() {
         if (auto r = CmdArg(cl, "hsmrole")) c.role = ParseRole(*r, "-hsmrole");
         if (CmdArg(cl, "hsmhost") || CmdArg(cl, "hsmport")) HSM_LOG("config: -hsmhost and -hsmport are ignored: direct IP was removed in 0.8.0");
         if (auto n = CmdArg(cl, "hsmname"); n && !n->empty()) c.playerName = n->substr(0, 32);
-        if (auto m = CmdArg(cl, "hsmsync"); m && !m->empty()) HSM_LOG("config: -hsmsync is ignored: host sync was removed in 0.8.0, owner sync is the only mode");
+        if (auto m = CmdArg(cl, "hsmsync"); m && (*m == "host" || *m == "owner")) c.hostPhysics = *m == "host";
         if (auto k = CmdArg(cl, "hsmchatkey"); k && !ParseChatKey(*k, c.chatKey))
             HSM_LOG("config: -hsmchatkey=%s is not enter, t, y or u; ignored", k->c_str());
     }
-    HSM_LOG("config: role=%s snapshot_hz=%d input_hz=%d chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
-            c.snapshotHz, c.inputHz, ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
+    HSM_LOG("config: role=%s snapshot_hz=%d input_hz=%d sync_mode=%s chat_key=%s standin_grip=%s allow_build_mismatch=%d", RoleName(c.role),
+            c.snapshotHz, c.inputHz, c.hostPhysics ? "host" : "owner", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.allowBuildMismatch ? 1 : 0);
-    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
-            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0);
+    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d sync_structures=%s", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
+            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0,
+            StructureModeName(c.syncStructures));
+    HSM_LOG("config: drive_lean=%d host_input_delay=%s host_lock_on=%d scabbard_fix=%d force_strength=%d", c.driveLean ? 1 : 0,
+            c.hostInputDelay.mode == HostDelayMode::Auto ? "auto" : c.hostInputDelay.mode == HostDelayMode::Off ? "0" : std::to_string(c.hostInputDelay.fixedMs).c_str(),
+            c.hostLockOn ? 1 : 0, c.scabbardFix ? 1 : 0, c.forceStrength ? 1 : 0);
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)

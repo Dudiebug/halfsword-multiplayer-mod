@@ -60,7 +60,7 @@ static void TestNewRows() {
     MatchConfig d; d.format = Format::Duel;
     CHECK(!has(d, LobbyRow::ClearGround) && !has(d, LobbyRow::WaveBreak));
     CHECK(has(MatchConfig{}, LobbyRow::ClearGround));
-    MatchConfig br; br.gear = Gear::Fists; CHECK(has(br, LobbyRow::ClearGround));
+    MatchConfig br; br.gear = Gear::Fists; CHECK(has(br, LobbyRow::ClearGround) && !has(br, LobbyRow::Tier) && !has(br, LobbyRow::Gear));   // Brawl: fixed strength, no gear
     MatchConfig t; t.format = Format::TwoTeams; CHECK(has(t, LobbyRow::ClearGround));
 }
 
@@ -247,16 +247,16 @@ static void TestHostAgainstMember() {
 static void TestRowsPerFormat() {
     using V = std::vector<LobbyRow>;
     using enum LobbyRow;
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, Gear, Damage, ClearGround}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, ClearGround, MyTeam}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::ThreeTeams, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam}));
-    CHECK(Ids(BuildLobbyScene(InLobby(false, Format::ThreeTeams))) == (V{Limit, Time, Respawn, Gear, FriendlyFire, Damage, ClearGround, MyTeam}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, Gear, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, Tier, WaveBreak, FriendlyFire, Damage}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, Tier, WaveBreak, FriendlyFire, Damage}));   // gear is PvP only
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, ClearGround, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::ThreeTeams, Gear::Mirror))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(false, Format::ThreeTeams))) == (V{Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, ClearGround, MyTeam, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, Gear, Tier, Damage, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, Gear, Tier, WaveBreak, FriendlyFire, Damage, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, Gear, Tier, WaveBreak, FriendlyFire, Damage, Sync}));   // 0.8.0-pre20: the bot formats take a gear setting
 }
 
 static void TestLabelsAndValues() {
@@ -274,6 +274,14 @@ static void TestLabelsAndValues() {
     CHECK(Need(s, LobbyRow::Tier).value == "tier 7 " + kDot + " budget 888");
     l.config.gear = Gear::Own;
     CHECK(Need(BuildLobbyScene(l), LobbyRow::Gear).value == "Own loadouts");
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).value == "tier 7");                       // own gear: a strength, no gear budget
+    // 0.9.0: the sync row, per player (owner sync) by default; a step flips it either way.
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Sync).label == "Sync" && Need(BuildLobbyScene(l), LobbyRow::Sync).value == "Per player");
+    CHECK(StepSetting(l.config, LobbyRow::Sync, 1).hostPhysics && StepSetting(l.config, LobbyRow::Sync, -1).hostPhysics);
+    l.config.hostPhysics = true;
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Sync).value == "Host physics" && !StepSetting(l.config, LobbyRow::Sync, 1).hostPhysics);
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Sync).hint.find("one ping late") != std::string::npos);
+    l.config.hostPhysics = false;
 
     LobbyLocal d = InLobby(true, Format::Duel);
     d.config.respawnDelayS = 3;
@@ -305,8 +313,13 @@ static void TestGearHint() {
     }
     CHECK(GearHint(Format::Duel, Gear::RandomTier) == "Fresh random gear for each fighter every round.");
     CHECK(GearHint(Format::Duel, Gear::Mirror) == "One random loadout for everyone, new each round.");
-    CHECK(RowOf(BuildLobbyScene(InLobby(true, Format::PlayersVsBots, Gear::Mirror)), LobbyRow::Gear) == nullptr);
-    CHECK(RowOf(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier)), LobbyRow::Gear) == nullptr);
+    // Survival and Zombies (0.8.0-pre20): the same three choices; the loadout is rolled at the start and kept for the run.
+    for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
+        CHECK(GearHint(f, Gear::Own) == "Everyone fights in their own loadout.");
+        CHECK(GearHint(f, Gear::RandomTier) == "A random loadout for each player at the start, kept for the whole run.");
+        CHECK(GearHint(f, Gear::Mirror) == "One random loadout for everyone, kept for the whole run.");
+        CHECK(Need(BuildLobbyScene(InLobby(true, f, Gear::Mirror)), LobbyRow::Gear).value == "Everyone identical");
+    }
 }
 
 static void TestOtherHints() {
@@ -325,9 +338,12 @@ static void TestOtherHints() {
     CHECK(hint(Format::Duel, LobbyRow::Respawn, none) == "The pause between the end of a round and the next.");
     CHECK(hint(Format::TwoTeams, LobbyRow::Respawn, none) == "How long the fallen wait to come back.");
     CHECK(hint(Format::FreeForAll, LobbyRow::Respawn, none) == "How long the fallen wait to come back.");
-    CHECK(hint(Format::Zombies, LobbyRow::Tier, none) == "Zombies start at this rank and rise one every 3 waves.");
-    CHECK(hint(Format::PlayersVsBots, LobbyRow::Tier, none) == "Bots start at this rank and rise one every 2 waves.");
-    CHECK(hint(Format::Duel, LobbyRow::Tier, none) == "The random gear is rolled within this budget.");
+    CHECK(hint(Format::Zombies, LobbyRow::Tier, none) == "Zombies start at this rank and rise one every 3 waves. Also every player's strength and the random gear's budget.");
+    CHECK(hint(Format::PlayersVsBots, LobbyRow::Tier, none) == "Bots start at this rank and rise one every 2 waves. Also every player's strength and the random gear's budget.");
+    CHECK(hint(Format::Duel, LobbyRow::Tier, none) == "Sets every player's strength; the random gear is rolled within this budget.");
+    auto own = [](MatchConfig& c) { c.gear = Gear::Own; };
+    CHECK(hint(Format::Duel, LobbyRow::Tier, own) == "Sets every player's strength (muscle and grip).");
+    CHECK(hint(Format::PlayersVsBots, LobbyRow::Tier, own) == "Bots start at this rank and rise one every 2 waves. Also every player's strength.");
     CHECK(hint(Format::TwoTeams, LobbyRow::FriendlyFire, none) == "Teammates cannot hurt each other.");
     CHECK(hint(Format::ThreeTeams, LobbyRow::FriendlyFire, ff) == "Hits on teammates count.");
     CHECK(hint(Format::PlayersVsBots, LobbyRow::FriendlyFire, none) == "Players cannot hurt each other.");
@@ -432,7 +448,7 @@ static void TestModes() {
     CHECK(std::string(FormatBlurb(Format::TwoTeams)) == "Red against Blue. Every kill scores for the team; the first team to the limit wins.");
     CHECK(std::string(FormatBlurb(Format::ThreeTeams)) == "Red, Blue and Green. Every kill scores for the team; the first team to the limit wins.");
     CHECK(std::string(FormatBlurb(Format::PlayersVsBots)) == "Everyone against waves of bots that rank up. The fallen return when a wave is cleared.");
-    CHECK(std::string(FormatBlurb(Format::Zombies)) == "Endless zombie hordes in the Abyss. The fallen return when a wave is cleared.");
+    CHECK(std::string(FormatBlurb(Format::Zombies)) == "Zombie waves in the Abyss, one zombie at a time per player. The fallen return when a wave is cleared.");
 }
 
 // The Brawl card: free-for-all with bare fists. A mode card (format free-for-all, gear Fists), not a format; no Gear or
@@ -446,7 +462,7 @@ static void TestBrawl() {
     int selected = 0, brawls = 0;
     for (const ModeCard& m : s.modes) { selected += m.selected; brawls += m.brawl; }
     CHECK(selected == 1 && brawls == 1 && !s.modes[0].selected);              // the free-for-all card is not also lit
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround}));   // no Gear, no Tier
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync}));   // no Gear, no Tier
     CHECK(RowOf(s, LobbyRow::Gear) == nullptr && RowOf(s, LobbyRow::Tier) == nullptr);
     LobbyScene own = BuildLobbyScene(InLobby(true));
     CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 2].selected && RowOf(own, LobbyRow::Gear) != nullptr);
@@ -457,8 +473,9 @@ static void TestBrawl() {
 
     MatchConfig c; c.format = Format::TwoTeams; c.scoreLimit = 30; c.gear = Gear::Mirror; c.tier = 6; c.timeLimitS = 600;
     MatchConfig b = SelectMode(c, Format::FreeForAll, true);
-    CHECK(IsBrawl(b) && b.gear == Gear::Fists && b.tier == 0 && b.scoreLimit == DefaultScoreLimit(Format::FreeForAll) && b.timeLimitS == 600);
-    CHECK(Sanitize(b).gear == Gear::Fists && Sanitize(b).tier == 0);
+    CHECK(IsBrawl(b) && b.gear == Gear::Fists && b.tier == kBrawlTier && b.scoreLimit == DefaultScoreLimit(Format::FreeForAll) && b.timeLimitS == 600);
+    CHECK(Sanitize(b).gear == Gear::Fists && Sanitize(b).tier == kBrawlTier);
+    b.tier = 6; CHECK(Sanitize(b).tier == kBrawlTier); b.tier = kBrawlTier;   // Brawl's tier is fixed
     b.scoreLimit = 20;
     CHECK(SelectMode(b, Format::FreeForAll, true).scoreLimit == 20);          // the card again changes nothing
     MatchConfig back = SelectMode(b, Format::FreeForAll, false);              // the free-for-all card: same format, other rules

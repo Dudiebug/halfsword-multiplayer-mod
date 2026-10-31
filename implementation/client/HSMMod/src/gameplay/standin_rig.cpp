@@ -1,4 +1,5 @@
 #include "gameplay/standin_rig.h"
+#include "combat/hsm_handloss.h"
 #include "sync/hsm_grip.h"
 #include "sync/hsm_pose_codec.h"
 #include "util/hsm_names.h"
@@ -76,6 +77,8 @@ constexpr double kOffhandAngleDeg = 36.0;      // the game's MapRangeClamped(Sof
 constexpr uint8_t kFree = 0;                  // ELinearConstraintMotion::LCM_Free, EAngularConstraintMotion::ACM_Free
 constexpr uint8_t kWorldSpace = 0;            // ERelativeTransformSpace::RTS_World
 constexpr uint8_t kAlwaysTickPose = 0;        // EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
+
+double SteadyMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 V3 ToV3(const FVector& v) { return {v.x, v.y, v.z}; }
 FQuat ToFQuat(const Q4& q) { return {q.x, q.y, q.z, q.w}; }
@@ -272,6 +275,10 @@ void FighterRig::RefreshWeapon(int w) {
     UObject* actor = FieldAt(weaponOffset_[w]);
     if (w == 1 && actor && actor == FieldAt(weaponOffset_[0])) actor = nullptr;   // one weapon in both hands: slot 0 has it
     if (actor == wp.actor && (!actor || Live(actor, wp.index))) return;
+    // Let go while neutralised (a stand-in's hand opened; my own fighter's while another machine held it): the held-weapon
+    // policy (no gravity, blind to the world) would stay on it for good, floating where it was (#145, #138-#141).
+    if (wp.actor && actor != wp.actor && !FieldAt(weaponOffset_[w])) CheckHandLoss(w, wp);   // the variable went null
+    if (boundAtMs_ >= 0.0 && wp.actor && actor != wp.actor) RearmDropped(wp);
     wp = Weapon{};
     weaponChanged_ = true;
     gripFreed_[0] = gripFreed_[1] = nullptr;   // a re-made grip comes with its limits locked again
@@ -328,11 +335,35 @@ void FighterRig::RefreshWeapon(int w) {
             ObjectName(root).c_str(), wp.base ? "yes" : "no", wp.tip ? "yes" : "no", wp.flail ? ObjectName(wp.flail).c_str() : "no");
 }
 
+// #249: the player's own real weapon left its hand with the grab still pressed and none of the game's release paths run
+// (combat::LeftHandUnasked). A log line only, on the player's own live fighter; it changes nothing. "frame" is the time
+// since this fighter was last read (a hitch shows as a long one).
+void FighterRig::CheckHandLoss(int w, const Weapon& wp) {
+    if (!sendsFrames_ || boundAtMs_ >= 0.0 || wp.fists || !wp.actor || !Live(wp.actor, wp.index)) return;
+    combat::HandLossInput in;
+    in.ownLive = true;
+    in.wasHeld = true;
+    in.gone = true;
+    if (w == 0) {
+        GetBool(willie_, "R Grab Pressed", in.grabPressed);
+        GetBool(willie_, "Dropping R", in.dropping);
+    } else {
+        GetBool(willie_, "L Grab Pressed", in.grabPressed);
+        GetBool(willie_, "Dropping L", in.dropping);
+    }
+    for (int k = 0; k < kSheathSlots; ++k)
+        if (FieldAt(slotOffset_[k]) == wp.actor) in.sheathed = true;
+    Call dying(wp.actor, "IsActorBeingDestroyed");
+    in.destroyed = dying.invoke() && dying.get<bool>("ReturnValue");
+    if (!combat::LeftHandUnasked(in)) return;
+    HSM_LOG("rig: own %s left the hand (frame %.0f ms, no release pressed)", ObjectName(wp.actor).c_str(), readGapMs_);
+}
+
 // ---- reading ---------------------------------------------------------------------------------------------------------
 
 bool FighterRig::ReadWeapon(int w, const V3& hand) {
     Weapon& wp = weapons_[w];
-    wp.read = wp.haveTip = false;
+    wp.read = wp.haveTip = wp.farFromHand = false;
     if (!wp.root || !Live(wp.actor, wp.index) || !Live(wp.root, wp.rootIndex)) return false;
     wp.simulating.put(0, FName{});
     if (!wp.simulating.invoke(wp.root) || !wp.simulating.take<bool>(1)) return false;   // kinematic: it follows the hand
@@ -345,7 +376,8 @@ bool FighterRig::ReadWeapon(int w, const V3& hand) {
     if (Live(wp.tip, wp.tipIndex) && wp.tipLoc.invoke(wp.tip)) { wp.tipPos = ToV3(wp.tipLoc.take<FVector>(0)); wp.haveTip = true; }
     // Held: some point between the root and the tip is within reach of the hand (a polearm is gripped mid-shaft). A
     // dropped weapon still in the field, or one parked at the world origin, is not.
-    if (SegmentDistance(hand, wp.pos, wp.tipPos) > kHeldMaxUu) return false;
+    wp.farFromHand = SegmentDistance(hand, wp.pos, wp.tipPos) > kHeldMaxUu;
+    if (wp.farFromHand) return false;
     wp.read = true;
     return true;
 }
@@ -407,7 +439,7 @@ bool FighterRig::ReadHead(Weapon& wp, sync::BoneSample& out) {
 
 // The weapon actor's simulating primitive components other than its root: a flail's links and head (Flail_A..D: 'Blade1'
 // and the links, each a body joined to the next by a constraint). Nothing on a sword, a spear or a shield. The head is
-// the 'Blade*' part, else the part farthest from the handle. Found parts get the chain's collision policy at once.
+// the 'Blade*' part, else the part farthest from the handle. On a stand-in, found parts get the chain's collision policy at once.
 void FighterRig::ScanParts(Weapon& wp) {
     if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
     if (!primitiveClass_ || !wp.actor || !wp.root) return;
@@ -460,7 +492,10 @@ void FighterRig::ScanParts(Weapon& wp) {
     wp.headIndex = ObjectIndex(head);
     wp.headBone = FName{};
     wp.haveHeadBone = false;
-    ChainPolicy(wp);
+    // Only on a stand-in (Neutralise ran). Read also runs on the fighters this machine simulates (OwnerStreams, the host's
+    // under host physics), and a modular weapon's Pommel, Guard, Head and Grip are such simulating parts: the policy left
+    // a live fighter's weapon without gravity and blind to the world, so it floated off once dropped (#138-#141).
+    if (boundAtMs_ >= 0.0) ChainPolicy(wp);
     std::string names;
     for (UObject* c : found) { if (!names.empty()) names += ' '; names += ObjectName(c); }
     HSM_LOG("rig: %s: %s chain = %zu simulating part(s) (%s), head %s", ObjectName(willie_).c_str(), ObjectName(wp.actor).c_str(),
@@ -500,6 +535,12 @@ void FighterRig::RearmChain(const Weapon& wp) {
 
 bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sync::FighterNow* now) {
     if (!StillValid()) return false;
+    sendsFrames_ = frame != nullptr;   // the player's own live fighter (CheckHandLoss)
+    {
+        const double t = SteadyMs();
+        readGapMs_ = lastReadMs_ >= 0.0 ? t - lastReadMs_ : 0.0;
+        lastReadMs_ = t;
+    }
     if (frame) { frame->tsMs = tsMs; frame->stepUs = stepUs; }
     if (now) *now = sync::FighterNow{};
     pelvisRead_ = false;
@@ -553,7 +594,10 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
     for (int w = 0; w < sync::kPoseWeapons; ++w) {
         RefreshWeapon(w);
         Weapon& wp = weapons_[w];
+        const bool wasHeld = wp.wasHeld;
         const bool held = ReadWeapon(w, hand[w]);
+        wp.wasHeld = held;
+        if (wasHeld && !held && wp.farFromHand) CheckHandLoss(w, wp);   // the weapon flew out of reach with its variable still set
         sync::BoneSample head{};
         const bool haveHead = held && (frame || now) && ReadHead(wp, head);
         if (frame) {
@@ -843,6 +887,12 @@ void FighterRig::PlaceCapsule(const V3& at, const double* yawDeg) {
 void FighterRig::Neutralise(double nowMs) {
     if (!StillValid()) return;
     auto* base = reinterpret_cast<uint8_t*>(willie_);
+    if (!savedFields_) {
+        savedFields_ = true;
+        for (int32_t off : zeroDoubles_) savedDoubles_.push_back(*reinterpret_cast<double*>(base + off));
+        for (FProperty* p : trueBools_) { bool v = false; GetBoolValue(p, base + PropertyOffset(p), v); savedTrue_.push_back(v); }
+        for (FProperty* p : falseBools_) { bool v = false; GetBoolValue(p, base + PropertyOffset(p), v); savedFalse_.push_back(v); }
+    }
     for (int32_t off : zeroDoubles_) *reinterpret_cast<double*>(base + off) = 0.0;
     for (FProperty* p : trueBools_) SetBoolValue(p, base + PropertyOffset(p), true);
     for (FProperty* p : falseBools_) SetBoolValue(p, base + PropertyOffset(p), false);
@@ -869,6 +919,7 @@ void FighterRig::Neutralise(double nowMs) {
             if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) SetChainPolicy(wp.root);
         }
     }
+    slots_.Watch(willie_);   // sheathed weapons that drifted from their sockets are put back (standin_slots.h)
     if (nowMs < nextFullMs_ && !weaponChanged_ && !slotsChanged) return;
     NeutraliseFull();
     weaponChanged_ = false;
@@ -1169,6 +1220,23 @@ void FighterRig::NeutraliseFull() {
         Call(c, "BreakConstraint").invoke();
         brokenRoots_.push_back(c);
     }
+    if (!savedPolicy_) {
+        savedPolicy_ = true;
+        for (int i = 0; i < 2; ++i) {
+            Call g(mesh_, "GetCollisionResponseToChannel");
+            g.set<uint8_t>("Channel", i == 0 ? kWorldStatic : kWorldDynamic);
+            if (g.invoke()) savedMeshResponse_[i] = g.get<uint8_t>("ReturnValue");
+        }
+        Call grav(mesh_, "IsGravityEnabled");
+        if (grav.invoke()) savedGravity_ = grav.get<bool>("ReturnValue");
+        auto enabled = [](UObject* c, uint8_t& out) {
+            Call g(c, "GetCollisionEnabled");
+            if (c && g.invoke()) out = g.get<uint8_t>("ReturnValue");
+        };
+        enabled(ObjField(willie_, "BoneCore"), savedCore_);
+        Call root(willie_, "K2_GetRootComponent");
+        enabled(root.invoke() ? root.get<UObject*>("ReturnValue") : nullptr, savedCapsule_);
+    }
     SetBodyPolicy(mesh_);
     for (Weapon& wp : weapons_)   // as of the last Read (Neutralise runs before this frame's): checked live
         if (Live(wp.actor, wp.index) && Live(wp.root, wp.rootIndex)) {
@@ -1192,6 +1260,60 @@ void FighterRig::NeutraliseFull() {
     gripLocked_[0] = gripLocked_[1] = nullptr;   // and locked again: a new grip joint after a re-grip
     gripFreed_[0] = gripFreed_[1] = nullptr;   // the grips are freed again on the next Drive: the BP may re-lock them
     slots_.Maintain(willie_);   // the sheathed weapons: diagnosis line (standin_slots.h)
+}
+
+void FighterRig::Revive() {
+    if (!StillValid()) { Unbind(); return; }
+    auto* base = reinterpret_cast<uint8_t*>(willie_);
+    if (savedFields_) {
+        for (size_t i = 0; i < zeroDoubles_.size() && i < savedDoubles_.size(); ++i) *reinterpret_cast<double*>(base + zeroDoubles_[i]) = savedDoubles_[i];
+        for (size_t i = 0; i < trueBools_.size() && i < savedTrue_.size(); ++i) SetBoolValue(trueBools_[i], base + PropertyOffset(trueBools_[i]), savedTrue_[i]);
+        for (size_t i = 0; i < falseBools_.size() && i < savedFalse_.size(); ++i) SetBoolValue(falseBools_[i], base + PropertyOffset(falseBools_[i]), savedFalse_[i]);
+    }
+    Call(mesh_, "SetConstraintProfileForAll").setName("ProfileName", MakeName("Motor")).set<bool>("bDefaultIfNotFound", false).invoke();
+    if (UObject* pa = ObjField(willie_, "PhysicalAnimation"))
+        Call(pa, "SetStrengthMultiplyer").set<float>("InStrengthMultiplyer", 1.f).invoke();
+    if (FObjArray* arr = Field<FObjArray>(willie_, "Phys Anim Array"); arr && arr->num > 0 && arr->num <= 64)
+        for (int32_t i = 0; i < arr->num; ++i)
+            if (arr->data[i]) Call(arr->data[i], "SetStrengthMultiplyer").set<float>("InStrengthMultiplyer", 1.f).invoke();
+    Call(mesh_, "SetEnableGravity").set<bool>("bGravityEnabled", savedGravity_).invoke();
+    Call(mesh_, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", savedMeshResponse_[0]).invoke();
+    Call(mesh_, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldDynamic).set<uint8_t>("NewResponse", savedMeshResponse_[1]).invoke();
+    // Held weapons: the roots and chains back to a dropped weapon's responses (ObjectSync::RestorePhysics), then the
+    // weapon's own re-arm for its parts.
+    for (Weapon& wp : weapons_) RearmDropped(wp);
+    if (UObject* core = ObjField(willie_, "BoneCore")) Call(core, "SetCollisionEnabled").set<uint8_t>("NewType", savedCore_).invoke();
+    Call rc(willie_, "K2_GetRootComponent");
+    UObject* capsule = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
+    if (capsule) Call(capsule, "SetCollisionEnabled").set<uint8_t>("NewType", savedCapsule_).invoke();
+    Call mv(willie_, "GetMovementComponent");
+    if (UObject* m = mv.invoke() ? mv.get<UObject*>("ReturnValue") : nullptr)
+        Call(m, "SetMovementMode").set<uint8_t>("NewMovementMode", 1).set<uint8_t>("NewCustomMode", 0).invoke();   // MOVE_Walking
+    int joined = 0;
+    for (UObject* c : brokenRoots_)
+        if (c && capsule && Call(c, "SetConstrainedComponents").set<UObject*>("Component1", capsule).setName("BoneName1", MakeName("None"))
+                 .set<UObject*>("Component2", mesh_).setName("BoneName2", MakeName("pelvis")).invoke()) ++joined;
+    HSM_LOG("rig: %s revived (fields %s, %d root constraint(s) made again, capsule collision %u)", ObjectName(willie_).c_str(),
+            savedFields_ ? "restored" : "never neutralised", joined, unsigned(savedCapsule_));
+    Unbind();
+}
+
+// A weapon's bodies back to a dropped weapon's physics (ObjectSync::RestorePhysics): gravity, every channel blocked, then
+// the weapon's own re-arm for its parts. For the weapons of a revived fighter and one a neutralised fighter let go.
+void FighterRig::RearmDropped(const Weapon& wp) {
+    if (!Live(wp.actor, wp.index) || wp.fists) return;
+    constexpr uint8_t kBlock = 2;
+    std::vector<UObject*> bodies;
+    if (Live(wp.root, wp.rootIndex)) bodies.push_back(wp.root);
+    for (size_t i = 0; i < wp.parts.size(); ++i) if (Live(wp.parts[i], wp.partIndex[i])) bodies.push_back(wp.parts[i]);
+    if (Live(wp.flail, wp.flailIndex)) bodies.push_back(wp.flail);
+    for (UObject* b : bodies) {
+        Call(b, "SetEnableGravity").set<bool>("bGravityEnabled", true).invoke();
+        for (uint8_t ch : {kWorldStatic, kWorldDynamic, kPawn, kPhysicsBody})
+            Call(b, "SetCollisionResponseToChannel").set<uint8_t>("Channel", ch).set<uint8_t>("NewResponse", kBlock).invoke();
+    }
+    Call(wp.actor, "Turn On Collision").invoke();
+    HSM_LOG("rig: %s: %s re-armed as a dropped weapon (%zu bodies)", ObjectName(willie_).c_str(), ObjectName(wp.actor).c_str(), bodies.size());
 }
 
 void SetStandInGripLock(bool on) { g_gripLock = on; }

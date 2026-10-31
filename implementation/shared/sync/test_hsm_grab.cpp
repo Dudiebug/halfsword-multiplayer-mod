@@ -555,6 +555,19 @@ static void TestPullLaw() {
     CHECK(Near(Len(Dv(V3{}, V3{}, V3{}, V3{ 1e6, 0, 0 }, dt)), d.maxDvUu, 1e-6));
     CHECK(Near(Len(Dv(V3{}, V3{ 0, 0, -1e5 }, V3{}, V3{}, dt)), d.maxDvUu, 1e-6));
 
+    // The cap is per 60 Hz step: a slower grabber's longer step gets a longer cap, so a cap-bound pull is the same cm/s per
+    // second at 20 and 60 fps (0.8.0-pre19: a 15-26 fps grabber pulled a held body a third as hard). Never below one step.
+    {
+        const V3 hard{ 1e6, 0, 0 };
+        const double at60 = Len(Dv(V3{}, V3{}, V3{}, hard, 1.0 / 60)) * 60, at20 = Len(Dv(V3{}, V3{}, V3{}, hard, 1.0 / 20)) * 20;
+        const double at30 = Len(Dv(V3{}, V3{}, V3{}, hard, 1.0 / 30)) * 30;
+        CHECK(Near(at60, d.maxDvUu * 60, 1e-6) && Near(at30, at60, 1e-6) && Near(at20, at60, 1e-6));
+        CHECK(Near(Len(Dv(V3{}, V3{}, V3{}, hard, 1.0 / 20)), d.maxDvUu * 3, 1e-6));
+        CHECK(Near(Len(Dv(V3{}, V3{}, V3{}, hard, 1.0 / 120)), d.maxDvUu, 1e-6));       // a fast machine: still one step's cap
+        CHECK(Near(Len(Dv(V3{}, V3{}, V3{}, hard, 1.0)), d.maxDvUu * 4, 1e-6));           // the frame clamp (80 ms) bounds it: 4 steps
+        CHECK(Near(Len(GrabPullDv(V3{}, V3{}, V3{}, hard, 1.0 / 20, hsm::sync::DownPullParams())), 1500 * 3, 1e-6));
+    }
+
     // Stable at the longest frame (80 ms; longer frames are clamped to it), and a zero or negative frame is 4 ms.
     x = V3{ 35, 0, 0 }; v = V3{};
     bool grew = false;
@@ -655,6 +668,38 @@ static void TestDownCarry() {
         CHECK((YieldBones(b, true) & (1u << b)) != 0);
         CHECK(YieldBones(b, true) != (1u << sync::kPoseBones) - 1u);                    // never the whole (gravity-free) body
     }
+
+    // The game's bone names in any case (a grab's "Head").
+    CHECK(PoseBoneIndex("Head") == sync::kBoneHead && PoseBoneIndex("HAND_R") == sync::kBoneHandR && PoseBoneIndex("Pelvis") == 0);
+    CHECK(PoseBoneIndex("hea") == -1 && PoseBoneIndex("heads") == -1 && PoseBoneIndex("") == -1);
+    CHECK(YieldBones(PoseBoneIndex("Head"), true) == ((1u << 8) | (1u << 7) | (1u << 6)));   // head and neck
+
+    // grab_drag: every hold yields like a carried foot.
+    using hsm::sync::DragYieldBones;
+    CHECK(DragYieldBones(-1) == 0 && DragYieldBones(sync::kPoseBones) == 0);
+    CHECK(DragYieldBones(sync::kBoneFootL) == YieldBones(sync::kBoneFootL, true));      // the leg, standing or down
+    CHECK(DragYieldBones(sync::kBoneHandR) == ((1u << 16) | (1u << 15) | (1u << 14) | (1u << 13)));
+    CHECK(DragYieldBones(sync::kBoneHead) == ((1u << 8) | (1u << 7) | (1u << 6)));
+    CHECK(DragYieldBones(3) == ((1u << 2) | (1u << 3) | (1u << 4)));                    // spine_03 and its neighbours
+    CHECK(DragYieldBones(5) == ((1u << 4) | (1u << 5)));
+    CHECK(DragYieldBones(2) == ((1u << 2) | (1u << 3)));
+    CHECK(DragYieldBones(0) == (1u | (1u << 2)));
+    const uint32_t legsAndArms = (1u << 19) | (1u << 22) | (1u << 12) | (1u << 16);
+    for (int b = 0; b < sync::kPoseBones; ++b) {
+        CHECK((DragYieldBones(b) & (1u << b)) != 0);
+        CHECK((DragYieldBones(b) & legsAndArms) != legsAndArms);                         // never the whole body
+        if (b != 0 && b != 2) CHECK((DragYieldBones(b) & 1u) == 0);                       // the pelvis stays servoed
+    }
+
+    // The pull's share on the pelvis and chest.
+    using hsm::sync::GrabSpread;
+    CHECK(GrabSpread(true, false) == sync::kGrabDownSpread && GrabSpread(true, true) == sync::kGrabDownSpread);
+    CHECK(GrabSpread(false, false) == 0.0 && GrabSpread(false, true) > 0.0 && GrabSpread(false, true) < sync::kGrabDownSpread);
+
+    // A held stand-in is not snapped unless far off; not held: the servo's own rule.
+    using hsm::sync::GrabBlocksSnap;
+    CHECK(GrabBlocksSnap(1u << 3, 160.0) && GrabBlocksSnap(1u << 3, -1.0));
+    CHECK(!GrabBlocksSnap(1u << 3, 400.0) && !GrabBlocksSnap(0, 160.0));
 }
 
 int main() {

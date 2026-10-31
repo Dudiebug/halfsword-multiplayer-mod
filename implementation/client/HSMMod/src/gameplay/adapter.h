@@ -1,9 +1,11 @@
 // Half Sword game adapter: the only place that knows Half Sword class, function, property and bone
 // names. Translates between protocol types (hsm_protocol.h) and the running game. Game thread only.
 #pragma once
+#include "hsm_drivelean.h"
 #include "hsm_protocol.h"
 #include "ue/engine.h"
 #include <array>
+#include <functional>
 #include <string>
 #include <utility>
 #include <unordered_map>
@@ -23,6 +25,7 @@ public:
     // Players
     ue::UObject* PlayerWillie(int localIndex);     // GameplayStatics.GetPlayerCharacter
     bool ControlRotation(int localIndex, float& yaw, float& pitch);   // the local player's camera/aim rotation
+    bool SetControlRotation(int localIndex, float yaw, float pitch);  // turns the local player's camera (host physics lock-on, sync/hsm_lockon.h)
 
     // Loadouts: the local player's passport (Free Mode or Progression fighter) carried in an SG_GameProgress_C
     // SaveGame serialized to memory, so the engine deep-copies its TMaps/TArrays and reloads classes by path.
@@ -38,9 +41,16 @@ public:
         bool brain = true;                            // true: plain AIController (host-driven input); false: puppet, no controller
         const void* passport = nullptr;               // raw Str_Passport_Character1 used instead of blob (bots)
         bool stockBrain = false;                      // keep Willie's own NPC brain (bots on the host)
+        bool bot = false;                             // a generated bot (SpawnBot): keeps the generator's build, clamped to 0..1, never forced
     };
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
+    // drive_lean (hsm_drivelean.h): the controller is read from the pawn, the rotation is set only when it changed, the
+    // game instance is found once. false: as 0.8.0-pre17.
+    void SetLean(bool on) { lean_ = on; }
+    // Hand-off: a stand-in spawned without a controller gets the plain AIController a host-played fighter has
+    // (SpawnFighter's brain), so KeepRemoteFighter can aim it. True when it has one.
+    bool EnsureBrain(ue::UObject* willie);
     void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
     // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
     // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
@@ -122,17 +132,29 @@ public:
     bool WillieClassKnown() const { return willieClass_ != nullptr; }   // until then IsWillie answers false for everything
     bool FreeModeActive();
     void PrepareFreeModeFight(int foes = -1);
+    // Game Mode 2 (the Tavern errands: Alley drunk escort, Cellar barrel) cannot finish in a session (audit item 40):
+    // set it to 1, a normal fight. True if it was 2.
+    bool EndErrandMode();
     void ClearFreeMode();                       // the stock Progression: Free Mode off
     int FreeModeFoes();                                    // GI "Free Mode Foes Amount", -1 if unreadable
     void SetFreeModeFoes(int foes);
-    // Every fighter spawned from now on gets at least this tier's build (MuscleFor); -1: their own build.
-    void SetMuscleTier(int tier) { muscleTier_ = tier; }                           // GI settings the stock arena select uses for a Free Mode fight
+    // 0.8.0-pre20 (#294 #295 #301): every player fighter spawned from now on (own body, stand-ins) gets exactly `forced` as
+    // its passport Weight when `on` (hsm::BuildWeight), the lobby tier's build. Off, and for bots: their own, clamped to 0..1.
+    // The Weight drives the body's mass and the grip's hold limit, so players must not differ in it. `tier` is for the log.
+    void SetBuild(double forced, bool on, int tier) { buildWeight_ = forced; buildOn_ = on; buildTier_ = tier; }
+    bool BuildOn() const { return buildOn_; }
+    double ForcedBuild() const { return buildWeight_; }
+    // 0.8.0-pre21: the forced build on a fighter already in the world (the player's own, which the game spawned from its
+    // save): passport Weight, Muscle Rate and every body's mass scale, rescaled so armour and weapon weights stay.
+    void ApplyBuildLive(ue::UObject* willie);
     // Brawl: every fighter spawned from now on (own body, stand-ins, whatever loadout it was sent) has no armour and
     // holds no weapon. Done on the fighter's own copy of the passport, so no save and no uploaded loadout changes.
     void SetBare(bool on) { bare_ = on; }
     void QuitGame();
     bool GamePaused();
     void SetGamePaused(bool paused);
+    // World time back to normal speed (slow motion and photo mode change it on one machine only). True if it was not 1.
+    bool ResetTimeDilation();
     void ConsoleCommand(const std::string& command);      // KismetSystemLibrary.ExecuteConsoleCommand                                 // GI_Settings.Free Mode Activated (false = Progression)
     bool IsDead(ue::UObject* willie);
     ue::UObject* FighterOf(ue::UObject* actor);            // the Willie an actor belongs to (itself, a held weapon, worn armor)
@@ -142,9 +164,12 @@ public:
     bool IsBodyWeapon(ue::UObject* actor);
     std::vector<ue::UObject*> AllWillies();                // live Willie_BP_C instances in the loaded level
     std::vector<ue::UObject*> WeaponActors();              // live weapon actors (IsWeapon), sheathed, held and dropped
-    // Destroys every weapon lying loose that a fighter once held: no "Parent Actor" (a drop clears it, Willie_BP.cpp:5987,
-    // 6299) but a "Last Parent" (set by every grab, :6073, 6394). Level weapons nobody picked up stay. Returns how many.
-    int DestroyDroppedWeapons();
+    // Destroys every weapon lying loose: no "Parent Actor" (held and sheathed weapons keep it, Willie_BP.cpp:5987, 6299, 6995).
+    // "Last Parent" is not asked: ModularWeaponBP clears it itself 300 uu from the holder (:1152-1157) and on a re-grab
+    // (:1021-1023). levelStart says whether a weapon is one the level placed and still lies at its spot (kept); the
+    // rule is session/hsm_ground_clear.h. Counts what was destroyed and what stayed.
+    struct DropClear { int destroyed = 0, held = 0, sheathed = 0, level = 0; };
+    DropClear DestroyDroppedWeapons(const std::function<bool(ue::UObject*)>& levelStart);
     // Weapons the level itself placed: lying loose (no "Parent Actor") and never held ("Last Parent" empty). The map reset
     // records them at the match start (object_sync.h). One pass over the object array.
     std::vector<ue::UObject*> LevelWeapons();
@@ -189,9 +214,21 @@ public:
     bool FirstBodyPosition(ue::UObject* willie, ue::FVector& out);   // world position of the first synced bone (hip)
     void NudgeTowards(ue::UObject* willie, const WillieState& target, float blend);   // blends bone velocities, keeps the local motion
     void ApplyVitals(ue::UObject* willie, const WillieState& s);
+    void ApplyStandInVitals(ue::UObject* willie, const VitalsMsg& v);   // owner sync: the owner's state on its stand-in
+    void WriteParryTonus(ue::UObject* willie, const VitalsMsg& v);      // ...and its tonus, just before a parry roll
+    // Sync audit T3: what another machine's Blueprint wrote onto this fighter's stand-in, made on the real one.
+    void Revive(ue::UObject* willie);                                    // Willie_BP Get_Up_Pal (W:4718)
+    bool Push(ue::UObject* willie, const std::string& bone, const ue::FVector& impulse);   // a contact's impulse (kg cm/s) on one body
     void TriggerDeath(ue::UObject* willie);
     size_t BoneCount() const { return bones_.size(); }
     ue::UObject* GameInstance();
+    bool MouseLook(float& sensitivity, bool& invert);   // GI_Settings' mouse sensitivity and invert
+    // My own fighter while its tick is blocked (a replica: host physics, a hand-off): Look Sensiticity moved as its tick
+    // would. The look axes multiply by it, and it starts at 0 (#137: no mouse look at all on a replica from its spawn).
+    void TickLookSensitivity(ue::UObject* willie, float dt);
+    // The actors a blade of this fighter is stuck in now: its held weapons' active Stuck Constraints (hand-offs).
+    std::vector<ue::UObject*> StuckTargets(ue::UObject* willie);
+    void KeepAudioListener(ue::UObject* mine);          // player 0's audio listener back on my fighter's head
     std::wstring SaveGamesDir();   // <Saved>/SaveGames/ (sweeps temporary slots left by a crash the first time); empty before the engine is up
 
 private:
@@ -206,7 +243,9 @@ private:
     bool paintClassLooked_ = false;
     bool PaintTasksQueued(ue::UObject* willie);
     void FinishDestroy(Parked& pk, const char* why, double t0Ms);
-    int muscleTier_ = -1;
+    double buildWeight_ = 0.5;
+    bool buildOn_ = false;
+    int buildTier_ = 0;
     bool bare_ = false;
     bool ResolveBones(ue::UObject* mesh);
     std::string TempSlot();
@@ -214,7 +253,7 @@ private:
     std::wstring saveDir_;
     uint32_t slotCounter_ = 0;
     bool CopyPassport(ue::UObject* willie, const SpawnOptions& o, double& height);
-    void ApplyMuscle(ue::UObject* willie, ue::FProperty* passport);
+    void ApplyBuild(ue::UObject* willie, ue::FProperty* passport, bool bot);
     void StripEquipment(ue::UObject* willie, ue::FProperty* passport);
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
@@ -222,6 +261,11 @@ private:
     ue::UObject* statics_ = nullptr;               // GameplayStatics CDO
     ue::UClass* willieClass_ = nullptr;
     bool destroyAware_ = false;
+    bool lean_ = true;
+    std::unordered_map<ue::UObject*, ControlRotationGate> rotationGate_;   // per remote fighter (KeepRemoteFighter)
+    ue::UObject* gi_ = nullptr;            // GameInstance(), found once
+    int32_t giIndex_ = -1;
+    ue::UClass* giClass_ = nullptr;
     bool pauseOpen_ = false, pauseLogged_ = false;
     ue::UObject* pauseWidget_ = nullptr;           // with its object-array slot: the widget PauseMenuOpen last found on screen
     int32_t pauseWidgetIndex_ = -1;

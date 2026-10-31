@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fuzzes the wire-protocol decoders under ASan/UBSan. Exit 0 only if no sanitizer error and no
 # round-trip mismatch occurs. --negative-control builds the harness with a known out-of-bounds decoder,
-# which must make this gate fail (used by workflowctl calibrate).
+# which must make this gate fail (proves the gate can fail).
 #   run_fuzz.sh [--negative-control] [ITERATIONS]
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"

@@ -3,6 +3,7 @@
 #include "gameplay/lobby.h"
 #include "log.h"
 #include "paths.h"
+#include "util/hsm_gzip.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdlib>
@@ -24,7 +25,7 @@ uint16_t g_port = 443;
 constexpr unsigned kReportTimeoutMs = 120000;   // the relay answers once the issue exists; GitHub itself can take a while
 
 // The end of one log file (shared with the logger, which keeps HSMMod.log open), cut and redacted.
-std::optional<ReportLog> ReadLog(const wchar_t* ext, const char* name, uint64_t salt) {
+std::optional<ReportLog> ReadLog(const wchar_t* ext, const char* name, uint64_t salt, size_t max) {
     std::wstring path = InstanceFilePath(L"HSMMod", ext);
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return std::nullopt;
@@ -33,7 +34,7 @@ std::optional<ReportLog> ReadLog(const wchar_t* ext, const char* name, uint64_t 
     uint64_t skipped = 0;
     if (GetFileSizeEx(f, &size)) {
         uint64_t total = uint64_t(size.QuadPart);
-        skipped = total > kReportLogTailBytes ? total - kReportLogTailBytes : 0;
+        skipped = total > max ? total - max : 0;
         LARGE_INTEGER at{}; at.QuadPart = LONGLONG(skipped);
         text.resize(size_t(total - skipped));
         DWORD got = 0;
@@ -41,27 +42,31 @@ std::optional<ReportLog> ReadLog(const wchar_t* ext, const char* name, uint64_t 
         text.resize(got);
     }
     CloseHandle(f);
-    return ReportLog{name, RedactLog(LogTail(text, kReportLogTailBytes, skipped), salt)};
+    return ReportLog{name, RedactLog(LogTail(text, max, skipped), salt)};
 }
 
-std::vector<ReportLog> ReadLogs() {
+// gz: the logs of the last four sessions, up to 16 MB of each, for a gzipped body; otherwise the 3 MB tails of the
+// two newest, which any relay takes plain.
+std::vector<ReportLog> ReadLogs(bool gz) {
+    static constexpr struct { const wchar_t* ext; const char* name; } kLogs[] = {
+        {L".log", "HSMMod.log"}, {L".prev.log", "HSMMod.prev.log"}, {L".prev2.log", "HSMMod.prev2.log"}, {L".prev3.log", "HSMMod.prev3.log"}};
     std::random_device rd;
     const uint64_t salt = (uint64_t(rd()) << 32) ^ rd() ^ GetTickCount64();   // a new salt per report: ids never match across reports
     std::vector<ReportLog> logs;
-    if (auto l = ReadLog(L".log", "HSMMod.log", salt)) logs.push_back(std::move(*l));
-    if (auto l = ReadLog(L".prev.log", "HSMMod.prev.log", salt)) logs.push_back(std::move(*l));
+    for (size_t i = 0; i < (gz ? 4u : 2u); ++i)
+        if (auto l = ReadLog(kLogs[i].ext, kLogs[i].name, salt, gz ? kReportGzipLogBytes : kReportLogTailBytes)) logs.push_back(std::move(*l));
     return logs;
 }
 
 struct Response { ReportTransport transport = ReportTransport::Ok; bool sent = false; unsigned status = 0; unsigned winError = 0; std::string body; };
 
-Response Post(const std::wstring& path, const std::string& body) {
+Response Post(const std::wstring& path, std::string body, bool gz) {
     using Fail = net::HttpResponse::Fail;
     net::HttpRequest req;
     req.method = L"POST"; req.host = g_host; req.path = path; req.port = g_port; req.secure = g_secure;
-    req.headers = L"Content-Type: application/json";
+    req.headers = gz ? L"Content-Type: application/json\r\nContent-Encoding: gzip" : L"Content-Type: application/json";
     req.agent = L"HSMMod/" + net::Wide(game::ModBuild());
-    req.body = body;
+    req.body = std::move(body);
     req.timeoutMs = kReportTimeoutMs;
     net::HttpResponse h = net::Http(req);
     Response r;
@@ -76,6 +81,30 @@ Response Post(const std::wstring& path, const std::string& body) {
         case Fail::Other: r.transport = ReportTransport::Other; break;
     }
     return r;
+}
+
+// json: the body around a set of logs. It goes gzipped first, dropping the oldest logs while it is over the relay's
+// limit. A relay from before 0.8.0-pre11 refuses that (400: not JSON, 413, 415), so the plain body with the short tails
+// follows; a refused body never counts against the relay's rate limit, which counts filed reports only.
+Response Send(const std::wstring& path, const std::function<std::string(const std::vector<ReportLog>&)>& json) {
+    std::vector<ReportLog> logs = ReadLogs(true);
+    for (;;) {
+        std::string body = json(logs);
+        const size_t raw = body.size();
+        std::string gz = util::Gzip(body);
+        HSM_LOG("report: body %zu bytes with %zu logs, %zu gzipped", raw, logs.size(), gz.size());
+        if (gz.size() <= kReportGzipBodyMax) {
+            std::vector<ReportLog>().swap(logs);
+            std::string().swap(body);
+            Response r = Post(path, std::move(gz), true);
+            if (r.transport != ReportTransport::Ok || (r.status != 400 && r.status != 413 && r.status != 415)) return r;
+            HSM_LOG("report: the relay refused the gzipped body (status %u); sending the log tails plain", r.status);
+            break;
+        }
+        if (logs.size() <= 1) break;
+        logs.pop_back();
+    }
+    return Post(path, json(ReadLogs(false)), false);
 }
 
 const char* OutcomeName(ReportOutcome o) {
@@ -154,7 +183,7 @@ bool Busy() { return g_busy; }
 
 bool Submit(const std::string& description, const ReportFacts& facts, ReportJob job) {
     return Start(job, [description, facts, job]() -> Result {
-        Result res = Judge(job, job == ReportJob::Crash ? "crash report" : "submit", Post(g_base + L"/v1/reports", ReportJson(description, facts, ReadLogs())));
+        Result res = Judge(job, job == ReportJob::Crash ? "crash report" : "submit", Send(g_base + L"/v1/reports", [&](const std::vector<ReportLog>& logs) { return ReportJson(description, facts, logs); }));
         if (res.verdict.outcome == ReportOutcome::Done) HSM_LOG("report: filed as %s", res.verdict.id.c_str());
         return res;
     });
@@ -164,7 +193,7 @@ bool Attach(const std::string& id, const std::string& token, const ReportFacts& 
     if (!ValidReportId(id) || !ValidReportToken(token)) return false;
     return Start(ReportJob::Log, [id, token, facts]() -> Result {
         const std::string what = "attach to " + id;
-        return Judge(ReportJob::Log, what.c_str(), Post(g_base + L"/v1/reports/" + net::Wide(id) + L"/logs", AttachJson(token, facts, ReadLogs())));
+        return Judge(ReportJob::Log, what.c_str(), Send(g_base + L"/v1/reports/" + net::Wide(id) + L"/logs", [&](const std::vector<ReportLog>& logs) { return AttachJson(token, facts, logs); }));
     });
 }
 

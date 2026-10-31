@@ -10,9 +10,9 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.scoreLimit = std::clamp<uint16_t>(c.scoreLimit, 1, 100);
     c.timeLimitS = std::min<uint16_t>(c.timeLimitS, 3600);
     c.respawnDelayS = std::min<uint16_t>(c.respawnDelayS, 60);
-    if (uint8_t(c.gear) >= kGearCount || (c.gear == Gear::Fists && c.format != Format::FreeForAll)) c.gear = Gear::Own;
+    if (!GearAllowed(c.format, c.gear)) c.gear = Gear::Own;
     c.tier = std::min<uint8_t>(c.tier, 7);
-    if (c.gear == Gear::Fists) c.tier = 0;                              // Brawl is tier 0: the lowest build, no gear budget
+    if (c.gear == Gear::Fists) c.tier = kBrawlTier;                     // Brawl: one fixed strength
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
     if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || c.format == Format::Duel) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
@@ -20,11 +20,14 @@ inline MatchConfig Sanitize(MatchConfig c) {
 }
 
 inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
-    if (IsBotFormat(c.format) || c.gear == Gear::Fists) return Regear::None;   // gear is a PvP option; Brawl strips at the spawn instead
+    if (c.gear == Gear::Fists) return Regear::None;                            // Brawl strips at the spawn instead
+    if (IsBotFormat(c.format) && cause != RespawnCause::Rematch) return Regear::None;   // the run's start: that loadout lasts the run
     if (c.gear == Gear::RandomTier) return Regear::Each;
     if (c.gear == Gear::Mirror && (cause == RespawnCause::RoundReset || cause == RespawnCause::Rematch)) return Regear::Shared;
     return Regear::None;
 }
+
+inline Regear JoinRegearFor(const MatchConfig& c) { return RegearFor(c, RespawnCause::Rematch) == Regear::Each ? Regear::Each : Regear::None; }
 
 inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f) {
     std::map<uint8_t, int8_t> out;
@@ -367,7 +370,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
             for (const auto& [e, f] : fighters_) if (f.human && !f.alive && !gone_.count(e)) ev.respawn.push_back(e);
             return ev;
         }
-        int room = kMaxBotsAlive - alive - spawnOwed_;
+        int room = MaxBotsAlive() - alive - spawnOwed_;
         int n = std::min({remaining_, std::max(room, 0), kBotsPerTick});
         if (n > 0) { remaining_ -= n; spawnOwed_ += n; ev.spawnBots = n; ev.botRank = waveRank_; }
         return ev;
@@ -417,7 +420,7 @@ inline Wave WaveFor(Format f, int waveIndex, int humans, int tier) {
     Wave w;
     waveIndex = std::max(waveIndex, 0); humans = std::max(humans, 0); tier = std::clamp(tier, 0, 7);
     if (f == Format::Zombies) {
-        w.count = std::min(6 * humans + 4 * waveIndex, 60);
+        w.count = std::min(3 * humans + 2 * waveIndex, 40);
         w.rank = std::min(7, tier + waveIndex / 3);
     } else {
         w.count = std::min(std::max(humans, 1) + waveIndex, 30);
@@ -425,6 +428,9 @@ inline Wave WaveFor(Format f, int waveIndex, int humans, int tier) {
     }
     w.count = std::max(w.count, 1);
     return w;
+}
+inline int Match::MaxBotsAlive() const {
+    return cfg_.format == Format::Zombies ? std::clamp(players_, 1, kMaxBotsAlive) : kMaxBotsAlive;
 }
 inline int Match::AliveBots() const {
     int n = 0;

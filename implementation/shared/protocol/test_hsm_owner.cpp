@@ -115,6 +115,8 @@ static VitalsMsg SomeVitals() {
     v.entity = 9; v.flags = 0x5; v.health = 77.5f; v.consciousness = 0.25f; v.stamina = 40.f; v.bleeding = 1.5f;
     for (size_t i = 0; i < v.partHealth.size(); ++i) v.partHealth[i] = float(10 * i) + 0.5f;
     v.severed = 0x81; v.dislocated = 0x3;
+    v.state = kVitalsStateDowned | kVitalsStateGuarding | kVitalsStateGiveUp; v.weaponSkill = 0.75f; v.tonus = 62.f;
+    v.noise = 0.4f; v.light = 0.9f; v.moveDislocation = 35.f; v.exhaustion = 12.f;
     return v;
 }
 
@@ -126,6 +128,8 @@ static void TestVitals() {
     CHECK(o.entity == 9 && o.flags == 0x5 && o.health == 77.5f && o.consciousness == 0.25f && o.stamina == 40.f && o.bleeding == 1.5f);
     for (size_t i = 0; i < o.partHealth.size(); ++i) CHECK(o.partHealth[i] == v.partHealth[i]);
     CHECK(o.severed == 0x81 && o.dislocated == 0x3);
+    CHECK(o.state == (kVitalsStateDowned | kVitalsStateGuarding | kVitalsStateGiveUp) && o.weaponSkill == 0.75f && o.tonus == 62.f);
+    CHECK(o.noise == 0.4f && o.light == 0.9f && o.moveDislocation == 35.f && o.exhaustion == 12.f);
     auto bad = [](VitalsMsg m) { const auto b = Encode(m); VitalsMsg x; return !Decode(b.data(), b.size(), x); };
     VitalsMsg m = v; m.entity = 0; CHECK(bad(m));
     m = v; m.entity = uint8_t(kMaxWillies + 1); CHECK(bad(m));
@@ -133,6 +137,8 @@ static void TestVitals() {
     m = v; m.flags = 0x7; CHECK(!bad(m));
     m = v; m.health = std::numeric_limits<float>::quiet_NaN(); CHECK(bad(m));
     m = v; m.partHealth[6] = std::numeric_limits<float>::infinity(); CHECK(bad(m));
+    m = v; m.tonus = std::numeric_limits<float>::quiet_NaN(); CHECK(bad(m));
+    m = v; m.exhaustion = std::numeric_limits<float>::infinity(); CHECK(bad(m));
     std::vector<uint8_t> b = bytes; b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));
     b = bytes; b.pop_back(); CHECK(!Decode(b.data(), b.size(), o));
 }

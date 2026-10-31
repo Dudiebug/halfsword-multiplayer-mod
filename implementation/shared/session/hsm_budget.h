@@ -30,7 +30,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::PropLease: case MsgType::ObjectAnnounce: case MsgType::ObjectEvent: return BudgetClass::Lease;
         case MsgType::CombatEvent: case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim:
         case MsgType::SeverNotice: case MsgType::StuckBlade: case MsgType::GrabState: case MsgType::Equip:
-        case MsgType::DeathReport: case MsgType::GiveUp:
+        case MsgType::DeathReport: case MsgType::GiveUp: case MsgType::RemoteWrite:   // rev 31: at most a few pushes a second per pair
             return BudgetClass::Combat;
         case MsgType::PaintFx: return BudgetClass::Fx;
         case MsgType::BlobChunk: return BudgetClass::Blob;
@@ -38,6 +38,8 @@ inline BudgetClass BudgetClassOf(MsgType t) {
             return BudgetClass::Control;
         case MsgType::ModMap: return BudgetClass::Control;   // rev 27: a host sends one per map pick (and one to each joiner)
         case MsgType::LevelSeed: return BudgetClass::Control;   // rev 28: host -> client only, one per travel (and one to each joiner)
+        case MsgType::HandOff: case MsgType::HandOffAsk:          // rev 32: a few per grab or stab (an ask every kAskEveryMs while unanswered)
+            return BudgetClass::Combat;
         case MsgType::Forward: return BudgetClass::Detour;
         default: return BudgetClass::Free;
     }

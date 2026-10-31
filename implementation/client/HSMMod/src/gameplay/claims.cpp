@@ -1,4 +1,5 @@
 #include "gameplay/claims.h"
+#include "sync/hsm_grab.h"
 #include "util/hsm_names.h"
 #include "util/hsm_sanitize.h"
 #include "util/hsm_validate.h"
@@ -18,14 +19,15 @@ using combat::Xform;
 namespace {
 
 constexpr const char* kHookOwner = "claims";
-constexpr double kClashEveryMs = 100;         // ParryWindow keeps 64 clashes: one per 100 ms per attacker weapon
 // C0: the striking actor's class and the component, e.g. "BP_Flail_C/Head"; "none" when the call named no component.
 std::string AuditKey(UObject* comp) {
     if (!comp) return "none";
     UObject* outer = OuterOf(comp);
     return (outer ? ObjectName(reinterpret_cast<UObject*>(ClassOf(outer))) : std::string("?")) + "/" + ObjectName(comp);
 }
-constexpr double kResetLastDamageMs = 200;    // Willie_BP's Reset Last Damage Taken delay after a blow (OnDealComplexDamage)
+// Willie_BP's Reset Latest Complex Damage: a plain Delay(0.1) started by the first blow through the gate (W:3231,
+// 20203); a Delay already pending ignores later calls, so it is counted from the first blow, not retriggered (item 5).
+constexpr double kResetLatestDamageMs = 100;
 constexpr double kRecentAttackerMs = 60000;   // a death this long after the last replayed blow has no killer (KillLog::kWindowMs)
 constexpr uint64_t kLogFirst = 20;            // the first claims and replays are logged in full (test evidence)
 
@@ -97,6 +99,7 @@ bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
     int n = HookScript(kHookOwner, "Willie_BP_C", "Deal Complex Damage", [this](ScriptCall& c) { return OnDealComplexDamage(c); },
                        [this](ScriptCall& c) { AfterDealComplexDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Damage", [this](ScriptCall& c) { return OnGetDamage(c); });
+    n += HookScript(kHookOwner, "Willie_BP_C", "Get Up, Pal", [this](ScriptCall& c) { OnGetUpPal(c); return false; });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
     HSM_LOG("claims: %s (%d function(s) hooked now; components %s, box class %s)",
@@ -120,7 +123,14 @@ void Claims::Stop() {
 void Claims::Tick(double nowMs) {
     if (!active_) return;
     limiter_.NewTick();
+    ++frame_;
     for (const HitClaim& c : queue_.Drain()) ReplayNow(c, nowMs);
+    for (const sync::RemoteWriteMsg& m : pushes_.Drain(SteadyNowMs())) {
+        if (!env_.sendRemote) break;
+        env_.sendRemote(m);
+        if (++pushesSent_ <= kLogFirst)
+            HSM_LOG("claims: push e%u -> e%u bone %s, %.0f kg cm/s", m.from, m.target, sync::kPoseBoneNames[m.bone], sync::RemoteLen(m.vec));
+    }
 }
 
 // ---------------------------------------------------------------- the hooks (game thread, inside the VM)
@@ -156,6 +166,7 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
             if (audit) ++audit->blocked;
             return true;
         }
+        if (striker && !isProp) GatherPush(c, striker, attacker, victim);   // a push is physics: friendly fire does not stop it
         if (env_.allowed && !env_.allowed(attacker, victim)) {
             c.ZeroOutputs();
             ++n_.friendly;
@@ -175,15 +186,15 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
         // The stand-in's tick is blocked, so the game's Reset Last Damage Taken (0.2 s after a blow) never cleared this on
         // it: after one hard blow, every softer blow on the same bone was gated out until another bone was hit. A body
         // on the ground is struck on the same bone again and again (#77, #81: the "invisible force field" round a downed
-        // player, since 0.6). 0.8.0-pre7: cleared here once the game's own 0.2 s have passed since the last blow through.
+        // player, since 0.6). Cleared here as the game clears it: 0.1 s after the first blow through (0.8.0-pre9).
         const double nowMs = SteadyNowMs();
-        if (lastImpulse && nowMs - lastDcdMs_[victim] > kResetLastDamageMs) *lastImpulse = 0.0;
+        if (lastImpulse && resetDcdMs_[victim] > 0 && nowMs >= resetDcdMs_[victim]) { *lastImpulse = 0.0; resetDcdMs_[victim] = 0; }
         if (lastImpulse && lastBone && !combat::DcdGatePasses(len, cutting, *lastImpulse, SameName(*lastBone, bone))) {
             ++n_.gated;
             if (audit) ++audit->gated;
             return false;   // the body returns at its own gate: nothing happens natively either
         }
-        lastDcdMs_[victim] = nowMs;
+        if (resetDcdMs_[victim] <= 0) resetDcdMs_[victim] = nowMs + kResetLatestDamageMs;
         if (!limiter_.Allow(victim, NameToString(bone))) {
             c.ZeroOutputs();
             ++n_.limited;
@@ -327,6 +338,44 @@ void Claims::OnStuckDamage(ScriptCall& c, UObject* standIn, uint8_t victim) {
 
 // ---------------------------------------------------------------- attacker side
 
+// Sync audit item 3. The game's knockback is solver contact (Get_Damage applies no impulse): the contact moved the
+// stand-in here, and the owner's body has to take the same impulse (PushGather adds a blow's frames up). The impulse
+// reaches Deal Complex Damage from either fighter's hit event, so its sign is not fixed: it points away from the striker.
+void Claims::GatherPush(ScriptCall& c, UObject* striker, uint8_t attacker, uint8_t victim) {
+    if (!env_.sendRemote) return;
+    FVector impulse{}, at{};
+    FName bone{};
+    if (!c.get("Hit Impulse", impulse) || !c.get("Hit Bone", bone) || !c.get("Location", at)) return;
+    const int b = sync::PoseBoneIndex(NameToString(bone));
+    if (b < 0) return;
+    Call where(striker, "K2_GetActorLocation");
+    if (!where.invoke()) return;
+    const FVector from = where.get<FVector>("ReturnValue");
+    sync::V3 j = ToV(impulse);
+    if (j.x * (at.x - from.x) + j.y * (at.y - from.y) + j.z * (at.z - from.z) < 0) j = sync::V3{-j.x, -j.y, -j.z};
+    pushes_.Add(attacker, victim, b, j, SteadyNowMs(), frame_);
+}
+
+// Sync audit item 22. Get_Up_Pal (W:4718) runs on the grabber's machine when a grab takes a teammate; on a stand-in its
+// writes are lost, so the pal's owner makes them. The game's own test first (W:4719), on what this machine shows.
+void Claims::OnGetUpPal(ScriptCall& c) {
+    UObject* pal = nullptr;
+    if (!env_.sendRemote || !c.get("Pal", pal) || !pal) return;
+    const uint8_t from = env_.ownedEntity(c.self());
+    const uint8_t target = standIns_->EntityOf(pal);
+    if (!from || !target || from == target) return;
+    const int32_t* mine = Field<int32_t>(c.self(), "Team Int");
+    const int32_t* theirs = Field<int32_t>(pal, "Team Int");
+    bool downed = false;
+    GetBool(pal, "Downed", downed);
+    if (!mine || !theirs || *mine != *theirs || *mine == 0 || downed) return;
+    if (!reviveSent_.Revive(target, SteadyNowMs())) return;
+    sync::RemoteWriteMsg m;
+    m.kind = sync::RemoteKind::Revive; m.from = from; m.target = target; m.seq = pushes_.NextSeq();
+    env_.sendRemote(m);
+    if (++revivesSent_ <= kLogFirst) HSM_LOG("claims: e%u helps e%u up (Get Up, Pal on its stand-in); sent to its owner", from, target);
+}
+
 void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t attacker, UObject* attackerWillie, UObject* comp,
                        const ObjectSync::Touch* prop) {
     DcdInputs in;
@@ -411,17 +460,7 @@ void Claims::Replay(const HitClaim& c, double nowMs) {
 // A queued claim, at most kReplaysPerTick per victim per frame (Tick).
 void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     if (c.striker == combat::StrikerKind::Stuck) { ReplayStuck(c, nowMs); return; }   // a lodged blade is no swing: nothing to parry
-    int32_t clashMs = 0;
     Landed* landed = audit_ ? &landed_[StrikerName(c) + "/" + c.strikeComponent] : nullptr;
-    if (parry_.Cancels(c, &clashMs)) {
-        ++n_.parried;
-        if (landed) ++landed->parried;
-        const auto& i = c.hitImpulse;   // how hard the blow was: a real one cancelled, or a blade sliding off in a bind
-        HSM_LOG("claims: #%u from e%u parried (my weapon met their %s weapon %+d ms from the blow at t=%u; bone %s |impulse| %.0f cut %.2f)",
-                c.claimId, c.attacker, c.source == StrikeSource::WeaponLeft ? "left" : "right", int(clashMs), c.attackerTsMs, c.hitBone.c_str(),
-                std::sqrt(i.x * i.x + i.y * i.y + i.z * i.z), c.cuttingPower);
-        return;
-    }
     UObject* victim = env_.ownedActor ? env_.ownedActor(c.victim) : nullptr;
     UObject* mesh = victim ? adapter_->Mesh(victim) : nullptr;
     if (!mesh) { ++n_.noVictim; return; }   // between lives: the blow has nothing to land on
@@ -647,25 +686,20 @@ void Claims::Effect(const HitClaim& c) {
     else ++n_.effectsSkipped;
 }
 
-// My weapon met theirWeapon, a weapon of attacker's stand-in: noted with the hand that holds it ("Weapon R"/"Weapon L",
-// as MakeClaim names a claim's source) at the owner time that stand-in shows, so a claim from that attacker's same
-// weapon made around then is a parried blow (ParryWindow). A weapon in neither hand (a sheathed one bumped) parries
-// nothing (clashUnmatched). At most one per attacker weapon per 100 ms.
-void Claims::NoteClash(uint8_t attacker, UObject* theirWeapon, double nowMs) {
-    if (!active_ || !ValidEntity(attacker) || !theirWeapon) return;
-    UObject* standIn = standIns_->ActorOf(attacker);
-    UObject** right = standIn ? Field<UObject*>(standIn, "Weapon R") : nullptr;
-    UObject** left = standIn ? Field<UObject*>(standIn, "Weapon L") : nullptr;
-    StrikeSource source = StrikeSource::Body;
-    if (right && *right == theirWeapon) source = StrikeSource::WeaponRight;
-    else if (left && *left == theirWeapon) source = StrikeSource::WeaponLeft;
-    if (source == StrikeSource::Body) { ++n_.clashUnmatched; return; }
-    double& last = lastClashMs_[attacker][size_t(source)];
-    if (nowMs - last < kClashEveryMs) return;
-    uint32_t shown = 0;
-    if (!standIns_->ShownOwnerTs(attacker, shown)) return;
-    last = nowMs;
-    parry_.NoteClash(attacker, source, shown);
+// My weapon met theirWeapon, a weapon in a hand of defender's stand-in. The game's own parry roll runs on this machine
+// next, in my weapon's hit (ModularWeaponBP:918), and reads the defender: its guard, skill and Fallen come with the
+// owner's Vitals (StandIns), its tonus is written here. A parried blow's claim then carries the game's reduced impulse
+// and cut (Just Parried Rate), where 0.8.0-pre8 and earlier cancelled the whole claim on the victim's machine (sync
+// audit item 1). A weapon in neither hand (a sheathed one bumped) parries nothing (clashUnmatched).
+void Claims::NoteClash(uint8_t defender, UObject* theirWeapon) {
+    if (!active_ || !ValidEntity(defender) || !theirWeapon) return;
+    UObject* standIn = standIns_->ActorOf(defender);
+    const VitalsMsg* v = standIn ? standIns_->Vitals(defender) : nullptr;
+    if (!v) return;
+    UObject** right = Field<UObject*>(standIn, "Weapon R");
+    UObject** left = Field<UObject*>(standIn, "Weapon L");
+    if (!(right && *right == theirWeapon) && !(left && *left == theirWeapon)) { ++n_.clashUnmatched; return; }
+    adapter_->WriteParryTonus(standIn, *v);
     ++n_.clashes;
 }
 

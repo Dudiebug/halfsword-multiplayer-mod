@@ -17,7 +17,8 @@
 
 namespace hsm {
 
-// PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with hordes of the game's zombie Willies.
+// PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with the game's zombie Willies, one at a time
+// per player.
 enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5 };
 constexpr uint8_t kFormatCount = 6;
 // PvP gear: own loadout / random by tier / everyone identical / Fists: nobody wears or holds anything (the Brawl card,
@@ -38,6 +39,7 @@ struct MatchConfig {
     uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
     uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
     uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
+    bool hostPhysics = false;         // 0.9.0: the host runs every fighter's physics and every screen shows its copy (SyncMode::Host); false: each player its own (SyncMode::Owner)
 };
 inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
 inline constexpr uint8_t kClearGroundOptions[4] = {0, 2, 3, 5};       // minutes, 0 = off
@@ -49,23 +51,47 @@ inline bool IsBrawl(Format f, Gear g) { return f == Format::FreeForAll && g == G
 inline bool IsBrawl(const MatchConfig& c) { return IsBrawl(c.format, c.gear); }
 // Equipment Budget per tier, from BP_GameManager.Generate_Random_Characters: random gear is rolled within it.
 inline constexpr int kTierBudget[8] = {0, 15, 50, 100, 250, 444, 666, 888};
+inline constexpr uint8_t kBrawlTier = 5;            // Brawl's fixed tier: every build Weight 0.75 (no Tier row, no gear)
 
-// A fighter's build (the passport's Weight, 0..1, like Height) by Enum_Ranks tier: the higher the rank fought at, the
-// more muscle. A fighter already built heavier keeps their own build: MuscleFor never lowers it.
-inline double MuscleForTier(int tier) { return 0.2 + 0.8 * double(std::clamp(tier, 0, 7)) / 7.0; }
-inline double MuscleFor(double own, int tier) { return std::max(own, MuscleForTier(tier)); }
+// A fighter's build is the passport's Weight (0..1, like Height). The game derives the body from it (Willie_BP): the
+// Muscle Rate is the Weight, the body's mass scale runs 1..1.25 over it and the grip's hold limit 1..1.5. So two players
+// with different Weights are two different bodies, and a Free Mode passport can hold a Weight outside 0..1 (2.0 made one
+// fighter 33% heavier with a 60% stronger grip than a 0.5 one; 0.8.0-pre19 reports #294 #295 #301).
+// The game's own bot table (BP_Generator_Characters_Random), by Enum_Ranks tier: a player at tier N is built like a tier-N bot.
+inline constexpr double kTierWeight[8] = {0.0, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.0};
+inline constexpr double kDefaultWeight = 0.5;       // the game's default passport (GI_Settings); a NaN Weight gets it
+inline double TierWeight(int tier) { return kTierWeight[std::clamp(tier, 0, 7)]; }
+// The Weight every player is forced to: the tier's (Brawl is always kBrawlTier).
+inline double ForcedWeight(Format, Gear, int tier) { return TierWeight(tier); }
+inline double ForcedWeight(const MatchConfig& c) { return ForcedWeight(c.format, c.gear, c.tier); }
+// The Weight a fighter spawns with. on: exactly `forced` (up or down; whatever the passport holds, NaN too). off (a bot, or
+// force_strength=0): their own, clamped to 0..1 so an out-of-range passport cannot spawn a stronger body; NaN: the default.
+inline double BuildWeight(double own, double forced, bool on) {
+    if (on) return std::isfinite(forced) ? std::clamp(forced, 0.0, 1.0) : kDefaultWeight;
+    return std::isfinite(own) ? std::clamp(own, 0.0, 1.0) : kDefaultWeight;
+}
+// What a Weight does in the game (Willie_BP: MapRangeUnclamped over the Muscle Rate), for the log and the tests.
+inline double MassScaleFor(double weight) { return 1.0 + 0.25 * weight; }
+inline double GripScaleFor(double weight) { return 1.0 + 0.5 * weight; }
 
 inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Format::Zombies; }
+// The gear settings a format takes: own / random by tier / identical anywhere (Survival and Zombies too, 0.8.0-pre20);
+// Fists only for the Brawl card (free-for-all).
+inline bool GearAllowed(Format f, Gear g) { return g == Gear::Fists ? f == Format::FreeForAll : uint8_t(g) < kGearCount; }
 inline int TeamCount(Format f) { return f == Format::TwoTeams ? 2 : f == Format::ThreeTeams ? 3 : IsBotFormat(f) ? 2 : 0; }
 inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll ? 5 : f == Format::Duel ? 3 : 10; }
 MatchConfig Sanitize(MatchConfig c);
 
 // Generated gear at a respawn: None keeps the slot's loadout, Each gives every respawning fighter a fresh one, Shared
-// gives them all one fresh loadout. Own gear, Brawl and the bot formats never regear; Mirror rolls only when everybody is reset
-// together, so in free-for-all and teams the shared loadout lasts until the rematch.
+// gives them all one fresh loadout. Own gear and Brawl never regear; Mirror rolls only when everybody is reset
+// together, so in free-for-all and teams the shared loadout lasts until the rematch. The bot formats roll at the run's
+// start (and a rematch) only: a player keeps that loadout through every wave and respawn.
 enum class Regear : uint8_t { None = 0, Each = 1, Shared = 2 };
 enum class RespawnCause : uint8_t { Individual = 0, RoundReset = 1, WaveCleared = 2, Rematch = 3 };
 Regear RegearFor(const MatchConfig& c, RespawnCause cause);
+// A fighter joining a running match: RandomTier gets a fresh loadout of its own, whatever the format (Mirror takes the
+// shared one, if there is one). The bot formats' RegearFor rolls at the start only.
+Regear JoinRegearFor(const MatchConfig& c);
 
 // Owner authority: a machine processes a hit only on a body it owns, and between teammates only with friendly fire.
 inline bool HitAllowed(bool victimOwnedHere, int8_t attackerTeam, int8_t victimTeam, bool friendlyFire) {
@@ -121,7 +147,7 @@ public:
     static constexpr uint32_t kCountdownMs = 5000, kResultsMs = 10000;
     static constexpr uint32_t kWaveBreakMs = 60000, kZombieBreakMs = 10000, kCorpseMs = 45000;   // Duel's gap: respawnDelayS
     static constexpr uint32_t kLootDelayMs = 2000;   // Survival: a fallen bot sheds its loot this long after it fell
-    static constexpr int kMaxBotsAlive = 10;
+    static constexpr int kMaxBotsAlive = 10;   // Zombies: one per player (MaxBotsAlive), at most this
     static constexpr int kBotsPerTick = 1;   // the host ticks once a frame; a whole horde in one frame took seconds (test 5)
     struct Events {
         bool live = false, ended = false, rematch = false;
@@ -132,6 +158,10 @@ public:
     };
 
     void Start(const MatchConfig& cfg, const std::vector<FighterInfo>& fighters, uint32_t nowMs, const ScoreCarry& carry = {});
+    // Zombies: how many zombies may be alive at once, one per player in the session (the host's own fighter too), at
+    // least one and at most kMaxBotsAlive; the host sets the count every tick from its roster. Other formats: kMaxBotsAlive.
+    void SetPlayers(int players) { players_ = players; }
+    int MaxBotsAlive() const;
     void AddFighter(const FighterInfo& f);              // joins mid-match: alive; a player with an id comes back with the score they left with
     // A fighter leaves for good. Its score goes with the slot (the slot's next player starts at 0), but a player with an id has
     // it kept under that id until the rematch (AddFighter), so a rejoin on any slot gets it back. Team scores stay with the team.
@@ -214,6 +244,7 @@ private:
     void StartWave(uint32_t nowMs, Events& ev);
     int AliveBots() const;
     int wave_ = 0, remaining_ = 0, waveRank_ = 0, spawnOwed_ = 0;   // owed: requested, not yet added
+    int players_ = 0;
     bool inBreak_ = false, clearedPending_ = false;
     uint32_t breakStart_ = 0;
     std::set<uint8_t> skipVotes_;
@@ -282,7 +313,7 @@ constexpr size_t kLootArmorPieces = 2;
 std::vector<size_t> LootPicks(size_t pieces, size_t max, uint32_t seed);
 
 // Wave sizes. Survival: one bot per player plus one per wave (max 30), tier + wave/2.
-// Zombies: six per player plus four per wave (max 60), tier + wave/3. Ranks cap at 7.
+// Zombies: three per player plus two per wave (max 40), tier + wave/3. Ranks cap at 7.
 struct Wave { int count = 0; int rank = 0; };
 Wave WaveFor(Format f, int waveIndex, int humans, int tier);
 

@@ -18,7 +18,9 @@ namespace hsm {
 
 constexpr size_t kReportIdMax = 32;           // relay ids: [A-Za-z0-9]
 constexpr size_t kReportTokenMax = 64;        // attach tokens: [A-Za-z0-9_-]
-constexpr size_t kReportLogTailBytes = 3u << 20;   // the end of each log that is sent (the relay takes 4 MB per file)
+constexpr size_t kReportLogTailBytes = 3u << 20;   // plain bodies: the end of each log that is sent (any relay takes 4 MB per file)
+constexpr size_t kReportGzipLogBytes = 16u << 20;  // gzipped bodies: the end of each log (a session's log stops at 32 MB)
+constexpr size_t kReportGzipBodyMax = (10u << 20) - (64u << 10);   // a gzipped body as sent; the relay takes 10 MB
 constexpr uint32_t kReportOfferMs = 120000;   // how long another player may answer "/sendlog"
 constexpr uint32_t kReportCooldownMs = 30000;      // one report per player per 30 s (the relay allows 20 an hour, 60 a day per address)
 constexpr uint32_t kReportShareGapMs = 60000;      // the host relays one ReportShare per peer per minute
@@ -224,7 +226,7 @@ inline std::string ValidUtf8(const std::string& s) {
     return o;
 }
 
-struct ReportLog { std::string name, text; };   // name: "HSMMod.log", "HSMMod.prev.log"
+struct ReportLog { std::string name, text; };   // name: "HSMMod.log", "HSMMod.prev.log", "HSMMod.prev2.log", "HSMMod.prev3.log"
 struct ReportFacts {
     std::string modBuild, gameBuild, role, transport, syncMode, level, matchFormat, matchPhase, os;
     std::string ue4ss, ue4ssMods;   // UE4SS version ("none", "off", "3.0.1.0"...) and the enabled UE4SS mods' names

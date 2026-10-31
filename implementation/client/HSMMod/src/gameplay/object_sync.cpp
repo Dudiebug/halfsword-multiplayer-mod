@@ -138,6 +138,7 @@ void ObjectSync::Clear() {
     byActor_.clear();
     pending_.clear();
     givenUp_.clear();
+    late_.clear();
     heardMs_.clear();
     freeSince_.clear();
     idleCheckMs_ = 0;
@@ -200,6 +201,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
         for (uint64_t id : table_.Tick(nowMs)) { ++n_.lapsed; Grant(id, kHostSlot, LeaseLevel::Free); }
     DetectDrops(nowMs, owned);
     if (!pending_.empty()) ResolvePending(nowMs);
+    if (!late_.empty()) TickLate(nowMs);
     MatchStandIns(nowMs);
     if (!loose_.empty()) TickLoose(nowMs);
     if (env_.fightLevel && env_.fightLevel()) {
@@ -268,6 +270,8 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
             moving = Read(p, 0, s) && !PropAtRest(s);
         }
         LeaseLevel want = LeaseLevel::Free;
+        // TOUCH leasing as in 0.8.0-pre7: whoever's fighter bumps, kicks or pushes a prop simulates it until it rests. Rev 32
+        // gave every loose prop to the host instead, so a client's own bumps and kicks lagged a round trip (KNOWN_ISSUES.md).
         const ClaimSend cs = StepClaim(p.claim, holding, p.lastContactMs, moving, nowMs, want);
         if (cs != ClaimSend::None) Claim(id, cs, want, nowMs);
 
@@ -282,7 +286,10 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
             for (BodyRef& b : p.bodies) b.dirty = false;
             // A lease of mine I have just released streams no more (the host would drop it until its FREE Grant lands).
             const bool streaming = !p.attachedSent && (level == LeaseLevel::Free || p.claim.sent != LeaseLevel::Free);
-            if (streaming && PropStreamDue(level, p.lastSentMs, false, nowMs)) {   // due on the moving schedule: worth a read
+            if (streaming && Kept(id, p)) {   // never streamed (hsm_structure.h): every machine simulates its own copy
+                if (PropStreamDue(level, p.lastSentMs, false, nowMs)) { ++n_.structStatesSkipped; p.lastSentMs = nowMs; }
+            } else if (streaming && (Soft(id, p) ? StructureStreamDue(p.lastSentMs, false, nowMs)    // a soft structure: 20 Hz while it moves
+                                                 : PropStreamDue(level, p.lastSentMs, false, nowMs))) {   // due on the moving schedule: worth a read
                 if (!p.level && !p.spawned) StreamState(id, p, level, me, nowMs);
                 else (p.moving ? dueMoving : dueIdle).push_back(id);
             }
@@ -291,7 +298,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
             const bool awaitingGrant = p.claim.sent != LeaseLevel::Free && level == LeaseLevel::Free;
             if (!parent && !awaitingGrant && !p.attachedSent) {
                 if (!p.bodies.empty()) p.bodies[0].dirty = true;   // p.dirty is an explicit redrive of the root (and the state heard)
-                if (Drive(id, p) && (p.level || p.spawned)) ++n_.levelDriven;
+                if ((Soft(id, p) ? SoftDrive(id, p, nowMs) : Drive(id, p)) && (p.level || p.spawned)) ++n_.levelDriven;
             }
         }
         ++it;
@@ -335,7 +342,9 @@ size_t ObjectSync::StreamState(uint64_t propId, Prop& p, LeaseLevel level, uint8
     if (env_.host && !p.sub && IsSpawnedId(propId))
         for (const BodyStateMsg& s : out)
             if (s.body == 0) reconciler_.UpdateMotion(propId, s.px, s.py, s.pz, s.vx, s.vy, s.vz, nowMs);
-    if (out.empty() || !PropStreamDue(level, p.lastSentMs, atRest, nowMs)) return reads;
+    // A soft structure goes out as one snapshot: every body read this tick, in one go, at 20 Hz while any of them moves.
+    const bool due = Soft(propId, p) ? StructureStreamDue(p.lastSentMs, atRest, nowMs) : PropStreamDue(level, p.lastSentMs, atRest, nowMs);
+    if (out.empty() || !due) return reads;
     for (const BodyStateMsg& s : out)
         if (env_.send) { env_.send(Encode(s), false); ++n_.statesSent; }
     p.lastSentMs = nowMs;
@@ -611,6 +620,9 @@ void ObjectSync::OnGrant(uint64_t propId, uint8_t slot, LeaseLevel level) {
     d.deadlineMs = now + kResolveWindowMs;
     d.witness = UntrackedInHand(standIns_->ActorOf(PropOwnerEntity(propId)), PropHand(propId));
     d.witnessIndex = d.witness ? ObjectIndex(d.witness) : -1;
+    StandIns::PoseHandView pose;   // the class the owner's hand shows (or showed just before): GiveUp's late match needs it
+    if (standIns_->PoseHandInfo(PropOwnerEntity(propId), PropHand(propId), pose))
+        d.heardClass = pose.classHash != sync::kHandEmpty && pose.classHash != sync::kHandUnknown ? pose.classHash : pose.prevClassHash;
 }
 
 bool ObjectSync::OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot) {
@@ -637,7 +649,7 @@ bool ObjectSync::OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot) {
                 Call(p.actor, "K2_DetachFromActor").set<uint8_t>("LocationRule", 1).set<uint8_t>("RotationRule", 1).set<uint8_t>("ScaleRule", 1).invoke();
         }
         p.dirty = true;
-        if (m.body < p.bodies.size()) p.bodies[m.body].dirty = true;
+        if (m.body < p.bodies.size()) { p.bodies[m.body].dirty = true; p.bodies[m.body].rxMs = SteadyNowMs(); }
     }
     // A late proposal finds it where it is: its place and velocity, read at this moment (the proposal is judged by the same clock).
     if (env_.host && m.body == 0 && IsSpawnedId(m.objId)) reconciler_.UpdateMotion(m.objId, m.px, m.py, m.pz, m.vx, m.vy, m.vz, SteadyNowMs());
@@ -785,8 +797,40 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
     }
     n_.simAsked += asked; n_.simCached += cached; n_.simCapped += capped;
     // The walk's cost, every census (the cache and the cap are tuned from this line).
-    HSM_LOG("objects: walk %zu comps, %zu actors, %.1f ms (%zu asked, %zu cached, %zu capped)", comps, acc.size(), SteadyNowMs() - startMs,
-            asked, cached, capped);
+    if (logWalks_)
+        HSM_LOG("objects: walk %zu comps, %zu actors, %.1f ms (%zu asked, %zu cached, %zu capped)", comps, acc.size(), SteadyNowMs() - startMs,
+                asked, cached, capped);
+    return out;
+}
+
+std::vector<ObjectSync::WalkedObject> ObjectSync::WalkForRecorder(Adapter& adapter) {
+    std::vector<WalkedObject> out;
+    if (active_) return out;   // a session's own ObjectSync is never walked for the recorder
+    adapter_ = &adapter;
+    logWalks_ = false;
+    size_t notSimulating = 0;
+    const std::vector<LevelActor> walk = WalkLevel(notSimulating);
+    for (const LevelActor& la : walk) {
+        WalkedObject w;
+        w.actor = la.actor;
+        w.index = la.index;
+        w.bodies = RecorderBodies(adapter, la.actor);
+        if (!w.bodies.empty()) out.push_back(std::move(w));
+    }
+    return out;
+}
+
+std::vector<UObject*> ObjectSync::RecorderBodies(Adapter& adapter, UObject* actor) {
+    std::vector<UObject*> out;
+    if (active_ || !actor) return out;
+    adapter_ = &adapter;
+    if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
+    Call rc(actor, "K2_GetRootComponent");
+    UObject* root = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
+    if (root && MovableComp(root) && CallsFor(root)) out.push_back(root);
+    if (!primitiveClass_) return out;
+    for (UObject* comp : ComponentsOf(actor, primitiveClass_))
+        if (comp != root && out.size() < kMaxObjectBodies && MovableComp(comp) && CallsFor(comp)) out.push_back(comp);
     return out;
 }
 
@@ -950,6 +994,8 @@ void ObjectSync::ForgetEntity(uint8_t entity) {
         it = PropOwnerEntity(it->first) == entity ? pending_.erase(it) : std::next(it);
     for (auto it = givenUp_.begin(); it != givenUp_.end();)
         it = PropOwnerEntity(it->first) == entity ? givenUp_.erase(it) : std::next(it);
+    for (auto it = late_.begin(); it != late_.end();)
+        it = PropOwnerEntity(it->first) == entity ? late_.erase(it) : std::next(it);
     for (auto& [id, p] : props_)
         if (p.toucher == entity) p.toucher = 0;
 }
@@ -1011,7 +1057,7 @@ void ObjectSync::NoteContact(UObject* a, UObject* b) {
         entity = ContactClaimant(entity, kind, streamedHere);
         if (!entity) continue;
         auto p = props_.find(it->second);
-        if (p == props_.end()) continue;
+        if (p == props_.end() || OwnCopy(p->first, p->second)) continue;   // a structure is leased by nobody
         p->second.lastContactMs = SteadyNowMs();
         p->second.toucher = entity;
         if (kind == OtherKind::Prop) ++n_.islands;
@@ -1026,6 +1072,7 @@ bool ObjectSync::PropOf(UObject* actor, Touch& out) {
     if (it == byActor_.end()) return false;
     auto p = props_.find(it->second);
     if (p == props_.end() || !adapter_->StillValid(p->second.actor, p->second.index) || ObjectField(actor, 0)) return false;
+    if (OwnCopy(p->first, p->second)) return false;   // a structure is simulated by every machine: its blows are native, nobody claims them
     out = Touch{};
     out.id = p->first;
     out.streamedHere = view_.Streamer(p->first) == MySlot();
@@ -1076,6 +1123,10 @@ bool ObjectSync::Read(Prop& p, size_t body, BodyStateMsg& out) {
 
 // Drive every body of a copy that has a fresh state from the streamer (BodyRef::dirty).
 bool ObjectSync::Drive(uint64_t id, Prop& p) {
+    if (Kept(id, p)) {   // a structure is never placed by a state (teleporting joined bodies breaks their joints)
+        for (BodyRef& r : p.bodies) if (r.dirty) { r.dirty = false; ++n_.structStatesSkipped; }
+        return false;
+    }
     bool any = false;
     for (size_t b = 0; b < p.bodies.size(); ++b) {
         BodyRef& r = p.bodies[b];
@@ -1084,6 +1135,87 @@ bool ObjectSync::Drive(uint64_t id, Prop& p) {
         if (r.detached) continue;
         if (const BodyStateMsg* s = view_.Find(id, uint8_t(b)))
             if (DriveBody(p, b, *s)) any = true;
+    }
+    return any;
+}
+
+// A soft structure (hsm_structure.h) on a machine that does not stream it: no body is ever teleported by a state (the joints do
+// not follow a teleport and break). Each body with a fresh state is steered toward the host's pose, extrapolated by its velocity
+// to now, with velocity (sync/hsm_soft_correct.h Steer): v = v_host + a push toward the pose, nothing under the dead band.
+// The one exception is a structure that is badly off as a whole (any body past kSnapCm, or one far for kStuckMs on end), which is
+// put right by placing ALL its bodies from one snapshot in this frame, each with the host's velocity, at most every kSnapGapMs.
+// Applied when a state arrives (20 Hz while it swings), not every frame, so the local physics (a fighter walking on its own
+// copy) is left alone in between.
+bool ObjectSync::SoftDrive(uint64_t id, Prop& p, double nowMs) {
+    struct Item {
+        size_t b = 0;
+        BodyStateMsg now;           // the body as it is here
+        sync::V3 pos;
+        sync::Q4 rot;
+        sync::SoftTarget target;    // the host's state for it, extrapolated to now
+    };
+    std::vector<Item> items;
+    double worst = 0, oldest = 0, newest = 1e18;
+    for (size_t b = 0; b < p.bodies.size(); ++b) {
+        BodyRef& r = p.bodies[b];
+        if (r.detached || r.rxMs <= 0 || !adapter_->StillValid(r.comp, r.index) || IsGeometryCollection(r.comp)) continue;
+        const BodyStateMsg* s = view_.Find(id, uint8_t(b));
+        if (!s) continue;
+        Item it;
+        it.b = b;
+        if (!Read(p, b, it.now)) continue;
+        float qx, qy, qz, qw;
+        UnpackQuat(it.now.rot, qx, qy, qz, qw);
+        it.pos = {it.now.px, it.now.py, it.now.pz};
+        it.rot = {qx, qy, qz, qw};
+        UnpackQuat(s->rot, qx, qy, qz, qw);
+        const double age = std::max(0.0, nowMs - r.rxMs);
+        const sync::V3 vel{s->vx, s->vy, s->vz}, ang{s->wx, s->wy, s->wz};
+        it.target.pos = sync::ExtrapolatePos({s->px, s->py, s->pz}, vel, age);
+        it.target.rot = sync::ExtrapolateRot({qx, qy, qz, qw}, ang, age);
+        it.target.vel = vel;
+        it.target.angVel = ang;
+        worst = std::max(worst, sync::VLen({it.target.pos.x - it.pos.x, it.target.pos.y - it.pos.y, it.target.pos.z - it.pos.z}));
+        oldest = std::max(oldest, age);
+        newest = std::min(newest, age);
+        items.push_back(it);
+    }
+    if (items.empty()) { for (BodyRef& r : p.bodies) r.dirty = false; return false; }
+    const double stuckMs = p.stuck.Update(nowMs, worst);
+    const bool snap = sync::ShouldSnap(sync::SnapReady(oldest, newest), worst, stuckMs, nowMs - p.lastSnapMs);
+    bool any = false;
+    for (const Item& it : items) {
+        BodyRef& r = p.bodies[it.b];
+        if (!snap && !r.dirty) continue;
+        r.dirty = false;
+        sync::V3 lin = it.target.vel, ang = it.target.angVel;
+        if (snap) {   // one snapshot, all bodies, this frame; the host's velocity, no relative velocity left to correct
+            const Quat16 packed = PackQuat(float(it.target.rot.x), float(it.target.rot.y), float(it.target.rot.z), float(it.target.rot.w));
+            if (!ApplyBodyPose(r.comp, float(it.target.pos.x), float(it.target.pos.y), float(it.target.pos.z), packed)) continue;
+        } else {
+            const double dt = r.steerMs < -1e17 ? 0.05 : (nowMs - r.steerMs) / 1000.0;
+            const sync::SoftSteer st = sync::Steer(it.pos, it.rot, it.target, dt);
+            lin = st.vel;
+            ang = st.angVel;
+            if (st.corrected) ++n_.structCorrected;
+        }
+        r.steerMs = nowMs;
+        any = true;
+        RootCalls* c = CallsFor(r.comp);
+        if (!c) continue;
+        c->simulating.put(0, FName{});
+        if (c->simulating.invoke(r.comp) && c->simulating.take<bool>(1)) {
+            c->setAng.put(0, FVector{ang.x, ang.y, ang.z}).put(1, false).put(2, FName{}).invoke(r.comp);
+            c->setLin.put(0, FVector{lin.x, lin.y, lin.z}).put(1, false).put(2, FName{}).invoke(r.comp);
+        }
+        ++n_.bodyDriven;
+    }
+    if (snap) {
+        for (BodyRef& r : p.bodies) r.dirty = false;
+        p.lastSnapMs = nowMs;
+        p.stuck = sync::StuckTimer{};
+        ++n_.structSnapped;
+        LogStructureSnap(p, worst);
     }
     return any;
 }
@@ -1202,8 +1334,17 @@ std::string ObjectSync::HealthLine() {
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
                   d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected), d(a.despawned, b.despawned), d(a.resetUnmoved, b.resetUnmoved));
-    size_t spawned = 0, bodies = 0;
-    for (const auto& kv : props_) { spawned += kv.second.spawned ? 1 : 0; bodies += kv.second.bodies.size(); }
+    size_t spawned = 0, bodies = 0, structures = 0;
+    for (const auto& kv : props_) { spawned += kv.second.spawned ? 1 : 0; bodies += kv.second.bodies.size(); structures += OwnCopy(kv.first, kv.second) ? 1 : 0; }
+    char structText[160];   // by mode: soft streams and steers, local skips, full is pre17 (nothing is a structure)
+    if (env_.syncStructures == StructureMode::Soft)
+        std::snprintf(structText, sizeof structText, "structures %zu soft, corrections %llu, snaps %llu", structures,
+                      d(a.structCorrected, b.structCorrected), d(a.structSnapped, b.structSnapped));
+    else if (env_.syncStructures == StructureMode::Local)
+        std::snprintf(structText, sizeof structText, "structures %zu local, states skipped %llu, reset skipped %llu", structures,
+                      d(a.structStatesSkipped, b.structStatesSkipped), d(a.structResetSkipped, b.structResetSkipped));
+    else
+        std::snprintf(structText, sizeof structText, "structures full (as pre17)");
     char objects[640];
     std::snprintf(objects, sizeof objects,
                   " | objects: spawned %zu bodies %zu announced %llu pending %zu ghosts %zu (expired %llu) | proposed %llu refused %llu rekeyed %llu "
@@ -1215,13 +1356,16 @@ std::string ObjectSync::HealthLine() {
                   d(a.eventsSent, b.eventsSent), d(a.eventsApplied, b.eventsApplied), queuedEvents_.size(),
                   d(a.eventsRejected, b.eventsRejected), d(a.jointsBroken, b.jointsBroken), d(a.bodiesDetached, b.bodiesDetached),
                   d(a.destroyedSent, b.destroyedSent), d(a.destroyedApplied, b.destroyedApplied));
-    char fixes[384];
+    char fixes[704];
     std::snprintf(fixes, sizeof fixes,
                   " | pre2: skippedClasses %llu attachHeld %llu letGo sent %llu applied %llu | adopt known %llu bound %llu expired %llu | "
-                  "walk asked %llu cached %llu capped %llu",
+                  "walk asked %llu cached %llu capped %llu | %s | "
+                  "pre18: given up %llu, recovered %llu (aliased %llu expired %llu) dropRestored %llu",
                   d(a.skippedClasses, b.skippedClasses), d(a.attachHeld, b.attachHeld), d(a.letGoSent, b.letGoSent), d(a.letGoApplied, b.letGoApplied),
                   d(a.adoptKnown, b.adoptKnown), d(a.adoptBound, b.adoptBound), d(a.adoptExpired, b.adoptExpired),
-                  d(a.simAsked, b.simAsked), d(a.simCached, b.simCached), d(a.simCapped, b.simCapped));
+                  d(a.simAsked, b.simAsked), d(a.simCached, b.simCached), d(a.simCapped, b.simCapped), structText,
+                  d(a.unresolved, b.unresolved), d(a.lateRecovered, b.lateRecovered), d(a.lateAliased, b.lateAliased),
+                  d(a.lateExpired, b.lateExpired), d(a.dropRestored, b.dropRestored));
     reported_ = n_;
     return std::string(line) + objects + fixes;
 }

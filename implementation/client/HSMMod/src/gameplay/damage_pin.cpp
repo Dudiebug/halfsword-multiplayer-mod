@@ -34,6 +34,24 @@ struct Pin {
 };
 Pin g;
 
+// The pinned GI_Settings doubles (sync audit 10, 13): Willie_BP.cpp:7680-7703 copies each onto the fighter by name.
+struct Phys {
+    bool active = false;                   // pinned (the host sent a value) and the player's own saved
+    bool restore = false;                  // unpinned: the next sweep writes the own value back onto the fighters
+    double own = 0, forced = 0;
+};
+std::array<Phys, kPinnedPhysics> gp;
+bool physSweepNow = false;
+uint64_t physNextSweep = 0;
+
+void SweepPhysics() {
+    for (UObject* w : FindInstances("Willie_BP_C")) {
+        if (IsGarbage(w)) continue;
+        for (size_t i = 0; i < kPinnedPhysics; ++i)
+            if (gp[i].active || gp[i].restore) if (double* d = Field<double>(w, kPinnedPhysicsNames[i]); d && *d != gp[i].forced) *d = gp[i].forced;
+    }
+}
+
 double* Rate(UObject* o, const char* name) { return o ? Field<double>(o, name) : nullptr; }
 
 // A float or double property, whichever this build declares (USlider's range is float; the reflection index also
@@ -101,6 +119,8 @@ void Hook() {
         double* n = Rate(call.self(), kNpc);
         if (p) *p = OwnBeforeSave(g.ownPlayer, *p, g.forcedPlayer);
         if (n) *n = OwnBeforeSave(g.ownNpc, *n, g.forcedNpc);
+        for (size_t i = 0; i < kPinnedPhysics; ++i)
+            if (gp[i].active) if (double* d = Rate(call.self(), kPinnedPhysicsNames[i])) *d = OwnBeforeSave(gp[i].own, *d, gp[i].forced);
         if (++g.saves % 20 == 1) HSM_LOG("damage: the game saved its settings with the player's own rates (player %.3f, NPC %.3f)", g.ownPlayer, g.ownNpc);
         return false;
     };
@@ -108,6 +128,8 @@ void Hook() {
         if (!g.active) return;
         if (double* p = Rate(call.self(), kPlayer)) *p = g.forcedPlayer;
         if (double* n = Rate(call.self(), kNpc)) *n = g.forcedNpc;
+        for (size_t i = 0; i < kPinnedPhysics; ++i)
+            if (gp[i].active) if (double* d = Rate(call.self(), kPinnedPhysicsNames[i])) *d = gp[i].forced;
     };
     g.hooked = HookScript(kHookOwner, "GI_Settings_C", "Save Settings", before, after) > 0;
     if (!g.hooked && !g.hookFailLogged) HSM_LOG("damage: Save Settings could not be hooked; the session's damage is not pinned");
@@ -165,6 +187,44 @@ void TickDamagePin(bool active, uint16_t stored, bool host) {
         g.sweepNow = false; g.nextSweep = now + kSweepMs;
         Sweep(g.forcedPlayer, g.forcedNpc);
     }
+}
+
+std::array<float, kPinnedPhysics> OwnPhysics() {
+    std::array<float, kPinnedPhysics> out{ -1.f, -1.f, -1.f };
+    for (size_t i = 0; i < kPinnedPhysics; ++i) {
+        double* d = Rate(g.gi, kPinnedPhysicsNames[i]);
+        const double v = gp[i].active ? gp[i].own : d ? *d : -1.0;
+        if (d && ValidPinnedPhysics(float(v))) out[i] = float(v);
+    }
+    return out;
+}
+
+// After TickDamagePin, which finds the game instance and hooks Save Settings (g.active means both happened).
+void TickPhysicsPin(const std::array<float, kPinnedPhysics>& forced) {
+    bool any = false;
+    for (size_t i = 0; i < kPinnedPhysics; ++i) {
+        Phys& ph = gp[i];
+        double* d = Rate(g.gi, kPinnedPhysicsNames[i]);
+        const bool want = g.active && d && forced[i] >= 0.f;
+        if (want && !ph.active) {
+            ph.own = *d; ph.active = true; ph.restore = false;
+            HSM_LOG("physics: %s pinned to the host's %.3f (own %.3f)", kPinnedPhysicsNames[i], double(forced[i]), ph.own);
+        } else if (!want && ph.active) {
+            ph.active = false; ph.restore = true; ph.forced = ph.own; physSweepNow = true;
+            if (d) *d = ph.own;
+            HSM_LOG("physics: %s back to the player's own %.3f", kPinnedPhysicsNames[i], ph.own);
+        }
+        if (ph.active) {
+            if (ph.forced != double(forced[i])) { ph.forced = forced[i]; physSweepNow = true; }
+            if (*d != ph.forced) *d = ph.forced;   // a level load reads the save back (BP_HalfSwordGameMode.cpp:163)
+        }
+        any = any || ph.active || ph.restore;
+    }
+    const uint64_t now = GetTickCount64();
+    if (!any || (!physSweepNow && now < physNextSweep)) return;
+    SweepPhysics();                                // fighters copy them when they spawn or the settings apply
+    physSweepNow = false; physNextSweep = now + kSweepMs;
+    for (Phys& ph : gp) ph.restore = false;
 }
 
 }  // namespace hsm::game
