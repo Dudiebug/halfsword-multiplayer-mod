@@ -26,6 +26,16 @@ static void TestSanitize() {
     c = Cfg(Format::ThreeTeams, 250); CHECK(Sanitize(c).scoreLimit == 100 && Sanitize(c).format == Format::ThreeTeams);
     CHECK(TeamCount(Format::FreeForAll) == 0 && TeamCount(Format::TwoTeams) == 2 && TeamCount(Format::ThreeTeams) == 3 && TeamCount(Format::PlayersVsBots) == 2);
     CHECK(DefaultScoreLimit(Format::FreeForAll) == 5 && DefaultScoreLimit(Format::TwoTeams) == 10);
+    // The weapon filter: in range stays, out of range falls back to Any; the game-byte table covers every filter and Any is 0.
+    c = MatchConfig{}; CHECK(c.weapons == WeaponFilter::Any);
+    for (uint8_t w = 0; w < kWeaponFilterCount; ++w) { c.weapons = WeaponFilter(w); CHECK(Sanitize(c).weapons == WeaponFilter(w)); }
+    c.weapons = WeaponFilter(kWeaponFilterCount); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
+    c.weapons = WeaponFilter(255); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
+    CHECK(GameWeaponTypeByte(WeaponFilter::Any) == 0);
+    for (uint8_t w = 1; w < kWeaponFilterCount; ++w) CHECK(GameWeaponTypeByte(WeaponFilter(w)) != 0);       // a filter is never the game's Any
+    for (uint8_t a = 0; a < kWeaponFilterCount; ++a)
+        for (uint8_t b = uint8_t(a + 1); b < kWeaponFilterCount; ++b) CHECK(GameWeaponTypeByte(WeaponFilter(a)) != GameWeaponTypeByte(WeaponFilter(b)));
+    CHECK(GameWeaponTypeByte(WeaponFilter(200)) == 0);
 }
 
 static void TestResolveTeams() {
@@ -465,21 +475,33 @@ static void TestStartLoadoutsAhead() {
 }
 
 static void TestGearPool() {
+    const WeaponFilter any = WeaponFilter::Any;
     GearPool p;
-    CHECK(p.Wants(4, 2) && p.size() == 0 && p.Take(4).empty());
-    p.Put(4, {1});
-    p.Put(4, {});                                                               // a failed generation
-    CHECK(p.size() == 1 && p.Wants(4, 2));
-    p.Put(4, {2});
-    CHECK(!p.Wants(4, 2) && p.Wants(4, 3) && !p.Wants(4, 0));
-    CHECK(p.Take(4) == std::vector<uint8_t>({1}) && p.Take(4) == std::vector<uint8_t>({2}) && p.Take(4).empty());
-    p.Put(4, {3});
-    CHECK(p.Take(5).empty() && p.size() == 0);                                  // another tier empties it
-    p.Put(5, {5});
-    CHECK(p.Wants(6, 1) && p.size() == 0);
-    p.Put(6, {6});
-    p.Put(7, {7});
-    CHECK(p.size() == 1 && p.Take(7) == std::vector<uint8_t>({7}));
+    CHECK(p.Wants(4, any, 2) && p.size() == 0 && p.Take(4, any).empty());
+    p.Put(4, any, {1});
+    p.Put(4, any, {});                                                          // a failed generation
+    CHECK(p.size() == 1 && p.Wants(4, any, 2));
+    p.Put(4, any, {2});
+    CHECK(!p.Wants(4, any, 2) && p.Wants(4, any, 3) && !p.Wants(4, any, 0));
+    CHECK(p.Take(4, any) == std::vector<uint8_t>({1}) && p.Take(4, any) == std::vector<uint8_t>({2}) && p.Take(4, any).empty());
+    p.Put(4, any, {3});
+    CHECK(p.Take(5, any).empty() && p.size() == 0);                             // another tier empties it
+    p.Put(5, any, {5});
+    CHECK(p.Wants(6, any, 1) && p.size() == 0);
+    p.Put(6, any, {6});
+    p.Put(7, any, {7});
+    CHECK(p.size() == 1 && p.Take(7, any) == std::vector<uint8_t>({7}));
+    // Keyed by the weapon filter too: a roll made under one filter is never served under another.
+    GearPool w;
+    w.Put(3, WeaponFilter::Polearms, {9});
+    CHECK(w.size() == 1 && !w.Wants(3, WeaponFilter::Polearms, 1));
+    CHECK(w.Wants(3, WeaponFilter::Swords2H, 1) && w.size() == 0);              // the filter changed: emptied
+    w.Put(3, WeaponFilter::Swords2H, {8});
+    CHECK(w.Take(3, any).empty() && w.size() == 0);
+    w.Put(3, WeaponFilter::AxesMaces, {7});
+    CHECK(w.Take(3, WeaponFilter::Polearms).empty());
+    w.Put(3, WeaponFilter::AxesMaces, {6});
+    CHECK(w.Take(3, WeaponFilter::AxesMaces) == std::vector<uint8_t>({6}));
 }
 
 // Spec revision (user, 2026-10-25): what clears the dropped weapons and loose armour differs per format. Duel: each new
