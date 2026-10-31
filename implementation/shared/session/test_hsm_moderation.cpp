@@ -95,6 +95,18 @@ static void TestCommands() {
     c = ParseModCommand("say  match starts soon ", true);
     CHECK(c.kind == ModCommandKind::Say && c.target == "match starts soon");
     CHECK(ParseModCommand("hello", true).kind == ModCommandKind::None);
+    // /clear [all|weapons|armor|rocks]: a mask; no word is everything; an unknown word is a Clear with mask 0 (the usage reply)
+    c = ParseModCommand("/clear");
+    CHECK(c.kind == ModCommandKind::Clear && c.mask == kClearAll);
+    CHECK(ParseModCommand("/clear all").mask == kClearAll && ParseModCommand("/CLEAR  Weapons ").mask == kClearWeapons);
+    CHECK(ParseModCommand("/clear armor").mask == kClearArmor && ParseModCommand("/clear armour").mask == kClearArmor);
+    CHECK(ParseModCommand("/clear rocks").mask == kClearRocks && ParseModCommand("/clear rocks").kind == ModCommandKind::Clear);
+    for (const char* bad : {"/clear junk", "/clear weapons armor", "/clear 7", "/clear -all"}) {
+        c = ParseModCommand(bad);
+        CHECK(c.kind == ModCommandKind::Clear && c.mask == 0);
+    }
+    CHECK(ParseModCommand("clear rocks", true).kind == ModCommandKind::Clear && ParseModCommand("clear", true).mask == kClearAll);
+    CHECK(ParseModCommand("clear rocks").kind == ModCommandKind::None && ParseModCommand("hello /clear").kind == ModCommandKind::None);   // chat needs the slash
 }
 
 static void TestTargets() {

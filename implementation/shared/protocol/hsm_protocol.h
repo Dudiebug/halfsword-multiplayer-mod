@@ -85,10 +85,11 @@ enum class MsgType : uint8_t {
     RemoteWrite = 56, // sender -> host -> target's owner, reliable (rev 31): a write the game made onto a stand-in, for its owner to make (sync/hsm_remote.h)
     HandOff = 57,     // writer -> host -> everyone, reliable (rev 32): lease entries, who simulates a fighter coupled to another (sync/hsm_handoff.h)
     HandOffAsk = 58,  // asker -> host -> victim's owner, reliable (rev 32): my fighter grabbed or stabbed yours (sync/hsm_handoff.h)
+    GroundClear = 59, // host -> client, reliable (rev 35): the host's /clear: each machine clears its own weapons, armour and moved props (session/hsm_ground_clear.h)
 };
-// The highest type that has a decoder (HandOffAsk); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
-constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::HandOffAsk);
-constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::HandOffAsk);
+// The highest type that has a decoder (GroundClear); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
+constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::GroundClear);
+constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::GroundClear);
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
 enum class Axis : uint8_t {

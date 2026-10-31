@@ -180,6 +180,7 @@ public:
     // Zombies: how many zombies may be alive at once, one per player in the session (the host's own fighter too), at
     // least one and at most kMaxBotsAlive; the host sets the count every tick from its roster. Other formats: kMaxBotsAlive.
     void SetPlayers(int players) { players_ = players; }
+    void SetResultsMs(uint32_t ms) { resultsMs_ = ms; }   // how long the results show before the rematch (Progression: 3 s, then the Tavern)
     int MaxBotsAlive() const;
     void AddFighter(const FighterInfo& f);              // joins mid-match: alive; a player with an id comes back with the score they left with
     // A fighter leaves for good. Its score goes with the slot (the slot's next player starts at 0), but a player with an id has
@@ -253,6 +254,7 @@ private:
     MatchConfig cfg_;
     MatchPhase phase_ = MatchPhase::Idle;
     uint32_t phaseStart_ = 0;
+    uint32_t resultsMs_ = kResultsMs;
     std::map<uint8_t, F> fighters_;
     std::map<int, int> score_;
     std::map<uint64_t, PlayerScore> bank_;              // by id: scores of players not in the match now (left, or not back since a migration)

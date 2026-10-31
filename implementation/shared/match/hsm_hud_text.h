@@ -60,7 +60,8 @@ inline bool InWaveBreak(const MatchInfo& m) {
     return IsBotFormat(Format(m.format)) && m.roundGapLeftMs && (m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath));
 }
 
-inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
+// `oneFight`: a Progression fight (HUD) - the host takes everyone back to the Tavern after the results.
+inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFight = false) {
     Format f = Format(m.format);
     if (InWaveBreak(m)) {                                  // "Wave 2 cleared   next wave in 45   hold G to skip (1/2 ready)"
         int players = 0;
@@ -82,7 +83,7 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity) {
             else if (f == Format::PlayersVsBots) who = m.winner == kBotTeam ? "BOTS WIN" : "PLAYERS WIN";
             else if (f == Format::FreeForAll || f == Format::Duel) who = m.winner == int(myEntity) ? "YOU WIN" : Upper(NameOf(m, uint8_t(m.winner))) + " WINS";
             else who = TeamName(m.winner) + " WINS";
-            return who + "   rematch in " + Seconds(m.timeLeftMs);
+            return who + (oneFight && IsBotFormat(f) ? "   back to the Tavern in " : "   rematch in ") + Seconds(m.timeLeftMs);
         }
         case MatchPhase::SuddenDeath:
             return "SUDDEN DEATH   " + (f == Format::FreeForAll ? std::string("next kill wins") : TeamScores(m));
