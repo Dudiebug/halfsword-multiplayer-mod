@@ -206,14 +206,67 @@ static void TestBrowser() {
     }
     l.found.assign(8, ok);
     CHECK(BuildLobbyScene(l).browser.size() == kBrowserRows && kBrowserRows == 6);
-    l.maxPlayers = 2;
+    for (LobbyFound& f : l.found) f.maxPlayers = 2;          // the limit is each lobby's own (hsm_max), not one global
     s = BuildLobbyScene(l);
-    CHECK(!s.browser.empty() && !s.browser[0].joinable && s.browser[0].players == "2/2");
+    CHECK(!s.browser.empty() && !s.browser[0].joinable && s.browser[0].players == "2/2" && s.browser[0].note.text == "Full");
     l.phase = LobbyPhase::Joining;
     CHECK(BuildLobbyScene(l).browser.empty());
     LobbyLocal in = InLobby(true);
     in.found = {ok};
     CHECK(BuildLobbyScene(in).browser.empty());           // the browser is for finding a lobby
+}
+
+// The host's player limit: each listing carries its own, the row reads "3/4", Full and Has room go by it, the title and the
+// Players row show the lobby's.
+static void TestPlayerLimit() {
+    LobbyLocal l; l.phase = LobbyPhase::Idle; l.version = "0.2.0";
+    LobbyFound four; four.name = "Four"; four.players = 3; four.maxPlayers = 4; four.compatible = true;
+    LobbyFound fourFull = four; fourFull.name = "FourFull"; fourFull.players = 4;
+    LobbyFound two; two.name = "Two"; two.players = 2; two.maxPlayers = 2; two.compatible = true;
+    LobbyFound legacy; legacy.name = "Legacy"; legacy.players = 5; legacy.compatible = true;      // no hsm_max: 8
+    l.found = {four, fourFull, two, legacy};
+    LobbyScene s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 4);
+    if (s.browser.size() == 4) {
+        CHECK(s.browser[0].players == "3/4" && s.browser[0].joinable && s.browser[0].note.text == "Join");
+        CHECK(s.browser[1].players == "4/4" && !s.browser[1].joinable && s.browser[1].note.text == "Full");
+        CHECK(s.browser[2].players == "2/2" && !s.browser[2].joinable && s.browser[2].note.text == "Full");
+        CHECK(s.browser[3].players == "5/8" && s.browser[3].joinable);
+    }
+    l.maxPlayers = 3;                                                   // the in-lobby limit never leaks into the browser
+    CHECK(BuildLobbyScene(l).browser[0].players == "3/4");
+    l.maxPlayers = 8;
+    // Has room goes by the lobby's own limit.
+    CHECK(PassesFilter(four, BrowserFilter{}) && PassesFilter(fourFull, BrowserFilter{}));
+    BrowserFilter room; room.hasRoom = true;
+    CHECK(PassesFilter(four, room) && !PassesFilter(fourFull, room) && !PassesFilter(two, room) && PassesFilter(legacy, room));
+    LobbyFound seven = legacy; seven.players = 7;
+    CHECK(PassesFilter(seven, room));
+    seven.players = 8;
+    CHECK(!PassesFilter(seven, room));
+    l.filter = room;
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 2 && s.browser[0].players == "3/4" && s.browser[1].players == "5/8" && s.browserCount == "2 of 4 lobbies shown");
+    // In the lobby: the title is n/limit and the Players row reads the limit (the host steps it, members read it).
+    LobbyLocal in = InLobby(true);
+    in.maxPlayers = 4;
+    LobbyScene h = BuildLobbyScene(in);
+    CHECK(h.playersTitle == "PLAYERS 2/4" && h.hasPlayerLimit);
+    CHECK(h.playerLimit.id == LobbyRow::Players && h.playerLimit.label == "Players" && h.playerLimit.value == "4" && h.playerLimit.enabled && !h.playerLimit.hint.empty());
+    for (const SettingRow& r : h.settings) CHECK(r.id != LobbyRow::Players);   // it is not a match setting
+    LobbyLocal mem = InLobby(false);
+    mem.maxPlayers = 6;
+    LobbyScene m = BuildLobbyScene(mem);
+    CHECK(m.hasPlayerLimit && m.playerLimit.value == "6" && !m.playerLimit.enabled && m.playersTitle == "PLAYERS 2/6");
+    LobbyLocal prog = InLobby(true); prog.progression = true;
+    CHECK(BuildLobbyScene(prog).hasPlayerLimit);
+    LobbyLocal idle; idle.phase = LobbyPhase::Idle;
+    CHECK(!BuildLobbyScene(idle).hasPlayerLimit);
+    CHECK(SectionOf(LobbyRow::Players) == LobbySection::Match);
+    // StepSetting leaves the config alone for it: the limit is the lobby's (StepPlayerLimit).
+    MatchConfig c;
+    const MatchConfig stepped = StepSetting(c, LobbyRow::Players, 1);
+    CHECK(stepped.scoreLimit == c.scoreLimit && stepped.format == c.format);
 }
 
 static void TestOutOfLobby() {
@@ -715,6 +768,7 @@ int main() {
     TestPill();
     TestHeader();
     TestBrowser();
+    TestPlayerLimit();
     TestOutOfLobby();
     TestHostAgainstMember();
     TestRowsPerFormat();

@@ -91,6 +91,7 @@
 #include "session/hsm_reconnect.h"
 #include "session/hsm_report.h"
 #include "session/hsm_roster.h"
+#include "session/hsm_player_limit.h"
 #include "session/hsm_spawn_anchor.h"
 #include "session/hsm_spawn.h"
 #include "session/hsm_travel_gate.h"
@@ -3707,6 +3708,7 @@ private:
         if (h.revision != kProtocolRevision) r.reason = RejectReason::BadRevision;
         else if (h.buildKey != BuildKey()) r.reason = RejectReason::BuildMismatch;
         else if (const BanEntry* b = BannedEntry(ev)) r.reason = b->kick ? RejectReason::Kicked : RejectReason::Banned;
+        else if (!RoomForHello(roster_.size(), roster_.Find(key) != nullptr, lobby_.MaxPlayers())) r.reason = RejectReason::Full;   // the host's player limit; a rejoin within its reservation still holds its seat
         else if (!(slot = roster_.Add(key, h.name))) r.reason = RejectReason::Full;
         if (slot && reservations_.Claim(key, NowMs())) {        // rejoin: score kept, fighter respawns fresh
             HSM_LOG("host: slot %u rejoined within its reservation", *slot);

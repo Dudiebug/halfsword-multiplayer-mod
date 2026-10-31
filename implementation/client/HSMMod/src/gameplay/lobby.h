@@ -25,6 +25,7 @@ struct LobbyListing {
     steam::SteamId id = 0;
     std::string name, map, mode;
     int players = 0;      // players: a role=server lobby's server is not counted
+    int maxPlayers = kMaxLobbyMembers;   // the host's player limit (hsm_max); 8 when the lobby has none
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
 };
@@ -51,6 +52,10 @@ public:
     bool SendChat(const std::string& text);        // to every member (Steam lobby chat); false: not in a lobby or Steam refused
     void SetType(steam::LobbyType type);
     void SetReady(bool ready);
+    // The host's player limit, 2..8 (Steam's member limit and lobby data hsm_max). Never below the players already in:
+    // nobody is kicked by it. Before the lobby exists it is what Host creates it with.
+    int MaxPlayers() const;
+    void SetMaxPlayers(int n);
     void SetPublicState(const std::string& state, const std::string& map, const std::string& mode);
     void RefreshList();
     // Match settings (lobby data, host writes) and teams (own pick in member data, host moves in lobby data).
@@ -81,6 +86,7 @@ private:
     void RefreshMembers();
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
+    int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads
     bool server_ = false;   // Host(type, true): this machine runs role=server
     State state_ = State::Offline;
     steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;   // joining_: the lobby Join asked for, until its enter

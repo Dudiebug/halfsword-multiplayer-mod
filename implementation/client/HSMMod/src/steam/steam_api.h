@@ -53,6 +53,8 @@ void JoinLobby(SteamId lobby);
 void LeaveLobby(SteamId lobby);
 bool SetLobbyType(SteamId lobby, LobbyType type);
 bool SetLobbyJoinable(SteamId lobby, bool joinable);
+bool SetLobbyMemberLimit(SteamId lobby, int maxMembers);   // optional export; false without it (the host's own check stays)
+int LobbyMemberLimit(SteamId lobby);                       // 0 unknown
 bool SetLobbyData(SteamId lobby, const std::string& key, const std::string& value);
 std::string LobbyData(SteamId lobby, const std::string& key);
 void SetMemberData(SteamId lobby, const std::string& key, const std::string& value);

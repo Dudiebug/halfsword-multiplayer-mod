@@ -8,6 +8,7 @@
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_map_list.h"
 #include "session/hsm_build.h"
+#include "session/hsm_player_limit.h"
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -35,6 +36,7 @@ struct BrowserFilter {
 struct LobbyFound {                     // a public lobby from Find
     std::string name, map, mode;
     int players = 0;
+    int maxPlayers = 8;                 // the host's player limit (lobby data hsm_max; 8 when the lobby has none)
     bool compatible = false;
     std::string reason;                 // why not, when !compatible
 };
@@ -57,11 +59,12 @@ struct LobbyLocal {
     std::vector<LobbyPlayer> players;
     std::vector<LobbyFound> found;
     BrowserFilter filter;
-    int maxPlayers = 8;
+    int maxPlayers = 8;                 // in a lobby: the host's player limit (Lobby::MaxPlayers)
 };
 
-// MyTeam stays last: ui/menu.cpp makes one stepper per row up to it.
-enum class LobbyRow : uint8_t { Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
+// Players is the lobby's own player limit, not a MatchConfig field: the scene offers it as LobbyScene::playerLimit (it is
+// in no SettingsFor list) and the page applies it with Lobby::SetMaxPlayers. First, so it leads the MATCH section.
+enum class LobbyRow : uint8_t { Players, Limit, Time, Respawn, Gear, Tier, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, Sync };   // Sync last: the menu builds rows in this order
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
@@ -121,10 +124,10 @@ inline BrowserFilter ToggleFilter(BrowserFilter f, size_t chip) {
     }
     return f;
 }
-inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f, int maxPlayers) {
+inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f) {
     const auto& modes = BrowserModes();
     if (f.mode != 0 && f.mode < modes.size() && l.mode != modes[f.mode]) return false;
-    if (f.hasRoom && l.players >= maxPlayers) return false;
+    if (f.hasRoom && LobbyIsFull(l.players, l.maxPlayers)) return false;   // each lobby's own limit
     if (f.compatibleOnly && !l.compatible) return false;
     return true;
 }
@@ -147,6 +150,8 @@ struct LobbyScene {
     bool balance = false;               // Auto-balance: the host, in the formats with teams
     std::vector<ModeCard> modes;        // the grid's reading order, two to a row
     std::vector<SettingRow> settings;
+    SettingRow playerLimit;             // the Players stepper (LobbyRow::Players): the host steps it, members read it; in a lobby only
+    bool hasPlayerLimit = false;
     std::string hostOnly;               // members: "Only the host can change these."
     std::vector<MapCard> maps;          // the pickable maps, kMaps order; none for Progression
     bool start = false;                 // START MATCH: the host, while every known build matches (or the override is on)
@@ -198,7 +203,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             std::vector<int> o(std::begin(kClearGroundOptions), std::end(kClearGroundOptions));
             c.clearGroundMin = uint8_t(StepOf(o, c.clearGroundMin, dir)); break;
         }
-        case LobbyRow::MyTeam: break;
+        case LobbyRow::Players: case LobbyRow::MyTeam: break;   // the player limit is the lobby's (StepPlayerLimit); the team pick goes its own way
         case LobbyRow::Sync: c.hostPhysics = !c.hostPhysics; break;
     }
     return c;
@@ -304,6 +309,11 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
     r.id = s;
     r.enabled = l.host;
     switch (s) {
+        case LobbyRow::Players:
+            r.label = "Players";
+            r.value = std::to_string(l.maxPlayers);
+            r.hint = "How many players the lobby takes. It cannot go below the players already in; nobody is kicked.";
+            break;
         case LobbyRow::Limit:
             r.label = duel ? "Rounds to win" : "Score limit";
             r.value = std::to_string(c.scoreLimit);
@@ -435,7 +445,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
     if (s.idle) {
         s.filters = FilterChips(l.filter);
         std::vector<size_t> shown;
-        for (size_t i = 0; i < l.found.size(); ++i) if (PassesFilter(l.found[i], l.filter, l.maxPlayers)) shown.push_back(i);
+        for (size_t i = 0; i < l.found.size(); ++i) if (PassesFilter(l.found[i], l.filter)) shown.push_back(i);
         if (l.filter.mostPlayers)
             std::stable_sort(shown.begin(), shown.end(), [&](size_t a, size_t b) { return l.found[a].players > l.found[b].players; });
         if (!l.found.empty())
@@ -449,11 +459,11 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
             BrowserRow r;
             r.source = at;
             r.name = f.name.empty() ? "Unnamed lobby" : f.name;
-            r.players = std::to_string(f.players) + "/" + std::to_string(l.maxPlayers);
+            r.players = std::to_string(f.players) + "/" + std::to_string(f.maxPlayers);
             r.detail = f.map;
             if (!f.mode.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mode;
             if (!f.compatible) r.note = {f.reason.empty() ? std::string("Incompatible") : f.reason, style::kWarn};
-            else if (f.players >= l.maxPlayers) r.note = {"Full", style::kWarn};
+            else if (LobbyIsFull(f.players, f.maxPlayers)) r.note = {"Full", style::kWarn};
             else { r.note = {"Join", style::kOk}; r.joinable = true; }
             s.browser.push_back(r);
         }
@@ -499,6 +509,8 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.modes.push_back(p);
     }
     for (size_t i = 0; i < s.modes.size(); ++i) s.modes[i].group = ModeGroupAt(i);
+    s.playerLimit = Row(l, LobbyRow::Players);
+    s.hasPlayerLimit = true;
     if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
     else s.settings.push_back(Row(l, LobbyRow::Damage));   // co-op fights take player damage too
     if (!l.host) s.hostOnly = "Only the host can change these.";

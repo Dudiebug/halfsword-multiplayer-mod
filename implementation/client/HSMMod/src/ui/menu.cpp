@@ -776,7 +776,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     l.myBuild = game::ModBuild();
     l.allowBuildMismatch = game::AllowBuildMismatch();
     l.damage = game::VanillaDamageRange();
-    l.maxPlayers = game::kMaxLobbyMembers;
+    l.maxPlayers = lobby.MaxPlayers();
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
@@ -797,7 +797,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     }
     for (const game::LobbyListing& f : lobby.listings()) {
         LobbyFound o;
-        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.compatible = f.compatible; o.reason = f.reason;
+        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.compatible = f.compatible; o.reason = f.reason;
         l.found.push_back(o);
     }
     return l;
@@ -817,6 +817,13 @@ void PaintTabs() {
         t.line.Color(on ? style::kMenuAccent : kClear);
         if (g.tabPages[i]) g.tabPages[i].Show(on);
     }
+}
+
+// The scene's row for the i-th stepper (a LobbyRow value): the Players row is the lobby's own, not a match setting.
+const SettingRow* RowFor(const LobbyScene& s, size_t i) {
+    if (i == size_t(LobbyRow::Players)) return s.hasPlayerLimit ? &s.playerLimit : nullptr;
+    for (const SettingRow& r : s.settings) if (size_t(r.id) == i) return &r;
+    return nullptr;
 }
 
 void Draw(const LobbyScene& s) {
@@ -905,8 +912,7 @@ void Draw(const LobbyScene& s) {
     for (size_t i = 0; i < g.steppers.size(); ++i) {
         StepperView& v = g.steppers[i];
         if (!v.box) continue;
-        const SettingRow* row = nullptr;
-        for (const SettingRow& r : s.settings) if (size_t(r.id) == i) row = &r;
+        const SettingRow* row = RowFor(s, i);
         v.box.Show(row != nullptr);
         if (!row) continue;
         used[size_t(SectionOf(row->id))] = true;
@@ -1039,7 +1045,7 @@ void UpdatePanel(Session& session) {
 void UpdateOpenLabel(Session& session) {
     game::Lobby& lobby = session.lobby();
     std::string label = "MULTIPLAYER";
-    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(game::kMaxLobbyMembers);
+    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(lobby.MaxPlayers());
     g.openButton.label.Set(label);
 }
 
@@ -1183,10 +1189,11 @@ void HandleClicks(Session& session) {
         if (!v.box) continue;
         int dir = Clicked(v.prev.card) ? -1 : 0;
         if (Clicked(v.next.card)) dir = 1;
-        const SettingRow* row = nullptr;
-        for (const SettingRow& r : s.settings) if (size_t(r.id) == i) row = &r;
+        const SettingRow* row = RowFor(s, i);
         if (!act(dir != 0, g.tab == 1 && row && row->enabled)) continue;
-        if (row->id == LobbyRow::MyTeam) {
+        if (row->id == LobbyRow::Players) {         // the lobby's own limit, not a MatchConfig field
+            lobby.SetMaxPlayers(StepPlayerLimit(lobby.MaxPlayers(), lobby.PlayerCount(), dir));
+        } else if (row->id == LobbyRow::MyTeam) {
             int mine = kNoTeam;
             for (const game::LobbyMember& m : lobby.members()) if (m.id == steam::MySteamId()) mine = m.team;
             lobby.SetTeamPick(StepTeamPick(int8_t(mine), teams, dir));
