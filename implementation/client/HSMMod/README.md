@@ -20,6 +20,22 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll` and `build/dwmapi.map`. `tools/check.sh all` from the repo root runs every offline check
 (see `AGENTS.md`).
 
+## New in 0.8.0-pre23
+
+- **Teams of 2 to 4:** the lobby's Teams row (lobby key `hsm_teams`) sets the count; MatchInfo carries it. With
+  `role=server`, `server_format=teams` uses `server_teams=2..4`, and `server_format=teams2|teams3|teams4` sets the count
+  directly. `server_format=lms` is Last man standing.
+- **Duel is for 2 players, Last man standing for 2 or more.** A Duel lobby switches to Last man standing when a 3rd
+  player joins; a 3rd player in a running Duel is benched until the rematch, which runs as Last man standing.
+- **Weapons row** (lobby key `hsm_wpn`: 0 Any, 1 1H swords, 2 2H swords, 3 Polearms, 4 Axes & maces): the game's own
+  weapon filter for random-by-tier and identical gear. The log lists the filter fields and the byte it writes.
+- **Player limit 2 to 8** (lobby key `hsm_max`, also the Steam lobby's member limit) and **lobby password** (lobby key
+  `hsm_lock`: only whether the lobby is locked, never the password; the host hands it to players it lets in with
+  LobbySecret).
+- **`/clear [all|weapons|armor|rocks]`** for the host and admins; **emoji** in chat (`:shortcode:`, `/emoji`, Ctrl+V);
+  Progression fights return to the Tavern after 3 s.
+- Protocol revision 35: 0.8.0-pre23 connects only to pre23.
+
 ## New in 0.7.0 (pre-release)
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.

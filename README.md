@@ -8,9 +8,9 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre21 tries out optional host physics, the same strength for every player by tier, steadier
-> bridges and chains, Zombies on the Abyss and give-up in Survival and Zombies, with fixes from the latest play-session
-> reports. It connects only to 0.8.0-pre21.
+> **Prerelease:** v0.8.0-pre23 tries out Teams of 2 to 4, a Duel for 2 players with Last man standing for more, a
+> Weapons row for random gear, a player limit and a password for lobbies, emoji in chat, a `/clear` host command and a
+> shorter Progression results screen. It connects only to 0.8.0-pre23.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 
@@ -54,9 +54,23 @@ mod logs "unsupported build" and does nothing.
 
 - **Steam lobbies:** host for friends or in public, invite through the Steam overlay, join from the friends list.
   Traffic goes through Steam's relay network, so no port forwarding is needed.
-- **Up to 8 players** with their own loadouts, carried over from each player's game, plus bots.
+- **Up to 8 players** with their own loadouts, carried over from each player's game, plus bots. The host sets the
+  player limit (2 to 8) in the lobby; the browser shows e.g. 3/4, or Full. The limit cannot go below the players
+  already in.
 - **Match modes**, scores, chat and spectating with a follow camera behind the fighter you watch. **Brawl** is
   free-for-all with bare fists: everyone spawns naked with no weapons, and your own gear is untouched afterwards.
+- **Teams of 2, 3 or 4:** one TEAMS card and a team-count row in the lobby. Each team has its own colour and score.
+- **Duel is for exactly 2 players.** **Last man standing** is for 2 or more: rounds, and the last one alive takes the
+  round. A Duel lobby switches to it when a 3rd player joins. A 3rd player who joins a running Duel waits until the
+  rematch, which runs as Last man standing.
+- **Weapons row** (random-by-tier and identical gear): Any, 1H swords, 2H swords, Polearms, or Axes & maces. It limits
+  the weapons the gear roll can pick.
+- **Lobby password:** the host can lock a lobby. Locked lobbies show `[locked]` in the browser; the password is asked
+  on click and on invites. 3 wrong tries mean a 60 s wait. A "No password" filter hides locked lobbies. Changing the
+  password kicks nobody.
+- **Progression fights** return to the Tavern 3 s after the result (a rematch screen still keeps 10 s).
+- **Emoji in chat:** type `:shortcode:` (for example `:smile:`); `/emoji` lists them. Ctrl+V pastes the clipboard into
+  the chat line.
 - **Name tags** over other fighters, hidden behind walls, in team colours in team modes.
 - **Hold G to give up** in FFA, team matches and Duel: you die and the last player who hit you in the past 60 s gets
   the kill.
@@ -99,7 +113,8 @@ tag shows who is talking. Steam must be running.
   or ban, everyone else can start a vote kick and vote YES or NO), VOICE (your microphone) and NETWORK (role, ping to
   the host, direct links). GAME MENU opens the game's own pause menu, and MULTIPLAYER MENU there brings you back.
   RESUME, REPORT A BUG and LEAVE SESSION are at the bottom.
-- **Chat commands for the host:** `/kick <name>`, `/ban <name> [30m|2h|7d|perm]`, `/players`, `/bans`, `/unban`.
+- **Chat commands for the host:** `/kick <name>`, `/ban <name> [30m|2h|7d|perm]`, `/players`, `/bans`, `/unban`,
+  `/clear [all|weapons|armor|rocks]` (host and admins; rocks means loose props that were moved, scenery stays).
 - **Vote kick:** `/votekick <name>`, then `/yes` or `/no` (the host votes too). A passed vote keeps the player out for
   15 minutes. On a `role=server` host players can also start a vote ban (VOTE BAN or `/voteban <name>`): it needs two
   thirds of the votes and bans the player for 7 days.
@@ -152,6 +167,9 @@ Settings live in `HSMMod.ini`, next to the DLL, under `[net]` unless noted. The 
 - **Direct IP was removed in 0.8.0.** Play through Steam lobbies; an old `role=host` or `role=client` in `HSMMod.ini`
   is ignored.
 - Loadouts with no fabric armour show no team colour.
+- **Lobby password:** Steam has no lobby kick, so a modified client that skips the check can stay in the Steam lobby
+  and read lobby chat; it never gets a fighter, match traffic or the password.
+- **Emoji:** the chat uses the game's font; emoji it has no glyph for show as boxes.
 
 ## Bug reports and privacy
 
