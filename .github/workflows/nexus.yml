@@ -1,0 +1,107 @@
+# Uploads each full release to Nexus Mods (new version of the mod's main file).
+# Runs when a release is published as full or a pre-release is promoted, or by hand with a tag.
+# Pre-releases and drafts are never uploaded.
+name: nexus
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload (e.g. v0.8.0)"
+        type: string
+        required: true
+concurrency:
+  group: nexus-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+permissions: {}
+
+jobs:
+  nexus:
+    if: github.repository == 'Dudiebug/halfsword-multiplayer-mod'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check the release
+        id: rel
+        env:
+          MOD_ID: ${{ vars.NEXUS_MOD_ID }}
+          FILE_ID: ${{ vars.NEXUS_FILE_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$MOD_ID" ] && [ -n "$FILE_ID" ] || { echo "::error::set NEXUS_MOD_ID and NEXUS_FILE_ID first"; exit 1; }
+          info=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,body)
+          if [ "$(jq -r '.isPrerelease or .isDraft' <<<"$info")" = "true" ]; then
+            echo "::error::$TAG is a pre-release or draft; only full releases go to Nexus"; exit 1
+          fi
+          {
+            echo "changelog<<HSM_NOTES_EOF"
+            jq -r .body <<<"$info"
+            echo "HSM_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the DLL
+        run: |
+          set -euo pipefail
+          # Assets can land a moment after the release is published; wait up to 5 minutes.
+          for i in $(seq 1 30); do
+            if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p dwmapi.dll -D "$RUNNER_TEMP/dl" --clobber 2>/dev/null; then
+              break
+            fi
+            [ "$i" -eq 30 ] && { echo "::error::$TAG has no dwmapi.dll asset"; exit 1; }
+            sleep 10
+          done
+          sha256sum "$RUNNER_TEMP/dl/dwmapi.dll"
+
+      # The zip mirrors the game folder so mod managers put the DLL next to the exe.
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          stage="$RUNNER_TEMP/nexus"
+          mkdir -p "$stage/HalfswordUE5/Binaries/Win64"
+          cp "$RUNNER_TEMP/dl/dwmapi.dll" "$stage/HalfswordUE5/Binaries/Win64/"
+          cat > "$stage/INSTALL.txt" <<'EOF'
+          Half Sword Multiplayer (HSMMod)
+
+          Install
+          1. Extract this zip into your Half Sword folder (the one with HalfswordUE5 in it),
+             or copy dwmapi.dll into <Half Sword>/HalfswordUE5/Binaries/Win64/ by hand.
+          2. Using UE4SS? Copy HSMMod's dwmapi.dll over UE4SS's dwmapi.dll. HSMMod then loads UE4SS for you.
+          3. Start the game and click MULTIPLAYER on the main menu.
+
+          Every player in a lobby needs the same HSMMod version.
+          Discord: https://discord.gg/QZcSFnwxra
+          GitHub: https://github.com/Dudiebug/halfsword-multiplayer-mod
+          EOF
+          zip_name="HalfSwordMP-$ver.zip"
+          (cd "$stage" && zip -r "$GITHUB_WORKSPACE/$zip_name" .)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Nexus Mods
+        id: upload
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2 # v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUS_FILE_ID }}
+          mod_id: ${{ vars.NEXUS_MOD_ID }}
+          filename: ${{ steps.pkg.outputs.zip }}
+          display_name: Half Sword Multiplayer ${{ steps.pkg.outputs.version }}
+          version: ${{ steps.pkg.outputs.version }}
+          update_mod_version: true
+          archive_existing_version: true
+          changelog: ${{ steps.rel.outputs.changelog }}
+
+      - name: Summary
+        env:
+          ZIP: ${{ steps.pkg.outputs.zip }}
+          VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          echo "Uploaded $ZIP to Nexus Mods (version id $VERSION_ID)" >> "$GITHUB_STEP_SUMMARY"
