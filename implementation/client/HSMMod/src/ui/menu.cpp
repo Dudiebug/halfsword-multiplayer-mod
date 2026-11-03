@@ -621,7 +621,9 @@ void BuildRulesTab(Box& page) {
         v.value.Align(Justify::Center);
         v.hint.Wrap(true);
         valueBox.Width(230);
-        if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) {}
+        // The Damage row shows the slider instead: its value text is in no tree, so garbage collection frees it, and a
+        // later Set on it crashed (0.8.0-pre26). Drop it; the UpdatePanel writes to an empty Text are no-ops.
+        if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) v.value = Text{};
         else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(text, v.label, 0);
         AddToVerticalBox(text, v.hint, 2);

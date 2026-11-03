@@ -412,17 +412,27 @@ bool LooksLikeObject(const UObject* obj) {
     slot = v;
     return true;
 }
+
+// LooksLikeObject, and the object array still holds it at its own slot. A garbage-collected object can keep its vtable
+// until the memory is reused, so the vtable alone passes it (0.8.0-pre26: a freed TextBlock got through to the engine at
+// exe+0x12C1A91, or faulted in FindFunction on its overwritten class). Before the object array is known, the vtable is all.
+bool LiveObject(const UObject* obj) {
+    if (!LooksLikeObject(obj) || IsBadReadPtr(obj, kObjOuter + 8)) return false;
+    return !g_objects || ObjectAt(ObjectIndex(obj)) == obj;
+}
+
+void LogRefused(const char* fn, const UObject* obj) {
+    static int logged = 0;
+    if (++logged > 5) return;
+    HSM_LOG("engine: call of %s refused: %p is not a live object (a stale pointer)", fn, static_cast<const void*>(obj));
+    LogCallStack("refused call");
+}
 }  // namespace
 
 bool ProcessEvent(UObject* obj, UFunction* fn, void* params) {
     using Fn = void (*)(UObject*, UFunction*, void*);
-    if (!LooksLikeObject(obj)) {
-        static int logged = 0;
-        if (++logged <= 5) {
-            HSM_LOG("engine: call of %s refused: %p is not an object (a stale pointer)", fn ? ObjectName(reinterpret_cast<UObject*>(fn)).c_str() : "?",
-                    static_cast<const void*>(obj));
-            LogCallStack("refused call");
-        }
+    if (!LiveObject(obj)) {
+        LogRefused(fn ? ObjectName(reinterpret_cast<UObject*>(fn)).c_str() : "?", obj);
         return false;
     }
     void** vtable = Read<void**>(obj, 0);
@@ -464,7 +474,9 @@ bool SetBool(UObject* obj, const std::string& property, bool value) {
 Call::Call(UObject* target, UFunction* fn) : target_(target), fn_(fn) {
     if (fn_) buf_.assign(size_t(ParamsSize(fn_)) + 16, 0);
 }
-Call::Call(UObject* target, const std::string& name) : Call(target, target ? FindFunction(ClassOf(target), name) : nullptr) {}
+// A stale target is refused before its class is read: FindFunction would walk whatever the freed memory holds.
+Call::Call(UObject* target, const std::string& name)
+    : Call(target, !target ? nullptr : LiveObject(target) ? FindFunction(ClassOf(target), name) : (LogRefused(name.c_str(), target), nullptr)) {}
 
 void* Call::slot(const std::string& param, size_t size) {
     if (!fn_) return nullptr;
