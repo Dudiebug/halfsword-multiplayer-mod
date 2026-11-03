@@ -25,7 +25,11 @@ static void TestStatus() {
     m.phase = uint8_t(MatchPhase::SuddenDeath); CHECK(Has(StatusLine(m, 1), "SUDDEN DEATH"));
     m.phase = uint8_t(MatchPhase::Results); m.winner = 1; m.timeLeftMs = 9100;
     s = StatusLine(m, 1); CHECK(Has(s, "BLUE WINS") && Has(s, "rematch in 10"));
+    CHECK(!Has(StatusLine(m, 1, true), "Tavern"));                              // a team match always has the rematch
     m.phase = uint8_t(MatchPhase::Idle); CHECK(StatusLine(m, 1).empty());
+    MatchInfo p; p.format = uint8_t(Format::PlayersVsBots); p.phase = uint8_t(MatchPhase::Results); p.winner = kHumanTeam; p.timeLeftMs = 2100;
+    CHECK(Has(StatusLine(p, 1), "rematch in 3") && !Has(StatusLine(p, 1), "Tavern"));
+    s = StatusLine(p, 1, true); CHECK(Has(s, "PLAYERS WIN") && Has(s, "back to the Tavern in 3") && !Has(s, "rematch"));
     MatchInfo f; f.format = uint8_t(Format::FreeForAll); f.scoreLimit = 5; f.phase = uint8_t(MatchPhase::Live);
     f.scores = {{1, 2}, {2, 4}}; f.fighters = {{1, -1, 2, 0, "Host"}, {2, -1, 4, 1, "Ann"}};
     s = StatusLine(f, 1); CHECK(Has(s, "You 2") && Has(s, "Ann 4") && Has(s, "first to 5"));
@@ -34,6 +38,33 @@ static void TestStatus() {
     MatchInfo b; b.format = uint8_t(Format::PlayersVsBots); b.scoreLimit = 20; b.phase = uint8_t(MatchPhase::Results); b.winner = kBotTeam;
     CHECK(Has(StatusLine(b, 1), "BOTS WIN"));
     b.phase = uint8_t(MatchPhase::Live); b.scores = {{0, 7}}; CHECK(Has(StatusLine(b, 1), "Wave 8") && Has(StatusLine(b, 1), "7 cleared"));
+}
+
+// Four teams: the status line scores every team the match has; Last Man Standing reads like Duel with more fighters.
+static void TestFourTeamsAndLms() {
+    MatchInfo m = Teams(); m.teams = 4; m.scores = {{0, 3}, {1, 5}, {2, 1}, {3, 8}};
+    m.fighters.push_back({4, 3, 8, 0, "Di"});
+    std::string s = StatusLine(m, 1);
+    CHECK(Has(s, "RED 3") && Has(s, "BLUE 5") && Has(s, "GREEN 1") && Has(s, "GOLD 8"));
+    m.teams = 3; s = StatusLine(m, 1); CHECK(Has(s, "GREEN 1") && !Has(s, "GOLD"));
+    m.teams = 2; s = StatusLine(m, 1); CHECK(Has(s, "BLUE 5") && !Has(s, "GREEN"));
+    m.teams = 4; m.phase = uint8_t(MatchPhase::Results); m.winner = 3; m.timeLeftMs = 9100;
+    CHECK(Has(StatusLine(m, 1), "GOLD WINS"));
+    MatchInfo old = Teams(); old.format = uint8_t(Format::ThreeTeams); old.scores = {{0, 1}, {2, 4}};
+    CHECK(Has(StatusLine(old, 1), "GREEN 4"));                                     // the old value is three teams
+    CHECK(Has(Scoreboard(m), "GOLD"));
+
+    MatchInfo l; l.format = uint8_t(Format::LastManStanding); l.scoreLimit = 3; l.phase = uint8_t(MatchPhase::Live); l.round = 2;
+    l.scores = {{1, 1}, {3, 2}}; l.fighters = {{1, -1, 0, 0, "Host"}, {2, -1, 0, 0, "Ann"}, {3, -1, 0, 0, "Bo"}};
+    s = StatusLine(l, 1);
+    CHECK(Has(s, "Rounds") && Has(s, "You 1") && Has(s, "Bo 2") && Has(s, "first to 3") && !Has(s, "best of"));
+    MatchInfo d = l; d.format = uint8_t(Format::Duel);
+    CHECK(Has(StatusLine(d, 1), "best of 5"));
+    l.roundGapLeftMs = 2500; l.roundWinner = 3;                                     // the gap names who took the round
+    s = StatusLine(l, 1); CHECK(Has(s, "Round 2 to Bo") && Has(s, "next round in 3"));
+    CHECK(InRoundGap(l) && RespawnLine(l, 0) == "Round over   next round in 3");
+    l.roundGapLeftMs = 0; l.phase = uint8_t(MatchPhase::Results); l.winner = 3; l.timeLeftMs = 9100;
+    CHECK(Has(StatusLine(l, 1), "BO WINS") && Has(StatusLine(l, 3), "YOU WIN"));
 }
 
 static void TestKillLine() {
@@ -59,6 +90,7 @@ static void TestScoreboard() {
 static void TestLobbyText() {
     CHECK(FormatName(Format::FreeForAll) == "Free-for-all" && FormatName(Format::PlayersVsBots) == "Survival");
     CHECK(FormatName(Format::Zombies) == "Zombies" && FormatName(Format::Duel) == "Duel");
+    CHECK(FormatName(Format::LastManStanding) == "Last man standing" && FormatName(Format::TwoTeams) == "Teams" && FormatName(Format::ThreeTeams) == "Teams");
     {
         MatchInfo z; z.format = uint8_t(Format::Zombies); z.phase = uint8_t(MatchPhase::Results); z.winner = kBotTeam;
         CHECK(Has(StatusLine(z, 1), "OVERRUN"));
@@ -68,7 +100,7 @@ static void TestLobbyText() {
         CHECK(Has(StatusLine(d, 1), "Rounds") && Has(StatusLine(d, 1), "You 2") && Has(StatusLine(d, 1), "Bob 1") && Has(StatusLine(d, 1), "best of 5"));
         d.phase = uint8_t(MatchPhase::Results); d.winner = 1; CHECK(Has(StatusLine(d, 1), "YOU WIN"));
     }
-    CHECK(FormatName(Format(9)) == "Free-for-all");
+    CHECK(FormatName(Format(kFormatCount)) == "Free-for-all");
     CHECK(NextOf({3, 5, 10}, 5) == 10 && NextOf({3, 5, 10}, 10) == 3 && NextOf({3, 5, 10}, 7) == 3);
     CHECK(NextOf({}, 4) == 4);
     CHECK(NextTeamPick(kNoTeam, 2) == 0 && NextTeamPick(0, 2) == 1 && NextTeamPick(1, 2) == kNoTeam);   // Auto -> Red -> Blue -> Auto
@@ -121,6 +153,7 @@ static void TestRoundsText() {
     CHECK(GearLabel(Gear::Mirror, Format::FreeForAll) == "Everyone identical" && GearLabel(Gear::Mirror, Format::TwoTeams) == "Everyone identical");
     CHECK(GearLabel(Gear::RandomTier, Format::Duel) == "Random by tier, new each round");
     CHECK(GearLabel(Gear::RandomTier, Format::FreeForAll) == "Random by tier, new each life");
+    CHECK(GearLabel(Gear::RandomTier, Format::LastManStanding) == "Random by tier, new each round" && GearLabel(Gear::Mirror, Format::LastManStanding) == "Everyone identical, new each round");
     CHECK(GearLabel(Gear::RandomTier, Format::ThreeTeams) == "Random by tier, new each life");
     CHECK(GearLabel(Gear::Mirror, Format::Zombies) == "Everyone identical, kept all run" && GearLabel(Gear::RandomTier, Format::PlayersVsBots) == "Random by tier, kept all run");
     CHECK(GearLabel(Gear::Own, Format::Zombies) == "Own loadouts" && GearLabel(Gear::Own, Format::PlayersVsBots) == "Own loadouts");
@@ -129,7 +162,7 @@ static void TestRoundsText() {
     // Brawl is a free-for-all with bare fists: it has its own name wherever the mode is named.
     CHECK(ModeName(Format::FreeForAll, Gear::Fists) == "Brawl" && ModeName(uint8_t(Format::FreeForAll), uint8_t(Gear::Fists)) == "Brawl");
     CHECK(ModeName(Format::FreeForAll, Gear::Own) == "Free-for-all" && ModeName(Format::Duel, Gear::Fists) == "Duel");
-    CHECK(ModeName(uint8_t(Format::TwoTeams), uint8_t(Gear::Mirror)) == "2 teams");
+    CHECK(ModeName(uint8_t(Format::TwoTeams), uint8_t(Gear::Mirror)) == "Teams" && ModeName(uint8_t(Format::TwoTeams), uint8_t(Gear::Mirror), 3) == "Teams (3)");
 }
 
 // MatchInfo comes once a second (and at every change); the clocks run on in between so countdowns move every frame.
@@ -175,7 +208,7 @@ static void TestWaveBreakText() {
 
 int main() {
     TestLobbyText(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
-    TestStatus(); TestKillLine(); TestScoreboard();
+    TestStatus(); TestFourTeamsAndLms(); TestKillLine(); TestScoreboard();
     std::printf(g_fail ? "%d FAILED\n" : "all hud text tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

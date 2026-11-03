@@ -22,13 +22,13 @@ inline GiveUpAction GiveUpActionFor(const MatchInfo& m, bool alive, bool bodyGon
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     if (InWaveBreak(m)) return GiveUpAction::SkipBreak;                      // dead or alive: the vote counts either way
     if (!fought) return GiveUpAction::None;
-    const bool duelGap = f == Format::Duel && InRoundGap(m);
+    const bool duelGap = IsRoundFormat(f) && InRoundGap(m);
     if (alive && !duelGap) {
         if (!IsBotFormat(f)) return GiveUpAction::GiveUp;                    // free-for-all, teams, Duel
         if (oneFight && f == Format::PlayersVsBots) return GiveUpAction::GiveUpFight;
         return GiveUpAction::GiveUp;                                         // a wave of Survival or Zombies
     }
-    if (f == Format::Duel ? duelGap : bodyGone) return GiveUpAction::Waiting;
+    if (IsRoundFormat(f) ? duelGap : bodyGone) return GiveUpAction::Waiting;
     return GiveUpAction::None;
 }
 

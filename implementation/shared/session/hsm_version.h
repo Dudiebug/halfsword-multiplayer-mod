@@ -84,15 +84,27 @@ inline std::optional<Version> ParseDescribedVersion(std::string s) {
 // prerelease (0.8.0-pre3 built on top of v0.8.0-pre2 called itself pre2 and offered pre3 to its own players, #55-#57).
 inline std::optional<Version> RunningVersion(const std::string& modVersion) { return ParseVersion(modVersion); }
 
+// One entry of a release's "assets" array: what the self-update (session/hsm_update.h) needs. Any text over its cap is
+// dropped (the field is then empty and the asset unusable); size is 0 when absent.
+struct ReleaseAsset {
+    std::string name, url, digest;   // url: browser_download_url; digest: GitHub's "sha256:<hex>", empty when absent
+    uint64_t size = 0;
+};
+
 // One release object of GitHub's list.
 struct ReleaseInfo {
     std::string tag, url;   // url: https://github.com/... only, else empty
     bool prerelease = false, draft = false;
+    std::vector<ReleaseAsset> assets{};   // at most kMaxReleaseAssets, in the list's order
 };
 
 constexpr size_t kMaxReleasesJson = 256 * 1024;   // the caller reads no more than this; the scan refuses more
 constexpr size_t kMaxReleaseTag = 64;
 constexpr size_t kMaxReleaseUrl = 200;
+constexpr size_t kMaxReleaseAssets = 16;
+constexpr size_t kMaxAssetName = 64;
+constexpr size_t kMaxAssetUrl = 256;
+constexpr size_t kMaxAssetDigest = 80;
 
 // A link that is safe to log and show: https://github.com/..., printable ASCII without spaces or quotes.
 inline bool ValidReleaseUrl(const std::string& u) {
@@ -156,8 +168,9 @@ inline void SkipSpace(const std::string& s, size_t& i) {
 }  // namespace version_detail
 
 // Reads GitHub's "list releases" answer: a top-level array whose objects carry tag_name, html_url, prerelease and draft
-// as direct members (author, assets and the like nest deeper and are never looked at, so their own html_url cannot be
-// mistaken for the release's). An object without a tag_name is dropped. Over kMaxReleasesJson bytes, nesting over 16
+// as direct members (author and the like nest deeper and are never looked at, so their own html_url cannot be mistaken
+// for the release's). The "assets" array of each release is read for the name, browser_download_url, size and digest of
+// each asset (an asset's uploader and the rest are skipped). An object without a tag_name is dropped. Over kMaxReleasesJson bytes, nesting over 16
 // deep, an unterminated string or unbalanced brackets end the scan: complete stays false.
 inline ReleaseList ParseReleases(const std::string& json) {
     using namespace version_detail;
@@ -165,7 +178,8 @@ inline ReleaseList ParseReleases(const std::string& json) {
     if (json.size() > kMaxReleasesJson) return out;
     std::string stack;   // the open '[' and '{', outermost first
     ReleaseInfo cur;
-    bool haveTag = false;
+    ReleaseAsset asset;
+    bool haveTag = false, pendingAssets = false, inAssets = false;
     size_t i = 0;
     SkipSpace(json, i);
     if (i >= json.size() || json[i] != '[') return out;
@@ -174,11 +188,15 @@ inline ReleaseList ParseReleases(const std::string& json) {
         if (c == '[' || c == '{') {
             if (stack.size() >= kMaxDepth) return out;
             stack.push_back(c);
-            if (c == '{' && stack.size() == 2) { cur = ReleaseInfo{}; haveTag = false; }
+            if (c == '{' && stack.size() == 2) { cur = ReleaseInfo{}; haveTag = false; pendingAssets = inAssets = false; }
+            if (c == '[' && stack.size() == 3 && pendingAssets) { inAssets = true; pendingAssets = false; }
+            if (c == '{' && stack.size() == 4 && inAssets) asset = ReleaseAsset{};
             ++i;
         } else if (c == ']' || c == '}') {
             if (stack.empty() || stack.back() != (c == ']' ? '[' : '{')) return out;
             if (c == '}' && stack.size() == 2 && haveTag) out.releases.push_back(cur);
+            if (c == '}' && stack.size() == 4 && inAssets && !asset.name.empty() && cur.assets.size() < kMaxReleaseAssets) cur.assets.push_back(asset);
+            if (c == ']' && stack.size() == 3) inAssets = false;
             stack.pop_back();
             ++i;
             if (stack.empty()) { SkipSpace(json, i); out.complete = i == json.size(); return out; }
@@ -190,7 +208,26 @@ inline ReleaseList ParseReleases(const std::string& json) {
             SkipSpace(json, j);
             if (j >= json.size() || json[j] != ':') continue;   // a value, or a key we do not need (its value is read as it comes)
             i = j + 1;
+            if (inAssets && stack.size() == 4 && stack[3] == '{') {
+                SkipSpace(json, i);
+                if (i >= json.size()) return out;
+                if (key == "name" || key == "browser_download_url" || key == "digest") {
+                    if (json[i] != '"') continue;
+                    const size_t cap = key == "name" ? kMaxAssetName : key == "digest" ? kMaxAssetDigest : kMaxAssetUrl;
+                    std::string val;
+                    if (!ReadString(json, i, cap, val, tooLong)) return out;
+                    if (tooLong) val.clear();
+                    (key == "name" ? asset.name : key == "digest" ? asset.digest : asset.url) = val;
+                } else if (key == "size") {
+                    uint64_t n = 0;
+                    size_t digits = 0;
+                    while (i < json.size() && json[i] >= '0' && json[i] <= '9' && digits < 13) { n = n * 10 + uint64_t(json[i++] - '0'); ++digits; }
+                    asset.size = digits < 13 ? n : 0;
+                }
+                continue;
+            }
             if (stack.size() != 2 || stack[1] != '{') continue;
+            pendingAssets = key == "assets";
             SkipSpace(json, i);
             if (i >= json.size()) return out;
             if (key == "tag_name" || key == "html_url") {
@@ -214,6 +251,7 @@ inline ReleaseList ParseReleases(const std::string& json) {
 struct UpdateOffer {
     Version version;
     std::string tag, url;   // url empty when the release carried no usable link
+    std::vector<ReleaseAsset> assets{};
 };
 
 // The newest release newer than `running`, or nothing. Drafts are never offered; a prerelease (flagged, or tagged
@@ -226,7 +264,7 @@ inline std::optional<UpdateOffer> NewestOffer(const std::vector<ReleaseInfo>& re
         if (!v) continue;
         if ((r.prerelease || v->prerelease()) && !running.prerelease()) continue;
         if (CompareVersion(*v, running) <= 0) continue;
-        if (!best || CompareVersion(*v, best->version) > 0) best = UpdateOffer{*v, r.tag, r.url};
+        if (!best || CompareVersion(*v, best->version) > 0) best = UpdateOffer{*v, r.tag, r.url, r.assets};
     }
     return best;
 }

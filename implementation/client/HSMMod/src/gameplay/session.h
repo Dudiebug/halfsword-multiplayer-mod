@@ -31,10 +31,13 @@ public:
     virtual void SetVoiceMonitor(bool on) = 0;                       // HEAR MYSELF
     virtual std::vector<MpPlayer> Players() = 0;                     // the session's players, this machine's view
     virtual void SetPlayerListen(uint8_t slot, bool muted, int volumePct) = 0;   // this player's own mute and volume for one speaker
+    virtual void SetLobbyPassword(const std::string& password) = 0;  // host: lock the lobby with it, or open it again with ""; nobody is kicked
     virtual void KickPlayer(uint8_t slot, bool ban) = 0;             // host
     virtual void VoteKickPlayer(uint8_t slot) = 0;                   // starts a vote (the host counts it)
     virtual void VoteBanPlayer(uint8_t slot) = 0;                    // starts a voteban (role=server sessions: 7 days)
     virtual void CastVote(bool yes) = 0;
+    virtual MpLoadout LoadoutView() = 0;                             // the Esc menu's CHANGE LOADOUT button: shown, available, why not
+    virtual std::string ChangeLoadout() = 0;                         // a click: re-reads this player's passport and asks for the new kit; the line to show
     virtual MpVote Vote() = 0;                                       // the vote running now, if any
     virtual std::vector<std::string> NetworkLines() = 0;             // read-only network facts for the menu
     virtual void LeaveSession() = 0;                                 // out of the session (and the lobby), back to the main menu

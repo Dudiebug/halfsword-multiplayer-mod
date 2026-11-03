@@ -137,9 +137,21 @@ static void TestMigrationBoardGuards() {
     CHECK(plain.scores().empty() && plain.Kills(1) == 0);
 }
 
+// Last Man Standing scores per fighter like Duel (rounds won), so a migration carries them by player, not by team.
+static void TestMigrationRestoresRoundFormats() {
+    for (Format f : {Format::Duel, Format::LastManStanding}) {
+        Match old; old.Start(Cfg(f), Three(), 0);
+        old.Tick(5000); old.OnDeath(2, 1, 6000); old.OnDeath(3, 1, 6100);          // ann takes round 1
+        const ScoreCarry board = ScoreCarryFrom(InfoOf(old, {{1, kAnn}, {2, kBob}, {3, kCy}}));
+        CHECK(board.format == f && board.teams.empty() && board.players.size() == 3);
+        Match m; m.Start(Cfg(f), {{1, kNoTeam, true, kBob}, {2, kNoTeam, true, kAnn}}, 0, board);
+        CHECK(m.Score(2) == 1 && m.Kills(2) == 2 && m.Score(1) == 0 && m.Deaths(1) == 1);   // ann's round is hers on her new slot
+    }
+}
+
 int main() {
     TestRejoinGetsScoreBack(); TestRejoinOnAnotherSlot(); TestDifferentPlayerStartsAtZero(); TestRematchForgetsLeavers();
-    TestTeamsKeepTeamScore(); TestMigrationRestoresFreeForAll(); TestMigrationRestoresTeamsAndSurvival(); TestMigrationBoardGuards();
+    TestTeamsKeepTeamScore(); TestMigrationRestoresFreeForAll(); TestMigrationRestoresTeamsAndSurvival(); TestMigrationBoardGuards(); TestMigrationRestoresRoundFormats();
     if (g_fail) { std::printf("test_hsm_score_identity: %d failure(s)\n", g_fail); return 1; }
     std::puts("test_hsm_score_identity: all passed");
     return 0;

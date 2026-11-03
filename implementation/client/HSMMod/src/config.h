@@ -58,6 +58,11 @@ struct Config {
     // Mesh (not the slot constraint) and a watchdog puts a slot weapon that stays 40 cm from its socket back
     // (standin_slots.h). scabbard_fix=0: as 0.8.0-pre18. Per machine; owner sync too.
     bool scabbardFix = true;
+    // true (default from 0.8.0-pre24): the Fenced-ring scenario keeps its BP_Fence_Bags: the level manager's own
+    // level-load reset of "Current Lose Condition" is followed by the mod setting it back to 3 before the level script
+    // destroys the bags (#706). fence_fix=0: as 0.8.0-pre23 (the fence never survives a level load). Per machine:
+    // every machine's level manager wipes its own game instance, so every player in the fight needs it on.
+    bool fenceFix = true;
     // true (default from 0.7.0-pre6): with the mesh on, the host also plans each client pair's fastest path from the
     // measured pings and a client may pass another pair's Pose and Vitals on (detours, session/hsm_detour.h). detour=0
     // turns it off; nothing happens with mesh=0.
@@ -72,6 +77,13 @@ struct Config {
     // true (default): the host resets the map at each Duel round and each rematch (props back to their start, objects spawned
     // in the round gone, the level's own weapons back on their spots); 0 sends no MapReset. Read on the host only.
     bool mapReset = true;
+    // true (default): in the Tavern hub of a hosted Progression session the host puts the game's next fights to a vote
+    // (chat /fight <number>, 30 s) and starts the winner; 0 leaves the choice to the host's own hub UI. Read on the host only.
+    bool progressionVote = true;
+    // true (default): a hosted Progression fight pays the host's career money in-session (#620): a win adds the purse the
+    // suppressed win screen would have paid, a loss keeps the bet lost (stock), and either way the pending reward is spent.
+    // 0: money never moves. Read on the host only; the SaveGuard still restores the saved career when the session ends.
+    bool progressionPayout = true;
     // Voice chat (gameplay/voice.h). Each player's own setting (0.7.1): voice and voiceReach are off (the default), by
     // distance (proximity: full volume within voiceNearM, silent past voiceFarM) or every living player hears every
     // living one (everyone); two players hear each other at the narrower of their settings. A fighter below voiceCutoff
@@ -98,8 +110,13 @@ struct Config {
     // In-game bug reports ("/bug" in the chat; net/report_client.h). Nothing is sent without the player's command.
     // true: other fighters' names float over their heads in a match (name_tags=0 turns them off).
     bool nameTags = true;
+    // Capture the flag: true (ctf_carry=hand, the default) the carrier's own machine puts the flag in a free hand; false (ctf_carry=back) it always hangs on the back.
+    bool ctfFlagInHand = true;
     // true: armour swapped out while paint tasks still read it is destroyed later (the T5 crash); paint_defer=0 turns it off.
     bool paintDefer = true;
+    // The Juggernaut role's body scale (juggernaut_scale, 1.0..1.6, default 1.35), written as the passport Height the game
+    // maps to it (match/hsm_roles.h HeightForScale). Every machine needs the same value: each builds its own copy.
+    double juggernautScale = 1.35;
     bool reports = true;
     // true: your HSMMod log is also sent to the report relay when someone in your lobby files a report or a crash is reported
     // (the multiplayer page's HELP IMPROVE THE MOD toggle; SaveHelpImprove writes the key). Off by default.
@@ -111,7 +128,8 @@ struct Config {
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
     // role=server only (see session/hsm_autoflow.h): a public Steam lobby.
-    std::string serverFormat = "ffa";          // ffa | duel | teams | survival | zombies
+    std::string serverFormat = "ffa";          // ffa | duel | lms | teams | teams3 | teams4 | survival | zombies
+    int serverTeams = 2;                       // server_teams: the teams of server_format=teams, 2..4 (teams3 / teams4 say it in the word)
     std::string serverMaps = "all";            // comma list of map display names, or all
     int serverScoreLimit = 0;                  // 0: the format's default
     int serverTimeLimitS = 0;                  // 0: none
@@ -129,6 +147,9 @@ struct Config {
     bool ue4ssBefore = false;
     // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
     bool record = false;
+    // [mod] pack=<name>: the modpack in Paks/~mods/<name>/ (HSMPack.ini) a host announces in its lobby; off: none; empty: the only
+    // valid one installed (gameplay/mod_pack.h, docs/MODPACK.md).
+    std::string modPack;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists

@@ -130,6 +130,7 @@ void EquipSync::Forget(uint8_t entity) {
     standIn_.erase(entity);
     owner_.erase(entity);
     planPose_.erase(entity);
+    lastGear_.erase(entity);
     sender_.Forget(entity);
 }
 
@@ -163,6 +164,11 @@ void EquipSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject*
         if (!ReadFighter(willie, r)) { ++n_.readFailed; continue; }
         EquipStateMsg m = own_[entity].Read(r.snap);
         m.entity = entity;
+        if (const uint32_t gear = uint32_t(m.hand[0]) | uint32_t(m.hand[1]) << 8 | uint32_t(m.sheathed) << 16;
+            env_.gearChanged && (!lastGear_.count(entity) || lastGear_[entity] != gear)) {
+            lastGear_[entity] = gear;
+            env_.gearChanged(entity);   // drawn, sheathed, picked up or dropped on this machine
+        }
         if (!sender_.Due(m, nowMs)) continue;
         m.seq = ++seq_;
         if (env_.send) env_.send(m);
@@ -227,6 +233,7 @@ bool EquipSync::Plan(uint8_t entity, double nowMs) {
         const bool ok = draw ? Draw(standIn, now, s.hand, s.slot) : Sheathe(standIn, now, s.hand, s.slot);
         if (!ok) continue;
         const uint64_t done = draw ? ++n_.draws : ++n_.sheathes;
+        if (env_.gearChanged) env_.gearChanged(entity);
         if (done <= kLogFirst)
             HSM_LOG("equip: #%u stand-in of e%u %s hand %s slot %d", m.seq, m.entity, draw ? "drew into" : "sheathed from", Side(s.hand),
                     s.slot);

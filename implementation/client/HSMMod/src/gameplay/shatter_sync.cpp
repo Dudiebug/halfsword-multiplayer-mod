@@ -69,7 +69,7 @@ ShatterObject& ObjectSync::ShatterScan(uint64_t id, Prop& p) {
     so.index = p.index;
     for (size_t b = 0; b < p.bodies.size(); ++b) {
         const BodyRef& r = p.bodies[b];
-        if (r.detached || !r.comp || !IsGeometryCollection(r.comp)) continue;
+        if (r.detached || !r.comp || !adapter_->StillValid(r.comp, r.index) || !IsGeometryCollection(r.comp)) continue;
         ShatterBody sb;
         sb.comp = r.comp;
         sb.index = r.index;

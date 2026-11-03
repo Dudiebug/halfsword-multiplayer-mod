@@ -5,6 +5,7 @@
 #include "util/hsm_names.h"
 #include "gameplay/damage_pin.h"
 #include "gameplay/mod_maps.h"
+#include "gameplay/mod_pack.h"
 #include "gameplay/session.h"
 #include "log.h"
 #include "ue4ss_load.h"
@@ -13,10 +14,12 @@
 #include "match/hsm_hud_style.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
+#include "session/hsm_password.h"
 #include "util/hsm_bmp.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -63,6 +66,15 @@ struct Avatar {
 };
 constexpr int kAvatarTries = 20;                     // once a second while Steam fetches it
 struct StepperView { Box box; Text label, value, hint; Flat prev, next; };
+// The Damage row's value (0.8.0-pre26): a slider (0..200%) with the number beside it; a click on the number swaps in a
+// text box for a custom value up to 1000% (Enter applies, Esc or clicking away cancels). Host only.
+struct DamageView {
+    Slider slider;
+    Flat number;
+    EditBox edit;
+    bool editing = false, hadFocus = false, focused = false, enterDown = false, escDown = false, dragging = false;
+    float shown = -1;                                // where the slider was last put (-1: not yet)
+};
 constexpr size_t kTabCount = 3;                      // MODE, RULES, MAP
 constexpr size_t kSectionCount = size_t(LobbySection::Count);
 
@@ -77,6 +89,8 @@ struct State {
     mp::Maker maker;
     TextButton openButton;
     Panel panel;                             // the full-screen multiplayer page (a Border over the whole menu)
+    Box updateRow;                           // the update notice and its UPDATE NOW button (net/update_check.h)
+    Flat updateNow;
     Text title, me, badge, status, notice, updateNote, pillText, playersTitle, idleHint, hostOnly, waiting, summary;
     Panel pill, pillFrame;
     // Not in a lobby: HOST on the left, the browser on the right. In one: players and chat left, the tabs right.
@@ -106,6 +120,16 @@ struct State {
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
     Flat askYes, askNo;
     bool askOpen = false, escDown = false;
+    Panel pw;                                // the lobby password question over the whole menu: joining a locked lobby
+    Text pwNote;                             // why it asks again ("Wrong password")
+    EditBox pwText;
+    Flat pwOk, pwCancel;
+    bool pwOpen = false, pwEscDown = false, pwEnterDown = false, pwFocused = false;
+    Box pwHostBox;                           // the host's password row in the lobby (SET / CLEAR); only the host sees it
+    EditBox pwHostText;
+    Flat pwSet, pwClear;
+    Text pwHostNote;
+    bool pwHostFocused = false, pwHostEnterDown = false;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
     std::array<ChatRow, kChatLogLines> chatRows;
@@ -121,6 +145,7 @@ struct State {
     bool avatarFailLogged = false;
     std::vector<ModeView> modes;             // kModeOrder, then Brawl, then Progression
     std::vector<StepperView> steppers;       // one per LobbyRow, in its order
+    DamageView damage;
     std::vector<MapView> maps;               // the pickable maps, kMaps order, then the modded ones
     Card start;
     Text startLabel;
@@ -385,6 +410,31 @@ void BuildIdleRight() {
     if (g.browserEmpty) { g.browserEmpty.Wrap(true); list.Add(g.browserEmpty).Padding({0, 6, 0, 0}); }
 }
 
+// The host's password row under the lobby's buttons: a text box with SET and CLEAR, and a line saying whether the lobby is
+// locked. Shown to the host only (Draw). Setting or clearing it kicks nobody (Session::SetLobbyPassword).
+void BuildPasswordRow(Box& left) {
+    g.pwHostBox = g.kit.MakeColumn();
+    Box input = g.kit.MakeRow();
+    g.pwHostText = g.kit.MakeEditBox();
+    g.pwSet = MakeFlat("SET", 15, {14, 5, 14, 5});
+    g.pwClear = MakeFlat("CLEAR", 15, {14, 5, 14, 5});
+    g.pwHostNote = NewText("", 13, style::kMenuDim);
+    if (!g.pwHostBox || !input || !g.pwHostText || !g.pwSet.card || !g.pwClear.card || !g.pwHostNote) {
+        HSM_LOG("ui: the lobby password row could not be made");
+        g.pwHostBox = Box{};
+        return;
+    }
+    Section(g.pwHostBox, "LOBBY PASSWORD", 0);
+    g.pwHostText.Hint("Password (up to 32 characters)");
+    AddToHorizontalBox(input, g.pwHostText, 1, 8).Align(HAlign::Fill, VAlign::Center);
+    AddFlatH(input, g.pwSet, 8); AddFlatH(input, g.pwClear, 0);
+    AddToVerticalBox(g.pwHostBox, input, 6);
+    g.pwHostNote.Wrap(true);
+    AddToVerticalBox(g.pwHostBox, g.pwHostNote, 4);
+    AddToVerticalBox(left, g.pwHostBox, 14);
+    g.pwHostBox.Show(false);
+}
+
 // In a lobby, left: the players (the host clicks one to move them to the next team), the lobby's buttons, the chat.
 void BuildInLeft() {
     Box& col = g.inLeft;
@@ -420,6 +470,7 @@ void BuildInLeft() {
         AddFlatH(actions1, g.invite, 8); AddFlatH(actions1, g.readyUp, 0);
         AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.leave, 0);
     }
+    BuildPasswordRow(col);
     BuildChat(col);
 }
 
@@ -465,6 +516,48 @@ void BuildAsk(Canvas& root) {
     g.ask.Show(false);
 }
 
+// The password question (a locked lobby: clicked in the browser, an invite, or a wrong password): the same modal as the
+// help-improve question, with a text box. JOIN (or Enter) tries the password, CANCEL (or Esc) drops the join.
+void BuildPassword(Canvas& root) {
+    g.pw = g.kit.MakePanel();
+    Fixed width = g.kit.MakeFixed();
+    Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
+    Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
+    Text title = NewText("THIS LOBBY IS LOCKED", 30, style::kMenuText);
+    Text body = NewText("Type the lobby's password to join. The host gave it to you.", 17, style::kMenuText);
+    g.pwNote = NewText("", 17, style::kMenuWarn);
+    g.pwText = g.kit.MakeEditBox();
+    g.pwOk = MakeFlat("JOIN", 18);
+    g.pwCancel = MakeFlat("CANCEL", 18);
+    if (!g.pw || !width || !frame || !face || !column || !buttons || !title || !body || !g.pwNote || !g.pwText || !g.pwOk.card || !g.pwCancel.card) {
+        HSM_LOG("ui: the lobby password question could not be made; locked lobbies cannot be joined from this page");
+        g.pw = Panel{};
+        return;
+    }
+    root.Add(g.pw).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(111);
+    g.pw.Color({0, 0, 0, 0.80f});
+    g.pw.ContentAlign(HAlign::Center, VAlign::Center);
+    g.pw.Content(width);
+    width.Width(620);
+    width.Content(frame);
+    frame.Color(style::kMenuAccent);
+    frame.Padding({2, 2, 2, 2});
+    frame.Content(face);
+    face.Color(style::kMenuPanel);
+    face.Padding({36, 28, 36, 28});
+    face.Content(column);
+    title.Font(30, 1, {0, 0, 0, 0.85f});
+    AddToVerticalBox(column, title, 0);
+    body.Wrap(true); AddToVerticalBox(column, body, 14);
+    g.pwText.Hint("Password");
+    AddToVerticalBox(column, g.pwText, 14);
+    g.pwNote.Wrap(true); AddToVerticalBox(column, g.pwNote, 10);
+    AddToVerticalBox(column, buttons, 20);
+    AddToHorizontalBox(buttons, g.pwOk.card.button, 0, 14);
+    AddToHorizontalBox(buttons, g.pwCancel.card.button, 0, 0);
+    g.pw.Show(false);
+}
+
 // MODE tab: the cards two to a row, in their groups (VERSUS, CO-OP).
 void BuildModeTab(Box& page) {
     Grid versus = g.kit.MakeGrid(), coop = g.kit.MakeGrid();
@@ -493,6 +586,22 @@ void BuildModeTab(Box& page) {
     }
 }
 
+// The Damage row's value cell: "slider | number", and the text box in their place while the number is edited.
+bool BuildDamageValue(Fixed& cell) {
+    DamageView& d = g.damage;
+    Box row = g.kit.MakeRow();
+    d.slider = g.kit.MakeSlider();
+    d.number = MakeFlat("100%", 15, {8, 2, 8, 2});
+    d.edit = g.kit.MakeEditBox();
+    if (!row || !d.slider || !d.number.card || !d.edit) { g.damage = DamageView{}; return false; }
+    AddToHorizontalBox(row, d.slider, 1, 6).Align(HAlign::Fill, VAlign::Center);
+    AddToHorizontalBox(row, d.number.card.button, 0, 0).Align(HAlign::Right, VAlign::Center);
+    AddToHorizontalBox(row, d.edit, 1, 0).Align(HAlign::Fill, VAlign::Center);
+    d.edit.Show(false);
+    cell.Content(row).Align(HAlign::Fill, VAlign::Center);
+    return true;
+}
+
 // RULES tab: a stepper per setting, "label and hint | < | value | >", in its section (MATCH, TEAMS, GEAR, WORLD).
 void BuildRulesTab(Box& page) {
     for (size_t sct = 0; sct < kSectionCount; ++sct) {
@@ -512,7 +621,8 @@ void BuildRulesTab(Box& page) {
         v.value.Align(Justify::Center);
         v.hint.Wrap(true);
         valueBox.Width(230);
-        valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
+        if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) {}
+        else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(text, v.label, 0);
         AddToVerticalBox(text, v.hint, 2);
         AddToHorizontalBox(v.box, text, 1, 16).Align(HAlign::Fill, VAlign::Center);
@@ -679,7 +789,18 @@ bool BuildPanel() {
     g.notice = NewText("", 20, style::kMenuAccentInk);   // Session::TakeNotice: kicked, banned, refused; until the page closes
     if (g.notice) { g.notice.Wrap(true); g.notice.Show(false); AddToVerticalBox(page, g.notice, 8); }
     g.updateNote = NewText("", 15, style::kMenuOk);   // net/update_check.h: only when a newer release exists
-    if (g.updateNote) { g.updateNote.Show(false); AddToVerticalBox(page, g.updateNote, 6); }
+    g.updateRow = g.kit.MakeRow();
+    g.updateNow = MakeFlat("UPDATE NOW", 15, {14, 5, 14, 5});
+    if (g.updateNote && g.updateRow && g.updateNow.card) {
+        g.updateNote.Wrap(true);
+        AddToHorizontalBox(g.updateRow, g.updateNote, 1, 14).Align(HAlign::Fill, VAlign::Center);
+        AddToHorizontalBox(g.updateRow, g.updateNow.card.button, 0, 0).Align(HAlign::Left, VAlign::Center);
+        g.updateRow.Show(false);
+        AddToVerticalBox(page, g.updateRow, 6);
+    } else if (g.updateNote) {
+        g.updateNote.Show(false);
+        AddToVerticalBox(page, g.updateNote, 6);
+    }
 
     FillVerticalBox(page, body, 16);
     FillVerticalBox(body, g.mainRow, 0);
@@ -705,6 +826,7 @@ bool BuildPanel() {
     if (Box settings = AddColumn(settingsRow, 1, 0, true)) BuildSettingsView(settings);
     g.settingsView.Show(false);
     BuildAsk(root);
+    BuildPassword(root);
 
     // REPORT A BUG opens a text box over the footer: SEND and CANCEL; the text becomes a public GitHub issue
     // (net/report_client).
@@ -776,7 +898,8 @@ LobbyLocal Local(game::Lobby& lobby) {
     l.myBuild = game::ModBuild();
     l.allowBuildMismatch = game::AllowBuildMismatch();
     l.damage = game::VanillaDamageRange();
-    l.maxPlayers = game::kMaxLobbyMembers;
+    l.maxPlayers = lobby.MaxPlayers();
+    l.locked = lobby.Locked();
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
@@ -786,6 +909,7 @@ LobbyLocal Local(game::Lobby& lobby) {
         }
         l.modPickPending = l.host && game::modmaps::PickPending(l.mapPick);
         l.progression = lobby.Progression();
+        l.playerCount = lobby.PlayerCount();   // the cards: Duel is for exactly 2, Last Man Standing for 2 or more
         const bool server = lobby.ServerLobby();
         for (const game::LobbyMember& m : lobby.members()) {
             if (server && m.host) continue;   // role=server: the server is not a player
@@ -797,7 +921,12 @@ LobbyLocal Local(game::Lobby& lobby) {
     }
     for (const game::LobbyListing& f : lobby.listings()) {
         LobbyFound o;
-        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.compatible = f.compatible; o.reason = f.reason;
+        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
+        if (f.pack.any()) {   // the host's modpack, against this machine's files now (the hashes may still be running)
+            const PackVerdict v = game::modpack::Check(f.pack).verdict;
+            o.pack = PackRowText(f.pack, v);
+            if (o.compatible && v != PackVerdict::Ok) { o.compatible = false; o.reason = PackRowReason(v); }
+        }
         l.found.push_back(o);
     }
     return l;
@@ -817,6 +946,14 @@ void PaintTabs() {
         t.line.Color(on ? style::kMenuAccent : kClear);
         if (g.tabPages[i]) g.tabPages[i].Show(on);
     }
+}
+
+// The scene's row for the i-th stepper (a LobbyRow value): the Players row is the lobby's own, not a match setting.
+const SettingRow* RowFor(const LobbyScene& s, size_t i) {
+    if (i == size_t(LobbyRow::Players)) return s.hasPlayerLimit ? &s.playerLimit : nullptr;
+    if (i == size_t(LobbyRow::Scenario)) return s.hasScenario ? &s.scenario : nullptr;   // like the player limit, apart from the match settings
+    for (const SettingRow& r : s.settings) if (size_t(r.id) == i) return &r;
+    return nullptr;
 }
 
 void Draw(const LobbyScene& s) {
@@ -889,6 +1026,7 @@ void Draw(const LobbyScene& s) {
     g.readyUp.label.Color(s.readyOn ? style::kMenuOk : style::kMenuText);   // the dot's green
     g.readyUp.card.selected = s.readyOn;
     g.balance.card.button.Show(s.balance);
+    if (g.pwHostBox) { g.pwHostBox.Show(s.hostPassword); g.pwHostNote.Set(s.passwordNote); }
     g.leave.card.button.Show(s.in);
 
     for (size_t i = 0; i < g.modes.size() && i < s.modes.size(); ++i) {
@@ -896,7 +1034,7 @@ void Draw(const LobbyScene& s) {
         const ModeCard& m = s.modes[i];
         v.name.Set(m.name);
         v.name.Color(m.selected ? style::kMenuAccentInk : style::kMenuText);
-        v.blurb.Set(m.description);
+        v.blurb.Set(m.hint.empty() ? m.description : m.description + "\n" + m.hint);   // a card the player count rules out says why
         v.card.selected = m.selected;
         v.card.live = m.enabled;
         v.card.button.Enabled(m.enabled);
@@ -905,8 +1043,7 @@ void Draw(const LobbyScene& s) {
     for (size_t i = 0; i < g.steppers.size(); ++i) {
         StepperView& v = g.steppers[i];
         if (!v.box) continue;
-        const SettingRow* row = nullptr;
-        for (const SettingRow& r : s.settings) if (size_t(r.id) == i) row = &r;
+        const SettingRow* row = RowFor(s, i);
         v.box.Show(row != nullptr);
         if (!row) continue;
         used[size_t(SectionOf(row->id))] = true;
@@ -1025,9 +1162,15 @@ void UpdatePanel(Session& session) {
     Draw(scene);
     DrawChat(lobby.InLobby());
     std::string notice = update::Notice();
+    if (const std::string install = update::InstallStatus(); !install.empty()) notice += (notice.empty() ? "" : "\n") + install;
     if (const std::string proxy = ue4ss::Notice(); !proxy.empty()) notice += (notice.empty() ? "" : "\n") + proxy;
     g.updateNote.Set(notice);
-    g.updateNote.Show(!notice.empty());
+    if (g.updateRow) {
+        g.updateRow.Show(!notice.empty());
+        if (g.updateNow.card) g.updateNow.card.button.Show(update::CanInstall());
+    } else {
+        g.updateNote.Show(!notice.empty());
+    }
     ULONGLONG now = GetTickCount64();
     for (size_t i = 0; i < g.members.size(); ++i) {
         UObject* texture = g.memberIds[i] ? AvatarFor(g.memberIds[i], now) : nullptr;
@@ -1039,7 +1182,7 @@ void UpdatePanel(Session& session) {
 void UpdateOpenLabel(Session& session) {
     game::Lobby& lobby = session.lobby();
     std::string label = "MULTIPLAYER";
-    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(game::kMaxLobbyMembers);
+    if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(lobby.MaxPlayers());
     g.openButton.label.Set(label);
 }
 
@@ -1062,6 +1205,101 @@ void HandleChat(Session& session, bool in) {
     g.chatText.Focus();                         // the next line can be typed straight away
     session.LobbyChatLine(text);
     g.nextText = 0;
+}
+
+void CloseDamageEdit() {
+    DamageView& d = g.damage;
+    d.editing = false; d.hadFocus = false; d.focused = false;
+    d.edit.Show(false); d.slider.Show(true); d.number.card.button.Show(true);
+    d.shown = -1;                                    // put the slider back where the value is
+}
+
+// The Damage row's slider and number, every frame. The config is written when the handle is let go (or a click on the
+// bar moved it), not while it is dragged, so a drag does not flood the lobby data; the number follows the handle live.
+void HandleDamage(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
+    DamageView& d = g.damage;
+    if (!d.slider) return;
+    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !d.enterDown;
+    const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !d.escDown;
+    d.enterDown = enter; d.escDown = esc;
+    const bool numberClicked = Clicked(d.number.card);
+    const SettingRow* row = nullptr;
+    for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Damage) row = &r;
+    const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
+    const DamageRange r = game::VanillaDamageRange();
+    MatchConfig c = lobby.config();
+    d.slider.Range(float(r.minPct), float(DamageSliderMax(r)), float(r.stepPct));
+    d.slider.Colors(style::kMenuDim, live ? style::kMenuAccentInk : style::kMenuDim);
+    d.slider.Enabled(live);
+    d.number.card.button.Enabled(live);
+    if (d.editing) {
+        const bool focused = d.edit.Focused();
+        if (focused) d.hadFocus = true;
+        const bool apply = enterEdge && (focused || d.focused);   // the box commits on Enter, so it may have lost the keyboard this frame
+        const bool away = d.hadFocus && !focused && !d.focused && !apply;
+        d.focused = focused;
+        if (focused) SetLobbyTyping(true);
+        if (!live || escEdge || away) { CloseDamageEdit(); return; }
+        if (!apply) return;
+        const std::optional<uint16_t> typed = ParseDamageInput(d.edit.Value());
+        if (!typed) { d.edit.Set(""); d.edit.Hint("0 to 1000%"); d.edit.Focus(); return; }
+        c.damagePct = DamageFromInput(*typed, r);
+        lobby.SetConfig(c);
+        HSM_LOG("ui: player damage typed: %s", DamageLabel(c.damagePct, r).c_str());
+        acted = true;
+        CloseDamageEdit();
+        return;
+    }
+    if (live && numberClicked) {
+        d.editing = true; d.hadFocus = false; d.focused = false;
+        d.slider.Show(false); d.number.card.button.Show(false); d.edit.Show(true);
+        d.edit.Hint("");
+        d.edit.Set(std::to_string(DamagePct(c.damagePct, r)));
+        d.edit.Focus();
+        acted = true;
+        return;
+    }
+    const float at = d.slider.Value();
+    if (live && std::isfinite(at) && d.slider.Dragging()) {
+        d.dragging = true;
+        d.number.label.Set(std::to_string(DamagePct(DamageFromSlider(at, r), r)) + "%");
+        return;
+    }
+    if (live && std::isfinite(at) && d.shown >= 0 && (d.dragging || std::fabs(at - d.shown) > 0.5f)) {
+        const uint16_t v = DamageFromSlider(at, r);
+        if (v != c.damagePct) { c.damagePct = v; lobby.SetConfig(c); acted = true; HSM_LOG("ui: player damage slid to %s", DamageLabel(v, r).c_str()); }
+    }
+    d.dragging = false;
+    const float want = DamageSliderPos(c.damagePct, r);
+    if (d.shown < 0 || !std::isfinite(at) || std::fabs(at - want) > 0.01f) d.slider.Set(want);
+    d.shown = want;
+    d.number.label.Set(std::to_string(DamagePct(c.damagePct, r)) + "%");
+}
+
+// The host's password row: SET (or Enter in the box) locks the lobby with what is typed, CLEAR opens it. Nobody is kicked.
+// While the box has the keyboard the game's hotkeys stay off, as in the chat box.
+void HandlePassword(Session& session, bool host) {
+    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    const bool enterEdge = enter && !g.pwHostEnterDown;
+    g.pwHostEnterDown = enter;
+    if (!g.pwHostBox || !host) { g.pwHostFocused = false; return; }
+    const bool focused = g.pwHostText.Focused();
+    const bool set = Clicked(g.pwSet.card) || (enterEdge && (focused || g.pwHostFocused));
+    const bool clear = Clicked(g.pwClear.card);
+    g.pwHostFocused = focused;
+    if (focused) SetLobbyTyping(true);          // after HandleChat's own call: either box keeps the hotkeys off
+    Paint(g.pwSet.card); Paint(g.pwClear.card);
+    if (set) {
+        const std::string typed = CleanPassword(g.pwHostText.Value());
+        if (typed.empty()) { g.pwHostNote.Set("Type a password first, or press CLEAR to open the lobby."); return; }
+        g.pwHostText.Clear();
+        session.SetLobbyPassword(typed);
+        g.nextText = 0;
+    } else if (clear) {
+        g.pwHostText.Clear();
+        session.SetLobbyPassword("");
+        g.nextText = 0;
+    }
 }
 
 // START: the accent face, a little toward its ink under the mouse.
@@ -1097,6 +1335,37 @@ void HandleClicks(Session& session) {
         HSM_LOG("ui: help-improve question answered: %s", yes ? "yes" : "no");
         session.SetHelpImprove(yes);
         openPage();
+        return;
+    }
+    // The password question: a locked lobby was clicked (or invited to, or the password was wrong). Nothing else on the menu
+    // until it is answered; Enter joins, Esc drops the join.
+    if (!g.pwOpen && g.pw && lobby.PasswordAsk()) {
+        g.pwOpen = true; g.pw.Show(true);
+        g.pwText.Clear(); g.pwText.Focus();
+        g.pwNote.Set(lobby.PasswordNote());
+        g.pwEscDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        g.pwEnterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+        g.pwFocused = true;
+        if (!g.panelOpen) openPage();                  // an invite arrived on the bare main menu
+    }
+    if (g.pwOpen) {
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.pwEscDown;
+        const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !g.pwEnterDown;
+        g.pwEscDown = esc; g.pwEnterDown = enter;
+        const bool focused = g.pwText.Focused();
+        const bool ok = Clicked(g.pwOk.card) || (enterEdge && (focused || g.pwFocused));   // the box commits on Enter, so it may have lost the keyboard this frame
+        const bool cancel = Clicked(g.pwCancel.card) || escEdge || !lobby.PasswordAsk();
+        g.pwFocused = focused;
+        Paint(g.pwOk.card); Paint(g.pwCancel.card);
+        SetLobbyTyping(focused);
+        if (!ok && !cancel) return;
+        const steam::SteamId id = lobby.PasswordAsk();
+        const std::string typed = CleanPassword(g.pwText.Value());
+        if (ok && !cancel && typed.empty()) { g.pwNote.Set("Type the password first."); g.pwText.Focus(); return; }
+        g.pwOpen = false; g.pw.Show(false); g.pwText.Clear(); SetLobbyTyping(false);
+        lobby.CancelPasswordAsk();
+        if (ok && !cancel && id) { HSM_LOG("ui: joining a locked lobby with a password"); lobby.Join(id, typed); }
+        g.nextText = 0;
         return;
     }
     if (openClicked && !g.panelOpen && !session.HelpImproveAsked() && g.ask) {
@@ -1144,9 +1413,12 @@ void HandleClicks(Session& session) {
     g.helpToggle.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
     g.helpToggle.label.Color(help ? style::kMenuOk : style::kMenuText);
     g.helpToggle.card.selected = help;
+    if (act(Clicked(g.updateNow.card), update::CanInstall())) update::StartInstall();
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
     if (g.settingsShown) g.voice.Tick(session);
     HandleChat(session, s.in && !g.settingsShown);
+    HandlePassword(session, s.hostPassword && !g.settingsShown);
+    HandleDamage(lobby, s, acted);               // after the two boxes: its own text box keeps the hotkeys off too
 
     // Not in a lobby: hosting, the browser and its filters.
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
@@ -1155,7 +1427,10 @@ void HandleClicks(Session& session) {
     for (size_t i = 0; i < g.chips.size(); ++i)
         if (act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) g.filter = ToggleFilter(g.filter, i);
     for (size_t i = 0; i < g.rows.size(); ++i)
-        if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) lobby.Join(g.rowLobbies[i]);
+        if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) {
+            if (s.browser[i].locked) lobby.AskPassword(g.rowLobbies[i]);   // the question opens next frame; JOIN there joins
+            else lobby.Join(g.rowLobbies[i]);
+        }
 
     // In a lobby: the players' buttons, the tabs, and what each tab offers.
     if (act(Clicked(g.invite.card), s.in)) lobby.Invite();
@@ -1165,7 +1440,7 @@ void HandleClicks(Session& session) {
     for (size_t i = 0; i < kTabCount; ++i) if (act(Clicked(g.tabs[i].card), s.in)) g.tab = i;
 
     MatchConfig c = lobby.config();
-    int teams = HasTeams(c.format) ? TeamCount(c.format) : 0;
+    int teams = PicksTeams(c.format) ? TeamCount(c.format, c.teams) : 0;
     for (size_t i = 0; i < g.members.size(); ++i) {
         if (!act(Clicked(g.members[i].card), i < s.roster.size() && s.roster[i].movable && g.memberIds[i] && teams)) continue;
         for (const game::LobbyMember& m : lobby.members())
@@ -1183,13 +1458,17 @@ void HandleClicks(Session& session) {
         if (!v.box) continue;
         int dir = Clicked(v.prev.card) ? -1 : 0;
         if (Clicked(v.next.card)) dir = 1;
-        const SettingRow* row = nullptr;
-        for (const SettingRow& r : s.settings) if (size_t(r.id) == i) row = &r;
+        const SettingRow* row = RowFor(s, i);
         if (!act(dir != 0, g.tab == 1 && row && row->enabled)) continue;
-        if (row->id == LobbyRow::MyTeam) {
+        if (row->id == LobbyRow::Players) {         // the lobby's own limit, not a MatchConfig field
+            lobby.SetMaxPlayers(StepPlayerLimit(lobby.MaxPlayers(), lobby.PlayerCount(), dir));
+        } else if (row->id == LobbyRow::MyTeam) {
             int mine = kNoTeam;
             for (const game::LobbyMember& m : lobby.members()) if (m.id == steam::MySteamId()) mine = m.team;
             lobby.SetTeamPick(StepTeamPick(int8_t(mine), teams, dir));
+        } else if (row->id == LobbyRow::Scenario) {  // the scenarios the picked map offers (match/hsm_scenarios.h)
+            c.scenario = StepScenario(s.scenarioMap, c.scenario, dir);
+            lobby.SetConfig(c);
         } else {
             c = StepSetting(c, row->id, dir, game::VanillaDamageRange());
             lobby.SetConfig(c);
@@ -1211,13 +1490,14 @@ void HandleClicks(Session& session) {
 
     // Paint after the polls (a card's Hovered() is the one its Clicked() just saw).
     for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.settingsOpen, &g.reportOpen,
-                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle}) Paint(f->card);
+                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.updateNow}) Paint(f->card);
     for (Flat& f : g.chips) Paint(f.card);
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Paint(h->card);
     for (BrowserView& v : g.rows) Paint(v.card);
     for (MemberView& v : g.members) Paint(v.card);
     for (ModeView& v : g.modes) Paint(v.card);
     for (StepperView& v : g.steppers) { Paint(v.prev.card); Paint(v.next.card); }
+    Paint(g.damage.number.card);
     for (MapView& v : g.maps) Paint(v.card);
     PaintTabs();
     PaintStart();

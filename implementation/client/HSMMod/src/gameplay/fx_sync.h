@@ -37,6 +37,7 @@ public:
         std::function<uint8_t(const ue::UObject*)> ownedEntity;     // the entity of a fighter simulated here, 0 if none
         std::function<void(const combat::PaintFxMsg&)> send;        // a report made here (the session routes it)
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
+        std::function<void(uint8_t)> gearChanged;                   // an entity's worn armour changed (put on here or on a stand-in): the team kit is put back. Optional.
         std::function<void()> noteSpawn;                            // armour came off a fighter: a new loose object (ObjectSync::NoteSpawn). Optional.
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
@@ -55,7 +56,7 @@ public:
 private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
     struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
-                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0; };
+                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0, stripHeld = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
     void OnBoxVertexPaint(ue::ScriptCall& c);

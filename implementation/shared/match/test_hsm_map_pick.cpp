@@ -14,7 +14,7 @@ int main() {
     // The unpickable maps stay known (Progression travels to the Tavern by path).
     CHECK(FindMap("Map_Hub_Tavern_Frank") != nullptr);
 
-    const Format all[] = {Format::Duel, Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies};
+    const Format all[] = {Format::Duel, Format::LastManStanding, Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Zombies};
     for (Format f : all) {
         size_t cur = MapCount() - 1;
         for (size_t step = 0; step < MapCount() + 2; ++step) {

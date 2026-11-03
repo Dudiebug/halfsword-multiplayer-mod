@@ -11,7 +11,7 @@ using namespace hsm::ue;
 namespace {
 
 constexpr int32_t kZOrder = 50;
-constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12;   // eight fighters, three team bands, slack
+constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12, kFlagLines = 2;   // eight fighters, three team bands, slack
 constexpr Rgba kOutline{0, 0, 0, 0.9f}, kClear{0, 0, 0, 0};
 constexpr Rgba kFeedMine{0.22f, 0.025f, 0.02f, 0.80f}, kFeedOther{0.02f, 0.017f, 0.014f, 0.55f};
 
@@ -27,12 +27,15 @@ struct State {
     ULONGLONG nextLive = 0;   // when to check that the UI_HUD we sit on is still the one on screen
     bool built = false;
     Kit kit;
-    Box top; std::array<Block, kStripBlocks> blocks; Fixed barBox; Bar bar; Panel pill; Text pillText, clock;   // top centre
+    std::array<Text, kFlagLines> flagLines;                                                                    // Capture the flag: one line per flag, under the pill
+    Box top; std::array<Block, kStripBlocks> blocks; Fixed barBox; Bar bar; Panel pill; Text pillText, clock, info;   // top centre (info: Tournament's pairing, Pit Bridge Duels' streak)
     Box bannerBox; Text banner, bannerSub;                                                                      // centre
     Panel hold; Text holdText; Fixed holdBarBox; Bar holdBar;                                                   // the G hold, mid screen
     Panel dead; Text deadTitle, deadDetail, deadHint; Fixed deadBarBox; Bar deadBar;                            // lower third
     Box feed; std::array<FeedLine, kFeedRows> feedLines;                                                       // top right
     std::array<TagLabel, kMaxWillies> tags;                                                                              // name tags over heads
+    std::array<TagLabel, kMaxObjectives> markers;                                                               // objective markers (flags)
+    bool markersOff = false;
     UObject* statics = nullptr; UObject* layout = nullptr;                                                      // CDOs, resolved once
     Format tagFormat = Format::Duel;
     bool tagsOff = false;                                                                                       // a name was not found: hidden for good
@@ -122,6 +125,14 @@ void BuildTop(Canvas& root) {
     pillRow.Add(g.pillText).Align(HAlign::Left, VAlign::Center);
     g.clock = MakeText(18, 1, style::kIron);
     pillRow.Add(g.clock).Align(HAlign::Left, VAlign::Center).Padding({14, 0, 0, 0});
+    for (Text& t : g.flagLines) {
+        t = MakeText(18, 2, style::kBone, Justify::Center);
+        if (!t) continue;
+        g.top.Add(t).Align(HAlign::Center, VAlign::Top).Padding({0, 4, 0, 0});
+        t.Show(false);
+    }
+    g.info = MakeText(16, 1, style::kIron, Justify::Center);
+    g.top.Add(g.info).Align(HAlign::Center, VAlign::Top).Padding({0, 4, 0, 0});
 }
 
 void BuildCentre(Canvas& root) {
@@ -195,7 +206,20 @@ void BuildTags(Canvas& root) {
     }
 }
 
+constexpr float kMarkerFont = 24.f;
+
+void BuildMarkers(Canvas& root) {
+    for (TagLabel& t : g.markers) {
+        t.text = MakeText(kMarkerFont, 2, style::kBone, Justify::Center);
+        if (!t.text) return;
+        t.slot = root.Add(t.text);
+        t.slot.Anchor({{0, 0}, {0, 0}}, {0.5, 1}).AutoSize().Z(kZOrder - 1);
+        t.text.Show(false);
+    }
+}
+
 void HideTags() { for (TagLabel& t : g.tags) if (t.text) t.text.Show(false); }
+void HideMarkers() { for (TagLabel& t : g.markers) if (t.text) t.text.Show(false); }
 
 // Every call here fails soft: a name the game does not have logs once and the tags stay hidden; nothing else is touched.
 void TagsFail(const char* what) {
@@ -237,13 +261,76 @@ void ApplyTags(const std::vector<NameTagSrc>& src) {
         const Vec2 sp = ok ? pj.get<Vec2>("ScreenLocation") : Vec2{};
         const double dx = n.wx - eye.x, dy = n.wy - eye.y, dz = n.wz - eye.z;
         NameTagView v = NameTagLayout(ok, float(sp.x), float(sp.y), float(view.x), float(view.y), scale,
-                                      float(std::sqrt(dx * dx + dy * dy + dz * dz)), n.alive, n.team, g.tagFormat, n.seen);
+                                      float(std::sqrt(dx * dx + dy * dy + dz * dz)), n.alive, n.team, g.tagFormat, n.seen, n.it);
         t.text.Show(v.visible);
         if (!v.visible) continue;
         t.text.Set(n.name);
         t.text.Color(v.ink);
         t.text.Opacity(v.alpha);
         t.text.Scale(v.fontSize / kTagFont);
+        t.slot.Position({v.x, v.y});
+    }
+}
+
+// What a projection needs, asked once a frame: the player controller, the viewport's scale and size, the camera's place.
+struct Proj { UObject* ctrl = nullptr; float scale = 1; Vec2 view{}; FVector eye{}; };
+enum class ProjState { Ok, Skip, Fail };   // Skip: nothing to project this frame; Fail: a name the game does not have (what says which)
+
+ProjState BeginProjection(Proj& p, const char*& what) {
+    if (!g.statics) if (UObject* c = FindObject("GameplayStatics", "Class")) g.statics = DefaultObject(reinterpret_cast<UClass*>(c));
+    if (!g.layout) if (UObject* c = FindObject("WidgetLayoutLibrary", "Class")) g.layout = DefaultObject(reinterpret_cast<UClass*>(c));
+    if (!g.statics || !g.layout) { what = "GameplayStatics / WidgetLayoutLibrary"; return ProjState::Fail; }
+    Call pc(g.statics, "GetPlayerController");
+    if (!pc.valid()) { what = "GetPlayerController"; return ProjState::Fail; }
+    pc.set<UObject*>("WorldContextObject", g.hud).set<int32_t>("PlayerIndex", 0);
+    p.ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!p.ctrl) return ProjState::Skip;                     // no controller this frame: not a failure
+    Call sc(g.layout, "GetViewportScale"), vs(g.layout, "GetViewportSize");
+    if (!sc.valid()) { what = "GetViewportScale"; return ProjState::Fail; }
+    if (!vs.valid()) { what = "GetViewportSize"; return ProjState::Fail; }
+    sc.set<UObject*>("WorldContextObject", g.hud); vs.set<UObject*>("WorldContextObject", g.hud);
+    if (!sc.invoke() || !vs.invoke()) return ProjState::Skip;
+    p.scale = sc.get<float>("ReturnValue");
+    p.view = vs.get<Vec2>("ReturnValue");
+    Call cam(p.ctrl, "GetPlayerViewPoint");
+    if (!cam.valid()) { what = "GetPlayerViewPoint"; return ProjState::Fail; }
+    p.eye = FVector{}; if (cam.invoke()) p.eye = cam.get<FVector>("Location");
+    return ProjState::Ok;
+}
+
+// A world point on the screen: false (what set) when the game has no ProjectWorldLocationToScreen; ok: it is in front of the camera.
+bool ProjectPoint(const Proj& p, double wx, double wy, double wz, bool& ok, Vec2& sp, float& distance, const char*& what) {
+    Call pj(p.ctrl, "ProjectWorldLocationToScreen");
+    if (!pj.valid()) { what = "ProjectWorldLocationToScreen"; return false; }
+    pj.set("WorldLocation", FVector{wx, wy, wz}).set<bool>("bPlayerViewportRelative", true);
+    ok = pj.invoke() && pj.get<bool>("ReturnValue");
+    sp = ok ? pj.get<Vec2>("ScreenLocation") : Vec2{};
+    const double dx = wx - p.eye.x, dy = wy - p.eye.y, dz = wz - p.eye.z;
+    distance = float(std::sqrt(dx * dx + dy * dy + dz * dz));
+    return true;
+}
+
+void ApplyMarkers(const std::vector<MarkerSrc>& src) {
+    if (g.markersOff || !g.markers[0].text) return;
+    if (src.empty()) { HideMarkers(); return; }
+    Proj p; const char* what = "";
+    const ProjState st = BeginProjection(p, what);
+    if (st == ProjState::Skip) { HideMarkers(); return; }
+    if (st == ProjState::Fail) { HSM_LOG("hud: objective markers off (%s not found)", what); g.markersOff = true; HideMarkers(); return; }
+    for (size_t i = 0; i < g.markers.size(); ++i) {
+        TagLabel& t = g.markers[i];
+        if (!t.text) continue;
+        if (i >= src.size()) { t.text.Show(false); continue; }
+        const MarkerSrc& m = src[i];
+        bool ok = false; Vec2 sp{}; float dist = 0;
+        if (!ProjectPoint(p, m.wx, m.wy, m.wz, ok, sp, dist, what)) { HSM_LOG("hud: objective markers off (%s not found)", what); g.markersOff = true; HideMarkers(); return; }
+        const MarkerView v = MarkerLayout(m, ok, float(sp.x), float(sp.y), float(p.view.x), float(p.view.y), p.scale, dist);
+        t.text.Show(v.visible);
+        if (!v.visible) continue;
+        t.text.Set(v.text);
+        t.text.Color(v.ink);
+        t.text.Opacity(v.alpha);
+        t.text.Scale(v.fontSize / kMarkerFont);
         t.slot.Position({v.x, v.y});
     }
 }
@@ -259,6 +346,7 @@ bool Build() {
     BuildFeed(root);
     BuildBoard(root);
     BuildTags(root);
+    BuildMarkers(root);
     if (!g.pillText || !g.banner || !g.holdText || !g.boardTitle) { HSM_LOG("hud: could not make the match HUD widgets"); return false; }
     HSM_LOG("hud: match HUD added to UI_HUD");
     return true;
@@ -288,11 +376,16 @@ void ApplyTop(const HudScene& s) {
         b.label.Set(sb.label); b.label.Color(sb.color);
         b.score.Set(std::to_string(sb.score)); b.score.Color(sb.color);
     }
+    for (size_t i = 0; i < g.flagLines.size(); ++i) {
+        if (!g.flagLines[i]) continue;
+        if (i < s.flags.size()) Apply(g.flagLines[i], s.flags[i]); else g.flagLines[i].Show(false);
+    }
     g.barBox.Show(s.timeBar);
     if (s.timeBar) g.bar.Percent(s.timeFrac);
     g.pill.Show(s.pill.visible);
     if (s.pill.visible) { g.pillText.Set(s.pill.text); g.pillText.Color(s.pill.color); }
     Line(g.clock, s.clock, s.timeBar && !s.clock.empty());
+    Apply(g.info, s.info);
 }
 
 void ApplyHold(const HoldView& h) {
@@ -334,7 +427,7 @@ void ApplyBoardLine(BoardLine& l, const BoardRow& r) {
     l.frame.Color(r.local ? style::kBlood : kClear);
     l.panel.Color(band ? Rgba{r.swatch.r, r.swatch.g, r.swatch.b, 0.45f} : kClear);
     l.swatch.Color(band ? kClear : r.swatch);
-    l.name.Set(r.name); l.name.Color(r.ink);
+    l.name.Set(r.tag.empty() ? r.name : r.name + "  " + r.tag); l.name.Color(r.ink);
     l.badge.Set(r.host ? "HOST" : "");
     l.kills.Set(band ? "" : std::to_string(r.kills)); l.kills.Color(r.ink);
     l.deaths.Set(band ? "" : std::to_string(r.deaths)); l.deaths.Color(r.ink);
@@ -362,7 +455,7 @@ bool HudTabHeld() {
     return pid == GetCurrentProcessId();
 }
 
-void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format format) {
+void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format format, const std::vector<MarkerSrc>& markers) {
     if (!g.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once a second
         const ULONGLONG now = GetTickCount64();
         if (now < g.nextScan) return;
@@ -401,6 +494,7 @@ void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format form
     ApplyBoard(s.board);
     g.tagFormat = format;
     ApplyTags(s.visible ? tags : std::vector<NameTagSrc>{});
+    ApplyMarkers(s.visible ? markers : std::vector<MarkerSrc>{});
 }
 
 }  // namespace hsm::ui

@@ -43,20 +43,23 @@ bool Blend(UObject* controller, UObject* target, float blendSeconds) {
     return c.invoke();
 }
 
-constexpr double kCamBack = 260.0;     // uu behind the head
-constexpr double kCamUp = 70.0;        // uu above it
-constexpr double kCamWallGap = 25.0;   // kept off a wall the camera would be behind
-
 struct Follow {
     UObject* cam = nullptr;
+    UObject* camComp = nullptr;   // its CameraComponent: what the audio listener is attached to while spectating (#190)
     int32_t camIndex = -1;
-    FVector pos;
+    FVector pos;          // where the camera was last put
+    FVector anchor;       // the (smoothed) head it orbits
+    double pull = 0;      // the orbit distance after the wall pull-in (eased back out)
+    double yaw = 0, pitch = 0;
+    bool placed = false;
     int logged = 0;   // follow lines written (the first 20 a game run)
     bool failLogged = false;
 } g_follow;
 
-// GameplayStatics::BeginDeferredActorSpawnFromClass / FinishSpawningActor, as Adapter::SpawnFighter does.
-UObject* SpawnCamera(Adapter& a, const FVector& at) {
+// GameplayStatics::BeginDeferredActorSpawnFromClass / FinishSpawningActor, as Adapter::SpawnFighter does. camComp comes
+// back with the camera's CameraComponent when there is one (nullptr otherwise).
+UObject* SpawnCamera(Adapter& a, const FVector& at, UObject*& camComp) {
+    camComp = nullptr;
     UObject* statics = GameplayStatics();
     UClass* cls = FindClass("CameraActor");
     if (!statics || !cls || !a.World()) return nullptr;
@@ -74,69 +77,131 @@ UObject* SpawnCamera(Adapter& a, const FVector& at) {
     if (UClass* compCls = FindClass("CameraComponent")) {
         Call get(cam, "GetComponentByClass");
         get.set<UClass*>("ComponentClass", compCls);
-        if (UObject* comp = get.invoke() ? get.get<UObject*>("ReturnValue") : nullptr)
+        if (UObject* comp = get.invoke() ? get.get<UObject*>("ReturnValue") : nullptr) {
+            camComp = comp;
             Call(comp, "SetConstraintAspectRatio").set<bool>("bInConstrainAspectRatio", false).invoke();
+        }
     }
     return cam;
 }
 
-double Len2(double x, double y) { return std::sqrt(x * x + y * y); }
+}  // namespace
+
+namespace {
+
+// The camera actor, spawned at `at` when we have none (or it was destroyed with the level).
+UObject* EnsureCamera(Adapter& a, const FVector& at, bool& created) {
+    Follow& f = g_follow;
+    created = false;
+    if (f.cam && !a.StillValid(f.cam, f.camIndex)) { f.cam = nullptr; f.camComp = nullptr; f.camIndex = -1; }
+    if (f.cam) return f.cam;
+    f.cam = SpawnCamera(a, at, f.camComp);
+    if (!f.cam) {
+        if (!f.failLogged) { f.failLogged = true; HSM_LOG("spectate: the follow camera could not be spawned"); }
+        return nullptr;
+    }
+    f.camIndex = ObjectIndex(f.cam);
+    created = true;
+    return f.cam;
+}
+
+void PlaceCamera(Follow& f, const FVector& pos, double yaw, double pitch) {
+    f.pos = pos; f.yaw = yaw; f.pitch = pitch; f.placed = true;
+    FRotator rot; rot.yaw = yaw; rot.pitch = pitch;
+    Call move(f.cam, "K2_SetActorLocationAndRotation");
+    move.set("NewLocation", pos).set("NewRotation", rot).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
+}
 
 }  // namespace
 
-UObject* FollowCamera(Adapter& a, UObject* target, bool snap, float dtSeconds) {
+UObject* FollowCamera(Adapter& a, UObject* target, UObject* alsoIgnore, bool snap, float dtSeconds, const freecam::Orbit& orbit) {
     if (!target) return nullptr;
     FVector head;
     if (!a.BoneLocation(target, "head", head)) { head = a.ActorLocation(target); head.z += 60; }
     if (!std::isfinite(head.x) || !std::isfinite(head.y) || !std::isfinite(head.z)) return nullptr;
     Follow& f = g_follow;
-    if (f.cam && !a.StillValid(f.cam, f.camIndex)) { f.cam = nullptr; f.camIndex = -1; }
-    if (!f.cam) {
-        f.cam = SpawnCamera(a, head);
-        if (!f.cam) {
-            if (!f.failLogged) { f.failLogged = true; HSM_LOG("spectate: the follow camera could not be spawned"); }
-            return nullptr;
-        }
-        f.camIndex = ObjectIndex(f.cam);
-        snap = true;
-    }
-    // Where it should be: behind the head along the camera's current bearing (a snap: behind the fighter's facing).
-    double dx = f.pos.x - head.x, dy = f.pos.y - head.y;
-    if (snap || Len2(dx, dy) < 1.0) {
-        const double yaw = a.ActorYaw(target) * 0.017453292519943295;
-        dx = -std::cos(yaw); dy = -std::sin(yaw);
-    } else {
-        const double l = Len2(dx, dy); dx /= l; dy /= l;
-    }
-    FVector want{head.x + dx * kCamBack, head.y + dy * kCamBack, head.z + kCamUp};
-    // A wall between the head and that spot: stop short of it (the fighter's own body is skipped).
-    const FVector from{head.x + dx * 30, head.y + dy * 30, head.z + 15};
-    FVector hit;
-    if (a.TraceLine(from, want, {target}, &hit, nullptr) && std::isfinite(hit.x)) {
-        const double hx = hit.x - head.x, hy = hit.y - head.y, hz = hit.z - head.z;
-        const double d = std::sqrt(hx * hx + hy * hy + hz * hz);
-        const double keep = d > kCamWallGap * 2 ? (d - kCamWallGap) / d : 0.5;
-        want = {head.x + hx * keep, head.y + hy * keep, head.z + hz * keep};
-    }
-    if (snap) f.pos = want;
+    bool created = false;
+    if (!EnsureCamera(a, head, created)) return nullptr;
+    if (created) snap = true;
+    // The head it orbits: smoothed (a running fighter's head bobs), cut to the new head on a snap.
+    if (snap) f.anchor = head;
     else {
-        const double k = 1.0 - std::exp(-8.0 * double(std::clamp(dtSeconds, 0.0f, 0.25f)));
-        f.pos = {f.pos.x + (want.x - f.pos.x) * k, f.pos.y + (want.y - f.pos.y) * k, f.pos.z + (want.z - f.pos.z) * k};
+        const double k = 1.0 - std::exp(-12.0 * double(std::clamp(dtSeconds, 0.0f, 0.25f)));
+        f.anchor = {f.anchor.x + (head.x - f.anchor.x) * k, f.anchor.y + (head.y - f.anchor.y) * k, f.anchor.z + (head.z - f.anchor.z) * k};
     }
-    const double lx = head.x - f.pos.x, ly = head.y - f.pos.y, lz = head.z + 10 - f.pos.z;
-    FRotator look;
-    look.yaw = std::atan2(ly, lx) * 57.29577951308232;
-    look.pitch = std::atan2(lz, Len2(lx, ly)) * 57.29577951308232;
-    Call move(f.cam, "K2_SetActorLocationAndRotation");
-    move.set("NewLocation", f.pos).set("NewRotation", look).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
+    // A wall between the head and the spot the orbit wants: stop short of it. The trace starts at the true head, so the
+    // smoothing cannot put the camera behind a wall the fighter is standing at.
+    const freecam::Vec3 h{head.x, head.y, head.z};
+    const freecam::Vec3 want = freecam::OrbitCameraPos(h, orbit);
+    double hitDist = -1.0;
+    FVector hit;
+    std::vector<UObject*> skip{target};
+    if (alsoIgnore) skip.push_back(alsoIgnore);
+    if (a.TraceLine(head, FVector{want.x, want.y, want.z}, skip, &hit, nullptr) && std::isfinite(hit.x) && std::isfinite(hit.y) && std::isfinite(hit.z))
+        hitDist = std::sqrt((hit.x - head.x) * (hit.x - head.x) + (hit.y - head.y) * (hit.y - head.y) + (hit.z - head.z) * (hit.z - head.z));
+    const double pulled = freecam::PullIn(orbit.dist, hitDist);
+    f.pull = snap ? pulled : freecam::EaseDist(f.pull, pulled, dtSeconds);
+    f.pull = std::min(f.pull, pulled);   // eased out, never past what the wall allows now
+    const freecam::Vec3 anchor{f.anchor.x, f.anchor.y, f.anchor.z};
+    const freecam::Vec3 pos = freecam::OrbitCameraPos(anchor, orbit, f.pull);
+    PlaceCamera(f, FVector{pos.x, pos.y, pos.z}, orbit.yaw, orbit.pitch);
+    // The view is this camera's, so the ears go with it: player 0's listener attenuation otherwise stays where the game put
+    // it once, the own fighter's First Person Camera (Adapter::KeepAudioListener re-points it there too), and a spectator
+    // hears the fight from its dead fighter's position (#190). Attached to the camera's component as the game attaches its
+    // own; session.cpp puts it back when spectating ends. Redone when the camera is spawned and each time the view snaps.
+    if (f.camComp && (created || snap))
+        if (UObject* ctrl = LocalController(a)) {
+            Call(ctrl, "SetAudioListenerAttenuationOverride").set<UObject*>("AttachToComponent", f.camComp).invoke();
+            static bool logged = false;
+            if (!logged) { logged = true; HSM_LOG("spectate: the audio listener rides the follow camera"); }
+        }
     if (snap && f.logged < 20) { ++f.logged; HSM_LOG("spectate: follow camera on %s", ObjectName(target).c_str()); }
     return f.cam;
+}
+
+UObject* FreeCamera(Adapter& a, const freecam::Pose& pose) {
+    Follow& f = g_follow;
+    bool created = false;
+    if (!EnsureCamera(a, FVector{pose.pos.x, pose.pos.y, pose.pos.z}, created)) return nullptr;
+    PlaceCamera(f, FVector{pose.pos.x, pose.pos.y, pose.pos.z}, pose.yaw, pose.pitch);
+    return f.cam;
+}
+
+bool CameraPose(freecam::Pose& out) {
+    const Follow& f = g_follow;
+    if (!f.placed) return false;
+    out.pos = {f.pos.x, f.pos.y, f.pos.z}; out.yaw = f.yaw; out.pitch = f.pitch;
+    return true;
+}
+
+bool ReadMouse(Adapter& a, MouseDelta& out) {
+    static bool failLogged = false;
+    out = MouseDelta{};
+    UObject* controller = LocalController(a);
+    if (!controller) return false;
+    Call d(controller, "GetInputMouseDelta");
+    if (!d.invoke()) {
+        if (!failLogged) { failLogged = true; HSM_LOG("spectate: the mouse delta could not be read from the controller"); }
+        return false;
+    }
+    const float dx = d.get<float>("DeltaX"), dy = d.get<float>("DeltaY");
+    if (std::isfinite(dx) && std::isfinite(dy)) { out.dx = dx; out.dy = dy; }
+    // The wheel is the analog value of the MouseWheelAxis key this frame (an FKey starts with the key's FName).
+    static FName wheelKey;
+    static bool haveKey = false;
+    if (!haveKey) { wheelKey = MakeName("MouseWheelAxis"); haveKey = true; }
+    Call w(controller, "GetInputAnalogKeyState");
+    if (void* key = w.paramPtr("Key")) {
+        *static_cast<FName*>(key) = wheelKey;
+        if (w.invoke()) { const float v = w.get<float>("ReturnValue"); if (std::isfinite(v)) out.wheel = v; }
+    }
+    return true;
 }
 
 void EndFollowCamera(Adapter& a) {
     Follow& f = g_follow;
     if (f.cam && a.StillValid(f.cam, f.camIndex)) a.DestroyActor(f.cam);
-    f.cam = nullptr; f.camIndex = -1;
+    f.cam = nullptr; f.camComp = nullptr; f.camIndex = -1; f.placed = false; f.pull = 0;
 }
 
 bool SetViewTarget(Adapter& a, UObject* target, float blendSeconds) {
@@ -184,9 +249,12 @@ bool IsDeathOverlay(const std::string& squashed) {
 }
 
 // UI_HUD's Tick sets Vignette from Consciousness and Stamina, Vignette_WakeUp to 1 - Wake Up Rate and BLACK to 1 at Wake Up Rate 0
-// (0.75 at Consciousness 0) (UI_HUD.cpp:77, 86-87). The death timeline drives Wake Up Rate down (Willie_BP.cpp:8265, 8351), so a
-// dead fighter's HUD is a solid black image whichever camera is the view target.
-constexpr const char* kHudDarkImages[] = {"BLACK", "Vignette_WakeUp", "Vignette"};
+// (0.75 at Consciousness 0) (UI_HUD.cpp:77, 86-87), and drives its pain and damage images from the same fighter every tick:
+// Vignette_Pain from Damage Taken, HPDmg1-3 from Health, HeadDmg, ArmLDmg, ArmRDmg, LegLDmg and LegRDmg from the head and limb
+// healths (UI_HUD.cpp:78-85, 88). The death timeline drives Wake Up Rate down (Willie_BP.cpp:8265, 8351), so a dead fighter's
+// HUD is a solid black image whichever camera is the view target, and its pain and damage overlays sit over the fight watched.
+constexpr const char* kHudDarkImages[] = {"BLACK", "Vignette_WakeUp", "Vignette", "Vignette_Pain", "HPDmg1", "HPDmg2", "HPDmg3",
+                                          "HeadDmg", "ArmLDmg", "ArmRDmg", "LegLDmg", "LegRDmg"};
 
 struct HiddenOverlay { UObject* w = nullptr; int32_t index = -1; uint8_t visibility = 0; };
 std::vector<HiddenOverlay> g_hidden;

@@ -1,6 +1,7 @@
 #include "gameplay/mod_maps.h"
 #include "log.h"
 #include "paths.h"
+#include "session/hsm_modpack.h"
 #include "ue/engine.h"
 #include <windows.h>
 #include <algorithm>
@@ -40,6 +41,7 @@ struct Shared {
     std::mutex mu;
     std::vector<ModPak> paks;
     std::vector<PakMaps> pakMaps;
+    std::vector<LocalPack> packs;             // the manifests under Paks/~mods/<pack>/ (session/hsm_modpack.h)
     bool listed = false, allHashed = false, running = false;
     uint32_t version = 0;                     // bumps on every change; the game thread copies when it differs
 };
@@ -151,9 +153,48 @@ void WriteWholeFile(const std::wstring& path, const std::string& text) {
     CloseHandle(h);
 }
 
-void Publish(const std::vector<ModPak>& paks, const std::vector<PakMaps>& pakMaps, bool listed, bool allHashed) {
+// A folder name that is plain ASCII, else empty (a pack's folder is its name).
+std::string AsciiName(const std::wstring& w) {
+    std::string s;
+    for (wchar_t c : w) { if (c >= 0x80) return {}; s += char(c); }
+    return s;
+}
+
+// Paks/~mods/<pack>/HSMPack.ini for every folder directly under ~mods that has one. A folder without a manifest is not a
+// pack (its paks are still listed and hashed as mod paks). Logged once per outcome, not at every rescan.
+std::vector<LocalPack> ScanPacks(const std::wstring& root) {
+    static std::set<std::string> logged;
+    std::vector<LocalPack> out;
+    const std::wstring mods = root + L"~mods\\";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((mods + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        const std::string folder = AsciiName(fd.cFileName);
+        if (!PackNameOk(folder)) continue;
+        const std::wstring file = mods + fd.cFileName + L"\\" + L"HSMPack.ini";
+        if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if (out.size() >= 16) break;
+        LocalPack p;
+        p.folder = folder;
+        const std::string text = ReadWholeFile(file);
+        p.error = text.empty() ? PackParse::MissingPack : ParsePackManifest(text, p.manifest);
+        if (p.error == PackParse::Ok && modpack_detail::Lower(p.manifest.name) != modpack_detail::Lower(folder)) p.error = PackParse::BadName;
+        p.valid = p.error == PackParse::Ok;
+        const std::string line = p.valid ? "pack: found " + p.manifest.name + " " + p.manifest.version + " (" + std::to_string(p.manifest.paks.size()) + " paks) in ~mods/" + folder
+                                         : "pack: ~mods/" + folder + "/HSMPack.ini is not valid (" + PackParseText(p.error) + ")";
+        if (logged.insert(line).second) HSM_LOG("%s", line.c_str());
+        out.push_back(p);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(out.begin(), out.end(), [](const LocalPack& a, const LocalPack& b) { return a.folder < b.folder; });
+    return out;
+}
+
+void Publish(const std::vector<ModPak>& paks, const std::vector<PakMaps>& pakMaps, const std::vector<LocalPack>& packs, bool listed, bool allHashed) {
     std::lock_guard<std::mutex> lock(g_shared.mu);
-    g_shared.paks = paks; g_shared.pakMaps = pakMaps; g_shared.listed = listed; g_shared.allHashed = allHashed;
+    g_shared.paks = paks; g_shared.pakMaps = pakMaps; g_shared.packs = packs; g_shared.listed = listed; g_shared.allHashed = allHashed;
     ++g_shared.version;
 }
 
@@ -171,7 +212,8 @@ void ScanOnce() {
     std::vector<ModPak> paks;
     for (const FoundPak& f : found) { ModPak p; p.name = f.name; p.size = f.size; paks.push_back(p); }
     std::vector<PakMaps> pakMaps;
-    Publish(paks, pakMaps, true, paks.empty());     // listed: the client can already say "no such pak" for names that are absent
+    const std::vector<LocalPack> packs = ScanPacks(root);
+    Publish(paks, pakMaps, packs, true, paks.empty());     // listed: the client can already say "no such pak" for names that are absent
 
     HashCache cache;
     cache.Parse(ReadWholeFile(CachePath()));
@@ -190,7 +232,7 @@ void ScanOnce() {
         HSM_LOG("maps: mod pak %s %llu %s%s", f.name.c_str(), (unsigned long long)f.size, Short(sha).c_str(),
                 r == PakParse::Ok ? "" : (std::string(" (index not read: ") + PakParseName(r) + ")").c_str());
         if (r == PakParse::Ok && !maps.empty()) pakMaps.push_back({i, maps});
-        Publish(paks, pakMaps, true, false);
+        Publish(paks, pakMaps, packs, true, false);
     }
     // A pak that could not be read is dropped from the list so nothing waits on its hash.
     std::vector<ModPak> kept; std::vector<PakMaps> keptMaps;
@@ -198,7 +240,7 @@ void ScanOnce() {
     for (size_t i = 0; i < paks.size(); ++i) if (paks[i].hashed) { remap[i] = kept.size(); kept.push_back(paks[i]); }
     for (PakMaps pm : pakMaps) { pm.pak = remap[pm.pak]; keptMaps.push_back(pm); }
     if (cacheDirty) WriteWholeFile(CachePath(), cache.Serialize());
-    Publish(kept, keptMaps, true, true);
+    Publish(kept, keptMaps, packs, true, true);
     HSM_LOG("maps: scanned %zu mod pak(s) under %s in %llu ms", kept.size(), Narrow(root).c_str(), (unsigned long long)(GetTickCount64() - t0));
 }
 
@@ -225,6 +267,7 @@ struct Local {
     uint32_t seenVersion = 0;
     std::vector<ModPak> paks;
     std::vector<PakMaps> pakMaps;
+    std::vector<LocalPack> packs;
     bool listed = false, allHashed = false;
     std::vector<std::string> registryMaps;
     bool registryDone = false, registryTried = false;
@@ -318,7 +361,7 @@ void Tick() {
         std::lock_guard<std::mutex> lock(g_shared.mu);
         if (g_shared.version != g.seenVersion) {
             g.seenVersion = g_shared.version;
-            g.paks = g_shared.paks; g.pakMaps = g_shared.pakMaps;
+            g.paks = g_shared.paks; g.pakMaps = g_shared.pakMaps; g.packs = g_shared.packs;
             g.listed = g_shared.listed; g.allHashed = g_shared.allHashed;
             g.dirty = true;
         }
@@ -343,6 +386,7 @@ void Rescan() {
 
 const std::vector<ModMapEntry>& Maps() { return g.maps; }
 const std::vector<ModPak>& Paks() { return g.paks; }
+const std::vector<LocalPack>& Packs() { return g.packs; }
 bool Listed() { return g.listed; }
 bool AllHashed() { return g.allHashed; }
 

@@ -239,6 +239,19 @@ static void TestHelloWatch() {
     const auto e = w.Expired(1000 + HelloWatch::kHelloMs);
     CHECK(e.size() == 1 && e[0] == 1);
     CHECK(w.Expired(1000 + 10 * HelloWatch::kHelloMs).empty() && w.size() == 0);   // reported once
+    // A peer still in the lobby is re-armed, not dropped (#708): its late Hello still lands.
+    HelloWatch m;
+    m.Connected(1, 1000);
+    auto member = [](uint32_t p) { return p == 1; };
+    std::vector<uint32_t> reArmed;
+    CHECK(m.Expired(1000 + HelloWatch::kHelloMs, member, &reArmed).empty() && reArmed.size() == 1 && reArmed[0] == 1);
+    reArmed.clear();
+    CHECK(m.Expired(1000 + 2 * HelloWatch::kHelloMs - 1, member, &reArmed).empty() && reArmed.empty());   // the clock re-armed, not frozen
+    m.Hello(1);
+    CHECK(m.size() == 0);                                                                              // the late Hello ends the watch
+    m.Connected(2, 2000);
+    CHECK(m.Expired(2000 + HelloWatch::kHelloMs, [](uint32_t) { return false; }, &reArmed).size() == 1);   // a non-member still drops
+    CHECK(m.Expired(2000 + 10 * HelloWatch::kHelloMs, [](uint32_t) { return false; }, &reArmed).empty());  // exactly once
     HelloWatch r;
     r.Connected(4, 0xFFFFFF00u);                                                 // clock wrap
     CHECK(r.Expired(0x100u).empty());

@@ -14,6 +14,7 @@ inline constexpr Rgba kBloodInk{0.95f, 0.32f, 0.26f, 1};         // the accent a
 inline constexpr Rgba kIron{0.45f, 0.47f, 0.50f, 1};             // secondary text, frames
 inline constexpr Rgba kOk{0.35f, 0.65f, 0.25f, 1};
 inline constexpr Rgba kWarn{0.85f, 0.62f, 0.05f, 1};
+inline constexpr Rgba kInfectedInk{0.45f, 0.78f, 0.28f, 1};      // Infection: the infected, as text
 inline constexpr Rgba kSceneGrey{0.18f, 0.18f, 0.18f, 1};        // the reference scene behind a panel
 
 // The menus (multiplayer page, Esc panel): "Iron & Blood". Opaque faces, so text is judged on the face itself.
@@ -59,6 +60,12 @@ inline Rgba Faded(Rgba c, float opacity) { return {c.r, c.g, c.b, c.a * opacity}
 inline Rgba TeamInk(int team) {
     static constexpr Rgba kInk[] = {kBloodInk, {0.40f, 0.55f, 1.0f, 1}, {0.30f, 0.80f, 0.30f, 1}, kWarn};
     return team >= 0 && team < 4 ? kInk[team] : kBone;
+}
+
+// The ink of a side in a match of format `f`: Infection's survivors keep bone and its infected are sickly green; the rest are TeamInk.
+inline Rgba TeamInkFor(Format f, int team) {
+    if (IsInfection(f)) return team == kInfectedTeam ? kInfectedInk : kBone;
+    return TeamInk(team);
 }
 
 }  // namespace hsm::style

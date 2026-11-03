@@ -20,6 +20,61 @@ Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other bui
 Output: `build/dwmapi.dll` and `build/dwmapi.map`. `tools/check.sh all` from the repo root runs every offline check
 (see `AGENTS.md`).
 
+## New in 0.8.0-pre23
+
+Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: docs/HUMAN_TESTING.md (private repo).
+
+### Wave 1
+
+- **Teams of 2 to 4:** the lobby's Teams row (lobby key `hsm_teams`) sets the count; MatchInfo carries it. With
+  `role=server`, `server_format=teams` uses `server_teams=2..4`, and `server_format=teams2|teams3|teams4` sets the count
+  directly. `server_format=lms` is Last man standing.
+- **Duel is for 2 players, Last man standing for 2 or more.** A Duel lobby switches to Last man standing when a 3rd
+  player joins; a 3rd player in a running Duel is benched until the rematch, which runs as Last man standing.
+- **Weapons row** (lobby key `hsm_wpn`: 0 Any, 1 1H swords, 2 2H swords, 3 Polearms, 4 Axes & maces): the game's own
+  weapon filter for random-by-tier and identical gear. The log lists the filter fields and the byte it writes.
+- **Player limit 2 to 8** (lobby key `hsm_max`, also the Steam lobby's member limit) and **lobby password** (lobby key
+  `hsm_lock`: only whether the lobby is locked, never the password; the host hands it to players it lets in with
+  LobbySecret).
+- **`/clear [all|weapons|armor|rocks]`** for the host and admins; **emoji** in chat (`:shortcode:`, `/emoji`, Ctrl+V);
+  Progression fights return to the Tavern after 3 s.
+
+### Wave 2
+
+- **Roles and three team-round modes.** Team Duel (2 to 4 teams, Duel's rounds between teams), Riot (one Knight in the best
+  kit on one side against everyone else as Rioters of tier 1 to 4) and Juggernaut (a few tall, heavy Juggernauts against
+  Skirmishers, short and light, with a bigger equipment budget). The Knight and the Juggernauts move on at every rematch.
+  Riot and Juggernaut need 3 players or more and deal the gear by role.
+- **Team colours row** (lobby key `hsm_kit`: 0 Off, 1 Tabard, 2 Full kit): what takes the team colour on each machine's own
+  copies of the fighters; blades stay steel. Every team format has it (Teams, Team Duel, Riot, Juggernaut).
+- **Spectator camera:** a dead player orbits the fighter watched with the mouse, zooms with the wheel, and presses F for a free
+  camera (W A S D, Space, Ctrl, Shift). The host's Free camera row (lobby key `hsm_fcam`) turns it off.
+- **CHANGE LOADOUT** in the Esc menu: edit your kit in the game's menu, then bring it into the match out of the fight. Own
+  gear only (not in Riot or Juggernaut); one change per 5 s.
+- **Crossbows row** (lobby key `hsm_xbow`: Off, 1, 2, Half, All; experimental): random players spawn with a crossbow,
+  redrawn every round. The Knight and the Juggernauts never get one.
+
+
+### Waves 3 and 4
+
+- **Capture the flag** (Format 10; lobby keys `hsm_ctfcap` captures to win, `hsm_ctfret` flag return seconds; `ctf_carry=hand|back`
+  under `[net]`): Alley and "Forest" (the Ambush arena, `/Game/Maps/Arenas/Map_Arena_Ambush_Test`, Capture the flag only).
+  The host decides every take, drop, return and capture (CtfEvent 62); flags and carriers are HUD markers
+  (`match/hsm_objective.h`). The flag actors are kept out of ground clears and map resets.
+- **Tag** (11; `hsm_fuse` fuse seconds), **Infection** (12), **Crossbow TDM** (13), **Tournament** (14; `hsm_trnr` rounds
+  per fight) and **Pit Bridge Duels** (15, the Pit only; `hsm_pbwin` wins to take the match). Tournament and Pit Bridge
+  Duels bench everyone not fighting.
+- **Progression:** a next-fight vote in the Tavern (ProgressionVote 66; `/fight`, `/fight <n>`; `progression_vote=0`
+  turns the automatic vote off) and everyone in their own career kit.
+- **Scenario row** (`hsm_scen`): Standard, Fenced ring (Pit, Yard, Cellar), Carnage, Brawling.
+- **UPDATE NOW:** downloads `dwmapi.dll` and `dwmapi.dll.sha256` of the newer public release, checks SHA-256, size and the PE
+  exports, and swaps the DLL (the old one is kept as `dwmapi.dll.old` until the next start).
+- **Modpack:** `~mods/<pack>/HSMPack.ini` (tools/make_pack_manifest.py, docs/MODPACK.md); lobby keys `hsm_pack`,
+  `hsm_packv`, `hsm_packh`; `[mod] pack=<name>|off`. A player without the host's pack is told what to install.
+- With `role=server`, `server_format` also takes `teamduel`, `riot`, `juggernaut`, `ctf`, `tag`, `infection`,
+  `crossbowtdm`, `tournament` and `pitbridge`.
+
+
 ## New in 0.7.0 (pre-release)
 
 - **Name tags** above other fighters, team colours in team formats; they fade out behind walls (a visibility trace from the camera, 10 times a second per fighter) and `name_tags=0` under `[net]` hides them.

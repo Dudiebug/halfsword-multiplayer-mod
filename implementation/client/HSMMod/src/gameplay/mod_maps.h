@@ -11,6 +11,7 @@
 // Game thread only, except the worker, which touches only its own state and the mutex-guarded results.
 #pragma once
 #include "session/hsm_modmaps.h"
+#include "session/hsm_modpack.h"
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@ void Rescan();    // files may have been dropped in since the start: list again 
 
 const std::vector<ModMapEntry>& Maps();   // the custom maps, sorted; ModMapEntry::pak indexes Paks()
 const std::vector<ModPak>& Paks();        // the mod paks found, hashed or not yet
+const std::vector<LocalPack>& Packs();    // the packs installed under Paks/~mods/<pack>/ (HSMPack.ini), valid or not
 bool Listed();                            // the file listing is complete (hashing may still run)
 bool AllHashed();                         // every pak listed has its SHA-256
 

@@ -315,13 +315,16 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
         if (t) { AddV(pages_[2], t, 6); t.Show(false); }
     }
 
+    loadoutNote_ = m_.NewText("", 16, style::kIron);
+    if (loadoutNote_) { loadoutNote_.Wrap(true); AddV(page, loadoutNote_, 12); loadoutNote_.Show(false); }
     AddV(page, footer, 16);
     resume_ = m_.MakeFlat("RESUME", 18);
+    loadout_ = m_.MakeFlat("CHANGE LOADOUT", 18);
     gameMenu_ = m_.MakeFlat("GAME MENU", 18);
     report_ = m_.MakeFlat("REPORT A BUG", 18);
     help_ = m_.MakeFlat("HELP IMPROVE THE MOD: OFF", 18);
     leave_ = m_.MakeFlat("LEAVE SESSION", 18);
-    for (Flat* f : {&resume_, &gameMenu_, &report_, &help_, &leave_}) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
+    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_}) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
     panel_.Show(false);
     return true;
 }
@@ -432,8 +435,21 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (!nextData_ || int32_t(now - nextData_) >= 0) { nextData_ = now + 250; Refresh(session); }
     if (tab_ == 1) voice_.Tick(session);
 
-    for (Flat* f : {&resume_, &gameMenu_, &report_, &help_, &leave_}) Paint(f->card);
+    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_}) Paint(f->card);
     if (report_.card) report_.card.button.Show(reportOn);
+    // CHANGE LOADOUT: only in a match; dimmed, with the reason under the buttons, while the rule says no. A click re-reads the
+    // passport (edited in the game's own menu) and asks the host for the new kit; the answer shows in the same line.
+    if (loadout_.card) {
+        const MpLoadout lv = session.LoadoutView();
+        loadout_.card.button.Show(lv.shown);
+        Live(loadout_, lv.available);
+        if (lv.shown && lv.available && Clicked(loadout_.card)) session.ChangeLoadout();
+        if (loadoutNote_) {
+            const std::string& text = lv.note.empty() ? lv.hint : lv.note;
+            loadoutNote_.Show(lv.shown && !text.empty());
+            if (lv.shown && !text.empty()) loadoutNote_.Set(text);
+        }
+    }
     if (help_.card) {                           // the multiplayer page's switch: on gets the blood frame and a green label
         const bool help = session.HelpImprove();
         help_.card.button.Show(reportOn);

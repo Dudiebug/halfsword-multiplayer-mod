@@ -129,6 +129,10 @@ public:
     // MapReset: put this machine's copy of the map back as it began, a few items a frame (StepReset, from Tick).
     void MarkBaseline();
     void MapReset(double nowMs, uint8_t flags);
+    // /clear rocks (session/hsm_ground_clear.h ClearableProp): destroy this machine's copy of every level prop that has been moved
+    // and every object spawned since the match began, a few a frame like a map reset's destroys. Loose armour, held props,
+    // detached bodies and structures stay. Returns how many were queued.
+    size_t ClearMovedProps(double nowMs);
     // The ground clear keeps these: a weapon MarkBaseline recorded that still lies within a metre and a half of its spot.
     // False for any other weapon, and for a level weapon that was picked up and put down elsewhere (it is a drop then).
     bool IsLevelWeaponAtStart(ue::UObject* actor);
@@ -152,6 +156,7 @@ private:
         double rxMs = 0;                   // when the state in the view for this body arrived here (SteadyNowMs); soft structures extrapolate from it
         double steerMs = -1e18;            // when this body was last steered toward a state (soft structures)
         bool detached = false;             // left the object (a Detached event): it is its own object now
+        bool gone = false;                 // its component was destroyed here (logged once, never streamed again)
         uint64_t readTick = 0;             // the tick `read` was taken in
         bool readOk = false;
         BodyStateMsg read;
@@ -237,6 +242,7 @@ private:
                  simAsked = 0, simCached = 0, simCapped = 0, structStatesSkipped = 0, structResetSkipped = 0,
                  structCorrected = 0, structSnapped = 0;
         uint64_t lateRecovered = 0, lateAliased = 0, lateExpired = 0, dropRestored = 0;   // 0.8.0-pre18 (weapon_hands.cpp)
+        uint64_t flagSkipped = 0;   // #612 (weapon_hands.cpp): the CTF flag left alone by stand-in hands
     };
 
     static constexpr double kCensusRefreshMs = 5000.0;  // the host walks again this often; a client retries its misses this often

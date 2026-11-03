@@ -212,14 +212,20 @@ public:
     void Hello(uint32_t peer) { since_.erase(peer); }
     void Forget(uint32_t peer) { since_.erase(peer); }
     void Clear() { since_.clear(); }
-    std::vector<uint32_t> Expired(uint32_t nowMs) {
+    // A peer still in the lobby is re-armed instead of reported: a slow Steam join's Hello arrives after kHelloMs (#708).
+    template <class Member>
+    std::vector<uint32_t> Expired(uint32_t nowMs, Member&& stillMember, std::vector<uint32_t>* reArmed = nullptr) {
         std::vector<uint32_t> out;
         for (auto it = since_.begin(); it != since_.end();) {
-            if (ElapsedAtLeast(it->second, nowMs, kHelloMs)) { out.push_back(it->first); it = since_.erase(it); }
-            else ++it;
+            if (ElapsedAtLeast(it->second, nowMs, kHelloMs)) {
+                if (stillMember(it->first)) { it->second = nowMs; if (reArmed) reArmed->push_back(it->first); ++it; continue; }
+                out.push_back(it->first);
+                it = since_.erase(it);
+            } else ++it;
         }
         return out;
     }
+    std::vector<uint32_t> Expired(uint32_t nowMs) { return Expired(nowMs, [](uint32_t) { return false; }); }
     size_t size() const { return since_.size(); }
 private:
     std::map<uint32_t, uint32_t> since_;

@@ -121,4 +121,20 @@ private:
     uint32_t due_ = 0, giveUp_ = 0;
 };
 
+// Map reload that keeps the match (pre25): the level is opened again for everyone, which puts back every prop and
+// structure (the Pit's bridge: its joints are made in BeginPlay and a broken one is gone for good, so the in-place reset
+// above cannot mend it), while the host keeps the scores, the round, the queue and the roles and respawns the fighters
+// once all are in. Bots die with the level and a wave cannot be rebuilt mid-way, nor can Capture the Flag's flags, so
+// those formats (unsupported) never reload.
+enum class ReloadVerdict : uint8_t { Reload, NoMatch, Unsupported, Travelling };
+inline ReloadVerdict MidMatchReload(bool matchLevel, bool matchRunning, bool unsupported, bool reloadPending) {
+    if (!matchLevel || !matchRunning) return ReloadVerdict::NoMatch;
+    if (unsupported) return ReloadVerdict::Unsupported;
+    if (reloadPending) return ReloadVerdict::Travelling;
+    return ReloadVerdict::Reload;
+}
+// Pit Bridge Duels: each new round is fought on a whole bridge, so the round reset is a reload (setting map_reset on);
+// a rematch, too. Every other format keeps the in-place reset.
+inline bool ReloadForRound(bool pitBridgeDuel, bool mapResetOn) { return pitBridgeDuel && mapResetOn; }
+
 }  // namespace hsm

@@ -1,4 +1,6 @@
 #include "config.h"
+#include "match/hsm_match.h"
+#include "match/hsm_roles.h"
 #include "session/hsm_cmdline.h"
 #include "session/hsm_roster.h"
 #include "session/hsm_ue4ss.h"
@@ -34,6 +36,8 @@ constexpr char kDefaultIni[] =
     "name_tags=1\n"
     "; 0 turns off the armour paint crash guard (armour is destroyed at once, as in the stock game)\n"
     "paint_defer=1\n"
+    "; the Juggernaut's body size (1.0 = the biggest stock fighter, up to 1.6). Every player needs the same value.\n"
+    "juggernaut_scale=1.35\n"
     "; in-game bug reports: type /bug <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
     "; (Steam IDs, IP addresses and your Windows user name are removed first). Nothing is sent unless you type it.\n"
     "reports=on\n"
@@ -63,14 +67,16 @@ constexpr char kDefaultIni[] =
     "voice_cutoff=30\n"
     "voice_volume=100\n"
     "; role=server (a hosted retail instance with no fighter of its own that starts matches by itself):\n"
-    "; the server opens a public Steam lobby that shows in the game's lobby browser. server_format=ffa|duel|teams|survival|zombies,\n"
+    "; the server opens a public Steam lobby that shows in the game's lobby browser. server_format=ffa|duel|lms|teams|survival|zombies (teams3 / teams4: three or four teams; duel runs as lms unless exactly\n"
+    "; 2 players are in), server_teams=2..4 (teams for server_format=teams),\n"
     "; server_maps=all or a comma list of map names, server_score_limit=0 (format default), server_time_limit_s=0 (none),\n"
     "; server_countdown_s=30, server_min_players=2 (1..8), server_damage=stock or a percent (player damage for everyone,\n"
     "; 100 = the game's rate 1.0, inside the game's own damage slider)\n"
-    "; server_admins=Steam IDs (comma list) allowed to /kick, /ban and /unban from the chat; server_votekick=1 lets players\n"
-    "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players\n"
-    "; and say (HSMMod.cmd)\n"
+    "; server_admins=Steam IDs (comma list) allowed to /kick, /ban, /unban, /clear [all|weapons|armor|rocks] and /resetmap from the chat; server_votekick=1 lets players\n"
+    "; vote a player out (15 min) or /voteban them (7 days, two thirds). The console takes kick, ban, unban, bans, players,\n"
+    "; clear and say (HSMMod.cmd)\n"
     "server_format=ffa\n"
+    "server_teams=2\n"
     "server_maps=all\n"
     "server_score_limit=0\n"
     "server_time_limit_s=0\n"
@@ -88,7 +94,10 @@ constexpr char kDefaultIni[] =
     "ue4ss_order=after\n"
     "; record=1: write a 60 Hz recording of every fighter, prop and gameplay event in each fight level to HSMRec-<date>-<time>.hsmrec\n"
     "; next to HSMMod.log (tools/hsmrec.py reads it; for mod development, about 40 MB a minute). Off by default.\n"
-    "record=0\n";
+    "record=0\n"
+    "; pack=<name>: the modpack (Content/Paks/~mods/<name>/ with its HSMPack.ini) your lobbies announce; every player needs the same files.\n"
+    "; Empty: the only valid pack installed. off: none. See docs/MODPACK.md.\n"
+    "pack=\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -108,6 +117,7 @@ std::string ReadModString(const std::wstring& ini, const wchar_t* key, const cha
     return out;
 }
 int Clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+double ClampD(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
 }  // namespace
 
 const char* RoleName(Role r) {
@@ -172,10 +182,13 @@ Config LoadConfig() {
         if (!c.hostInputDelay.valid) HSM_LOG("config: host_input_delay=%s is not auto, 0 or a number of milliseconds; using auto", hd.c_str());
     }
     c.scabbardFix = ReadString(ini, L"scabbard_fix", "1") != "0";
+    c.fenceFix = ReadString(ini, L"fence_fix", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
     c.mapReset = ReadString(ini, L"map_reset", "1") != "0";
+    c.progressionVote = ReadString(ini, L"progression_vote", "1") != "0";
+    c.progressionPayout = ReadString(ini, L"progression_payout", "1") != "0";
     c.voice = ReadString(ini, L"voice", "0") != "0";
     {
         const std::string reach = ReadString(ini, L"voice_reach", "proximity");
@@ -202,7 +215,9 @@ Config LoadConfig() {
     c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
     c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
     c.nameTags = ReadString(ini, L"name_tags", "1") != "0";
+    c.ctfFlagInHand = ReadString(ini, L"ctf_carry", "hand") != "back";
     c.paintDefer = ReadString(ini, L"paint_defer", "1") != "0";
+    c.juggernautScale = ClampD(std::atof(ReadString(ini, L"juggernaut_scale", "1.35").c_str()), hsm::kJuggernautScaleMin, hsm::kJuggernautScaleMax);
     c.reports = ReadString(ini, L"reports", "on") != "off";
     c.reportUrl = ReadString(ini, L"report_url", "https://reports.dudiebug.net");
     if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
@@ -210,6 +225,7 @@ Config LoadConfig() {
     c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";   // already on: nothing to ask
     c.updateCheck = ReadString(ini, L"update_check", "1") != "0";
     c.serverFormat = ReadString(ini, L"server_format", "ffa");
+    c.serverTeams = Clamp(std::atoi(ReadString(ini, L"server_teams", "2").c_str()), kMinTeams, kMaxTeams);
     c.serverMaps = ReadString(ini, L"server_maps", "all");
     c.serverScoreLimit = Clamp(std::atoi(ReadString(ini, L"server_score_limit", "0").c_str()), 0, 100);
     c.serverTimeLimitS = Clamp(std::atoi(ReadString(ini, L"server_time_limit_s", "0").c_str()), 0, 3600);
@@ -223,6 +239,7 @@ Config LoadConfig() {
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
+    c.modPack = ReadModString(ini, L"pack", "");
     c.record = ReadModString(ini, L"record", "0") != "0";
     if (c.record) HSM_LOG("config: record=1: fight levels are recorded to HSMRec-*.hsmrec next to this log");
     // Command-line overrides (several instances may share one ini).
@@ -249,8 +266,8 @@ Config LoadConfig() {
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)
-        HSM_LOG("config: server format=%s maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d",
-                c.serverFormat.c_str(), c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
+        HSM_LOG("config: server format=%s teams=%d maps=%s score_limit=%d time_limit_s=%d countdown_s=%d min_players=%d damage=%d",
+                c.serverFormat.c_str(), c.serverTeams, c.serverMaps.c_str(), c.serverScoreLimit, c.serverTimeLimitS, c.serverCountdownS, c.serverMinPlayers, c.serverDamagePct);
     if (c.role == Role::Server)
         HSM_LOG("config: server admins=%s", c.serverAdmins.empty() ? "none (console only)" : "set");
     return c;

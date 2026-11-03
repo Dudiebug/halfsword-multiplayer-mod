@@ -42,7 +42,7 @@ inline const char* ChatKeyLabel(ChatKey k) {
 inline Rgba ChatNameInk(const MatchInfo& m, uint8_t entity) {
     Format f = Format(m.format);
     const FighterEntry* e = FighterOf(m, entity);
-    if (!e || (f != Format::TwoTeams && f != Format::ThreeTeams) || e->team < 0 || e->team >= TeamCount(f)) return style::kIron;
+    if (!e || !HasTeams(f) || e->team < 0 || e->team >= TeamCount(f, m.teams)) return style::kIron;
     return style::TeamInk(e->team);
 }
 

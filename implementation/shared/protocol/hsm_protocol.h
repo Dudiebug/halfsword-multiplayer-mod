@@ -3,6 +3,8 @@
 // counts and finiteness and returns false on malformed input instead of trusting the sender.
 #pragma once
 #include "match/hsm_match.h"
+#include "match/hsm_objective.h"
+#include "match/hsm_roles.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -13,7 +15,7 @@
 namespace hsm {
 
 constexpr uint16_t kMagic = 0x4D48;          // "HM"
-constexpr uint8_t kProtocolRevision = 34;         // 34: MatchInfo.forceStrength (the host's force_strength: every player's build is forced to the lobby tier's, match/hsm_match.h ForcedWeight); 33: Input 4 and RelayInput 19 carry a toggle count per action (a press or release edge survives a lost frame and a tap shorter than a frame; protocol/hsm_input.h) and the lock-on target (host physics: the client locks on itself and the host logs it; sync/hsm_lockon.h); 32: hand-offs (sync/hsm_handoff.h): HandOffAsk 58 (asker -> host -> victim's owner: my fighter grabbed or stabbed yours), HandOff 57 (writer -> host -> everyone: lease entries, the machine of the fighter that grabbed or stabbed simulates the other while they are coupled), Pose and Vitals carry the sender's lease epoch, clients send Input 4 under owner sync too, RelayInput 19 (host -> holder: a handed fighter's input); 31: MatchInfo.physics (the host's Gore Rate, Bone Snapping and Dead Weight Scale, pinned on every machine; -1 = each its own), RemoteWrite 56 (sender -> host -> target's owner: a teammate helped up, a shove's push, a hold broken free; sync/hsm_remote.h); 30: Vitals carries the fields other fighters read on a stand-in (state bits: downed, guarding, guard sides, crouched, thrusting, threatening, give-up; Weapon Skill, tonus, noise, light, movement dislocation, exhaustion); 29: host physics (0.9.0): Welcome.syncMode 0 is back (the host simulates every fighter from Input 4, clients show its Pose stream for every fighter, their own included), MatchInfo.syncMode (the mode the next map runs, the lobby's Sync row); 28: MapReset 54 (host -> client: the map goes back to the round start at a Duel round reset and a rematch; session/hsm_map_reset.h); MatchInfo.waveBreakS (the host's pause between waves), clearGroundMin and clearCount (the ground-clear timer; clients clear when the count changes); LevelSeed 55 (host -> client: the seed of the travel's shared dice, so the map's Blueprint random numbers agree on every machine; session/hsm_dice.h); 27: ModMap 53 (host -> client: the picked modded map's package path and the pak it comes from, name + size + SHA-256; session/hsm_modmaps.h), a client without that pak leaves with a line saying what to install; 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
+constexpr uint8_t kProtocolRevision = 39;         // 39: Sanitize rules both ends apply: Tag is bare-fisted (gear Fists, match/hsm_match.h IsBare) and a Tournament fight is one round (scoreLimit 1); 38: Spawn.flags bit 1 kSpawnZombie (the body is the zombie Willie: Zombies' bots, Infection's infected; match/hsm_fighter_class.h), HitClaim source Ammo 3 (a fired bolt lodged in the victim, Stuck claims only); 37: Wave 3/4 wire: Format CaptureTheFlag 10, Tag 11, Infection 12, CrossbowTDM 13, Tournament 14 and PitBridgeDuel 15 (kFormatCount 16; match/hsm_ctf.h, hsm_modes.h, hsm_bracket.h, hsm_kingqueue.h, hsm_pitbridge.h), CtfEvent 62 (host -> client: a flag taken, dropped, returned, home or captured), ModeEvent 63 (host -> client: a Tag pass, a fuse burned, an infection), ProgressionVote 66 (the Tavern's next-fight vote; session/hsm_progvote.h; 64 and 65 stay unused), MatchInfo.tagIt (u8) and MatchInfo.fuseLeftMs (u16) right after crossbows, and trailing after fighters: the objectives (u8 count at most 8, 18 bytes each: kind, owner, state, carrier, x, y, z, timer; match/hsm_objective.h), then queueOrder (u8 count, entities), bracketWinners (u8 count, entities), fightWinsA, fightWinsB and streak (Tournament and Pit Bridge Duels; empty or 0 in every other format); 36: roles and team rounds (FighterEntry.role, a trailing u8 after steamId; Format TeamDuel 7, Riot 8 and Juggernaut 9, kFormatCount 10; match/hsm_roles.h), MatchInfo.teamKit, MatchInfo.freeCam and MatchInfo.crossbows (three u8, in that order, after forceStrength: the Team colours row, the dead players' free camera, the Crossbows row), Spawn.flags (a trailing u8, bit 0 kSpawnCrossbow), LoadoutChange 61 (CHANGE LOADOUT: client -> host the new passport as BlobChunks, host -> client one verdict byte; session/hsm_loadout_change.h); 35: GroundClear 59 (host -> client: the host's /clear, a mask of weapons, armour and moved props each machine clears on its own ground; session/hsm_ground_clear.h), LobbySecret 60 (host -> client: the lobby's password, handed to every player let in so a new host keeps the lobby locked; session/hsm_password.h), Hello.password (a trailing string, 32 bytes at most), RejectReason WrongPassword 7 and TooManyTries 8, MatchInfo.teams (the team count 2-4, right after format; Teams 2-4), Format::LastManStanding 6 (rounds, the last one alive takes the round; a Duel is for 2 players); 34: MatchInfo.forceStrength (the host's force_strength: every player's build is forced to the lobby tier's, match/hsm_match.h ForcedWeight); 33: Input 4 and RelayInput 19 carry a toggle count per action (a press or release edge survives a lost frame and a tap shorter than a frame; protocol/hsm_input.h) and the lock-on target (host physics: the client locks on itself and the host logs it; sync/hsm_lockon.h); 32: hand-offs (sync/hsm_handoff.h): HandOffAsk 58 (asker -> host -> victim's owner: my fighter grabbed or stabbed yours), HandOff 57 (writer -> host -> everyone: lease entries, the machine of the fighter that grabbed or stabbed simulates the other while they are coupled), Pose and Vitals carry the sender's lease epoch, clients send Input 4 under owner sync too, RelayInput 19 (host -> holder: a handed fighter's input); 31: MatchInfo.physics (the host's Gore Rate, Bone Snapping and Dead Weight Scale, pinned on every machine; -1 = each its own), RemoteWrite 56 (sender -> host -> target's owner: a teammate helped up, a shove's push, a hold broken free; sync/hsm_remote.h); 30: Vitals carries the fields other fighters read on a stand-in (state bits: downed, guarding, guard sides, crouched, thrusting, threatening, give-up; Weapon Skill, tonus, noise, light, movement dislocation, exhaustion); 29: host physics (0.9.0): Welcome.syncMode 0 is back (the host simulates every fighter from Input 4, clients show its Pose stream for every fighter, their own included), MatchInfo.syncMode (the mode the next map runs, the lobby's Sync row); 28: MapReset 54 (host -> client: the map goes back to the round start at a Duel round reset and a rematch; session/hsm_map_reset.h); MatchInfo.waveBreakS (the host's pause between waves), clearGroundMin and clearCount (the ground-clear timer; clients clear when the count changes); LevelSeed 55 (host -> client: the seed of the travel's shared dice, so the map's Blueprint random numbers agree on every machine; session/hsm_dice.h); 27: ModMap 53 (host -> client: the picked modded map's package path and the pak it comes from, name + size + SHA-256; session/hsm_modmaps.h), a client without that pak leaves with a line saying what to install; 26: generic object and event sync (M0): ObjectAnnounce 45, BodyState 46 (per body, replaces PropState 28), ObjectEvent 47; WorldState 17 and PropState 28 are retired (numbers stay reserved), spawned object ids (bit 62), Welcome.syncMode stays on the wire; 25: HitClaim striker kind Stuck + rawDamage (a lodged blade's Get Damage, replayed by the victim; stabs), the claim wire grows 8 bytes; 24: voice is each player's own (Voice flags kVoiceNoCut, kVoiceEveryone; VoiceMode and kWelcomeVoice* unused), MatchInfo.damagePct (the host's player damage), FighterEntry.steamId (a host migration rebuilds the scores by player); 23: Voice flags kVoiceAdpcm (a microphone the mod records itself), VoiceMode and Welcome.flags kWelcomeVoiceAll (the host's voice setting: Off / Proximity / Everyone), RouteTable and Forward (detours: a client relays another pair's Pose/Vitals), VoteState (the running votekick or voteban, for the in-match menu); 22: 8 players (fighter slots are entities 1..9: host + 8 clients, bots 10..19), Voice (proximity voice chat), PingTable (each client's ping to the host and to every other client), Welcome.flags kWelcomePeerPing; 21: MatchInfo.gear may be Fists (3, the Brawl mode: free-for-all with bare fists); 20: Reject reasons Kicked and Banned, chat lines from the server (kChatSystemSlot); 19: Spawn.life and victimLife (HitClaim, SeverClaim, DeathReport), PeerMap and MeshHeard (direct client-to-client Pose/Vitals), Welcome.flags; 18: ReportShare (in-game bug reports); 17: Kill flags 16/32, a drawn Duel round (both down / no hits); the pose carries each weapon's flail head (pose flags bits 2, 3, codec still v2); Hello and Welcome carry the mod build (session/hsm_build.h); MatchInfo marks fighters down (alive byte bit 1); 16: GiveUp (hold G concedes a Duel round); 15: PaintFx kinds Voice, HitSound, Armor, ArmorOn (voice lines, hit sounds, armour off/on, strip requests); 14: the pose codec is version 2, its header carries the hands' grip state (GripState); 13: a HitClaim may be struck by a prop; MatchInfo carries gear, tier, the Duel round and gap, fighters' ping and alive; 12: SeverNotice, PropCensus; 11: MatchInfo accepts every match format (Duel, Zombies); 10: PaintFx, Equip
 constexpr uint16_t kDefaultPort = 27777;
 constexpr size_t kMaxPlayerName = 32;
 constexpr size_t kMaxModBuild = 64;   // Hello/Welcome modBuild bytes (session/hsm_build.h)
@@ -85,10 +87,18 @@ enum class MsgType : uint8_t {
     RemoteWrite = 56, // sender -> host -> target's owner, reliable (rev 31): a write the game made onto a stand-in, for its owner to make (sync/hsm_remote.h)
     HandOff = 57,     // writer -> host -> everyone, reliable (rev 32): lease entries, who simulates a fighter coupled to another (sync/hsm_handoff.h)
     HandOffAsk = 58,  // asker -> host -> victim's owner, reliable (rev 32): my fighter grabbed or stabbed yours (sync/hsm_handoff.h)
+    GroundClear = 59, // host -> client, reliable (rev 35): the host's /clear: each machine clears its own weapons, armour and moved props (session/hsm_ground_clear.h)
+    LobbySecret = 60, // host -> client, reliable (rev 35): the lobby's password, handed to every player let in so a new host keeps the lobby locked (session/hsm_password.h)
+    LoadoutChange = 61, // client -> host, reliable (rev 36): the Esc menu's CHANGE LOADOUT: the new passport as BlobChunks (session/hsm_loadout_change.h)
+    CtfEvent = 62,    // host -> client, reliable (rev 37): a flag was taken, dropped, returned, went home or was captured (match/hsm_ctf.h)
+    ModeEvent = 63,   // host -> client, reliable (rev 37): a Tag pass, a fuse that ran out, an infection: the kill feed line, and for a fuse the owner's fighter dies (match/hsm_modes.h)
+    // 64 and 65 are reserved (skipped on purpose, never reuse them).
+    ProgressionVote = 66, // both ways, reliable (rev 37): the Tavern's next-fight vote: the host's options and tally, a client's pick, the result (session/hsm_progvote.h)
 };
-// The highest type that has a decoder (HandOffAsk); 48-52 in between are reserved with none. Fuzzers and tests bound valid types by these.
-constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::HandOffAsk);
-constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::HandOffAsk);
+// The highest type that has a decoder (ProgressionVote); 48-52, 64 and 65 are reserved with none (64 and 65 are skipped on purpose,
+// never reuse them). Fuzzers and tests bound valid types by these.
+constexpr uint8_t kLastDecodedMsgType = uint8_t(MsgType::ProgressionVote);
+constexpr uint8_t kLastReservedMsgType = uint8_t(MsgType::ProgressionVote);
 
 // Analog inputs, mirroring DefaultInput.ini axis mappings.
 enum class Axis : uint8_t {
@@ -106,8 +116,10 @@ constexpr size_t kAxisCount = static_cast<size_t>(Axis::Count);
 constexpr size_t kActionCount = static_cast<size_t>(Action::Count);
 static_assert(kActionCount <= 32, "action bitmask is 32 bits");
 
-enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4, Kicked = 5, Banned = 6 };
-constexpr uint8_t kMaxRejectReason = 6;
+enum class RejectReason : uint8_t { BadRevision = 1, BuildMismatch = 2, Full = 3, Malformed = 4, Kicked = 5, Banned = 6,
+                                     WrongPassword = 7, TooManyTries = 8 };   // rev 35: a locked lobby (session/hsm_password.h)
+constexpr uint8_t kMaxRejectReason = 8;
+constexpr size_t kMaxLobbyPassword = 32;   // Hello.password / LobbySecret bytes
 
 enum class EventKind : uint8_t {
     Spawned = 1,       // a = entity, b = slot
@@ -123,6 +135,7 @@ struct Hello {
     uint64_t buildKey = 0;   // PE TimeDateStamp << 32 | SizeOfImage of the game exe
     std::string name;
     std::string modBuild;    // rev 17: the client's mod build (session/hsm_build.h ModBuildString)
+    std::string password;    // rev 35: the lobby password the player typed (empty: none); the host compares it when the lobby is locked
 };
 struct Welcome {
     uint32_t sessionId = 0;
@@ -198,7 +211,9 @@ struct Spawn {
     uint32_t blobId = 0;        // loadout blob carrying this entity's passport (0 = none)
     float x = 0, y = 0, z = 0, yaw = 0;   // spawn location (cm, degrees)
     uint8_t life = 0;           // rev 19: the host's count of this entity's bodies; a claim names the life it was made against (0 = unknown)
+    uint8_t flags = 0;          // rev 36: kSpawnCrossbow = the body is given a crossbow (the lobby's Crossbows row; match/hsm_crossbow.h)
 };
+constexpr uint8_t kSpawnCrossbow = 1, kSpawnZombie = 2;   // rev 38: kSpawnZombie = the host built it as the zombie Willie
 struct Despawn { uint8_t entity = 0; };
 
 // Loadout blobs (SaveGame bytes holding one Str_Passport_Character1) travel as reliable chunks.
@@ -219,6 +234,7 @@ struct FighterEntry {
     bool alive = true;
     bool down = false;                  // rev 17: Duel, the host's draw check has it down (match/hsm_draw.h DrawCheck::Down)
     uint64_t steamId = 0;               // rev 24: the player's SteamID, 0 = bot / not a Steam player (the scores' identity, session/hsm_migration.h)
+    uint8_t role = 0;                   // rev 36: the fighter's role id (match/hsm_roles.h; 0 = the lobby's role, bots too), 0..kRoleCount-1
 };
 // GI_Settings doubles that change bodies and gore (Willie_BP.cpp:7678 Apply Gameplay Settings copies them onto each
 // fighter): the host's are every machine's in a session (sync audit items 10, 13; gameplay/damage_pin.cpp).
@@ -228,6 +244,7 @@ constexpr float kPinnedPhysicsMax = 10.f;
 inline bool ValidPinnedPhysics(float v) { return v == -1.f || (v >= 0.f && v <= kPinnedPhysicsMax); }
 struct MatchInfo {
     uint8_t format = 0;                 // hsm::Format
+    uint8_t teams = 2;                  // rev 35: the Teams format's team count, 2..4 (always 2..4 on the wire; other formats ignore it: hsm::TeamCount)
     uint16_t scoreLimit = 5, timeLimitS = 0, respawnDelayS = 5;
     bool friendlyFire = false;
     uint8_t phase = 0;                  // hsm::MatchPhase
@@ -242,10 +259,22 @@ struct MatchInfo {
     uint8_t clearCount = 0;             // rev 28: the host's ground clears so far (wraps); a change makes every machine clear its dropped weapons and loose armour
     uint8_t syncMode = 1;               // rev 29: SyncMode the next map runs (0 host physics, 1 per player); each machine takes it at a level change
     uint8_t forceStrength = 1;          // rev 34: the host's force_strength (0/1): 1 forces every player's passport Weight to the tier's (ForcedWeight); 0 leaves their own (clamped to 0..1)
+    uint8_t teamKit = uint8_t(TeamKit::Full);   // rev 36: the host's Team colours row (hsm::TeamKit 0..2): every machine tints its own copies of the fighters that way
+    uint8_t freeCam = 1;                // rev 36: the host allows the dead a free camera (MatchConfig::freeCam): 0/1
+    uint8_t crossbows = 0;              // rev 36: the host's Crossbows row (hsm::Crossbows, 0..4): how many random players get a crossbow (match/hsm_crossbow.h)
+    uint8_t tagIt = 0;                  // Wave 3, Tag: the entity that is "it" (a fighter in the roster; 0 = nobody, and every other format)
+    uint16_t fuseLeftMs = 0;            // Wave 3, Tag: the milliseconds left on "it"'s fuse (0 without one); the HUD runs it on between MatchInfos
     uint16_t damagePct = 0xFFFF;        // rev 24: the Player Damage Rate everyone runs, percent (0..1000); 0xFFFF the stock one (match/hsm_damage.h)
     std::array<float, kPinnedPhysics> physics{ -1.f, -1.f, -1.f };   // rev 31: kPinnedPhysicsNames' values everyone runs, -1 = each its own
     std::vector<ScoreEntry> scores;
     std::vector<FighterEntry> fighters;
+    std::vector<Objective> objectives;   // rev 37 (trailing): the match's objectives; Capture the flag's two flags (team 0's, then team 1's), else none (match/hsm_objective.h)
+    // Tournament and Pit Bridge Duels (match/hsm_bracket.h, hsm_kingqueue.h), empty/0 in every other format. Tournament: queueOrder the
+    // entities in seed order (0: left before his first game), bracketWinners the winner of every game in play order (0 undecided,
+    // 0xFF empty), fightWinsA/B the rounds the pairing's two fighters (the bracket's current game, a then b) have won. Pit Bridge
+    // Duels: queueOrder the queue (the first two fight), streak the wins in a row of the one who stays. Decode checks they hold together.
+    std::vector<uint8_t> queueOrder, bracketWinners;
+    uint8_t fightWinsA = 0, fightWinsB = 0, streak = 0;
 };
 struct Kill { uint8_t killer = 0, victim = 0; uint8_t flags = 0; };   // flags: 1 teamkill, 2 suicide, 4 environment, 8 gave up (Duel); 16 the round drawn with both down, 32 drawn with no hits (Duel: victim and killer are the two fighters)
 
@@ -285,10 +314,10 @@ private:
 inline bool PeekType(const uint8_t* d, size_t n, MsgType& t) { Reader r(d, n); return r.header(t); }
 
 // ---------------------------------------------------------------- encoders / decoders
-inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); w.str(m.modBuild, kMaxModBuild); return w.buf; }
+inline std::vector<uint8_t> Encode(const Hello& m) { Writer w; w.header(MsgType::Hello); w.u8(m.revision); w.u64(m.buildKey); w.str(m.name, kMaxPlayerName); w.str(m.modBuild, kMaxModBuild); w.str(m.password, kMaxLobbyPassword); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Hello& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Hello) return false;
-    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); return r.done();
+    m.revision = r.u8(); m.buildKey = r.u64(); m.name = r.str(kMaxPlayerName); m.modBuild = r.str(kMaxModBuild); m.password = r.str(kMaxLobbyPassword); return r.done();
 }
 
 inline std::vector<uint8_t> Encode(const Welcome& m) { Writer w; w.header(MsgType::Welcome); w.u32(m.sessionId); w.u8(m.slot); w.u8(m.entity); w.u16(m.snapshotHz); w.str(m.map, 200); w.u8(m.syncMode); w.str(m.modBuild, kMaxModBuild); w.u8(m.flags); return w.buf; }
@@ -435,12 +464,13 @@ inline bool Decode(const uint8_t* d, size_t n, Ready& m) {
 
 inline std::vector<uint8_t> Encode(const Spawn& m) {
     Writer w; w.header(MsgType::Spawn); w.u8(m.entity); w.u8(uint8_t(m.kind)); w.u8(m.ownerSlot); w.u8(uint8_t(m.team)); w.u32(m.blobId);
-    w.f32(m.x); w.f32(m.y); w.f32(m.z); w.f32(m.yaw); w.u8(m.life); return w.buf;
+    w.f32(m.x); w.f32(m.y); w.f32(m.z); w.f32(m.yaw); w.u8(m.life); w.u8(m.flags); return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, Spawn& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Spawn) return false;
     m.entity = r.u8(); uint8_t k = r.u8(); m.ownerSlot = r.u8(); m.team = int8_t(r.u8()); m.blobId = r.u32();
-    m.x = r.f32(); m.y = r.f32(); m.z = r.f32(); m.yaw = r.f32(); m.life = r.u8();
+    m.x = r.f32(); m.y = r.f32(); m.z = r.f32(); m.yaw = r.f32(); m.life = r.u8(); m.flags = r.u8();
+    if (m.flags & ~(kSpawnCrossbow | kSpawnZombie)) return false;
     if (k < 1 || k > 2 || m.entity == 0 || m.team < -1 || m.team > 7) return false;
     if (std::fabs(m.x) > 1e7f || std::fabs(m.y) > 1e7f || std::fabs(m.z) > 1e7f || std::fabs(m.yaw) > 720.f) return false;
     m.kind = EntityKind(k); return r.done();
@@ -468,10 +498,11 @@ inline bool Decode(const uint8_t* d, size_t n, BlobChunk& m) {
 
 inline std::vector<uint8_t> Encode(const MatchInfo& m) {
     Writer w; w.header(MsgType::MatchInfo);
-    w.u8(m.format); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
+    w.u8(m.format); w.u8(m.teams); w.u16(m.scoreLimit); w.u16(m.timeLimitS); w.u16(m.respawnDelayS); w.u8(m.friendlyFire ? 1 : 0);
     w.u8(m.phase); w.u32(m.timeLeftMs); w.i16(m.winner);
     w.u8(m.gear); w.u8(m.tier); w.u16(m.round); w.u32(m.roundGapLeftMs); w.u8(m.roundWinner); w.u16(m.damagePct);
-    w.u16(m.waveBreakS); w.u8(m.clearGroundMin); w.u8(m.clearCount); w.u8(m.syncMode); w.u8(m.forceStrength);
+    w.u16(m.waveBreakS); w.u8(m.clearGroundMin); w.u8(m.clearCount); w.u8(m.syncMode); w.u8(m.forceStrength); w.u8(m.teamKit); w.u8(m.freeCam); w.u8(m.crossbows);
+    w.u8(m.tagIt); w.u16(m.fuseLeftMs);
     for (float v : m.physics) w.f32(v);
     size_t ns = m.scores.size() < 255 ? m.scores.size() : 255; w.u8(uint8_t(ns));
     for (size_t i = 0; i < ns; ++i) { w.i16(m.scores[i].key); w.i16(m.scores[i].score); }
@@ -481,18 +512,32 @@ inline std::vector<uint8_t> Encode(const MatchInfo& m) {
         w.u8(f.entity); w.u8(uint8_t(f.team)); w.i16(f.kills); w.i16(f.deaths); w.str(f.name, kMaxPlayerName); w.u16(f.pingMs);
         w.u8(uint8_t((f.alive ? 1 : 0) | (f.down ? 2 : 0)));   // bit 0 alive, bit 1 down
         w.u64(f.steamId);
+        w.u8(f.role);
     }
+    size_t no = m.objectives.size() < kMaxObjectives ? m.objectives.size() : kMaxObjectives; w.u8(uint8_t(no));
+    for (size_t i = 0; i < no; ++i) {
+        const Objective& o = m.objectives[i];
+        w.u8(uint8_t(o.kind)); w.u8(uint8_t(o.owner)); w.u8(uint8_t(o.state)); w.u8(o.carrier);
+        w.f32(o.x); w.f32(o.y); w.f32(o.z); w.u16(uint16_t(o.timerMs));
+    }
+    const size_t nq = m.queueOrder.size() < kMaxBracketPlayers ? m.queueOrder.size() : kMaxBracketPlayers; w.u8(uint8_t(nq));
+    for (size_t i = 0; i < nq; ++i) w.u8(m.queueOrder[i]);
+    const size_t nw = m.bracketWinners.size() < kMaxBracketPlayers ? m.bracketWinners.size() : kMaxBracketPlayers; w.u8(uint8_t(nw));
+    for (size_t i = 0; i < nw; ++i) w.u8(m.bracketWinners[i]);
+    w.u8(m.fightWinsA); w.u8(m.fightWinsB); w.u8(m.streak);
     return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::MatchInfo) return false;
-    m.format = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
+    m.format = r.u8(); m.teams = r.u8(); m.scoreLimit = r.u16(); m.timeLimitS = r.u16(); m.respawnDelayS = r.u16();
     uint8_t ff = r.u8(); m.phase = r.u8(); m.timeLeftMs = r.u32(); m.winner = r.i16();
     m.gear = r.u8(); m.tier = r.u8(); m.round = r.u16(); m.roundGapLeftMs = r.u32(); m.roundWinner = r.u8(); m.damagePct = r.u16();
-    m.waveBreakS = r.u16(); m.clearGroundMin = r.u8(); m.clearCount = r.u8(); m.syncMode = r.u8(); m.forceStrength = r.u8();
+    m.waveBreakS = r.u16(); m.clearGroundMin = r.u8(); m.clearCount = r.u8(); m.syncMode = r.u8(); m.forceStrength = r.u8(); m.teamKit = r.u8(); m.freeCam = r.u8(); m.crossbows = r.u8();
+    m.tagIt = r.u8(); m.fuseLeftMs = r.u16();
     for (float& v : m.physics) { v = r.f32(); if (!ValidPinnedPhysics(v)) return false; }
-    if (m.syncMode > 1 || m.forceStrength > 1) return false;
-    if (m.format >= kFormatCount || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.syncMode > 1 || m.forceStrength > 1 || m.teamKit >= kTeamKitCount || m.freeCam > 1 || !ValidCrossbows(m.crossbows)) return false;
+    if (m.format >= kFormatCount || m.teams < kMinTeams || m.teams > kMaxTeams || ff > 1 || m.phase > 4 || m.scoreLimit < 1 || m.scoreLimit > 100 || m.timeLimitS > 3600 || m.respawnDelayS > 60) return false;
+    if (m.tagIt > kMaxWillies || m.fuseLeftMs > uint16_t(kFuseMaxS) * 1000u || (!m.tagIt && m.fuseLeftMs)) return false;   // a fuse needs its "it", and runs the Fuse row's 60 s at most
     if (m.gear >= kGearCount || m.tier > 7 || (m.damagePct != 0xFFFF && m.damagePct > 1000)) return false;
     if (!ValidWaveBreakS(m.waveBreakS) || !ValidClearGroundMin(m.clearGroundMin)) return false;
     m.friendlyFire = ff == 1;
@@ -503,17 +548,53 @@ inline bool Decode(const uint8_t* d, size_t n, MatchInfo& m) {
     for (FighterEntry& f : m.fighters) {
         f.entity = r.u8(); f.team = int8_t(r.u8()); f.kills = r.i16(); f.deaths = r.i16(); f.name = r.str(kMaxPlayerName);
         f.pingMs = r.u16(); uint8_t alive = r.u8(); f.alive = (alive & 1) != 0; f.down = (alive & 2) != 0;
-        f.steamId = r.u64();
+        f.steamId = r.u64(); f.role = r.u8();
+        if (!ValidRoleId(f.role)) return false;
         if (f.entity == 0 || f.team < -1 || f.team > 7) return false;
         if (alive > 3) return false;
     }
-    return r.done();
+    size_t no = r.u8(); if (no > kMaxObjectives) return false;
+    m.objectives.assign(no, Objective{});
+    for (Objective& o : m.objectives) {
+        o.kind = ObjectiveKind(r.u8()); o.owner = int8_t(r.u8()); o.state = ObjectiveState(r.u8()); o.carrier = r.u8();
+        o.x = r.f32(); o.y = r.f32(); o.z = r.f32(); o.timerMs = r.u16();
+        if (!ValidObjective(o)) return false;
+    }
+    size_t nq = r.u8(); if (nq > kMaxBracketPlayers) return false;
+    m.queueOrder.resize(nq); for (uint8_t& e : m.queueOrder) e = r.u8();
+    size_t nw = r.u8(); if (nw > kMaxBracketPlayers) return false;
+    m.bracketWinners.resize(nw); for (uint8_t& e : m.bracketWinners) e = r.u8();
+    m.fightWinsA = r.u8(); m.fightWinsB = r.u8(); m.streak = r.u8();
+    if (!r.done()) return false;
+    const bool tournament = m.format == uint8_t(Format::Tournament), pit = m.format == uint8_t(Format::PitBridgeDuel);
+    for (uint8_t e : m.queueOrder) if (e > kMaxWillies) return false;   // 0 is a seed who left, in a bracket only (the validators say)
+    if (tournament) return ValidBracketWire(m.queueOrder, m.bracketWinners) && m.streak == 0 && m.fightWinsA <= 3 && m.fightWinsB <= 3;
+    if (pit) return ValidQueueWire(m.queueOrder, m.streak) && m.bracketWinners.empty() && m.fightWinsA == 0 && m.fightWinsB == 0;
+    return m.queueOrder.empty() && m.bracketWinners.empty() && m.fightWinsA == 0 && m.fightWinsB == 0 && m.streak == 0;
 }
 inline std::vector<uint8_t> Encode(const Kill& m) { Writer w; w.header(MsgType::Kill); w.u8(m.killer); w.u8(m.victim); w.u8(m.flags); return w.buf; }
 inline bool Decode(const uint8_t* d, size_t n, Kill& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Kill) return false;
     m.killer = r.u8(); m.victim = r.u8(); m.flags = r.u8();
     return r.done() && m.victim != 0 && m.flags < 64;
+}
+
+// Wave 3: a mode's one-off event, for the kill feed (and for a fuse, to the fighter it burns). a and b are entities.
+//   kTagPass    a tagged b (the fuse is b's now)
+//   kTagBurn    a's fuse ran out: a is out for the round (its owner's fighter dies)
+//   kInfected   a infected b (a = 0: the world or nobody); b is infected and respawns
+enum class ModeEventKind : uint8_t { TagPass = 1, TagBurn = 2, Infected = 3 };
+struct ModeEventMsg { ModeEventKind kind = ModeEventKind::TagPass; uint8_t a = 0, b = 0; };
+inline std::vector<uint8_t> Encode(const ModeEventMsg& m) { Writer w; w.header(MsgType::ModeEvent); w.u8(uint8_t(m.kind)); w.u8(m.a); w.u8(m.b); return w.buf; }
+inline bool Decode(const uint8_t* d, size_t n, ModeEventMsg& m) {
+    Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::ModeEvent) return false;
+    const uint8_t k = r.u8(); m.a = r.u8(); m.b = r.u8();
+    if (!r.done() || k < uint8_t(ModeEventKind::TagPass) || k > uint8_t(ModeEventKind::Infected)) return false;
+    m.kind = ModeEventKind(k);
+    if (m.a > kMaxWillies || m.b > kMaxWillies) return false;
+    if (m.kind == ModeEventKind::TagPass) return m.a != 0 && m.b != 0 && m.a != m.b;
+    if (m.kind == ModeEventKind::TagBurn) return m.a != 0;
+    return m.b != 0;                                  // Infected: a may be 0
 }
 
 // Mesh (rev 19). The host tells each client who else is in the session so clients can stream Pose/Vitals to each other;

@@ -35,6 +35,7 @@ class EquipSync {
 public:
     struct Env {
         std::function<void(const combat::EquipStateMsg&)> send;   // a state of a fighter simulated here (the session routes it)
+        std::function<void(uint8_t)> gearChanged;                  // a fighter's hands or sheaths changed (its own, or a stand-in matched to its owner): the team kit is put back. Optional.
     };
     void Start(Adapter& adapter, StandIns& standIns, Env env);
     void Stop();
@@ -74,6 +75,7 @@ private:
     Adapter* adapter_ = nullptr;
     StandIns* standIns_ = nullptr;
     Env env_;
+    std::map<uint8_t, uint32_t> lastGear_;                           // per owned entity: hands and sheaths at the last poll
     double nextPollMs_ = 0;
     uint16_t seq_ = 0;
     combat::EquipSender sender_;

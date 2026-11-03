@@ -43,6 +43,13 @@ struct MpPlayer {
     bool canVoteBan = false;              // ... and a voteban too (a role=server session)
 };
 
+// The Esc menu's CHANGE LOADOUT button (session/hsm_loadout_change.h): shown in a match, available when the rule allows it now;
+// hint says why not; note is the last outcome, for a few seconds.
+struct MpLoadout {
+    bool shown = false, available = false;
+    std::string hint, note;
+};
+
 struct MpVote {
     bool active = false;
     uint8_t target = 0xFF;

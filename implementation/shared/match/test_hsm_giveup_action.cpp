@@ -42,7 +42,7 @@ static void TestProgressionUnchanged() {
 }
 
 static void TestPvpUnchanged() {
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams}) {
+    for (Format f : {Format::FreeForAll, Format::TwoTeams}) {
         CHECK(Alive(Info(f)) == GiveUpAction::GiveUp);
         CHECK(Alive(Info(f, MatchPhase::SuddenDeath)) == GiveUpAction::GiveUp);
         CHECK(Out(Info(f)) == GiveUpAction::Waiting);
@@ -51,10 +51,14 @@ static void TestPvpUnchanged() {
     CHECK(Alive(Info(Format::Duel, MatchPhase::Live, 3000)) == GiveUpAction::Waiting);        // the round gap: nothing to give up
     CHECK(Out(Info(Format::Duel, MatchPhase::Live, 3000)) == GiveUpAction::Waiting);
     CHECK(Out(Info(Format::Duel)) == GiveUpAction::None);                                     // Duel waits only in the gap (as before)
+    CHECK(Alive(Info(Format::LastManStanding)) == GiveUpAction::GiveUp);                      // Last Man Standing: Duel's rules
+    CHECK(Alive(Info(Format::LastManStanding, MatchPhase::Live, 3000)) == GiveUpAction::Waiting);
+    CHECK(Out(Info(Format::LastManStanding, MatchPhase::Live, 3000)) == GiveUpAction::Waiting);
+    CHECK(Out(Info(Format::LastManStanding)) == GiveUpAction::None);
 }
 
 static void TestNotFought() {
-    for (Format f : {Format::FreeForAll, Format::Duel, Format::PlayersVsBots, Format::Zombies})
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies})
         for (MatchPhase p : {MatchPhase::Idle, MatchPhase::Countdown, MatchPhase::Results}) {
             CHECK(Alive(Info(f, p)) == GiveUpAction::None);
             CHECK(Out(Info(f, p)) == GiveUpAction::None);

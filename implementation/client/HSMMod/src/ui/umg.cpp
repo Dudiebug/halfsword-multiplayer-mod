@@ -3,6 +3,7 @@
 #include "log.h"
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 
@@ -26,6 +27,7 @@ constexpr const char* kProgressBarClass = "ProgressBar";
 constexpr const char* kImageClass = "Image";
 constexpr const char* kButtonClass = "Button";
 constexpr const char* kEditBoxClass = "EditableTextBox";
+constexpr const char* kSliderClass = "Slider";
 
 // A TextBlock's font size when the copied font's own cannot be read (UMG's default).
 constexpr float kAssumedFontSize = 24;
@@ -504,6 +506,33 @@ bool EditBox::Focused() const {
 }
 void EditBox::Focus() { if (w_) Call(w_, "SetKeyboardFocus").invoke(); }
 void EditBox::Hint(const std::string& s) { if (w_) Call(w_, "SetHintText").set("InText", MakeText(s)).invoke(); }
+void EditBox::Set(const std::string& s) { if (w_) Call(w_, "SetText").set("InText", MakeText(s)).invoke(); }
+
+Slider Kit::MakeSlider() { return Made<Slider>(Spawn(WidgetClass(kSliderClass))); }
+void Slider::Range(float min, float max, float step) {
+    if (!w_) return;
+    if (range_.Changed(Vec2{min, max})) {
+        Call(w_, "SetMinValue").set<float>("InValue", min).invoke();
+        Call(w_, "SetMaxValue").set<float>("InValue", max).invoke();
+    }
+    if (step_.Changed(step)) Call(w_, "SetStepSize").set<float>("InValue", step).invoke();
+}
+void Slider::Set(float v) { if (w_) Call(w_, "SetValue").set<float>("InValue", v).invoke(); }
+float Slider::Value() const {
+    if (!w_) return 0;
+    Call c(w_, "GetValue");
+    return c.invoke() ? c.get<float>("ReturnValue") : std::numeric_limits<float>::quiet_NaN();
+}
+bool Slider::Dragging() const {
+    if (!w_) return false;
+    Call c(w_, "HasMouseCapture");
+    return c.invoke() && c.get<bool>("ReturnValue");
+}
+void Slider::Colors(Rgba bar, Rgba handle) {
+    if (!w_) return;
+    if (bar_.Changed(bar)) Call(w_, "SetSliderBarColor").set("InValue", bar).invoke();
+    if (handle_.Changed(handle)) Call(w_, "SetSliderHandleColor").set("InValue", handle).invoke();
+}
 
 bool InViewport(UObject* userWidget) {
     Call v(userWidget, "IsInViewport"); v.invoke();

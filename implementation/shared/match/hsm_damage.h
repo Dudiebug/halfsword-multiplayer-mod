@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace hsm {
@@ -17,7 +18,8 @@ namespace hsm {
 // The host's Player Damage Rate as a percent of the rate (1.0 = 100). kDamageStock: every machine uses the game's own
 // stock rate (its GI_Settings class default), whatever that is.
 inline constexpr uint16_t kDamageStock = 0xFFFF;
-inline constexpr uint16_t kDamageMaxPct = 1000;   // the most Sanitize lets through; the vanilla slider bounds the stepper
+inline constexpr uint16_t kDamageMaxPct = 1000;   // the most Sanitize lets through, and the most a host can type in
+inline constexpr int kDamageSliderMaxPct = 200;   // the lobby slider's end (0.8.0-pre26); a typed value can go past it
 
 // The vanilla damage slider (UI_GameSettings' Slider_DamagePlayer), in percent. The defaults hold until the slider's
 // template has been read (DamageRangeFrom).
@@ -55,18 +57,21 @@ inline bool IsGameSettingsSlider(const std::string& fullName) {
     return false;
 }
 
-// The value a stored percent stands for (kDamageStock: the stock one). The host's is inside the slider's range;
-// onlyMax (a client taking the host's value): as sent, up to kDamageMaxPct, whatever this machine's slider runs.
+// The value a stored percent stands for (kDamageStock: the stock one). The host's is from the slider's minimum up to
+// kDamageMaxPct (a typed custom value can pass the slider's end, 0.8.0-pre26); onlyMax (a client taking the host's
+// value): as sent, up to kDamageMaxPct, whatever this machine's slider runs.
 inline int DamagePct(uint16_t stored, const DamageRange& r, bool onlyMax = false) {
     if (stored == kDamageStock) return r.stockPct;
     if (onlyMax) return std::min(int(stored), int(kDamageMaxPct));
-    return std::clamp(int(stored), r.minPct, r.maxPct);
+    return std::clamp(int(stored), r.minPct, int(kDamageMaxPct));
 }
 
 // One stepper click: by the slider's step, inside its range, stopping at the stock value on the way (it is the one
 // to come back to); landing on it stores kDamageStock again.
+// A typed value past the slider's end steps down onto the end and does not step further up.
 inline uint16_t StepDamage(uint16_t stored, int dir, const DamageRange& r) {
     const int cur = DamagePct(stored, r);
+    if (cur > r.maxPct) return dir < 0 ? (r.maxPct == r.stockPct ? kDamageStock : uint16_t(r.maxPct)) : stored;
     int next = cur + (dir < 0 ? -r.stepPct : r.stepPct);
     if ((cur < r.stockPct && next > r.stockPct) || (cur > r.stockPct && next < r.stockPct)) next = r.stockPct;
     next = std::clamp(next, r.minPct, r.maxPct);
@@ -76,6 +81,43 @@ inline uint16_t StepDamage(uint16_t stored, int dir, const DamageRange& r) {
 inline std::string DamageLabel(uint16_t stored, const DamageRange& r) {
     const int p = DamagePct(stored, r);
     return std::to_string(p) + "%" + (p == r.stockPct ? " (stock)" : "");
+}
+
+// The lobby slider runs from the vanilla slider's minimum to kDamageSliderMaxPct (or the vanilla end, if that is
+// further), in its step. Where its thumb sits for a stored value: a typed value past the end sits at the end.
+inline int DamageSliderMax(const DamageRange& r) { return std::max(kDamageSliderMaxPct, r.maxPct); }
+inline float DamageSliderPos(uint16_t stored, const DamageRange& r) { return float(std::min(DamagePct(stored, r), DamageSliderMax(r))); }
+
+// The slider let go at pct: snapped to the step from the minimum, inside the slider; the stock value stores kDamageStock.
+inline uint16_t DamageFromSlider(float pct, const DamageRange& r) {
+    const int top = DamageSliderMax(r);
+    int v = std::isfinite(pct) ? int(std::lround((double(pct) - r.minPct) / r.stepPct)) * r.stepPct + r.minPct : r.stockPct;
+    v = std::clamp(v, r.minPct, top);
+    return v == r.stockPct ? kDamageStock : uint16_t(v);
+}
+
+// A value the host typed on the Damage row: digits, an optional % and spaces around, 0 to kDamageMaxPct. No sign,
+// no decimals, nothing else. Below the slider's minimum is the caller's (DamagePct clamps it).
+inline std::optional<uint16_t> ParseDamageInput(const std::string& text) {
+    size_t a = 0, b = text.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
+    if (b > a && text[b - 1] == '%') --b;
+    while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
+    if (a == b || b - a > 4) return std::nullopt;
+    int v = 0;
+    for (size_t i = a; i < b; ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(text[i]))) return std::nullopt;
+        v = v * 10 + (text[i] - '0');
+    }
+    if (v > kDamageMaxPct) return std::nullopt;
+    return uint16_t(v);
+}
+
+// The value the host typed, as stored: the stock value stores kDamageStock, below the slider's minimum its minimum.
+inline uint16_t DamageFromInput(uint16_t typed, const DamageRange& r) {
+    const int v = std::max(int(typed), r.minPct);
+    return v == r.stockPct ? kDamageStock : uint16_t(v);
 }
 
 // The rate the game instance runs while in a session.

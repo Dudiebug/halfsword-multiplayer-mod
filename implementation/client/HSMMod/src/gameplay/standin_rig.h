@@ -202,7 +202,6 @@ private:
     sync::V3 pelvis_{};                                      // this frame's Read
     bool pelvisRead_ = false;
     ue::UObject* failLogged_ = nullptr;                      // the fighter whose bind failure was logged
-    bool flailShiftLogged_ = false;                          // a flail chain that would not shift was logged
     ue::UClass* primitiveClass_ = nullptr;                   // "PrimitiveComponent", for ScanParts
     StandInSlots slots_;                                     // the sheathed weapons (standin_slots.h)
 };

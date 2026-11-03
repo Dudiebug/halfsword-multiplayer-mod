@@ -11,7 +11,7 @@ static void TestCodec() {
     MapResetMsg m; m.seq = 0xBEEF; m.round = 7; m.flags = kMapResetRematch;
     const auto b = Encode(m);
     CHECK(b.size() == 4 + 2 + 2 + 1);
-    CHECK(b[3] == 54 && b[2] == kProtocolRevision && kProtocolRevision == 34);
+    CHECK(b[3] == 54 && b[2] == kProtocolRevision && kProtocolRevision == 39);
     MapResetMsg back;
     CHECK(Decode(b.data(), b.size(), back) && back.seq == 0xBEEF && back.round == 7 && back.flags == kMapResetRematch);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, back));           // every truncation
@@ -114,7 +114,17 @@ static void TestSupersede() {
     CHECK(!g.pending());
 }
 
+static void TestMidMatchReload() {
+    CHECK(MidMatchReload(true, true, false, false) == ReloadVerdict::Reload);
+    CHECK(MidMatchReload(false, true, false, false) == ReloadVerdict::NoMatch);     // the menu, the hub
+    CHECK(MidMatchReload(true, false, false, false) == ReloadVerdict::NoMatch);     // no match running
+    CHECK(MidMatchReload(true, true, true, false) == ReloadVerdict::Unsupported);     // a wave cannot be rebuilt
+    CHECK(MidMatchReload(true, true, false, true) == ReloadVerdict::Travelling);    // one reload at a time
+    CHECK(ReloadForRound(true, true) && !ReloadForRound(true, false) && !ReloadForRound(false, true));
+}
+
 int main() {
+    TestMidMatchReload();
     TestCodec(); TestPlanLevelProp(); TestPlanSpawned(); TestPlanWeapon(); TestTally(); TestPacing(); TestGate(); TestGateClockWrap(); TestSupersede();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::printf("map reset: ok\n");

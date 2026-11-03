@@ -5,6 +5,7 @@
 // console (HSMMod.cmd, fed by the Pelican egg) is the admin, plus the Steam IDs in server_admins=, and the players can
 // start a votekick or (role=server only) a voteban. A ban names a Steam ID ("steam:<id>") or, for a direct-IP player, an address ("ip:<a.b.c.d>").
 #pragma once
+#include "session/hsm_ground_clear.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -222,17 +223,18 @@ private:
 };
 
 // ---------------------------------------------------------------- commands
-enum class ModCommandKind { None, Kick, Ban, Unban, Bans, VoteKick, VoteBan, Yes, No, Players, Say };
+enum class ModCommandKind { None, Kick, Ban, Unban, Bans, VoteKick, VoteBan, Yes, No, Players, Say, Clear, ResetMap };
 
 struct ModCommand {
     ModCommandKind kind = ModCommandKind::None;
     std::string target;      // kick/ban/votekick/voteban: "#slot" or a name; unban: see BanList::Resolve; say: the text
     int64_t seconds = 0;     // ban: 0 = permanent
+    uint8_t mask = 0;        // clear: kClear* bits; 0 = a word that is none of them (the usage reply)
 };
 
 // Chat: "/kick <who>", "/ban <who> [duration]", "/unban <who>", "/bans", "/votekick <who>" (or "/vk"), "/voteban <who>"
 // (or "/vb"), "/yes", "/no",
-// "/players". The server console takes the same words without the slash, plus "say <text>". Command word is
+// "/players", "/clear [all|weapons|armor|rocks]". The server console takes the same words without the slash, plus "say <text>". Command word is
 // case-insensitive. A line that is none of these (or misses its argument) is None and stays chat.
 inline ModCommand ParseModCommand(const std::string& line, bool console = false) {
     ModCommand c;
@@ -268,6 +270,8 @@ inline ModCommand ParseModCommand(const std::string& line, bool console = false)
     else if ((word == "yes" || word == "y") && rest.empty()) c.kind = ModCommandKind::Yes;
     else if ((word == "no" || word == "n") && rest.empty()) c.kind = ModCommandKind::No;
     else if ((word == "players" || word == "who") && rest.empty()) c.kind = ModCommandKind::Players;
+    else if (word == "clear") { c.kind = ModCommandKind::Clear; c.mask = ParseClearMask(rest); }   // "/clear", "/clear rocks"; an unknown word: mask 0
+    else if ((word == "resetmap" || word == "reset") && rest.empty()) c.kind = ModCommandKind::ResetMap;   // reload the map, keep the match
     else if (console && word == "say" && !rest.empty()) { c.kind = ModCommandKind::Say; c.target = rest; }
     return c;
 }

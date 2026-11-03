@@ -214,8 +214,24 @@ public:
     std::string Value() const;                // what is typed now (empty when it cannot be read)
     void Clear();
     void Hint(const std::string& s);          // greyed text shown while empty
+    void Set(const std::string& s);           // replaces what is typed
     bool Focused() const;                     // the player is typing in it (the keyboard is on the box or the field inside it)
     void Focus();                             // take the keyboard
+};
+
+// Slider: a bar with a handle the player drags (the game's own Slate slider). Range and Set are sent as asked (Set
+// is not diffed: the player moves the handle, so the last value sent says nothing about where it is now).
+class Slider : public Widget {
+public:
+    void Range(float min, float max, float step);
+    void Set(float v);
+    float Value() const;                      // where the handle is now (NaN when it cannot be read)
+    bool Dragging() const;                    // the mouse holds the handle
+    void Colors(Rgba bar, Rgba handle);
+private:
+    Sent<Vec2> range_;
+    Sent<float> step_;
+    Sent<Rgba> bar_, handle_;
 };
 
 // Makes widgets in one user widget's tree.
@@ -244,6 +260,7 @@ public:
     Icon MakeIcon();
     Button MakeButton();
     EditBox MakeEditBox();
+    Slider MakeSlider();
 private:
     ue::UObject* Spawn(ue::UClass* cls) const;
     template <class W> W Made(ue::UObject* o) const;

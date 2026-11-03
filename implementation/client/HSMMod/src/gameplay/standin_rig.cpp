@@ -845,20 +845,9 @@ void FighterRig::Shift(const V3& d) {
     for (int w = 0; w < sync::kPoseWeapons; ++w) {
         Weapon& wp = weapons_[w];
         if (!wp.read || Pinned(w)) continue;
-        if (Live(wp.flail, wp.flailIndex)) {
-            // A teleport of the handle leaves the simulated chain behind (it would be dragged across the map by its
-            // joints): every body goes by the same delta, measured from the chain's root before the handle moves.
-            Call at(wp.flail, "K2_GetComponentLocation");
-            if (at.invoke()) {
-                const V3 root = ToV3(at.get<FVector>("ReturnValue"));
-                if (!Call(wp.flail, "SetAllPhysicsPosition").set("NewPos", ToF(Add(root, d))).invoke() && !flailShiftLogged_) {
-                    flailShiftLogged_ = true;
-                    HSM_LOG("rig: %s: flail chain NOT shifted with the body", ObjectName(willie_).c_str());
-                }
-                Call(wp.flail, "SetAllPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
-                Call(wp.flail, "SetAllPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
-            }
-        }
+        // A skeletal flail chain (wp.flail) stays behind: this build reflects no way to move a simulated chain's bodies
+        // (SetAllPhysicsPosition was never in the exe; the bone setters are PoseableMeshComponent-only), so Shift moves
+        // only what it can - the parts and the root below - and the joints drag the chain, as before 5d3e67f.
         for (size_t i = 0; i < wp.parts.size(); ++i) {   // a component chain: every part by d, still (0.8.0-pre7)
             if (!Live(wp.parts[i], wp.partIndex[i])) continue;
             MoveBy(wp.parts[i], d);

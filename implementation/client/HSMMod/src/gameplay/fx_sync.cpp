@@ -22,6 +22,9 @@ constexpr const char* kHookOwner = "fxsync";
 constexpr uint64_t kLogFirst = 10;   // the first reports and replays are logged in full (test evidence)
 constexpr double kVoiceRateMin = 0.0, kVoiceRateMax = 2.0;  // clamp voice rate
 constexpr double kPaintWaitMs = 1500.0;   // longest an armour change waits for its fighter's paint tasks (T5)
+// A strip request is not applied mid-paint at all (pre24 tester feedback: a crash stripping a bleeding-out fighter): it
+// waits this long for the paint to go quiet, then is dropped (the stripper can try again).
+constexpr double kStripWaitMaxMs = 6000.0;
 constexpr size_t kHeldMax = 64;           // armour changes held at once; beyond it they apply at once, as before
 constexpr uint32_t kPaintLogFirst = 20;
 
@@ -267,6 +270,7 @@ void FxSync::OnPickUpArmor(ScriptCall& c) {
     bool picked = false;
     UObject* actor = nullptr;
     if (!c.getBool("Picked Up", picked) || !picked || !c.get("Armor Actor", actor) || !actor) return;
+    if (env_.gearChanged) env_.gearChanged(entity);   // the new piece wears the game's own colours until the kit is put back
     PaintFxMsg m;
     m.entity = entity;
     m.kind = FxKind::ArmorOn;
@@ -318,6 +322,12 @@ void FxSync::OnStripBegin(ScriptCall& c) {
     const uint8_t entity = target ? standIns_->EntityOf(target) : 0;
     const VitalsMsg* v = entity ? standIns_->Vitals(entity) : nullptr;
     if (!v || !((v->flags & 7u) != 0 || v->health <= 0.f) || Flag(target, "Fallen")) return;
+    // A bleeding body's paint tasks read the armour being swapped (the engine's vertex-paint crash): while they are queued
+    // the stand-in stays not Fallen, so the stock strip does nothing this time (the stripper's next try gets through).
+    if (PaintBusy(target)) {
+        if (n_.stripHeld++ < 10) HSM_LOG("fx: strip of e%u's stand-in held back (its paint tasks are still queued)", entity);
+        return;
+    }
     if (!SetBool(target, "Fallen", true)) return;
     stripFallen_ = target;
     if (n_.stripTries++ < 10) HSM_LOG("fx: stripping e%u's stand-in (its owner reports it down)", entity);
@@ -486,6 +496,13 @@ void FxSync::Tick() {
         const bool timedOut = now - h.since >= kPaintWaitMs;
         gate_.Observe(h.m.entity, PaintBusy(ArmorTarget(h.m)), now);
         if (!timedOut && !gate_.Quiet(h.m.entity, now)) { waiting.insert(h.m.entity); keep.push_back(std::move(h)); continue; }
+        if (timedOut && combat::IsStripRequest(h.m) && !gate_.Quiet(h.m.entity, now)) {
+            if (now - h.since < kStripWaitMaxMs) { waiting.insert(h.m.entity); keep.push_back(std::move(h)); continue; }
+            ++n_.skipped;
+            HSM_LOG("fx: strip of armour slot %u from my e%u dropped: its paint tasks stayed busy for %.0f ms", unsigned(h.m.rate),
+                    h.m.entity, now - h.since);
+            continue;
+        }
         if (paintWaitsLogged_ < kPaintLogFirst)
             HSM_LOG("fx: armour change (%s) on e%u waited %.0f ms for its paint tasks%s (%u)", KindName(h.m.kind), h.m.entity,
                     now - h.since, timedOut ? ", gave up waiting" : "", ++paintWaitsLogged_);
@@ -620,6 +637,7 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
     }
     SetBool(standIn, "Player", wasPlayer);
     HSM_LOG("fx: %s put on the stand-in of e%u%s", m.bone.c_str(), m.entity, ok ? "" : ": FAILED");
+    if (ok && env_.gearChanged) env_.gearChanged(m.entity);
     Count(ok, m);
 }
 

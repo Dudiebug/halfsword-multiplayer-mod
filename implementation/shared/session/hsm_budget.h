@@ -33,10 +33,12 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::DeathReport: case MsgType::GiveUp: case MsgType::RemoteWrite:   // rev 31: at most a few pushes a second per pair
             return BudgetClass::Combat;
         case MsgType::PaintFx: return BudgetClass::Fx;
-        case MsgType::BlobChunk: return BudgetClass::Blob;
+        case MsgType::BlobChunk: case MsgType::LoadoutChange: return BudgetClass::Blob;   // rev 36: LoadoutChange is a BlobChunk set, client -> host
         case MsgType::Ready: case MsgType::ReportShare: case MsgType::MeshHeard: case MsgType::PingTable:
             return BudgetClass::Control;
         case MsgType::ModMap: return BudgetClass::Control;   // rev 27: a host sends one per map pick (and one to each joiner)
+        case MsgType::LobbySecret: return BudgetClass::Control;   // rev 35: host -> client only, one per password change (and one to each joiner)
+        case MsgType::ProgressionVote: return BudgetClass::Control;   // rev 36: the Tavern's next-fight vote: a state change or a second, a pick per click
         case MsgType::LevelSeed: return BudgetClass::Control;   // rev 28: host -> client only, one per travel (and one to each joiner)
         case MsgType::HandOff: case MsgType::HandOffAsk:          // rev 32: a few per grab or stab (an ask every kAskEveryMs while unanswered)
             return BudgetClass::Combat;

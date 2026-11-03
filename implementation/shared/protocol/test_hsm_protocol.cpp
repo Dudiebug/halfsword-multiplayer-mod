@@ -24,6 +24,18 @@ static void TestHello() {
     Hello noBuild; noBuild.name = "x";
     auto nb = Encode(noBuild); CHECK(Decode(nb.data(), nb.size(), o) && o.modBuild.empty() && o.name == "x");
     CHECK(nb.size() == Encode(Hello{}).size() + noBuild.name.size());   // an empty build costs its length byte only
+    // rev 35: the password ends the Hello (str, 32).
+    Hello pw = h; pw.password = "s3cret pass";
+    auto pb = Encode(pw); Hello po;
+    CHECK(Decode(pb.data(), pb.size(), po) && po.password == "s3cret pass" && po.name == "player" && po.modBuild == h.modBuild);
+    CHECK(pb.size() == b.size() + pw.password.size());                                  // an empty password costs its length byte only
+    CHECK(pb[pb.size() - 1 - pw.password.size()] == uint8_t(pw.password.size()));        // length byte, then the bytes, at the very end
+    for (size_t cut = 0; cut < pb.size(); ++cut) CHECK(!Decode(pb.data(), cut, po));
+    Hello longPw = h; longPw.password = std::string(100, 'p');
+    auto lpb = Encode(longPw); CHECK(Decode(lpb.data(), lpb.size(), po) && po.password == std::string(kMaxLobbyPassword, 'p'));
+    auto over = pb; over[over.size() - 1 - pw.password.size()] = uint8_t(kMaxLobbyPassword + 1); over.resize(over.size() + 40, 'x');   // a length past the cap
+    CHECK(!Decode(over.data(), over.size(), po));
+    auto old = b; old.pop_back(); CHECK(!Decode(old.data(), old.size(), po));         // the pre-35 layout (no password byte) is not a Hello
 }
 
 static void TestInput() {
@@ -60,10 +72,11 @@ static void TestEventAndReject() {
     auto bad = b; bad[8] = 99; CHECK(!Decode(bad.data(), bad.size(), o));
     Reject r; r.reason = RejectReason::BuildMismatch; auto rb = Encode(r); Reject ro;
     CHECK(Decode(rb.data(), rb.size(), ro) && ro.reason == RejectReason::BuildMismatch);
-    for (RejectReason k : {RejectReason::Kicked, RejectReason::Banned}) {   // rev 20
+    for (RejectReason k : {RejectReason::Kicked, RejectReason::Banned, RejectReason::WrongPassword, RejectReason::TooManyTries}) {   // rev 20; rev 35
         Reject rk; rk.reason = k; auto kb = Encode(rk); Reject ko;
         CHECK(Decode(kb.data(), kb.size(), ko) && ko.reason == k);
     }
+    CHECK(kMaxRejectReason == 8 && uint8_t(RejectReason::WrongPassword) == 7 && uint8_t(RejectReason::TooManyTries) == 8);
     { auto bad = rb; bad[4] = 0; CHECK(!Decode(bad.data(), bad.size(), ro)); bad[4] = kMaxRejectReason + 1; CHECK(!Decode(bad.data(), bad.size(), ro)); }
     Welcome w; w.snapshotHz = 0; auto wb = Encode(w); Welcome wo; CHECK(!Decode(wb.data(), wb.size(), wo));
     w.snapshotHz = 30; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; wb = Encode(w); CHECK(Decode(wb.data(), wb.size(), wo) && wo.map == w.map);
@@ -108,8 +121,55 @@ static void TestSpawnDespawn() {
     Spawn team = s; team.team = 8; auto tb = Encode(team); CHECK(!Decode(tb.data(), tb.size(), o));
     Spawn far = s; far.x = 1e9f; auto fb = Encode(far); CHECK(!Decode(fb.data(), fb.size(), o));
     Spawn ffa = s; ffa.team = -1; auto ab = Encode(ffa); CHECK(Decode(ab.data(), ab.size(), o) && o.team == -1);
+    CHECK(o.flags == 0 && Spawn{}.flags == 0);                                  // rev 36: no crossbow unless the host says so
+    { Spawn xs = s; xs.flags = kSpawnCrossbow; auto xb = Encode(xs); Spawn y; CHECK(Decode(xb.data(), xb.size(), y) && y.flags == kSpawnCrossbow && y.entity == 3 && y.life == xs.life);
+      xs.flags = kSpawnZombie; xb = Encode(xs); CHECK(Decode(xb.data(), xb.size(), y) && y.flags == kSpawnZombie);   // rev 38: a zombie body
+      xs.flags = kSpawnCrossbow | kSpawnZombie; xb = Encode(xs); CHECK(Decode(xb.data(), xb.size(), y) && y.flags == 3);
+      xs.flags = 4; xb = Encode(xs); CHECK(!Decode(xb.data(), xb.size(), y));    // an unknown flag bit
+      xs.flags = 0xFF; xb = Encode(xs); CHECK(!Decode(xb.data(), xb.size(), y)); }
     Despawn d; d.entity = 4; auto db = Encode(d); Despawn od; CHECK(Decode(db.data(), db.size(), od) && od.entity == 4);
     Despawn d0; auto d0b = Encode(d0); CHECK(!Decode(d0b.data(), d0b.size(), od));
+}
+
+// Tournament and Pit Bridge Duels: the bracket / queue rides the MatchInfo and Decode checks it holds together.
+static void TestQueueModesOnTheWire() {
+    MatchInfo base; base.format = uint8_t(Format::Tournament); base.scoreLimit = 2; base.phase = 2; base.round = 3;
+    base.fighters = {{1, -1, 0, 0, "ann"}, {2, -1, 0, 0, "bo"}, {3, -1, 0, 0, "cy"}, {4, -1, 0, 0, "di"}};
+    // Tournament: a real bracket round-trips, with a game played and a player who left
+    Bracket b; CHECK(b.Start({1, 2, 3, 4}, 9));
+    Bracket::Game g; CHECK(b.Current(g)); b.Report(g.a);
+    MatchInfo t = base; t.queueOrder = b.seeds(); t.bracketWinners = b.GameWinners(); t.fightWinsA = 1; t.fightWinsB = 0;
+    auto e = Encode(t); MatchInfo y;
+    CHECK(Decode(e.data(), e.size(), y) && y.queueOrder == t.queueOrder && y.bracketWinners == t.bracketWinners && y.fightWinsA == 1 && y.fightWinsB == 0 && y.streak == 0);
+    for (size_t cut = 0; cut < e.size(); ++cut) CHECK(!Decode(e.data(), cut, y));
+    { MatchInfo l = t; b.Remove(b.seeds()[2]); l.queueOrder = b.seeds(); l.bracketWinners = b.GameWinners(); auto el = Encode(l); MatchInfo yl;
+      CHECK(Decode(el.data(), el.size(), yl) && yl.bracketWinners == l.bracketWinners); }
+    // an empty bracket (before the first MatchInfo of a match) is fine
+    { MatchInfo n = base; auto en = Encode(n); MatchInfo yn; CHECK(Decode(en.data(), en.size(), yn) && yn.queueOrder.empty() && yn.bracketWinners.empty()); }
+    auto bad = [&](const MatchInfo& x) { auto ex = Encode(x); MatchInfo yx; return !Decode(ex.data(), ex.size(), yx); };
+    { MatchInfo x = t; x.bracketWinners.pop_back(); CHECK(bad(x)); }                          // the wrong number of games
+    { MatchInfo x = t; x.bracketWinners[0] = 77; CHECK(bad(x)); }                              // a winner who is not in the game
+    { MatchInfo x = t; x.queueOrder[1] = x.queueOrder[0]; CHECK(bad(x)); }                     // a seed twice
+    { MatchInfo x = t; x.queueOrder = {1}; x.bracketWinners = {}; CHECK(bad(x)); }             // one seed is no bracket
+    { MatchInfo x = t; x.queueOrder.resize(kMaxBracketPlayers + 1, 5); CHECK(bad(x)); }        // too many (Encode cuts at 16: a count of 17 never goes out)
+    { MatchInfo x = t; x.streak = 2; CHECK(bad(x)); }                                          // a streak is the Pit's
+    { MatchInfo x = t; x.fightWinsA = 4; CHECK(bad(x)); }                                      // past the most rounds a fight has
+    // Pit Bridge Duels: the queue and the streak
+    MatchInfo p = base; p.format = uint8_t(Format::PitBridgeDuel); p.scoreLimit = 5; p.queueOrder = {3, 1, 4, 2}; p.streak = 3;
+    auto ep = Encode(p); MatchInfo yp;
+    CHECK(Decode(ep.data(), ep.size(), yp) && yp.queueOrder == p.queueOrder && yp.streak == 3 && yp.bracketWinners.empty());
+    for (size_t cut = 0; cut < ep.size(); ++cut) CHECK(!Decode(ep.data(), cut, yp));
+    { MatchInfo x = p; x.queueOrder = {3, 1, 3}; CHECK(bad(x)); }                              // a player twice
+    { MatchInfo x = p; x.queueOrder = {3, 0}; CHECK(bad(x)); }
+    { MatchInfo x = p; x.queueOrder = {}; CHECK(bad(x)); }                                     // a streak with nobody
+    { MatchInfo x = p; x.queueOrder = {3, 99}; CHECK(bad(x)); }                                // not an entity
+    { MatchInfo x = p; x.bracketWinners = {1}; CHECK(bad(x)); }                                // a bracket's field
+    { MatchInfo x = p; x.fightWinsA = 1; CHECK(bad(x)); }
+    { MatchInfo x = p; x.streak = 0; auto ex = Encode(x); MatchInfo yx; CHECK(Decode(ex.data(), ex.size(), yx) && yx.streak == 0); }
+    // every other format carries none of it
+    { MatchInfo x = base; x.format = uint8_t(Format::Duel); x.queueOrder = {1, 2}; CHECK(bad(x)); }
+    { MatchInfo x = base; x.format = uint8_t(Format::LastManStanding); x.streak = 1; CHECK(bad(x)); }
+    { MatchInfo x = base; x.format = uint8_t(Format::FreeForAll); x.fightWinsB = 1; CHECK(bad(x)); }
 }
 
 static void TestMatchInfoAndKill() {
@@ -138,6 +198,18 @@ static void TestMatchInfoAndKill() {
       fm.forceStrength = 1; e = Encode(fm); CHECK(Decode(e.data(), e.size(), y) && y.forceStrength == 1 && y.syncMode == o.syncMode && y.physics == o.physics);
       fm.forceStrength = 2; e = Encode(fm); CHECK(!Decode(e.data(), e.size(), y));
       fm.forceStrength = 0xFF; e = Encode(fm); CHECK(!Decode(e.data(), e.size(), y)); }
+    CHECK(o.teamKit == uint8_t(TeamKit::Full) && MatchInfo{}.teamKit == 2);   // the Team colours row: Full kit unless the host says so
+    for (uint8_t k = 0; k < kTeamKitCount; ++k) { MatchInfo km = m; km.teamKit = k; auto e = Encode(km); MatchInfo y;
+        CHECK(Decode(e.data(), e.size(), y) && y.teamKit == k && y.forceStrength == m.forceStrength && y.physics == o.physics && y.fighters.size() == m.fighters.size()); }
+    CHECK(o.freeCam == 1 && MatchInfo{}.freeCam == 1);                       // rev 36: the dead may fly a free camera unless the host says so
+    { MatchInfo cm = m; cm.freeCam = 0; auto e = Encode(cm); MatchInfo y; CHECK(Decode(e.data(), e.size(), y) && y.freeCam == 0 && y.forceStrength == o.forceStrength && y.teamKit == o.teamKit);
+      cm.freeCam = 1; e = Encode(cm); CHECK(Decode(e.data(), e.size(), y) && y.freeCam == 1 && y.syncMode == o.syncMode);
+      cm.freeCam = 2; e = Encode(cm); CHECK(!Decode(e.data(), e.size(), y));
+      cm.freeCam = 0xFF; e = Encode(cm); CHECK(!Decode(e.data(), e.size(), y)); }
+    CHECK(MatchInfo{}.crossbows == 0 && o.crossbows == 0);                      // rev 36: the Crossbows row, Off by default
+    { MatchInfo cm = m; MatchInfo y;
+      for (uint8_t v = 0; v < kCrossbowModeCount; ++v) { cm.crossbows = v; auto e = Encode(cm); CHECK(Decode(e.data(), e.size(), y) && y.crossbows == v && y.forceStrength == o.forceStrength && y.teamKit == o.teamKit && y.freeCam == o.freeCam && y.physics == o.physics); }
+      for (uint8_t bad : {uint8_t(kCrossbowModeCount), uint8_t(9), uint8_t(0xFF)}) { cm.crossbows = bad; auto e = Encode(cm); CHECK(!Decode(e.data(), e.size(), y)); } }
     CHECK(o.physics[0] == -1.f && o.physics[1] == -1.f && o.physics[2] == -1.f);   // rev 31: each its own
     { MatchInfo pm = m; pm.physics = { 0.5f, 1.f, 0.f }; auto e = Encode(pm); MatchInfo y;
       CHECK(Decode(e.data(), e.size(), y) && y.physics[0] == 0.5f && y.physics[1] == 1.f && y.physics[2] == 0.f);
@@ -181,6 +253,19 @@ static void TestMatchInfoAndKill() {
     CHECK(bad([](MatchInfo& x) { x.scoreLimit = 101; }));
     CHECK(bad([](MatchInfo& x) { x.timeLimitS = 3601; }));
     CHECK(bad([](MatchInfo& x) { x.respawnDelayS = 61; }));
+    // rev 35: the Teams format's team count rides every MatchInfo (2..4; 2 by default, other formats ignore it).
+    CHECK(MatchInfo{}.teams == 2 && o.teams == 2);
+    for (uint8_t t = 2; t <= 4; ++t) {
+        MatchInfo x = m; x.format = uint8_t(Format::TwoTeams); x.teams = t; x.scores = {{0, 1}, {3, 2}}; x.fighters[2].team = int8_t(t - 1);
+        auto e = Encode(x); MatchInfo y;
+        CHECK(Decode(e.data(), e.size(), y) && y.teams == t && y.format == uint8_t(Format::TwoTeams) && y.fighters[2].team == int8_t(t - 1) && y.scores.size() == 2);
+        for (size_t cut = 0; cut < e.size(); ++cut) CHECK(!Decode(e.data(), cut, y));
+    }
+    { MatchInfo x = m; x.format = uint8_t(Format::LastManStanding); x.teams = 4; auto e = Encode(x); MatchInfo y;   // not a teams format: carried, ignored
+      CHECK(Decode(e.data(), e.size(), y) && y.format == uint8_t(Format::LastManStanding) && y.teams == 4); }
+    CHECK(bad([](MatchInfo& x) { x.teams = 0; }) && bad([](MatchInfo& x) { x.teams = 1; }) && bad([](MatchInfo& x) { x.teams = 5; }) && bad([](MatchInfo& x) { x.teams = 255; }));
+    CHECK(bad([](MatchInfo& x) { x.format = uint8_t(Format::TwoTeams); x.teams = 5; }));
+    CHECK(bad([](MatchInfo& x) { x.teamKit = 3; }) && bad([](MatchInfo& x) { x.teamKit = 255; }));   // Team colours: Off, Tabard, Full only
     CHECK(bad([](MatchInfo& x) { x.waveBreakS = 45; }));      // rev 28
     CHECK(bad([](MatchInfo& x) { x.clearGroundMin = 4; }));
     CHECK(bad([](MatchInfo& x) { x.damagePct = 1001; }));   // rev 24: past the most, not the stock marker
@@ -193,7 +278,7 @@ static void TestMatchInfoAndKill() {
     CHECK(kGearCount == 4 && uint8_t(Gear::Fists) == kGearCount - 1);          // the last accepted gear is Fists; an older build's range ended at 2
     CHECK(bad([](MatchInfo& x) { x.gear = kGearCount; }));
     CHECK(bad([](MatchInfo& x) { x.tier = 8; }));
-    { auto e = Encode(m); uint8_t& al = e[e.size() - 9]; CHECK(al == 3 && e.back() == 0); al = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only
+    { auto e = Encode(m); uint8_t& al = e[e.size() - 16]; CHECK(al == 3 && e[e.size() - 7] == 0 && e.back() == 0); al = 4; MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }   // alive: bits 0-1 only (the last fighter's alive byte, before its steamId and role, the objective count and the queue fields: 2 counts and 3 bytes)
     { auto e = Encode(m); e.pop_back(); MatchInfo y; CHECK(!Decode(e.data(), e.size(), y)); }                        // truncated
     b.push_back(0); CHECK(!Decode(b.data(), b.size(), o));                  // trailing byte
     Kill k; k.killer = 3; k.victim = 4; k.flags = 1;
@@ -204,7 +289,7 @@ static void TestMatchInfoAndKill() {
     k.flags = 16; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 16);
     k.flags = 63; kb = Encode(k); CHECK(Decode(kb.data(), kb.size(), ko) && ko.flags == 63);
     k.flags = 64; kb = Encode(k); CHECK(!Decode(kb.data(), kb.size(), ko));
-    CHECK(kMaxWillies >= 18 && kProtocolRevision == 34);   // rev 34: MatchInfo.forceStrength; rev 33: Input/RelayInput toggle counts and lock-on target; rev 32: HandOff, HandOffAsk, Pose/Vitals epoch; rev 31: MatchInfo.physics; rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
+    CHECK(kMaxWillies >= 18 && kProtocolRevision == 39);   // rev 39: Tag bare-fisted, one-round Tournament fights; rev 38: Spawn kSpawnZombie, HitClaim source Ammo; rev 37: formats 10-15, CtfEvent 62, ModeEvent 63, ProgressionVote 66, MatchInfo.tagIt/fuseLeftMs/objectives/queueOrder/bracketWinners/fightWinsA/fightWinsB/streak; rev 36: FighterEntry.role, Format TeamDuel/Riot/Juggernaut, MatchInfo.teamKit/freeCam/crossbows, Spawn.flags, LoadoutChange; rev 35: GroundClear, LobbySecret, Hello.password, MatchInfo.teams, Format::LastManStanding; rev 34: MatchInfo.forceStrength; rev 33: Input/RelayInput toggle counts and lock-on target; rev 32: HandOff, HandOffAsk, Pose/Vitals epoch; rev 31: MatchInfo.physics; rev 25: HitClaim Stuck + rawDamage; rev 24: Voice flags NoCut, Everyone (voice per player); rev 23: Voice ADPCM flag, VoiceMode, kWelcomeVoiceAll, RouteTable, Forward; rev 22: 8 players, PingTable, kWelcomePeerPing; rev 21: MatchInfo.gear Fists (Brawl); rev 20: Reject Kicked/Banned, server chat lines; rev 19: Spawn.life, victimLife, PeerMap, MeshHeard, Welcome.flags; rev 18: ReportShare; rev 17: drawn rounds, flail head, mod build in Hello and Welcome, fighters down in MatchInfo; rev 16: GiveUp; rev 15: PaintFx Voice, HitSound, Armor, ArmorOn; rev 14: pose codec v2 (grip state); rev 13: prop HitClaims, MatchInfo rounds/gear/ping/alive; rev 12: SeverNotice, PropCensus
     // rev 9: Welcome says who simulates the fighters (0 host, 1 owner); nothing else is a mode
     Welcome sm; sm.snapshotHz = 60; sm.map = "m"; Welcome smo;
     CHECK(sm.syncMode == 0);                                                   // host authority unless the host says so
@@ -219,7 +304,7 @@ static void TestMatchInfoAndKill() {
     sm.syncMode = 1; smb = Encode(sm); smb.pop_back(); CHECK(!Decode(smb.data(), smb.size(), smo));   // the mode byte is required
     // Reserved for M4-M6: numbers fixed, no decoder. A Welcome with the reserved flag 32 is rejected until M4 lands.
     CHECK(uint8_t(MsgType::ModList) == 48 && uint8_t(MsgType::SessionMods) == 49 && uint8_t(MsgType::ModMsg) == 50
-          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && kLastDecodedMsgType == 58 && kLastReservedMsgType == 58);
+          && uint8_t(MsgType::PackList) == 51 && uint8_t(MsgType::PackStatus) == 52 && uint8_t(MsgType::ModMap) == 53 && uint8_t(MsgType::MapReset) == 54 && uint8_t(MsgType::LevelSeed) == 55 && uint8_t(MsgType::RemoteWrite) == 56 && uint8_t(MsgType::HandOff) == 57 && uint8_t(MsgType::HandOffAsk) == 58 && uint8_t(MsgType::GroundClear) == 59 && uint8_t(MsgType::LobbySecret) == 60 && uint8_t(MsgType::LoadoutChange) == 61 && uint8_t(MsgType::CtfEvent) == 62 && uint8_t(MsgType::ModeEvent) == 63 && uint8_t(MsgType::ProgressionVote) == 66 && kLastDecodedMsgType == 66 && kLastReservedMsgType == 66);
     {
         Welcome w; w.snapshotHz = 30; w.map = "m"; w.flags = 32;
         auto wb = Encode(w); Welcome back; CHECK(!Decode(wb.data(), wb.size(), back));
@@ -270,6 +355,7 @@ int main() {
     TestOwnerStateAndDeath();
     TestRelayInput();
     TestMatchInfoAndKill();
+    TestQueueModesOnTheWire();
     TestTravel();
     TestSpawnDespawn();
     TestHello(); TestInput(); TestSnapshot(); TestEventAndReject(); TestQuatAndSeq();

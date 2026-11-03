@@ -820,6 +820,10 @@ static void TestStuckClaimDecode() {
     m = ref; m.rawDamage = std::nan("");                     CHECK(!roundTrips(m, back));
     m = ref; m.cuttingPower = -0.5;                          CHECK(!roundTrips(m, back));
     m = ref; m.cuttingPower = kMaxStuckCuttingPower * 1.001; CHECK(!roundTrips(m, back));
+    m = ref; m.source = StrikeSource::Ammo;                  CHECK(roundTrips(m, back) && back.source == StrikeSource::Ammo);   // a lodged bolt (rev 38)
+    m = ref; m.source = StrikeSource(4);                     CHECK(!roundTrips(m, back));             // no such source
+    m = ref; m.source = StrikeSource::Ammo; m.striker = StrikerKind::Fighter; m.rawDamage = 0; CHECK(!roundTrips(m, back));   // a bolt only lodges
+    m = PropRef(); m.source = StrikeSource::Ammo;            CHECK(!roundTrips(m, back));
     m = ref; m.source = StrikeSource::Body;                  CHECK(!roundTrips(m, back));             // a blade is in a hand
     m = ref; m.hitBone = "";                                 CHECK(!roundTrips(m, back));             // it names a bone
     m = ref; m.propId = hsm::MakeLevelPropId(14);            CHECK(!roundTrips(m, back));             // and no prop

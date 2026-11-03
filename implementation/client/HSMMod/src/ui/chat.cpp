@@ -163,6 +163,33 @@ std::string Utf8(const wchar_t* in, int n) {
     return u;
 }
 
+// The clipboard's text as UTF-8, empty when it holds none or cannot be opened (another program has it open). Only the
+// first kClipUnits UTF-16 units are read: the draft holds 120 bytes, and a huge clipboard is not converted in full.
+std::string ClipboardUtf8() {
+    constexpr size_t kClipUnits = 8192;
+    std::string out;
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return out;
+    if (!OpenClipboard(nullptr)) { HSM_LOG("chat: paste: the clipboard is in use"); return out; }
+    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+            size_t cap = GlobalSize(h) / sizeof(wchar_t), n = 0;
+            if (cap > kClipUnits) cap = kClipUnits;
+            while (n < cap && p[n]) ++n;
+            static_assert(sizeof(wchar_t) == sizeof(char16_t), "UTF-16 wchar_t");
+            out = hsm::Utf8FromUtf16(reinterpret_cast<const char16_t*>(p), n);
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    return out;
+}
+
+// Ctrl+V: the clipboard's text into the draft, as much of it as fits (PasteText makes it one line of valid text).
+void Paste(uint32_t now) {
+    const std::string text = hsm::PasteText(ClipboardUtf8(), d.session.freeBytes());
+    if (!text.empty()) Feed(hsm::ChatEvent::Char, now, text);
+}
+
 // Keyboard state for ToUnicode, from this poll's async state (the thread message queue may not be pumped).
 void BuildKeyState(BYTE (&ks)[256], const SHORT (&st)[256]) {
     for (int vk = 0; vk < 256; ++vk) ks[vk] = (st[vk] & 0x8000) ? 0x80 : 0;
@@ -196,13 +223,16 @@ void Poll(uint32_t now) {
     if (Fires(VK_RETURN, st[VK_RETURN], now, false)) { Feed(hsm::ChatEvent::Enter, now); return; }
     BYTE ks[256] = {};
     bool ksReady = false;
+    // Ctrl is a command, not text (ToUnicode would give a control character); AltGr reports Ctrl too and does type.
+    const bool ctrl = ((st[VK_CONTROL] | st[VK_LCONTROL] | st[VK_RCONTROL]) & 0x8000) && !(st[VK_RMENU] & 0x8000);
     for (int vk = 0x08; vk <= 0xFE; ++vk) {
         if (vk == VK_RETURN || vk == VK_ESCAPE) continue;
         if (vk == d.swallowVk) {   // held since it opened the chat: typed only once pressed again
             if (!(st[vk] & 0x8000)) { d.swallowVk = 0; d.keys[vk].down = false; }
             continue;
         }
-        if (!Fires(vk, st[vk], now, true)) continue;
+        if (!Fires(vk, st[vk], now, !(ctrl && vk == 'V'))) continue;   // a held Ctrl+V pastes once
+        if (ctrl) { if (vk == 'V') Paste(now); continue; }
         if (vk == VK_BACK) { Feed(hsm::ChatEvent::Backspace, now); continue; }
         if (!ksReady) { BuildKeyState(ks, st); ksReady = true; }
         WCHAR buf[8] = {};

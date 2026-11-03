@@ -23,6 +23,8 @@ static void TestGate() {
     CHECK(g.tracked() == 0);
 }
 
+static Rgba LobbyChatInk(Format f, int team, int ovr, int teams = 2) { MatchConfig c; c.format = f; c.teams = uint8_t(teams); return hsm::LobbyChatInk(c, team, ovr); }
+
 static void TestInk() {
     CHECK(Same(LobbyChatInk(Format::TwoTeams, 0, -1), style::TeamInk(0)));
     CHECK(Same(LobbyChatInk(Format::TwoTeams, 1, -1), style::TeamInk(1)));
@@ -30,7 +32,10 @@ static void TestInk() {
     CHECK(Same(LobbyChatInk(Format::TwoTeams, -1, -1), style::kIron));         // no pick: Auto
     CHECK(Same(LobbyChatInk(Format::TwoTeams, 2, -1), style::kIron));          // a team the format does not have
     CHECK(Same(LobbyChatInk(Format::TwoTeams, 3, 3), style::kIron));
-    CHECK(Same(LobbyChatInk(Format::ThreeTeams, 2, -1), style::TeamInk(2)));
+    CHECK(Same(LobbyChatInk(Format::TwoTeams, 2, -1, 3), style::TeamInk(2)));
+    CHECK(Same(LobbyChatInk(Format::TwoTeams, 3, -1, 3), style::kIron) && Same(LobbyChatInk(Format::TwoTeams, 3, -1, 4), style::TeamInk(3)));
+    CHECK(Same(LobbyChatInk(Format::TwoTeams, -1, 3, 4), style::TeamInk(3)));              // the host's move to the fourth team
+    CHECK(Same(LobbyChatInk(Format::ThreeTeams, 2, -1), style::TeamInk(2)));               // the old value is 3 teams
     CHECK(Same(LobbyChatInk(Format::Duel, 0, 1), style::kIron));               // no teams in this format
 }
 

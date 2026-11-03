@@ -15,6 +15,7 @@ struct HttpRequest {
     bool secure = true;                                  // false only for a local relay (127.0.0.1), for testing
     size_t maxBody = 65536;                              // the answer is read up to this many bytes, the rest dropped
     unsigned timeoutMs = 60000;                          // sending and receiving; resolving and connecting take 10 s
+    bool followRedirects = true;                         // false: a 3xx comes back as it is, with its Location (the update checks each hop)
 };
 
 struct HttpResponse {
@@ -22,6 +23,7 @@ struct HttpResponse {
     unsigned status = 0;      // HTTP status when fail == None
     unsigned winError = 0;    // Other: GetLastError()
     bool sent = false;        // the request and its body went out (WinHttpSendRequest returned), so the server may have acted on it
+    std::string location;     // followRedirects == false and a 3xx: the Location header when it is plain ASCII, else empty
     std::string body;
 };
 

@@ -3,9 +3,12 @@
 #pragma once
 #include "hsm_drivelean.h"
 #include "hsm_protocol.h"
+#include "match/hsm_scenarios.h"
+#include "match/hsm_team_kit.h"
 #include "ue/engine.h"
 #include <array>
 #include <functional>
+#include <set>
 #include <string>
 #include <utility>
 #include <unordered_map>
@@ -14,6 +17,13 @@
 namespace hsm { struct VitalsMsg; }
 
 namespace hsm::game {
+
+// What one TintKit pass set: material parameters per slot kind (cloth includes the tabard, grip is a weapon's handle),
+// and the weapon mesh parts it left alone as blades.
+struct KitTally {
+    int plate = 0, cloth = 0, shield = 0, grip = 0, skippedBlade = 0;
+    int total() const { return plate + cloth + shield + grip; }
+};
 
 struct InputBinding { bool isAxis = false; size_t index = 0; bool pressed = false; };
 
@@ -42,6 +52,8 @@ public:
         const void* passport = nullptr;               // raw Str_Passport_Character1 used instead of blob (bots)
         bool stockBrain = false;                      // keep Willie's own NPC brain (bots on the host)
         bool bot = false;                             // a generated bot (SpawnBot): keeps the generator's build, clamped to 0..1, never forced
+        double weight = -1.0, height = -1.0;          // a role's build (match/hsm_roles.h; Riot, Juggernaut): the passport Weight / Height this fighter spawns with, 0..1; negative: none (SetBuild's rules)
+        const char* fighterClass = nullptr;           // nullptr = the stock Willie_BP_C; else the actor class to spawn as (match/hsm_fighter_class.h: the Zombies format's bots)
     };
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
@@ -115,6 +127,10 @@ public:
     // every spawner not made for the current game, combat and play modes or the number of combatants (the Pit's bridge
     // and outer ring in Free Mode), and a destroyed one reads (0,0,0), the middle of the Pit.
     std::vector<ue::FVector> SpawnCandidates();
+    // Pit Bridge Duels: the world bounds (centre, half extents) of every BP_Structure_Board_Destructible_1X6M_C in the level, the
+    // Pit's bridge (shared/match/hsm_pitbridge.h works the ends out). Empty when the level has none.
+    struct ActorBox { ue::FVector origin, extent; };
+    std::vector<ActorBox> BridgeBoards();
     // role=server spawn anchor fallbacks, tried in this order after the spawners (shared/session/hsm_spawn_anchor.h): the
     // level's PlayerStart actors; a navmesh point (the origin or a NavMeshBoundsVolume projected onto the navmesh); the floor
     // a downward trace finds under the static meshes nearest the origin. The last two return false when there is none.
@@ -136,6 +152,32 @@ public:
     // set it to 1, a normal fight. True if it was 2.
     bool EndErrandMode();
     void ClearFreeMode();                       // the stock Progression: Free Mode off
+    // Combat scenarios (match/hsm_scenarios.h): the world settings on the game instance, set before a travel (they reach the
+    // clients with its settings). The host's own values are kept the first time and put back by RestoreScenario.
+    // False when none of the fields it needed could be set.
+    bool ApplyScenario(const hsm::ScenarioWorld& w);
+    void RestoreScenario();
+    // The Fenced-ring scenario's lose condition back on the game instance (hsm::kLoseConditionFence), after the level
+    // manager's level-load reset wiped it and before the level script checks it to keep the BP_Fence_Bags (#706).
+    // True when the field was set.
+    bool KeepFenceLoseCondition();
+    // The Fenced ring's BP_Fence_Bags, as the map's own script builds it at Play Mode 0 (match/hsm_scenarios.h
+    // FencePlacementFor): spawned with its Radius set before it finishes (its construction lays the bags out). nullptr:
+    // the class is not loaded (not a fence map) or the spawn failed.
+    ue::UObject* SpawnFenceBags(const ue::FVector& at, double radius);
+    bool FenceBagsExist();
+    ue::UClass* LoadClassBlocking(const std::string& objectPath);
+    bool IsZombieBody(ue::UObject* willie);   // of the zombie Willie class (match/hsm_fighter_class.h)
+    // The spike: logs the game's combat-event objects (BP_CombatEvent_*_C) with their Scenario Name, Available Combat Modes
+    // and Available Lose Conditions, one line each ("scenario: map <name>: combat event ..."). Returns how many lines.
+    int LogCombatEvents(const std::string& map);
+    // Progression: the names of the next fights the hub offers (the career's "Available Combat Events"), in list order;
+    // empty when the list cannot be found. `freshVisit` (the host's first read of a hub visit) logs one line per holder
+    // of the list saying why it reads as it does, and when it is empty refills it once through the level's own game
+    // manager (BP_GameManager_C's Generate Combat Events, #621) before reading it again. StartOfferedFight(i) starts the
+    // i-th through the hub UI's own function; false (and `how` says why) when that cannot be found or called.
+    std::vector<std::string> OfferedFights(bool freshVisit = false);
+    bool StartOfferedFight(size_t index, std::string& how);
     int FreeModeFoes();                                    // GI "Free Mode Foes Amount", -1 if unreadable
     void SetFreeModeFoes(int foes);
     // 0.8.0-pre20 (#294 #295 #301): every player fighter spawned from now on (own body, stand-ins) gets exactly `forced` as
@@ -175,7 +217,32 @@ public:
     std::vector<ue::UObject*> LevelWeapons();
     // A new actor of a class (a Blueprint or native actor class with no setup of its own) at a place, spawned always.
     ue::UObject* SpawnActorAt(ue::UClass* cls, const ue::FVector& at, const ue::FRotator& rot);
+    // Crossbows in the lobby (experimental, behind a runtime check): whether this level has the game's crossbow weapon and bolt
+    // classes. Logs "crossbow: class <name> found|missing, bolt class <name> found|missing" each time `log` is set. The classes
+    // are Blueprint classes, found only while some loaded asset references them; missing ones leave the Crossbows row without effect.
+    bool CrossbowAvailable(bool log);
+    // Hands a living fighter a crossbow: spawns the weapon actor and puts it in the right hand the way the game's own pick-up
+    // does ("Set Up Right Hand Weapon"), then makes sure the quiver holds bolts. False (logged) when any step failed.
+    bool GiveCrossbow(ue::UObject* willie);
     ue::FRotator ActorRotation(ue::UObject* actor);
+    // Capture the flag (match/hsm_ctf.h): each machine spawns its own two flag actors and moves them to what MatchInfo says.
+    // The actor class is the first loaded one of a preference list (a long tool: Rake, Pitchfork, Shovel, Scythe, the lantern);
+    // null (logged once per level) when none is loaded, and the flags are markers only. The actor is tinted in the team's colour
+    // and frozen (no physics, no collision) until a fighter takes it in hand.
+    ue::UObject* SpawnFlagActor(int team, const ue::FVector& at, std::string* className = nullptr);
+    void FlagLevelChanged() { flagClass_ = nullptr; flagClassName_.clear(); flagBodies_.clear(); modActors_.clear(); }
+    // An actor the mod spawned and keeps (the flags): the ground clears (DestroyDroppedWeapons) and the map reset's level-weapon
+    // record (LevelWeapons) leave it alone. Checked by object index, so a recycled address is not mistaken for it.
+    bool IsModActor(ue::UObject* a);
+    // Lets go of the flag (a hand or the back), then puts it, frozen, at `at`.
+    void FlagPlace(ue::UObject* flag, ue::UObject* carrier, const ue::FVector& at, double yawDeg);
+    // The fighter takes the flag in a free hand (the game's own pick-up: "Set Up Right/Left Hand Weapon"); never lets go of a
+    // weapon for it. False when both hands are full or the pick-up did not take: the caller carries it on the back.
+    bool FlagHold(ue::UObject* willie, ue::UObject* flag);
+    bool FlagHeld(ue::UObject* willie, ue::UObject* flag);
+    // Hangs the flag, frozen, on the fighter's back sheath socket (Sheath_Slot_Back). True when it is attached to that fighter.
+    bool FlagCarryOnBack(ue::UObject* carrier, ue::UObject* flag);
+    bool FlagAttachedTo(ue::UObject* carrier, ue::UObject* flag);
     // Armour pieces lying loose (no attach parent): what a strip, a pick-up swap or a fallen bot's loot left. Worn and
     // carried pieces are attached. One pass over the object array.
     std::vector<ue::UObject*> LooseArmor();
@@ -186,6 +253,17 @@ public:
     std::vector<ue::UObject*> BodiesAndGear();             // every Willie, what is attached to it (armor, weapons) and every weapon
     // Re-tints the fabric of every armor piece attached to the Willie; returns how many pieces changed.
     int TintArmor(ue::UObject* willie, float r, float g, float b);
+    // The team kit (match/hsm_team_kit.h): walks the Willie's attached actors (worn armour and clothing, shield, held and
+    // sheathed weapons) and sets every tintable colour parameter of the slots `kit` names to `team`'s colour, through dynamic
+    // material instances (made once per mesh slot: the component keeps them). Blades are never touched. Cheap to repeat.
+    KitTally TintKit(ue::UObject* willie, int team, TeamKit kit);
+    // Infection (match/hsm_modes.h): puts the zombie traits on a fighter simulated here: the zombie flag, the pain fields zeroed, and
+    // Consciousness kept above half of `baseline` (the value read when the body was first handled; NaN: read it now and return it).
+    // Cheap to repeat every frame (the fields are looked up once per class). What it found comes back for the log line.
+    struct InfectedTraits { bool zombieFlag = false; int painFields = 0; std::string consciousness; double baseline = 0; };
+    InfectedTraits ApplyInfectedTraits(ue::UObject* willie, double baseline);
+    // A hash of what the Willie wears and holds (its attached actors and both hand fields): a change means gear came or went.
+    uint64_t GearSignature(ue::UObject* willie);
     // Spawns a fresh fighter for local player 0 and possesses it; the old pawn is destroyed.
     ue::UObject* RespawnLocalPlayer(const SpawnOptions& o);
     // Host: a stock NPC fighter with a passport from the game's random generator (Enum_Ranks tier 0..7).
@@ -247,13 +325,21 @@ private:
     bool buildOn_ = false;
     int buildTier_ = 0;
     bool bare_ = false;
+    struct FlagBody { ue::UObject* comp = nullptr; uint8_t collision = 3; bool simulating = false; };
+    ue::UClass* flagClass_ = nullptr;
+    std::string flagClassName_;
+    std::unordered_map<ue::UObject*, std::vector<FlagBody>> flagBodies_;   // per flag actor: each primitive as it was before it was frozen
+    std::vector<std::pair<ue::UObject*, int32_t>> modActors_;                // the flags: actor and object index (IsModActor)
+    void FlagFreeze(ue::UObject* flag, bool frozen);
+    int TintFlag(ue::UObject* flag, int team);
+    struct ScenarioSaved { bool saved = false, carnage = false, brawling = false, hasLose = false; uint8_t lose = 0; } scenarioSaved_;   // the GI values ApplyScenario replaced
     bool ResolveBones(ue::UObject* mesh);
     std::string TempSlot();
     void DeleteSlot(const std::string& slot);
     std::wstring saveDir_;
     uint32_t slotCounter_ = 0;
     bool CopyPassport(ue::UObject* willie, const SpawnOptions& o, double& height);
-    void ApplyBuild(ue::UObject* willie, ue::FProperty* passport, bool bot);
+    void ApplyBuild(ue::UObject* willie, ue::FProperty* passport, bool bot, double roleWeight);
     void StripEquipment(ue::UObject* willie, ue::FProperty* passport);
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
@@ -281,6 +367,12 @@ private:
     std::vector<ue::FName> bones_;
     std::vector<std::string> boneNames_;
     bool bonesResolved_ = false;
+    int TintMesh(ue::UObject* mesh, KitSlot slot, TeamKit kit, int team);
+    void NoteKitParam(KitSlot slot, const std::string& name, bool tintable);
+    std::array<std::set<std::string>, kKitSlotCount> kitParamsSeen_;   // the parameter names logged so far, per slot kind
+    std::set<int> kitPushSeen_;                                        // the teams whose armour-passport push was logged (once each)
+    ue::UClass* meshClass_ = nullptr;               // MeshComponent
+    bool heightLogged_ = false;                     // the past-1.0 fighter spawn (the Juggernaut's INI height) was logged
 };
 
 }  // namespace hsm::game

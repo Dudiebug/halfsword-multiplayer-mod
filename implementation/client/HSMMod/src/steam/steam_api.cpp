@@ -44,6 +44,8 @@ struct Api {
     FLAT(uint64_t, GetLobbyOwner, void*, uint64_t)
     FLAT(bool, SetLobbyType, void*, uint64_t, int)
     FLAT(bool, SetLobbyJoinable, void*, uint64_t, bool)
+    FLAT(bool, SetLobbyMemberLimit, void*, uint64_t, int)
+    FLAT(int, GetLobbyMemberLimit, void*, uint64_t)
     FLAT(uint64_t, RequestLobbyList, void*)
     FLAT(uint64_t, GetLobbyByIndex, void*, int)
     FLAT(void, AddRequestLobbyListStringFilter, void*, const char*, const char*, int)
@@ -233,6 +235,11 @@ bool Init() {
     // session stamps arrivals when it polls them.
     g.GetLocalTimestamp = Fn<Api::GetLocalTimestamp_t>("SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp");
     if (!g.GetLocalTimestamp) HSM_LOG("steam: no SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp; arrival times are the poll time");
+    // Optional: the lobby's player limit (Steam enforces it at join). Without them the limit stays at its creation value
+    // and the host's own check in the session still turns the extra player away.
+    g.SetLobbyMemberLimit = Fn<Api::SetLobbyMemberLimit_t>("SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit");
+    g.GetLobbyMemberLimit = Fn<Api::GetLobbyMemberLimit_t>("SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
+    if (!g.SetLobbyMemberLimit || !g.GetLobbyMemberLimit) HSM_LOG("steam: no lobby member limit exports; the player limit is enforced by the host only");
     // Optional: avatars on the multiplayer page; without them the rows keep an empty space.
     g.GetMediumFriendAvatar = Fn<Api::GetMediumFriendAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
     g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
@@ -392,6 +399,8 @@ void JoinLobby(SteamId lobby) {   // the result arrives as a LobbyEnter callback
 }
 void LeaveLobby(SteamId lobby) { if (g_ready && lobby) g.LeaveLobby(g_mm, lobby); }
 bool SetLobbyType(SteamId lobby, LobbyType type) { return g_ready && g.SetLobbyType(g_mm, lobby, int(type)); }
+bool SetLobbyMemberLimit(SteamId lobby, int maxMembers) { return g_ready && g.SetLobbyMemberLimit && g.SetLobbyMemberLimit(g_mm, lobby, maxMembers); }
+int LobbyMemberLimit(SteamId lobby) { return g_ready && g.GetLobbyMemberLimit ? g.GetLobbyMemberLimit(g_mm, lobby) : 0; }
 bool SetLobbyJoinable(SteamId lobby, bool joinable) { return g_ready && g.SetLobbyJoinable(g_mm, lobby, joinable); }
 bool SetLobbyData(SteamId lobby, const std::string& k, const std::string& v) { return g_ready && g.SetLobbyData(g_mm, lobby, k.c_str(), v.c_str()); }
 std::string LobbyData(SteamId lobby, const std::string& k) { const char* s = g_ready ? g.GetLobbyData(g_mm, lobby, k.c_str()) : nullptr; return s ? s : ""; }

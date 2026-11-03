@@ -7,11 +7,16 @@
 #include "combat/hsm_sever.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
+#include "match/hsm_ctf.h"
 #include "session/hsm_dice.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_loadout_change.h"
+#include "session/hsm_ground_clear.h"
 #include "session/hsm_map_reset.h"
 #include "session/hsm_modmaps.h"
 #include "session/hsm_object_event.h"
+#include "session/hsm_password.h"
+#include "session/hsm_progvote.h"
 #include "session/hsm_prop_census.h"
 #include "session/hsm_report.h"
 #include "sync/hsm_grab.h"
@@ -59,7 +64,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
-    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n);
+    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<CtfEventMsg>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -72,6 +77,16 @@ void TryAll(const uint8_t* d, size_t n) {
 std::vector<std::vector<uint8_t>> Seeds() {
     std::vector<std::vector<uint8_t>> s;
     Hello h; h.buildKey = 0x8EFA122909712000ull; h.name = "seed"; h.modBuild = "0.6.4 (v0.6.3-12-gdb82570)"; s.push_back(Encode(h));
+    h.password = "hunter2 hunter2"; s.push_back(Encode(h));                    // a locked lobby's Hello
+    s.push_back(Encode(LobbySecretMsg{"hunter2 hunter2"})); s.push_back(Encode(LobbySecretMsg{}));   // the host's password hand-out, and its clear
+    s.push_back(Encode(LobbySecretMsg{std::string(kMaxLobbyPassword, 'p')}));
+    { LoadoutChangeMsg lc; lc.chunk.blobId = 0x01000001u; lc.chunk.total = 5; lc.chunk.count = 1; lc.chunk.crc = 7; lc.chunk.data = {1, 2, 3, 4, 5}; s.push_back(Encode(lc)); s.push_back(Encode(LoadoutChangeResult{LoadoutVerdict::AtNextRespawn})); }   // the Esc menu's CHANGE LOADOUT
+    { ProgVoteMsg pv; pv.seq = 3; pv.secondsLeft = 20; pv.mine = 1; pv.voters = 3; pv.voted = 2; pv.options = {{"The Pit", 1}, {"Old Yard", 1}, {"Tourney", 0}}; s.push_back(Encode(pv));   // the Tavern's next-fight vote: state, a pick, the result
+      ProgVoteMsg pk; pk.kind = ProgVoteKind::Pick; pk.seq = 3; pk.pick = 2; s.push_back(Encode(pk));
+      ProgVoteMsg pr; pr.kind = ProgVoteKind::Result; pr.seq = 3; pr.winner = 1; pr.how = ProgWin::Seed; pr.name = "Old Yard"; s.push_back(Encode(pr)); }
+    { Spawn xs; xs.entity = 2; xs.flags = kSpawnCrossbow; s.push_back(Encode(xs)); }
+    s.push_back(Encode(ModeEventMsg{ModeEventKind::TagPass, 1, 2})); s.push_back(Encode(ModeEventMsg{ModeEventKind::TagBurn, 3, 0})); s.push_back(Encode(ModeEventMsg{ModeEventKind::Infected, 0, 4}));
+    { MatchInfo mt; mt.format = uint8_t(Format::Tag); mt.tagIt = 2; mt.fuseLeftMs = 12000; mt.fighters.resize(2); mt.fighters[0].entity = 1; mt.fighters[1].entity = 2; s.push_back(Encode(mt)); }                                                  // a body given a crossbow
     Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; w.flags = kWelcomeMesh; s.push_back(Encode(w));
     Reject r; r.reason = RejectReason::Full; s.push_back(Encode(r));
     r.reason = RejectReason::Banned; s.push_back(Encode(r));
@@ -97,7 +112,19 @@ std::vector<std::vector<uint8_t>> Seeds() {
     DeathReport dr; dr.victim = 2; dr.killer = 1; dr.victimLife = 3; s.push_back(Encode(dr));
     Despawn dp; dp.entity = 2; s.push_back(Encode(dp));
     BlobChunk bc; bc.blobId = 9; bc.total = 300; bc.count = 1; bc.crc = 1; bc.data.assign(300, 7); s.push_back(Encode(bc));
-    MatchInfo mi; mi.format = 1; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
+    MatchInfo mi; mi.format = 1; mi.teams = 4; mi.scoreLimit = 10; mi.phase = 2; mi.scores = {{0, 3}, {1, 4}}; mi.fighters = {{1, 0, 2, 1, "a"}, {2, 1, 0, 3, "bb"}}; s.push_back(Encode(mi));
+    mi.crossbows = 3; s.push_back(Encode(mi));                                  // the Crossbows row: Half
+    { MatchInfo tn = mi; tn.format = uint8_t(Format::Tournament); tn.crossbows = 0; Bracket br; br.Start({1, 2, 3, 4, 5}, 3);   // a Tournament: the bracket
+      Bracket::Game g; if (br.Current(g)) br.Report(g.a);
+      tn.queueOrder = br.seeds(); tn.bracketWinners = br.GameWinners(); tn.fightWinsA = 1; s.push_back(Encode(tn)); }
+    { MatchInfo pb = mi; pb.format = uint8_t(Format::PitBridgeDuel); pb.crossbows = 0; pb.queueOrder = {2, 1}; pb.streak = 2; s.push_back(Encode(pb)); }   // Pit Bridge Duels: the queue
+    { MatchInfo rt = mi; rt.format = uint8_t(Format::Riot); rt.teamKit = uint8_t(TeamKit::Tabard); rt.freeCam = 0; rt.crossbows = 4;       // a Riot: roles on the wire, the kit, camera and crossbow bytes
+      rt.fighters = {{1, 0, 0, 0, "k", 10, true, false, 7, kRoleKnight}, {2, 1, 0, 0, "r", 20, true, false, 8, uint8_t(kRoleRioterLast)}}; s.push_back(Encode(rt)); }
+    { MatchInfo ct = mi; ct.format = uint8_t(Format::CaptureTheFlag); ct.teams = 2;                                                  // a CTF match: both flags on the wire
+      Objective carried; carried.owner = 0; carried.state = ObjectiveState::Carried; carried.carrier = 2; carried.x = 100; carried.y = -50; carried.z = 30;
+      Objective lying; lying.owner = 1; lying.state = ObjectiveState::Dropped; lying.timerMs = 14000; lying.x = 5; lying.y = 6; lying.z = 7;
+      ct.objectives = {carried, lying}; s.push_back(Encode(ct)); }
+    s.push_back(Encode(CtfEventMsg{{CtfEventKind::Captured, 1, 2}})); s.push_back(Encode(CtfEventMsg{{CtfEventKind::Expired, 0, 0}}));
     MatchInfo md; md.format = 4; md.scoreLimit = 3; md.phase = 2; md.gear = 3; md.tier = 4; md.round = 2; md.roundGapLeftMs = 3000; md.roundWinner = 1;
     md.scores = {{1, 1}}; md.fighters = {{1, -1, 1, 0, "a", 40, true}, {2, -1, 0, 1, "bb", 120, false}}; s.push_back(Encode(md));
     Kill kl; kl.killer = 1; kl.victim = 2; s.push_back(Encode(kl));
@@ -152,6 +179,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     s.push_back(Encode(ModMapMsg{}));                                              // the stock-pick clear
     s.push_back(Encode(dice::LevelSeedMsg{7, 0x0123456789ABCDEFull}));            // a level's shared-dice seed
     { MapResetMsg mr; mr.seq = 0xFFFF; mr.round = 12; mr.flags = kMapResetRematch; s.push_back(Encode(mr)); s.push_back(Encode(MapResetMsg{})); }
+    for (uint8_t mask : {uint8_t(kClearAll), uint8_t(kClearRocks), uint8_t(0)}) s.push_back(Encode(GroundClearMsg{200, mask}));   // /clear (mask 0 is a bad one)
     {   // a pak full directory index, for the pak reader (byte-level mutation reaches its length and count checks)
         std::vector<uint8_t> fdi;
         auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) fdi.push_back(uint8_t(v >> (8 * i))); };

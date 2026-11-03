@@ -15,6 +15,7 @@ struct WinHttp {
     decltype(&WinHttpSendRequest) SendRequest = nullptr;
     decltype(&WinHttpReceiveResponse) ReceiveResponse = nullptr;
     decltype(&WinHttpQueryHeaders) QueryHeaders = nullptr;
+    decltype(&WinHttpSetOption) SetOption = nullptr;
     decltype(&WinHttpReadData) ReadData = nullptr;
     decltype(&WinHttpCloseHandle) CloseHandle = nullptr;
     bool ok = false;
@@ -32,7 +33,7 @@ const WinHttp& Api() {
         a.ok = get(a.Open, "WinHttpOpen") && get(a.SetTimeouts, "WinHttpSetTimeouts") && get(a.Connect, "WinHttpConnect") &&
                get(a.OpenRequest, "WinHttpOpenRequest") && get(a.AddRequestHeaders, "WinHttpAddRequestHeaders") &&
                get(a.SendRequest, "WinHttpSendRequest") && get(a.ReceiveResponse, "WinHttpReceiveResponse") &&
-               get(a.QueryHeaders, "WinHttpQueryHeaders") && get(a.ReadData, "WinHttpReadData") && get(a.CloseHandle, "WinHttpCloseHandle");
+               get(a.QueryHeaders, "WinHttpQueryHeaders") && get(a.SetOption, "WinHttpSetOption") && get(a.ReadData, "WinHttpReadData") && get(a.CloseHandle, "WinHttpCloseHandle");
         return a;
     }();
     return api;
@@ -61,6 +62,10 @@ HttpResponse Http(const HttpRequest& req) {
                                     req.secure ? WINHTTP_FLAG_SECURE : 0)
                     : nullptr;
     // Certificate checks stay on (WinHTTP's default): a server without a valid certificate gets nothing.
+    if (q && !req.followRedirects) {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        h.SetOption(q, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy);
+    }
     void* data = req.body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(req.body.data());
     if (q && (req.headers.empty() || h.AddRequestHeaders(q, req.headers.c_str(), DWORD(-1), WINHTTP_ADDREQ_FLAG_ADD)) &&
         h.SendRequest(q, WINHTTP_NO_ADDITIONAL_HEADERS, 0, data, DWORD(req.body.size()), DWORD(req.body.size()), 0) &&
@@ -68,9 +73,20 @@ HttpResponse Http(const HttpRequest& req) {
         DWORD status = 0, len = sizeof status;
         h.QueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
         r.status = status;
+        const bool redirect = !req.followRedirects && status >= 300 && status < 400;   // its body is not wanted
+        if (redirect) {
+            wchar_t loc[2100];
+            DWORD bytes = sizeof loc - sizeof(wchar_t);
+            if (h.QueryHeaders(q, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &bytes, WINHTTP_NO_HEADER_INDEX)) {
+                for (DWORD k = 0; k < bytes / sizeof(wchar_t); ++k) {
+                    if (loc[k] <= 0x20 || loc[k] >= 0x7F) { r.location.clear(); break; }
+                    r.location.push_back(char(loc[k]));
+                }
+            }
+        }
         char buf[4096];
         DWORD got = 0;
-        while (r.body.size() < req.maxBody && h.ReadData(q, buf, sizeof buf, &got) && got) r.body.append(buf, got);
+        while (!redirect && r.body.size() < req.maxBody && h.ReadData(q, buf, sizeof buf, &got) && got) r.body.append(buf, got);
         if (r.body.size() > req.maxBody) r.body.resize(req.maxBody);
     } else {
         DWORD e = GetLastError();

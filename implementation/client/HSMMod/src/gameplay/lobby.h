@@ -2,6 +2,7 @@
 // session; the session layer mirrors membership into the transport. Game thread only.
 #pragma once
 #include "match/hsm_match.h"
+#include "session/hsm_modpack.h"
 #include "steam/steam_api.h"
 #include <cstdint>
 #include <functional>
@@ -12,7 +13,7 @@ namespace hsm::game {
 
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
-constexpr const char* kModVersion = "0.8.0-pre22";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre26";   // bump with every release tag
 // This mod's build: kModVersion plus the git describe build.sh passed (session/hsm_build.h). Players compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
@@ -25,6 +26,9 @@ struct LobbyListing {
     steam::SteamId id = 0;
     std::string name, map, mode;
     int players = 0;      // players: a role=server lobby's server is not counted
+    int maxPlayers = kMaxLobbyMembers;   // the host's player limit (hsm_max); 8 when the lobby has none
+    bool locked = false;  // asks for a password (hsm_lock); the password is never listed
+    LobbyPack pack;       // the modpack the host announced (hsm_pack/hsm_packv/hsm_packh); empty: none. Checked live, not here
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
 };
@@ -45,12 +49,28 @@ public:
     void Tick();                                   // drives Steam init + callback processing
 
     void Host(steam::LobbyType type, bool server = false);   // server: role=server, one member more (hsm_srv=1)
-    void Join(steam::SteamId lobby);
+    void Join(steam::SteamId lobby, const std::string& password = std::string());   // password: for a locked lobby (kept for this lobby only)
     void Leave();
     void Invite();
     bool SendChat(const std::string& text);        // to every member (Steam lobby chat); false: not in a lobby or Steam refused
     void SetType(steam::LobbyType type);
     void SetReady(bool ready);
+    // The host's player limit, 2..8 (Steam's member limit and lobby data hsm_max). Never below the players already in:
+    // nobody is kicked by it. Before the lobby exists it is what Host creates it with.
+    int MaxPlayers() const;
+    void SetMaxPlayers(int n);
+    // Lobby password. Locked is the public flag (hsm_lock); the password itself is never in lobby data. The host sets it
+    // (SetPassword, "" clears; nobody is kicked), a joiner has the one it joined with, and every member keeps the host's
+    // latest (RememberPassword, from LobbySecret) so a new host after a migration keeps the lobby locked.
+    bool Locked() const;
+    const std::string& Password() const;            // this lobby's; empty: none known
+    void SetPassword(const std::string& password);  // host
+    void RememberPassword(const std::string& password);   // member: the host's latest
+    // A locked lobby was joined without (or with a wrong) password: the page asks for it, then Join(lobby, password).
+    void AskPassword(steam::SteamId lobby, const std::string& note = std::string());
+    steam::SteamId PasswordAsk() const { return askLobby_; }
+    const std::string& PasswordNote() const { return askNote_; }
+    void CancelPasswordAsk() { askLobby_ = 0; askNote_.clear(); }
     void SetPublicState(const std::string& state, const std::string& map, const std::string& mode);
     void RefreshList();
     // Match settings (lobby data, host writes) and teams (own pick in member data, host moves in lobby data).
@@ -58,6 +78,8 @@ public:
     void SetConfig(const MatchConfig& c);
     std::string MapPick() const;                    // host's chosen level (package path), empty until picked
     void SetMapPick(const std::string& path);
+    LobbyPack Pack() const;                         // the host's announced modpack (session/hsm_modpack.h); empty: none
+    void SetPack(const LobbyPack& pack);            // host: announce it (empty: none); gameplay/mod_pack.cpp
     bool Progression() const;                       // the host chose the Progression card (hsm_prog)
     void SetProgression(bool on);
     void SetTeamPick(int team);
@@ -81,6 +103,11 @@ private:
     void RefreshMembers();
     void SetStatus(const std::string& s);
     LobbyListing Describe(steam::SteamId lobby) const;
+    std::string password_;                // the lobby's password as this machine knows it, for passwordLobby_
+    steam::SteamId passwordLobby_ = 0;
+    steam::SteamId askLobby_ = 0;         // the lobby the page should ask a password for
+    std::string askNote_;                 // why it asks again ("Wrong password")
+    int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads
     bool server_ = false;   // Host(type, true): this machine runs role=server
     State state_ = State::Offline;
     steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;   // joining_: the lobby Join asked for, until its enter

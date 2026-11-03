@@ -97,7 +97,8 @@ private:
     Text alone_;
     VoiceBlock voice_;
     std::array<Text, 10> netLines_;
-    Flat resume_, gameMenu_, report_, help_, leave_;   // help_: HELP IMPROVE THE MOD (0.8.0-pre7)
+    Flat resume_, loadout_, gameMenu_, report_, help_, leave_;   // loadout_: CHANGE LOADOUT (session/hsm_loadout_change.h)
+    Text loadoutNote_;   // help_: HELP IMPROVE THE MOD (0.8.0-pre7)
     uint32_t nextData_ = 0, leaveArmedAt_ = 0, confirmAt_ = 0;
     int confirmRow_ = -1;
     bool confirmBan_ = false;

@@ -1,7 +1,8 @@
 // In-game text chat (MsgType::Chat, reliable, both ways; the host relays). Game-independent: no Unreal types.
-// Every line is sanitized before it is sent or shown: control characters and invalid UTF-8 are dropped, the text is
-// trimmed, and it is truncated to kMaxChatBytes on a code-point boundary. Decode validates the same way and returns
-// false on malformed input instead of trusting the sender. The host overwrites fromSlot with the sender's real slot.
+// Every line is sanitized before it is sent or shown: control characters, invalid UTF-8 and the emoji the chat font
+// cannot draw are dropped, the text is trimmed, and it is truncated to kMaxChatBytes on a code-point boundary. Decode
+// validates the same way and returns false on malformed input instead of trusting the sender. The host overwrites
+// fromSlot with the sender's real slot.
 #pragma once
 #include "hsm_protocol.h"
 #include <cstdint>
@@ -73,8 +74,73 @@ inline std::u16string Utf16FromUtf8(const std::string& s) {
     return out;
 }
 
-// Strips control characters (C0, DEL, C1) and invalid UTF-8, trims ASCII spaces, truncates to kMaxChatBytes on a
-// code-point boundary. Output is always valid UTF-8 and at most kMaxChatBytes long; it may be empty.
+// The inverse, lossless: UTF-16 code units (an FString, the clipboard) to UTF-8. A surrogate pair becomes one 4-byte
+// code point; a lone surrogate becomes U+FFFD. Always valid UTF-8.
+inline std::string Utf8FromUtf16(const char16_t* u, size_t n) {
+    std::string out;
+    out.reserve(n);
+    auto put = [&out](uint32_t cp) {
+        if (cp < 0x80) { out.push_back(char(cp)); return; }
+        if (cp < 0x800) { out.push_back(char(0xC0 | (cp >> 6))); out.push_back(char(0x80 | (cp & 0x3F))); return; }
+        if (cp < 0x10000) {
+            out.push_back(char(0xE0 | (cp >> 12))); out.push_back(char(0x80 | ((cp >> 6) & 0x3F))); out.push_back(char(0x80 | (cp & 0x3F)));
+            return;
+        }
+        out.push_back(char(0xF0 | (cp >> 18))); out.push_back(char(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(char(0x80 | ((cp >> 6) & 0x3F))); out.push_back(char(0x80 | (cp & 0x3F)));
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t c = u[i];
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n && u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF) {
+            put(0x10000 + ((c - 0xD800) << 10) + (uint32_t(u[i + 1]) - 0xDC00));
+            ++i;
+        } else if (c >= 0xD800 && c <= 0xDFFF) {
+            put(0xFFFD);
+        } else {
+            put(c);
+        }
+    }
+    return out;
+}
+inline std::string Utf8FromUtf16(const std::u16string& u) { return Utf8FromUtf16(u.data(), u.size()); }
+
+// A pasted clipboard text made fit for the chat draft: CR, LF and tab (a run of them) become one space, other control
+// characters (C0, DEL, C1) and invalid UTF-8 bytes are dropped, and the result is cut on a code-point boundary to at
+// most freeBytes. Always valid UTF-8 the draft accepts whole.
+inline std::string PasteText(const std::string& clip, size_t freeBytes) {
+    std::string out;
+    bool wsRun = false;
+    for (size_t i = 0; i < clip.size();) {
+        size_t len = 0; uint32_t cp = 0;
+        if (!ChatUtf8Next(clip, i, len, cp)) { ++i; continue; }
+        const size_t at = i;
+        i += len;
+        if (cp == '\r' || cp == '\n' || cp == '\t') {
+            if (wsRun) continue;
+            wsRun = true;
+            if (out.size() + 1 > freeBytes) break;
+            out.push_back(' ');
+            continue;
+        }
+        if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)) continue;
+        wsRun = false;
+        if (out.size() + len > freeBytes) break;
+        out.append(clip, at, len);
+    }
+    return out;
+}
+
+// A code point the chat font cannot draw: an emoji, or one of the code points that only dress an emoji sequence. They
+// would render as boxes (#611), so SanitizeChat strips them: the astral emoji blocks (U+1F000-U+1FAFF: the pictographs,
+// the regional indicators of flag pairs, the skin-tone modifiers), the BMP symbols and dingbats (U+2600-U+27BF), the
+// variation selectors (U+FE00-U+FE0F) and the zero-width joiner (U+200D). Everything else, ASCII, Latin-1 punctuation
+// and CJK included, stays.
+inline bool ChatEmojiCp(uint32_t cp) {
+    return (cp >= 0x1F000 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF) || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0x200D;
+}
+
+// Strips control characters (C0, DEL, C1), invalid UTF-8 and the emoji of ChatEmojiCp, trims ASCII spaces, truncates to
+// kMaxChatBytes on a code-point boundary. Output is always valid UTF-8 and at most kMaxChatBytes long; it may be empty.
 inline std::string SanitizeChat(const std::string& in) {
     std::string out;
     out.reserve(in.size() < kMaxChatBytes ? in.size() : kMaxChatBytes + 4);
@@ -82,7 +148,7 @@ inline std::string SanitizeChat(const std::string& in) {
         size_t len = 0; uint32_t cp = 0;
         if (!ChatUtf8Next(in, i, len, cp)) { ++i; continue; }          // drop the bad byte, resync on the next
         bool control = cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F);
-        if (!control) out.append(in, i, len);
+        if (!control && !ChatEmojiCp(cp)) out.append(in, i, len);
         i += len;
     }
     size_t b = 0, e = out.size();
@@ -268,6 +334,7 @@ public:
 
     bool typing() const { return typing_; }
     const std::string& draft() const { return draft_; }
+    size_t freeBytes() const { return draft_.size() < kMaxChatBytes ? kMaxChatBytes - draft_.size() : 0; }   // room left in the draft
     ChatKey key() const { return key_; }
 
 private:

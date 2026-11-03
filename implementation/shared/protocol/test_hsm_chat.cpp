@@ -52,11 +52,11 @@ static void TestUtf8CutEdges() {
     for (int i = 0; i < 60; ++i) s += "\xC3\xA9";
     std::string r = SanitizeChat(s);
     CHECK(r.size() == 119 && ValidUtf8(r));
-    // 30 x 4-byte emoji = exactly 120 bytes: kept whole.
-    std::string e; for (int i = 0; i < 30; ++i) e += "\xF0\x9F\x98\x80";
+    // 30 x 4-byte code points (U+10000: kept, it is no emoji) = exactly 120 bytes: kept whole.
+    std::string e; for (int i = 0; i < 30; ++i) e += "\xF0\x90\x80\x80";
     CHECK(SanitizeChat(e).size() == 120);
-    // 31 emoji: cut to 30 whole code points.
-    std::string e2 = e + "\xF0\x9F\x98\x80";
+    // 31 of them: cut to 30 whole code points. (Emoji are stripped whole, never cut: TestEmojiStripped.)
+    std::string e2 = e + "\xF0\x90\x80\x80";
     CHECK(SanitizeChat(e2) == e);
     // 3-byte euro sign: 41 x 3 = 123 bytes cut to 40 code points (120 bytes).
     std::string euro; for (int i = 0; i < 41; ++i) euro += "\xE2\x82\xAC";
@@ -88,6 +88,37 @@ static void TestControlChars() {
     CHECK(SanitizeChat("\x1b[31mred") == "[31mred");        // ESC stripped, rest kept
     CHECK(SanitizeChat("  \t hi \n ") == "hi");               // trim
     CHECK(SanitizeChat("\x01\x02   ").empty());               // empty after sanitize
+}
+
+// Emoji the chat font cannot draw are stripped with the code points that dress them (#611); every other text stays.
+static void TestEmojiStripped() {
+    CHECK(SanitizeChat("\xF0\x9F\x98\x80\xF0\x9F\x94\xA5\xE2\x9C\x8A").empty());   // pure emoji: astral and BMP
+    CHECK(SanitizeChat("gg \xF0\x9F\x98\x80 gg") == "gg  gg");                     // mixed: both spaces stay
+    CHECK(SanitizeChat("\xE4\xBD\xA0\xE5\xA5\xBD caf\xC3\xA9 \xE2\x82\xAC!") ==    // CJK, accents, Latin-1: untouched
+          "\xE4\xBD\xA0\xE5\xA5\xBD caf\xC3\xA9 \xE2\x82\xAC!");
+    const std::string mid = SanitizeChat("a\xF0\x9F\x94\xA5z");                    // a 4-byte emoji mid-string
+    CHECK(mid == "az" && ValidUtf8(mid));                                          // the byte after it is not broken
+    CHECK(SanitizeChat("a \xF0\x9F\x94\xA5") == "a");                              // the trim still runs after the strip
+    // The ranges: a code point on each edge, and the neighbour outside it kept.
+    CHECK(SanitizeChat("\xE2\x98\x80").empty());                                   // U+2600, the symbols' bottom
+    CHECK(SanitizeChat("\xE2\x97\xBF") == "\xE2\x97\xBF");                         // U+25FF below them: kept
+    CHECK(SanitizeChat("\xE2\x9E\xBE").empty());                                   // U+27BE, the dingbats' top
+    CHECK(SanitizeChat("\xE2\x9F\x80") == "\xE2\x9F\x80");                         // U+27C0 above them: kept
+    CHECK(SanitizeChat("\xF0\x9F\x80\x80").empty());                               // U+1F000, the emoji blocks' bottom
+    CHECK(SanitizeChat("\xF0\x9F\xAB\xBF").empty());                               // U+1FAFF, their top
+    CHECK(SanitizeChat("\xF0\x9F\xAC\x80") == "\xF0\x9F\xAC\x80");                 // U+1FB00 above them: kept
+    CHECK(SanitizeChat("\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8").empty());               // a flag's regional indicators
+    CHECK(SanitizeChat("\xF0\x9F\x8F\xBB").empty());                               // a skin-tone modifier
+    CHECK(SanitizeChat("\xF0\x9F\x91\x8D\xEF\xB8\x8F").empty());                   // an emoji and its variation selector
+    CHECK(SanitizeChat("\xEF\xB8\x8Fx") == "x");                                   // the selector alone
+    CHECK(SanitizeChat("\xEF\xB8\x90") == "\xEF\xB8\x90");                         // U+FE10 is no selector: kept
+    CHECK(SanitizeChat("\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9").empty());   // a ZWJ pair
+    CHECK(SanitizeChat("\xE2\x80\x8D").empty());                                   // the joiner alone
+    CHECK(SanitizeChat("\xE2\x80\x8B") == "\xE2\x80\x8B");                         // U+200B is no joiner: kept
+    // The wire: a line that is only emoji never reaches it.
+    ChatLine l; l.fromSlot = 2; l.text = "\xF0\x9F\x94\xA5";
+    auto b = Encode(l); ChatLine o;
+    CHECK(!Decode(b.data(), b.size(), o));
 }
 
 static void TestDecodeRejects() {
@@ -388,13 +419,82 @@ static void TestUtf16() {
     CHECK(Utf16FromUtf8(std::string("a\0b", 3)) == std::u16string(u"a\0b", 3));   // NUL is kept; callers terminate
 }
 
+static void TestUtf8FromUtf16() {
+    const std::string cases[] = {"", "gg wp", "caf\xC3\xA9", "\xE2\x82\xAC 5", "\xE2\x99\xA5", "\xF0\x9F\x94\xA5 fire",
+                                 "a\xF0\x9F\x98\x84\xF0\x9F\x98\x82z", "\xEF\xBF\xBD", "\xF4\x8F\xBF\xBF"};
+    for (const std::string& c : cases) CHECK(Utf8FromUtf16(Utf16FromUtf8(c)) == c);          // round trip
+    const std::u16string u = Utf16FromUtf8("x\xF0\x9F\x94\xA5y");
+    CHECK(Utf16FromUtf8(Utf8FromUtf16(u)) == u);
+    const char16_t pair[] = {0xD83D, 0xDD25};                                                // U+1F525
+    CHECK(Utf8FromUtf16(pair, 2) == "\xF0\x9F\x94\xA5");
+    const char16_t loneHi[] = {u'a', 0xD83D, u'b'}, loneLo[] = {u'a', 0xDD25, u'b'}, endHi[] = {u'a', 0xD83D};
+    const char16_t swapped[] = {0xDD25, 0xD83D};
+    CHECK(Utf8FromUtf16(loneHi, 3) == "a\xEF\xBF\xBD" "b");
+    CHECK(Utf8FromUtf16(loneLo, 3) == "a\xEF\xBF\xBD" "b");
+    CHECK(Utf8FromUtf16(endHi, 2) == "a\xEF\xBF\xBD");
+    CHECK(Utf8FromUtf16(swapped, 2) == "\xEF\xBF\xBD\xEF\xBF\xBD");
+    CHECK(Utf8FromUtf16(nullptr, 0).empty());
+    std::mt19937 rng(7);                                                                     // any units give valid UTF-8
+    for (int i = 0; i < 2000; ++i) {
+        std::u16string v;
+        for (int k = 0, n = int(rng() % 12); k < n; ++k) v.push_back(char16_t((rng() & 1) ? 0xD7F0 + rng() % 0x900 : rng() % 0x10000));
+        CHECK(ValidUtf8(Utf8FromUtf16(v)));
+    }
+}
+
+static void TestPasteText() {
+    CHECK(PasteText("hello", 120) == "hello");
+    CHECK(PasteText("a\r\nb", 120) == "a b");                         // CRLF is one space
+    CHECK(PasteText("a\nb\rc\td", 120) == "a b c d");
+    CHECK(PasteText("a\r\n\r\n\t b", 120) == "a  b");                 // a run is one space, then the typed one
+    CHECK(PasteText("a\x01" "b\x7F" "c\x1B" "d", 120) == "abcd");     // controls dropped
+    CHECK(PasteText("a\xC2\x85" "b\xC2\x9F" "c", 120) == "abc");      // C1 dropped
+    CHECK(PasteText("a\xFF" "b\xC3" "c\xE2\x82", 120) == "abc");      // invalid and truncated sequences dropped
+    CHECK(PasteText("\xF0\x9F\x94\xA5!", 120) == "\xF0\x9F\x94\xA5!");   // emoji kept
+    CHECK(PasteText("", 120).empty());
+    CHECK(PasteText("abc", 0).empty());
+    CHECK(PasteText("abc", 2) == "ab");
+    const std::string e = "\xF0\x9F\x94\xA5\xF0\x9F\x98\x82";         // two 4-byte emoji: truncation never splits one
+    CHECK(PasteText(e, 8) == e);
+    CHECK(PasteText(e, 7) == "\xF0\x9F\x94\xA5");
+    CHECK(PasteText(e, 4) == "\xF0\x9F\x94\xA5");
+    CHECK(PasteText(e, 3).empty());
+    CHECK(PasteText("a\xE2\x99\xA5", 3) == "a");
+    CHECK(PasteText("ab\r\ncd", 3) == "ab ");
+    CHECK(PasteText(std::string(500, 'x'), kMaxChatBytes).size() == kMaxChatBytes);
+    std::string many; for (int i = 0; i < 100; ++i) many += "\xE2\x99\xA5\n";
+    for (size_t room = 0; room <= 130; ++room) {
+        std::string p = PasteText(many, room);
+        CHECK(p.size() <= room && ValidUtf8(p));
+    }
+    // Into a session: freeBytes, then the paste fits whole.
+    ChatSession s;
+    s.On(ChatEvent::Enter, 0);
+    CHECK(s.freeBytes() == kMaxChatBytes);
+    s.On(ChatEvent::Char, 0, "gg ");
+    CHECK(s.freeBytes() == kMaxChatBytes - 3);
+    s.On(ChatEvent::Char, 0, PasteText(std::string(300, 'y') + "\xF0\x9F\x94\xA5", s.freeBytes()));
+    CHECK(s.draft().size() == kMaxChatBytes && s.freeBytes() == 0);
+    s.On(ChatEvent::Char, 0, PasteText("more", s.freeBytes()));       // nothing left: nothing typed
+    CHECK(s.draft().size() == kMaxChatBytes);
+    ChatSession t;
+    t.On(ChatEvent::Enter, 0);
+    t.On(ChatEvent::Char, 0, std::string(118, 'a'));
+    t.On(ChatEvent::Char, 0, PasteText("\xF0\x9F\x94\xA5 x\r\ny", t.freeBytes()));   // 2 bytes left: the emoji does not fit
+    CHECK(t.draft().size() == 118);
+    CHECK(PasteText("\xF0\x9F\x94\xA5 x\r\ny", 2).empty());
+}
+
 int main() {
+    TestUtf8FromUtf16();
+    TestPasteText();
     TestUtf16();
     TestRoundTrip();
     TestTruncationLoop();
     TestUtf8CutEdges();
     TestInvalidUtf8();
     TestControlChars();
+    TestEmojiStripped();
     TestDecodeRejects();
     TestFromSlotPreserved();
     TestRateLimiter();

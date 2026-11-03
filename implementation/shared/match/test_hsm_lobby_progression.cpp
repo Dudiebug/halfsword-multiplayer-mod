@@ -20,7 +20,7 @@ static LobbyLocal Lobby(bool host, bool progression) {
 
 int main() {
     LobbyScene off = BuildLobbyScene(Lobby(true, false));
-    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == size_t(kFormatCount) + 2);   // the formats, Brawl, Progression
+    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == kModeOrderCount + 2);   // the formats, Brawl, Progression
     CHECK(off.modes.back().progression && !off.modes.back().selected && off.modes.back().enabled);
     CHECK(!off.settings.empty() && !off.maps.empty());
     size_t selected = 0;
@@ -39,7 +39,7 @@ int main() {
     CHECK(member.modes.back().selected && !member.modes.back().enabled);
     for (const ModeCard& m : member.modes) CHECK(!m.enabled);
 
-    for (size_t i = 0; i < size_t(kFormatCount); ++i) CHECK(off.modes[i].format == kModeOrder[i] && !off.modes[i].progression);
+    for (size_t i = 0; i < kModeOrderCount; ++i) CHECK(off.modes[i].format == kModeOrder[i] && !off.modes[i].progression);
     if (!g_fail) std::printf("test_hsm_lobby_progression: all passed\n");
     return g_fail ? 1 : 0;
 }

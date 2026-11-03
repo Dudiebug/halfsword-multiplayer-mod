@@ -437,6 +437,7 @@ void ObjectSync::SelfDropped(uint8_t e, UObject* standIn, int h, StandInHand& sh
 // "Set Up Right/Left Hand Weapon" with that weapon, as the game's own pick-up does (Willie_BP.cpp:17357): the hand grips
 // it and the grip constraint pulls it in; the rig drives it from the next pose on.
 bool ObjectSync::TakeIntoHand(UObject* standIn, int h, UObject* weapon) {
+    if (adapter_->IsModActor(weapon)) return false;   // #612: the CTF flag is nobody's pickup, not even taken back
     bool ok = false;
     if (h == 0) {
         Call c(standIn, "Set Up Right Hand Weapon");
@@ -465,8 +466,12 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
     auto consider = [&](UObject* a, int32_t index, uint32_t cls) {
         if (!a || (cls && cls != pose.classHash) || std::find(actors.begin(), actors.end(), a) != actors.end()) return;
         if (!adapter_->StillValid(a, index) || (!cls && ClassHashOf(a) != pose.classHash) || ObjectField(a, 0)) return;
+        // #612: the mod's own spawned actor (the CTF flag, a frozen rake) is never a stand-in hand's pickup (modKept).
+        const bool modKept = adapter_->IsModActor(a);
+        if (modKept && ++n_.flagSkipped <= kLogFirst)
+            HSM_LOG("props: stand-in hand skip: the CTF flag is not a pickup");
         const FVector at = adapter_->ActorLocation(a);
-        loose.push_back(sync::LooseWeapon{sync::V3{at.x, at.y, at.z}, pose.classHash});
+        loose.push_back(sync::LooseWeapon{sync::V3{at.x, at.y, at.z}, pose.classHash, modKept});
         actors.push_back(a);
     };
     for (const Loose& l : loose_) consider(l.actor, l.index, 0);

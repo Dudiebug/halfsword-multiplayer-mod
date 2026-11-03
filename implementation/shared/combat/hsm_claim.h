@@ -90,7 +90,9 @@ struct Xform {
 };
 
 // What struck: HSMP flag bit 7 (BF.WEAPON) plus the hand that owns the history/replay component.
-enum class StrikeSource : uint8_t { Body = 0, WeaponRight = 1, WeaponLeft = 2 };
+// Ammo (rev 38): a fired bolt lodged in the victim, which is in neither hand (Stuck claims only; the replay strikes with
+// the attacker's crossbow, else their body).
+enum class StrikeSource : uint8_t { Body = 0, WeaponRight = 1, WeaponLeft = 2, Ammo = 3 };
 // Whose: the attacker fighter's weapon or body, or a prop (a rock, a thrown weapon, debris) streamed by the claiming
 // machine, whose contact it decided for the attacker (DecidePropContact).
 // Stuck (rev 25): not a blow but the damage the game's Constraint_Weapon_Stuck_BP deals each tick through Get Damage while a
@@ -658,7 +660,7 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
 
     if (!r.done() || !numOk) return false;
     if (lt > 1 || dpb > 1 || ehv > 1 || hasBox > 1) return false;
-    if (srcRaw > uint8_t(StrikeSource::WeaponLeft)) return false;
+    if (srcRaw > uint8_t(StrikeSource::Ammo)) return false;
     if (strikerRaw > uint8_t(StrikerKind::Stuck)) return false;
     const bool noProp = m.propId == 0 && m.propVelocity.x == 0 && m.propVelocity.y == 0 && m.propVelocity.z == 0;
     if (strikerRaw == uint8_t(StrikerKind::Prop)) {
@@ -668,11 +670,13 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
     }
     if (strikerRaw == uint8_t(StrikerKind::Stuck)) {
         // A stuck blade: in a hand, in a named bone, with a damage a Get Damage can take (rev 25).
-        if (srcRaw == uint8_t(StrikeSource::Body) || m.hitBone.empty()) return false;
+        if (srcRaw == uint8_t(StrikeSource::Body) || m.hitBone.empty()) return false;   // a lodged blade or bolt (rev 38)
         if (!(m.rawDamage > 0 && m.rawDamage <= kMaxStuckRawDamage)) return false;
         if (!(m.cuttingPower >= 0 && m.cuttingPower <= kMaxStuckCuttingPower)) return false;
     } else if (m.rawDamage != 0) {
         return false;                                                                        // only a stuck blade has one
+    } else if (srcRaw == uint8_t(StrikeSource::Ammo)) {
+        return false;                                                                        // a bolt's claim is a lodged one
     }
 
     m.lowerThreshold = lt == 1;

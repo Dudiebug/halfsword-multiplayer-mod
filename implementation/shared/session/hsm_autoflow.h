@@ -12,14 +12,29 @@
 
 namespace hsm {
 
-// server_format -> Format ("teams" = two teams, "survival" = players vs bots). False for an unknown word.
-inline bool ParseServerFormat(std::string_view s, Format* out) {
-    struct E { const char* name; Format f; };
-    static constexpr E kF[] = {{"ffa", Format::FreeForAll}, {"duel", Format::Duel}, {"teams", Format::TwoTeams},
-                               {"survival", Format::PlayersVsBots}, {"zombies", Format::Zombies}};
+// server_format -> Format ("teams" = two teams, "teams3" / "teams4" = three or four, "survival" = players vs bots, "lms" =
+// last man standing; "teamduel", "riot", "juggernaut", "ctf" (capture the flag), "tag", "infection", "crossbowtdm", "tournament"
+// and "pitbridge" (pit bridge duels) name the other formats). *teams (when given) gets the team count: 2..4 for the teams words,
+// 2 otherwise. False for an unknown word.
+inline bool ParseServerFormat(std::string_view s, Format* out, int* teams = nullptr) {
+    struct E { const char* name; Format f; int teams; };
+    static constexpr E kF[] = {{"ffa", Format::FreeForAll, 2}, {"duel", Format::Duel, 2}, {"lms", Format::LastManStanding, 2},
+                               {"teams", Format::TwoTeams, 2}, {"teams2", Format::TwoTeams, 2}, {"teams3", Format::TwoTeams, 3},
+                               {"teams4", Format::TwoTeams, 4}, {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2},
+                               {"teamduel", Format::TeamDuel, 2}, {"riot", Format::Riot, 2}, {"juggernaut", Format::Juggernaut, 2},
+                               {"ctf", Format::CaptureTheFlag, 2}, {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
+                               {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2},
+                               {"pitbridge", Format::PitBridgeDuel, 2}};
     for (const E& e : kF)
-        if (map_detail::EqualsNoCase(s, e.name)) { *out = e.f; return true; }
+        if (map_detail::EqualsNoCase(s, e.name)) { *out = e.f; if (teams) *teams = e.teams; return true; }
     return false;
+}
+// A server_format=duel rotation runs as Last Man Standing unless exactly two players are in (Duel is one on one); riot,
+// juggernaut and tournament need three, so with two in they run as Last Man Standing too.
+inline Format ServerFormatFor(Format f, int players) {
+    if (f == Format::Duel) return players != 2 ? Format::LastManStanding : f;
+    if ((f == Format::Riot || f == Format::Juggernaut || f == Format::Tournament) && players < 3) return Format::LastManStanding;
+    return f;
 }
 
 namespace flow_detail {

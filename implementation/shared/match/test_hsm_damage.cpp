@@ -29,7 +29,10 @@ static void TestStepStopsAtStock() {
     CHECK(StepDamage(80, -1, r) == kDamageStock);
     CHECK(StepDamage(80, 1, r) == 100 && StepDamage(100, 1, r) == 100);
     CHECK(StepDamage(20, -1, r) == 0 && StepDamage(0, -1, r) == 0);
-    CHECK(DamagePct(900, r) == 100);                       // out of the slider's range: clamped
+    CHECK(DamagePct(900, r) == 900 && DamagePct(1500, r) == kDamageMaxPct);   // a typed value passes the slider's end (pre26), up to the max
+    CHECK(DamagePct(0, DamageRangeFrom(0.1, 1.0, 0.1, 0.5)) == 10);   // below the slider's minimum: clamped
+    CHECK(StepDamage(350, -1, r) == 100 && StepDamage(350, 1, r) == 350);   // past the end: down onto the end, not further up
+    CHECK(StepDamage(350, -1, DamageRangeFrom(0.0, 1.0, 0.1, 1.0)) == kDamageStock);   // the end is the stock value
     CHECK(DamageRate(kDamageStock, r) == 0.5 && DamageRate(80, r) == 0.8);
     CHECK(DamageLabel(kDamageStock, r) == "50% (stock)" && DamageLabel(80, r) == "80%");
 }
@@ -43,10 +46,31 @@ static void TestSliderSelectionAndClientClamp() {
     CHECK(!IsGameSettingsSlider("Slider /Game/UI/XUI_GameSettings.XUI_GameSettings_C:WidgetTree.Slider_DamagePlayer"));
     CHECK(!IsGameSettingsSlider("") && !IsGameSettingsSlider("Slider_DamagePlayer"));
     const DamageRange cam = DamageRangeFrom(0.0, 1.0, 0.1, 1.0);   // the wrong slider's 0..100%
-    CHECK(DamagePct(150, cam) == 100);                      // the host clamps to its slider
+    CHECK(DamagePct(150, cam) == 150 && DamagePct(1200, cam) == kDamageMaxPct);   // the host: up to the max, past its slider (pre26)
     CHECK(DamagePct(150, cam, true) == 150 && DamageRate(150, cam, true) == 1.5);   // a client takes the host's value
     CHECK(DamagePct(5000, cam, true) == kDamageMaxPct);     // still bounded
     CHECK(DamagePct(kDamageStock, cam, true) == 100);
+}
+
+// Criterion (0.8.0-pre26): the lobby slider runs 0..200 in the vanilla step, snaps where it is let go, and stores the
+// stock value as kDamageStock; a typed value is digits with an optional %, 0 to 1000.
+static void TestSliderAndTyping() {
+    const DamageRange r;                                   // vanilla: 0..200 by 10, stock 100
+    CHECK(kDamageSliderMaxPct == 200 && DamageSliderMax(r) == 200);
+    CHECK(DamageFromSlider(0.f, r) == 0 && DamageFromSlider(14.f, r) == 10 && DamageFromSlider(15.f, r) == 20);
+    CHECK(DamageFromSlider(96.f, r) == kDamageStock && DamageFromSlider(200.f, r) == 200 && DamageFromSlider(260.f, r) == 200);
+    CHECK(DamageFromSlider(-5.f, r) == 0 && DamageFromSlider(std::numeric_limits<float>::quiet_NaN(), r) == kDamageStock);
+    const DamageRange odd = DamageRangeFrom(0.05, 1.0, 0.25, 1.0);   // steps from the minimum: 5, 30, 55, ...
+    CHECK(DamageFromSlider(31.f, odd) == 30 && DamageFromSlider(0.f, odd) == 5 && DamageFromSlider(205.f, odd) == 200);
+    CHECK(DamageSliderMax(DamageRangeFrom(0.0, 3.0, 0.1, 1.0)) == 300);   // a longer vanilla slider keeps its end
+    CHECK(DamageSliderPos(kDamageStock, r) == 100.f && DamageSliderPos(150, r) == 150.f && DamageSliderPos(350, r) == 200.f);
+    CHECK(DamageLabel(350, r) == "350%");                   // the label shows the real number past the slider's end
+    CHECK(ParseDamageInput("350") == uint16_t(350) && ParseDamageInput(" 75 % ") == uint16_t(75) && ParseDamageInput("0") == uint16_t(0));
+    CHECK(ParseDamageInput("1000%") == uint16_t(1000) && ParseDamageInput("0010") == uint16_t(10));
+    CHECK(!ParseDamageInput("1001") && !ParseDamageInput("") && !ParseDamageInput("  % ") && !ParseDamageInput("-5"));
+    CHECK(!ParseDamageInput("+5") && !ParseDamageInput("1.5") && !ParseDamageInput("50x") && !ParseDamageInput("99999") && !ParseDamageInput("5%%"));
+    CHECK(DamageFromInput(100, r) == kDamageStock && DamageFromInput(350, r) == 350 && DamageFromInput(0, r) == 0);
+    CHECK(DamageFromInput(0, DamageRangeFrom(0.1, 1.0, 0.1, 0.5)) == 10 && DamageFromInput(10, DamageRangeFrom(0.1, 1.0, 0.1, 0.1)) == kDamageStock);
 }
 
 static void TestOwnBeforeSave() {
@@ -62,6 +86,7 @@ int main() {
     TestRangeFromSlider();
     TestStepStopsAtStock();
     TestSliderSelectionAndClientClamp();
+    TestSliderAndTyping();
     TestOwnBeforeSave();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_damage: ok\n");

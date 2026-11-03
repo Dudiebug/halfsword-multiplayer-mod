@@ -2,9 +2,13 @@
 #include <windows.h>
 #include "gameplay/combat_sync.h"
 #include "gameplay/damage_pin.h"
+#include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "log.h"
+#include "match/hsm_roles.h"
 #include "match/hsm_match.h"
+#include "match/hsm_modes.h"
+#include "match/hsm_team_kit.h"
 #include "session/hsm_ground_clear.h"
 #include "session/hsm_gvas.h"
 #include "sync/hsm_gore.h"
@@ -15,11 +19,14 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cwchar>
 #include <iterator>
+#include <map>
+#include <set>
 
 namespace hsm::game {
 using namespace hsm::ue;
@@ -27,9 +34,11 @@ namespace {
 
 struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };
 constexpr const char* kWillieClass = "Willie_BP_C";
+constexpr const char* kZombieClass = "Willie_BP_Zombie_C";   // the Zombies format's bots: a child of Willie_BP_C with the rotten look, no new fields
 constexpr const char* kGameInstanceClass = "GI_Settings_C";
 constexpr const char* kSaveGameClass = "SG_GameProgress_C";
 constexpr const char* kSpawnerClass = "BP_SpawnerPoint_Willies_C";
+constexpr const char* kBridgeBoardClass = "BP_Structure_Board_Destructible_1X6M_C";
 constexpr const char* kPassportStruct = "Str_Passport_Character1";
 constexpr const char* kEquipmentStruct = "Str_SubPassport_Equipment";            // the passport's Equipment member (docs/REVERSE_ENGINEERING.md section 8)
 constexpr const char* kPassportFreeMode = "Free Mode Player Character 1";      // GI_Settings, Free Mode
@@ -384,7 +393,7 @@ std::wstring Adapter::SaveGamesDir() {
     FStringArg full = abs.get<FStringArg>("ReturnValue");
     std::string path = ReadFString(&full);
     if (path.empty()) return {};
-    saveDir_.assign(path.begin(), path.end());
+    { const std::u16string u = Utf16FromUtf8(path); saveDir_.assign(u.begin(), u.end()); }   // UTF-8 back to UTF-16 (a non-ASCII profile path)
     if (saveDir_.back() != L'/' && saveDir_.back() != L'\\') saveDir_ += L'/';
     saveDir_ += L"SaveGames/";
     // Sweep temporary slots a crashed session may have left in the player's save folder.
@@ -519,7 +528,13 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
     if (UObject* st = FindObject(kPassportStruct, "UserDefinedStruct"))
         if (FProperty* h = FindPropertyPrefix(st, "Height_"); h && PropertySize(h) == sizeof(double)) std::memcpy(&height, from + PropertyOffset(h), sizeof height);
     if (!std::isfinite(height)) height = 0.5;
-    ApplyBuild(willie, dst, o.bot);
+    if (o.height >= 0.0 && std::isfinite(o.height) && !o.bot)      // a role's Height, at the spawn only: the passport copy the game reads at BeginPlay
+        if (UObject* st = FindObject(kPassportStruct, "UserDefinedStruct"))
+            if (FProperty* h = FindPropertyPrefix(st, "Height_"); h && PropertySize(h) == sizeof(double)) {
+                height = std::clamp(o.height, 0.0, hsm::kMaxSpawnHeight);   // past 1.0: the Juggernaut's INI scale; the game's own height map runs unclamped
+                std::memcpy(reinterpret_cast<uint8_t*>(willie) + PropertyOffset(dst) + PropertyOffset(h), &height, sizeof height);
+            }
+    ApplyBuild(willie, dst, o.bot, o.weight);
     if (bare_) StripEquipment(willie, dst);
     return true;
 }
@@ -547,7 +562,7 @@ void Adapter::StripEquipment(UObject* willie, FProperty* passport) {
 // 1..1.5, so two players with different Weights are different bodies (a Free Mode 2.0 made one fighter 33% heavier with a 60%
 // stronger grip: #294 #295 #301). A player gets exactly the forced Weight (SetBuild); a bot, or any fighter with
 // force_strength=0, its own clamped to 0..1.
-void Adapter::ApplyBuild(UObject* willie, FProperty* passport, bool bot) {
+void Adapter::ApplyBuild(UObject* willie, FProperty* passport, bool bot, double roleWeight) {
     UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
     FProperty* w = st ? FindPropertyPrefix(st, "Weight_") : nullptr;
     if (!w || PropertySize(w) != sizeof(double)) {
@@ -559,8 +574,9 @@ void Adapter::ApplyBuild(UObject* willie, FProperty* passport, bool bot) {
     uint8_t* at = reinterpret_cast<uint8_t*>(willie) + PropertyOffset(passport) + PropertyOffset(w);
     double own = 0;
     std::memcpy(&own, at, sizeof own);
-    const bool force = buildOn_ && !bot;
-    const double want = BuildWeight(own, buildWeight_, force);
+    const bool role = roleWeight >= 0.0 && std::isfinite(roleWeight) && !bot;   // a role's Weight is the mode's rule: it holds with force_strength off too
+    const bool force = (buildOn_ || role) && !bot;
+    const double want = BuildWeight(own, role ? roleWeight : buildWeight_, force);
     if (want != own) std::memcpy(at, &want, sizeof want);          // a NaN own compares unequal too
     const std::string name = ObjectName(willie);
     if (force)
@@ -640,7 +656,13 @@ static void LogAppearance(UObject* w) {
 
 UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
     const auto t0 = std::chrono::steady_clock::now();   // the line below says what the spawn took (round restarts: one a frame)
-    UClass* willie = FindClass(kWillieClass);
+    UClass* willie = FindClass(o.fighterClass ? o.fighterClass : kWillieClass);   // Zombies' bots: the zombie class (match/hsm_fighter_class.h)
+    if (!willie && o.fighterClass && std::string(o.fighterClass) == kZombieClass) {
+        // Infection on an arena map: nothing there references the zombie Willie yet (pre24 tester feedback).
+        willie = LoadClassBlocking("/Game/Character/Blueprints/Willie_BP_Zombie.Willie_BP_Zombie_C");
+        HSM_LOG("adapter: zombie class %s", willie ? "loaded" : "could not be loaded; spawning the stock fighter");
+        if (!willie) willie = FindClass(kWillieClass);
+    }
     UClass* aiCtrl = o.brain && !o.stockBrain ? FindClass("AIController") : nullptr;
     if (!willie || (o.brain && !o.stockBrain && !aiCtrl)) { HSM_LOG("adapter: spawn classes missing"); return nullptr; }
     double rad = o.yawDeg * 0.017453292519943295;
@@ -657,10 +679,15 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
         if (UClass** cls = Field<UClass*>(w, "AIControllerClass")) *cls = aiCtrl;
         if (uint8_t* ap = Field<uint8_t>(w, "AutoPossessAI")) *ap = o.brain ? 3 : 0;   // EAutoPossessAI PlacedInWorldOrSpawned / Disabled
     }
-    // Same height mapping as the stock spawner: lift 0..10 cm and scale 0.875..1.
-    height = std::clamp(height, 0.0, 1.0);
+    // Same height mapping as the stock spawner: lift 0..10 cm and scale 0.875..1. The game's own map is
+    // MapRangeUnclamped, so a height past 1.0 (the Juggernaut's INI scale, match/hsm_roles.h) rides the same line: 3.8 -> 1.35.
+    height = std::clamp(height, 0.0, hsm::kMaxSpawnHeight);
     t.translation.z += 10.0 * height;
     double sc = 0.875 + 0.125 * height; t.scale = {sc, sc, sc};
+    if (height > 1.0 && !heightLogged_) {   // once: a fighter built past the stock cap, the tester's evidence
+        heightLogged_ = true;
+        HSM_LOG("adapter: spawned a fighter at height %.2f (scale %.3f)", height, sc);
+    }
     Call finish(statics_, "FinishSpawningActor");
     finish.set<UObject*>("Actor", w).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
     UObject* done = finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
@@ -941,6 +968,18 @@ std::vector<FVector> Adapter::SpawnCandidates() {
         if (IsGarbage(a) || BeingDestroyed(a)) continue;
         const FVector v = ActorLocation(a);
         if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0) out.push_back(v);   // (0,0,0): destroyed, its root gone
+    }
+    return out;
+}
+
+std::vector<Adapter::ActorBox> Adapter::BridgeBoards() {
+    std::vector<ActorBox> out;
+    for (UObject* a : FindInstances(kBridgeBoardClass)) {
+        if (IsGarbage(a) || BeingDestroyed(a)) continue;
+        Call c(a, "GetActorBounds");
+        c.set<bool>("bOnlyCollidingComponents", false).set<bool>("bIncludeFromChildActors", false);
+        if (!c.invoke()) continue;
+        out.push_back({c.get<FVector>("Origin"), c.get<FVector>("BoxExtent")});
     }
     return out;
 }
@@ -1263,7 +1302,21 @@ bool Adapter::IsWillie(UObject* o) {
 
 bool Adapter::FreeModeActive() { bool f = true; UObject* gi = GameInstance(); if (gi) GetBool(gi, "Free Mode Activated", f); return f; }
 
-void Adapter::ClearFreeMode() { if (UObject* gi = GameInstance()) SetBool(gi, "Free Mode Activated", false); }
+// The stock Free->Progression switch (the Fencer dialog's mode button) sets Free Mode off, Play Mode 0 and Crash Open
+// off, and the Tavern hub's own reset sets Game Mode 0, Combat Mode 1 and Lose Condition 0. Clearing Free Mode alone
+// left Play Mode at 1 after a lobby fight: the hub hid its mercenaries, merchant, smiths and sleep and the whole
+// Progression flow ran as Free Mode (#616). The same fields the stock entry sets, in the stock entry's spirit.
+void Adapter::ClearFreeMode() {
+    if (UObject* gi = GameInstance()) {
+        SetBool(gi, "Free Mode Activated", false);
+        if (uint8_t* p = Field<uint8_t>(gi, "Current Play Mode")) *p = 0;
+        if (uint8_t* m = Field<uint8_t>(gi, "Current Game Mode enum")) *m = 0;
+        if (uint8_t* cm = Field<uint8_t>(gi, "Current Combat Mode")) *cm = 1;
+        if (uint8_t* lc = Field<uint8_t>(gi, "Current Lose Condition")) *lc = 0;
+        SetBool(gi, "Crash Open", false);
+        HSM_LOG("adapter: Progression entry reset (Play Mode 0, Game Mode 0, Combat Mode 1, Lose Condition 0, Crash Open off)");
+    }
+}
 
 void Adapter::PrepareFreeModeFight(int foes) {
     UObject* gi = GameInstance();
@@ -1275,6 +1328,279 @@ void Adapter::PrepareFreeModeFight(int foes) {
     if (uint8_t* cm = Field<uint8_t>(gi, "Current Combat Mode")) *cm = carnage ? 3 : 1;
     if (uint8_t* p = Field<uint8_t>(gi, "Current Play Mode")) *p = 1;
     if (uint8_t* m = Field<uint8_t>(gi, "Current Game Mode enum")) *m = 1;
+}
+
+// ---------------------------------------------------------------- combat scenarios (match/hsm_scenarios.h)
+namespace {
+bool ReadableMem(const void* p, size_t len) {
+    MEMORY_BASIC_INFORMATION mbi;
+    const char* c = static_cast<const char*>(p);
+    const char* end = c + len;
+    while (c < end) {
+        if (!VirtualQuery(c, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+        c = static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize;
+    }
+    return true;
+}
+constexpr size_t kArrayInner = 0x70;     // FArrayProperty::Inner follows FProperty (0x70 bytes in this build; mod_maps.cpp)
+struct ScriptArray { const uint8_t* data; int32_t num, max; };
+// A TArray property of one-byte elements (an enum or byte array) as "1,3"; "?" when it is not what it should be.
+std::string ByteArrayText(UObject* o, const char* name) {
+    FProperty* p = FindProperty(ClassOf(o), name);
+    if (!p) return "none";
+    if (PropertyType(p) != "ArrayProperty" || PropertySize(p) != int32_t(sizeof(ScriptArray))) return "?";
+    const void* const* slot = reinterpret_cast<const void* const*>(reinterpret_cast<const char*>(p) + kArrayInner);
+    if (!ReadableMem(slot, sizeof(void*)) || !*slot || !ReadableMem(*slot, 0x80)) return "?";
+    const FProperty* inner = static_cast<const FProperty*>(*slot);
+    const std::string innerType = PropertyType(inner);
+    if (PropertySize(inner) != 1 || (innerType != "ByteProperty" && innerType != "EnumProperty")) return "?";
+    const ScriptArray* a = reinterpret_cast<const ScriptArray*>(reinterpret_cast<const uint8_t*>(o) + PropertyOffset(p));
+    if (!ReadableMem(a, sizeof *a) || a->num < 0 || a->num > 64 || (a->num && (!a->data || !ReadableMem(a->data, size_t(a->num))))) return "?";
+    std::string out;
+    for (int32_t i = 0; i < a->num; ++i) out += (i ? "," : "") + std::to_string(unsigned(a->data[i]));
+    return out.empty() ? "none" : out;
+}
+// An FText living at `t` as UTF-8; "?" when it cannot be read.
+std::string TextValue(const void* t) {
+    static UObject* lib = nullptr;
+    if (!lib) if (UObject* cls = FindObject("KismetTextLibrary", "Class")) lib = DefaultObject(reinterpret_cast<UClass*>(cls));
+    if (!lib || !ReadableMem(t, sizeof(FText))) return "?";
+    Call str(lib, "Conv_TextToString");
+    str.set("InText", *static_cast<const FText*>(t));
+    if (!str.invoke()) return "?";
+    return ReadFString(str.paramPtr("ReturnValue"));
+}
+std::string TextProp(UObject* o, const char* name) {
+    FProperty* p = FindProperty(ClassOf(o), name);
+    if (!p || PropertyType(p) != "TextProperty" || PropertySize(p) != int32_t(sizeof(FText))) return "?";
+    return TextValue(reinterpret_cast<const uint8_t*>(o) + PropertyOffset(p));
+}
+constexpr const char* kCombatEventClasses[] = {"BP_CombatEvent_Alley_C", "BP_CombatEvent_Cellar_C", "BP_CombatEvent_Forest_C", "BP_CombatEvent_Hall_C",
+                                               "BP_CombatEvent_Pit_C", "BP_CombatEvent_Slums_C", "BP_CombatEvent_Yard_C", "BP_CombatEvent_Tourney_C",
+                                               "BP_CombatEvent_TourneyBaron_C"};
+}  // namespace
+
+bool Adapter::ApplyScenario(const hsm::ScenarioWorld& w) {
+    UObject* gi = GameInstance();
+    if (!gi) return false;
+    if (!scenarioSaved_.saved) {                                   // the host's own Free Mode values, kept once
+        scenarioSaved_.saved = true;
+        GetBool(gi, "Free Mode Carnage", scenarioSaved_.carnage);
+        GetBool(gi, "Free Mode Brawling", scenarioSaved_.brawling);
+        if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { scenarioSaved_.hasLose = true; scenarioSaved_.lose = *l; }
+    }
+    bool any = false;
+    if (w.carnage) any |= SetBool(gi, "Free Mode Carnage", true);
+    if (w.brawling) any |= SetBool(gi, "Free Mode Brawling", true);
+    if (w.loseCondition >= 0) if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { *l = uint8_t(w.loseCondition); any = true; }
+    return any;
+}
+
+void Adapter::RestoreScenario() {
+    if (!scenarioSaved_.saved) return;
+    if (UObject* gi = GameInstance()) {
+        SetBool(gi, "Free Mode Carnage", scenarioSaved_.carnage);
+        SetBool(gi, "Free Mode Brawling", scenarioSaved_.brawling);
+        if (scenarioSaved_.hasLose) if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) *l = scenarioSaved_.lose;
+    }
+    scenarioSaved_ = ScenarioSaved{};
+}
+
+// The fence of the Fenced-ring scenario (#706): BP_LevelManager_C::Clean_Up_and_Spawn_Actors resets "Current Lose
+// Condition" on every level load (Free Mode on) and destroys the BP_Fence_Bags unless it is 3 at that moment (decomp
+// BP_LevelManager.cpp:66-91). Session's post hook on the level manager's Spawn Combatants calls this right after that
+// wipe, ahead of the fence check in the same pass.
+bool Adapter::KeepFenceLoseCondition() {
+    if (UObject* gi = GameInstance())
+        if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { *l = uint8_t(hsm::kLoseConditionFence); return true; }
+    return false;
+}
+
+UObject* Adapter::SpawnFenceBags(const FVector& at, double radius) {
+    UClass* cls = FindClass("BP_Fence_Bags_C");
+    if (!cls || !statics_ || !world_) return nullptr;
+    FTransform t; t.translation = at;
+    Call begin(statics_, "BeginDeferredActorSpawnFromClass");
+    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+         .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
+    UObject* a = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
+    if (!a) return nullptr;
+    if (float* r = Field<float>(a, "Radius")) *r = float(radius);   // a Float property (check_reflection)
+    Call finish(statics_, "FinishSpawningActor");
+    finish.set<UObject*>("Actor", a).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
+    return finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
+}
+
+bool Adapter::IsZombieBody(UObject* w) {
+    return w && ObjectName(reinterpret_cast<UObject*>(ClassOf(w))) == kZombieClass;
+}
+
+bool Adapter::FenceBagsExist() { return !FindInstances("BP_Fence_Bags_C").empty(); }
+
+int Adapter::LogCombatEvents(const std::string& map) {
+    int lines = 0;
+    for (const char* cls : kCombatEventClasses) {
+        std::vector<UObject*> objs = FindInstances(cls);
+        bool isDefault = false;
+        if (objs.empty()) {                                        // none placed in this level: the class defaults say what it offers
+            UClass* c = FindClass(cls);
+            if (!c) continue;
+            if (UObject* d = DefaultObject(c)) { objs.push_back(d); isDefault = true; }
+        }
+        for (UObject* o : objs) {
+            if (!o) continue;
+            HSM_LOG("scenario: map %s: combat event %s \"%s\" modes %s lose conditions %s%s", map.c_str(), cls, TextProp(o, "Scenario Name").c_str(),
+                    ByteArrayText(o, "Available Combat Modes").c_str(), ByteArrayText(o, "Available Lose Conditions").c_str(), isDefault ? " (class defaults)" : "");
+            ++lines;
+        }
+    }
+    return lines;
+}
+
+// ---------------------------------------------------------------- Progression: the next fights the hub offers
+namespace {
+constexpr size_t kMaxOffered = 16;
+constexpr const char* kGameManagerClass = "BP_GameManager_C";   // the level's own manager; its Generate Combat Events refills the list
+// The career's "Available Combat Events" (Str_Passport_CombatEvent1 elements): on the save object or the game instance.
+// The mod's own temporary save objects hold an empty list, so the longest list found is the career's.
+struct EventList { UObject* owner = nullptr; const uint8_t* data = nullptr; int32_t num = 0, stride = 0; };
+EventList FindEventList(UObject* gi) {
+    EventList best;
+    std::vector<UObject*> holders = FindInstances(kSaveGameClass);
+    if (gi) holders.push_back(gi);
+    for (UObject* o : holders) {
+        FProperty* p = o ? FindProperty(ClassOf(o), "Available Combat Events") : nullptr;
+        if (!p || PropertyType(p) != "ArrayProperty" || PropertySize(p) != int32_t(sizeof(ScriptArray))) continue;
+        const void* const* slot = reinterpret_cast<const void* const*>(reinterpret_cast<const char*>(p) + kArrayInner);
+        if (!ReadableMem(slot, sizeof(void*)) || !*slot || !ReadableMem(*slot, 0x80)) continue;
+        const FProperty* inner = static_cast<const FProperty*>(*slot);
+        const int32_t stride = PropertySize(inner);
+        if (PropertyType(inner) != "StructProperty" || stride <= 0 || stride > 4096) continue;
+        const ScriptArray* a = reinterpret_cast<const ScriptArray*>(reinterpret_cast<const uint8_t*>(o) + PropertyOffset(p));
+        if (!ReadableMem(a, sizeof *a) || a->num <= 0 || a->num > int32_t(kMaxOffered) || !a->data || !ReadableMem(a->data, size_t(a->num) * size_t(stride))) continue;
+        if (a->num > best.num) best = {o, a->data, a->num, stride};
+    }
+    return best;
+}
+// Why one holder's "Available Combat Events" reads as it does (#621): the first of FindEventList's checks it fails, or
+// the count it holds. Same checks, same order, so the line names the exact reason the list came back empty.
+std::string EventListWhy(UObject* o) {
+    FProperty* p = o ? FindProperty(ClassOf(o), "Available Combat Events") : nullptr;
+    if (!p) return "property missing";
+    if (PropertyType(p) != "ArrayProperty" || PropertySize(p) != int32_t(sizeof(ScriptArray))) return "not an array";
+    const void* const* slot = reinterpret_cast<const void* const*>(reinterpret_cast<const char*>(p) + kArrayInner);
+    if (!ReadableMem(slot, sizeof(void*)) || !*slot || !ReadableMem(*slot, 0x80)) return "inner property unreadable";
+    if (PropertyType(static_cast<const FProperty*>(*slot)) != "StructProperty") return "inner not a struct";
+    const ScriptArray* a = reinterpret_cast<const ScriptArray*>(reinterpret_cast<const uint8_t*>(o) + PropertyOffset(p));
+    if (!ReadableMem(a, sizeof *a)) return "array unreadable";
+    return "num=" + std::to_string(a->num);
+}
+// A GI integer as text, whatever width this build gives it (career money is Kismet Int64 here, Int in the decompiled
+// index): 8 and 4 bytes are read, another size says so. "?" when the property is missing.
+std::string GiIntText(const UObject* gi, const FProperty* p) {
+    if (!gi || !p) return "?";
+    const uint8_t* at = reinterpret_cast<const uint8_t*>(gi) + PropertyOffset(p);
+    if (PropertySize(p) == 8) { int64_t v = 0; std::memcpy(&v, at, sizeof v); return std::to_string(v); }
+    if (PropertySize(p) == 4) { int32_t v = 0; std::memcpy(&v, at, sizeof v); return std::to_string(v); }
+    return std::to_string(PropertySize(p)) + " bytes";
+}
+// The fight list's state, one line per holder (the save objects and the game instance) plus the career's money state and
+// whether the level's own game manager is there to refill it (#621). The host's first read of a hub visit only.
+void LogEventHolders(UObject* gi) {
+    std::vector<UObject*> holders = FindInstances(kSaveGameClass);
+    if (gi) holders.push_back(gi);
+    for (UObject* o : holders)
+        if (o) HSM_LOG("progression: %s: Available Combat Events: %s", ObjectName(o).c_str(), EventListWhy(o).c_str());
+    if (!gi) return;
+    const uint8_t* tier = Field<uint8_t>(gi, "Player Tier");
+    const std::string tierText = tier ? std::to_string(*tier) : "?";
+    HSM_LOG("progression: GI: Player Funds %s, Player Tier %s, BP_GameManager_C %s", GiIntText(gi, FindProperty(ClassOf(gi), "Player Funds")).c_str(),
+            tierText.c_str(), FindInstances(kGameManagerClass).empty() ? "missing" : "present");
+}
+// A text-like member of the event struct, as a name: the Scenario Name if it has one, else the first text, string or name member.
+std::string EventName(const uint8_t* element, const std::vector<FProperty*>& members) {
+    const FProperty* pick = nullptr;
+    for (const FProperty* m : members) {
+        const std::string t = PropertyType(m);
+        if (t != "TextProperty" && t != "StrProperty" && t != "NameProperty") continue;
+        if (!pick) pick = m;
+        if (PropertyName(m).find("Scenario") != std::string::npos) { pick = m; break; }
+    }
+    if (!pick) return {};
+    const uint8_t* at = element + PropertyOffset(pick);
+    const std::string t = PropertyType(pick);
+    if (t == "TextProperty") return PropertySize(pick) == int32_t(sizeof(FText)) ? TextValue(at) : std::string();
+    if (t == "NameProperty") return ReadableMem(at, sizeof(FName)) ? NameToString(*reinterpret_cast<const FName*>(at)) : std::string();
+    return ReadableMem(at, 16) ? ReadFString(at) : std::string();
+}
+}  // namespace
+
+std::vector<std::string> Adapter::OfferedFights(bool freshVisit) {
+    std::vector<std::string> out;
+    UObject* gi = GameInstance();
+    if (freshVisit) LogEventHolders(gi);                    // the host's first read this hub visit: why the list reads as it does
+    EventList list = FindEventList(gi);
+    if (freshVisit && !list.owner) {                        // empty everywhere: the stock regen-if-empty, once per hub visit (#621)
+        const std::vector<UObject*> managers = FindInstances(kGameManagerClass);
+        if (managers.empty()) HSM_LOG("progression: refill found no game manager");
+        else if (Call(managers.front(), "Generate Combat Events").invoke()) {
+            list = FindEventList(gi);
+            HSM_LOG("progression: offered fights refilled (%d)", list.owner ? list.num : 0);
+        } else HSM_LOG("progression: refill: Generate Combat Events could not be called");
+    }
+    if (!list.owner) return out;
+    UObject* st = FindObject("Str_Passport_CombatEvent1", "UserDefinedStruct");
+    const std::vector<FProperty*> members = st ? StructProperties(st) : std::vector<FProperty*>{};
+    static bool logged = false;
+    if (!logged) {                                                  // the spike: what the struct holds, for the next build
+        logged = true;
+        std::string m;
+        for (const FProperty* p : members) m += (m.empty() ? "" : ", ") + PropertyName(p) + ":" + PropertyType(p);
+        HSM_LOG("progression: Available Combat Events on %s: %d event(s), element %d bytes; struct members: %s", ObjectName(list.owner).c_str(), list.num, list.stride,
+                m.empty() ? "(struct not found)" : m.c_str());
+    }
+    for (int32_t i = 0; i < list.num; ++i) {
+        std::string n = EventName(list.data + size_t(i) * size_t(list.stride), members);
+        out.push_back(n.empty() ? "Fight " + std::to_string(i + 1) : n);
+    }
+    return out;
+}
+
+// Starts the offered fight `index` through the game's own hub UI: the function it calls with the chosen combat event
+// ("Go To Free Mode Event" on the Blueprint side), found on a live next-fight widget. Only a widget that is on screen is
+// called, and only a function whose single input is the event struct; every candidate is logged. False: the caller tells
+// the host to start it from the Fencer. `how` says what was called, or why not.
+bool Adapter::StartOfferedFight(size_t index, std::string& how) {
+    const EventList list = FindEventList(GameInstance());
+    if (!list.owner || index >= size_t(list.num)) { how = "the offered list is gone"; return false; }
+    const uint8_t* element = list.data + index * size_t(list.stride);
+    static const char* const kWidgets[] = {"UI_List_MapSelect_C", "UI_NextFIght_C", "UI_NextFight_C"};
+    static const char* const kFunctions[] = {"Go To Free Mode Event", "Go To Event", "Start Combat Event"};
+    std::string seen;
+    for (const char* wc : kWidgets) {
+        for (UObject* w : FindInstances(wc)) {
+            Call onScreen(w, "IsInViewport");
+            if (!onScreen.invoke() || !onScreen.get<bool>("ReturnValue")) { seen += std::string(seen.empty() ? "" : "; ") + wc + " not on screen"; continue; }
+            for (const char* fnName : kFunctions) {
+                UFunction* fn = FindFunction(ClassOf(w), fnName);
+                if (!fn) continue;
+                std::vector<FProperty*> inputs;
+                for (FProperty* p : Params(fn)) {
+                    const uint64_t f = PropertyFlags(p);
+                    if ((f & 0x80) && !(f & 0x400) && !(f & 0x100)) inputs.push_back(p);
+                }
+                seen += std::string(seen.empty() ? "" : "; ") + wc + "::" + fnName + "(" + std::to_string(inputs.size()) + " in)";
+                if (inputs.size() != 1 || PropertyType(inputs[0]) != "StructProperty" || PropertySize(inputs[0]) != list.stride) continue;
+                Call c(w, fn);
+                c.setFrom(PropertyName(inputs[0]), element);
+                if (!c.invoke()) continue;
+                how = std::string(wc) + "::" + fnName;
+                return true;
+            }
+        }
+    }
+    how = seen.empty() ? "no next-fight widget found" : seen;
+    return false;
 }
 
 bool Adapter::EndErrandMode() {
@@ -1318,6 +1644,29 @@ void Adapter::QuitGame() {
     Call q(ksl, "QuitGame");
     q.set<UObject*>("WorldContextObject", world_).set<UObject*>("SpecificPlayer", nullptr).set<uint8_t>("QuitPreference", 0).set<bool>("bIgnorePlatformRestrictions", true);
     if (!q.invoke()) ExitProcess(0);
+}
+
+// A Blueprint class that no loaded asset references yet (the zombie Willie on an arena map, for Infection): loaded by
+// its object path through KismetSystemLibrary (MakeSoftClassPath -> Conv_SoftClassPathToSoftClassRef ->
+// LoadClassAsset_Blocking). A hitch the first time; nullptr when the path does not resolve.
+UClass* Adapter::LoadClassBlocking(const std::string& path) {
+    UObject* ksl = nullptr;
+    if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
+    if (!ksl) return nullptr;
+    FStringArgHolder str(path);
+    Call make(ksl, "MakeSoftClassPath");
+    make.set("PathString", str.arg);
+    if (!make.valid() || !make.invoke()) return nullptr;
+    Call conv(ksl, "Conv_SoftClassPathToSoftClassRef");
+    void* softPath = make.paramPtr("ReturnValue");
+    if (!conv.valid() || !softPath) return nullptr;
+    conv.setFrom("SoftClassPath", softPath);
+    if (!conv.invoke()) return nullptr;
+    Call load(ksl, "LoadClassAsset_Blocking");
+    void* softRef = conv.paramPtr("ReturnValue");
+    if (!load.valid() || !softRef) return nullptr;
+    load.setFrom("AssetClass", softRef);
+    return load.invoke() ? load.get<UClass*>("ReturnValue") : nullptr;
 }
 
 void Adapter::ConsoleCommand(const std::string& command) {
@@ -1373,7 +1722,10 @@ std::vector<UObject*> Adapter::AllWillies() {
     std::vector<UObject*> out;
     // Destroyed fighters stay in the object array until garbage collection; once the destroy is over only their
     // garbage flag tells them apart (the purges destroyed them again every second, test 2).
-    for (UObject* w : FindInstances(kWillieClass)) if (!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) out.push_back(w);
+    // FindInstances matches class names exactly, so the zombie class (a child of Willie_BP_C, no new fields) is
+    // scanned on its own: without it the Zombies format's bots are invisible to every scan (#561).
+    for (const char* cls : {kWillieClass, kZombieClass})
+        for (UObject* w : FindInstances(cls)) if (!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) out.push_back(w);
     return out;
 }
 
@@ -1391,6 +1743,13 @@ std::vector<UObject*> Adapter::WeaponActors() {
     return out;
 }
 
+bool Adapter::IsModActor(UObject* a) {
+    if (!a || modActors_.empty()) return false;
+    std::erase_if(modActors_, [&](const auto& m) { return !StillValid(m.first, m.second); });   // gone ones leave the list
+    for (const auto& m : modActors_) if (m.first == a) return true;
+    return false;
+}
+
 Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObject*)>& levelStart) {
     DropClear out;
     for (UObject* w : WeaponActors()) {
@@ -1399,6 +1758,7 @@ Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObje
         DropCandidate c;
         c.bodyWeapon = IsBodyWeapon(w);
         c.beingDestroyed = BeingDestroyed(w);
+        c.modOwned = IsModActor(w);                              // the CTF flags: respawned by the mod when they are gone, but never cleared as drops
         c.hasParent = *parent != nullptr;
         if (c.hasParent) {
             UObject** right = Field<UObject*>(*parent, "Weapon R");
@@ -1421,7 +1781,7 @@ Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObje
 std::vector<UObject*> Adapter::LevelWeapons() {
     std::vector<UObject*> out;
     for (UObject* w : WeaponActors()) {
-        if (IsBodyWeapon(w)) continue;
+        if (IsBodyWeapon(w) || IsModActor(w)) continue;          // a flag is no level weapon: the map reset must not put it back or respawn it
         UObject** parent = Field<UObject*>(w, "Parent Actor");
         UObject** last = Field<UObject*>(w, "Last Parent");
         if (parent && !*parent && last && !*last) out.push_back(w);
@@ -1474,6 +1834,223 @@ std::vector<UObject*> Adapter::LooseArmor() {
     return out;
 }
 
+// ---------------------------------------------------------------- crossbows (experimental; the owner's crossbow test)
+// The game's crossbow is a Blueprint ranged weapon (BP_Weapon_Ranged_Weapon_CrossbowLight_C) that fires BP_Weapon_Ranged_Projectle_Bolt1_C
+// ("Projectle" is the game's spelling) from a bolt quiver the fighter wears ("Attached Bolt Quiver"). Names are from
+// tools/reflection_index.json; the class objects exist only while a loaded asset references them.
+namespace {
+constexpr const char* kCrossbowClass = "BP_Weapon_Ranged_Weapon_CrossbowLight_C";
+constexpr const char* kBoltClass = "BP_Weapon_Ranged_Projectle_Bolt1_C";
+constexpr int32_t kCrossbowStartBolts = 8;
+
+std::string Squash(const std::string& s) {      // the index's normal form: lowercase letters and digits only
+    std::string o;
+    for (char c : s) if (std::isalnum(static_cast<unsigned char>(c))) o.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+    return o;
+}
+
+// The class by its exact name, else the Blueprint class whose name matches ignoring case and underscores (the game's real
+// spelling may differ from the index's normalized one). Null: not loaded.
+UClass* FindClassLoose(const char* exact) {
+    if (UClass* c = FindClass(exact)) return c;
+    const std::string want = Squash(exact);
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (!o || Squash(ObjectName(o)) != want) continue;
+        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).find("Class") != std::string::npos) return reinterpret_cast<UClass*>(o);
+    }
+    return nullptr;
+}
+}  // namespace
+
+bool Adapter::CrossbowAvailable(bool log) {
+    UClass* weapon = FindClassLoose(kCrossbowClass);
+    UClass* bolt = FindClassLoose(kBoltClass);
+    if (log)
+        HSM_LOG("crossbow: class %s %s, bolt class %s %s", weapon ? ObjectName(reinterpret_cast<UObject*>(weapon)).c_str() : kCrossbowClass,
+                weapon ? "found" : "missing", bolt ? ObjectName(reinterpret_cast<UObject*>(bolt)).c_str() : kBoltClass, bolt ? "found" : "missing");
+    return weapon && bolt;
+}
+
+bool Adapter::GiveCrossbow(UObject* willie) {
+    UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
+    if (!cls) { HSM_LOG("crossbow: not given, the class is missing"); return false; }
+    // An occupied right hand lets go first, as a fallen bot's loot does (a grip type of 0 would destroy the weapon).
+    UObject** held = Field<UObject*>(willie, "Weapon R");
+    uint8_t* grip = Field<uint8_t>(willie, "R_GripType_Current");
+    if (held && *held && !IsBodyWeapon(*held) && grip && *grip != 0) {
+        Call drop(willie, "Set Up Right Hand Weapon");
+        drop.set<bool>("Dropped With no Damage", true);
+        drop.invoke();
+    }
+    FVector at = ActorLocation(willie);
+    at.z += 60;
+    UObject* x = SpawnActorAt(cls, at, ActorRotation(willie));
+    if (!x) { HSM_LOG("crossbow: not given, spawning %s failed", kCrossbowClass); return false; }
+    Call take(willie, "Set Up Right Hand Weapon");
+    take.set<UObject*>("Weapon R", x);
+    const bool called = take.invoke();
+    UObject** now = Field<UObject*>(willie, "Weapon R");
+    const bool inHand = called && now && *now == x;
+
+    // The quiver a reload draws from. "Attach Empty Quiver" spawns a BP_Quiver_Bolt_1_C (Projectile Count 0), attaches
+    // it at the Quiver_Slot_L socket and stores it in the Willie's "Attached Bolt Quiver"; the crossbow's reload gates
+    // on that actor's "Projectile Count". A fighter that already wears one keeps it, as Willie's own respawn path
+    // checks the same field before spawning another.
+    UObject** quiver = Field<UObject*>(willie, "Attached Bolt Quiver");
+    if (!quiver || !*quiver || IsGarbage(*quiver) || (destroyAware_ && BeingDestroyed(*quiver))) {
+        Call(willie, "Attach Empty Quiver").invoke();
+        quiver = Field<UObject*>(willie, "Attached Bolt Quiver");
+    }
+    int32_t bolts = -1;
+    if (quiver && *quiver) {
+        bolts = kCrossbowStartBolts;   // GI Settings' "Carried Bolt Count" is the save file's setting, 0 without one
+        if (UObject* gi = GameInstance())
+            if (int32_t* carried = Field<int32_t>(gi, "Carried Bolt Count"))
+                if (*carried > 0) bolts = *carried;
+        if (int32_t* n = Field<int32_t>(*quiver, "Projectile Count")) *n = bolts;
+        Call(*quiver, "Rearrange Projectiles").invoke();   // racks the bolts on the quiver mesh, as the game's respawn path does
+        if (int32_t* inQuiver = Field<int32_t>(willie, "Bolts in Quiver")) *inQuiver = bolts;
+    }
+
+    // Hand it armed: "Event Add Bolt" spawns the bolt on the rails from the quiver above, "Event Load Bolt" seats it
+    // (a zero-delay latent chain) and "String Loaded" is what fire gates on. A step that fails to invoke just leaves
+    // the cocking to the game's own reload UI, which now has the quiver it needs.
+    bool armed = false;
+    if (inHand && bolts > 0) {
+        Call add(x, "Event Add Bolt");
+        Call load(x, "Event Load Bolt");
+        armed = add.invoke() && load.invoke() && SetBool(x, "String Loaded", true);
+    }
+    HSM_LOG("adapter: crossbow given to %s: in hand %s, quiver %s, %d bolt(s), %s", ObjectName(willie).c_str(), inHand ? "yes" : "NO",
+            quiver && *quiver ? "yes" : "NO", bolts, armed ? "armed" : "not armed");
+    if (!inHand) DestroyActor(x);                   // never leave a loose crossbow behind a failed pick-up
+    return inHand;
+}
+
+// ---------------------------------------------------------------- capture the flag (the owner's CTF test)
+namespace {
+// What a flag may be, in the order tried: long tools first (a long haft reads as a flag pole), then the lantern. The game has no
+// banner weapon, and a polearm haft without its head is not creatable without module setup. Names go through FindClassLoose.
+constexpr const char* kFlagClasses[] = {"BP_Weapon_Tool_Rake_C", "BP_Weapon_Tool_PitchforkA_C", "BP_Weapon_Tool_PitchforkB_C", "BP_Weapon_Tool_ShovelA_C",
+                                        "BP_Weapon_Tool_ShovelB_C", "BP_Weapon_Tool_ScytheA_C", "BP_Weapon_Improv_Lantern_C"};
+
+std::vector<UObject*> ComponentsOf(UObject* actor, UClass* cls) {
+    std::vector<UObject*> parts;
+    if (!actor || !cls) return parts;
+    Call comps(actor, "K2_GetComponentsByClass");
+    comps.set<UClass*>("ComponentClass", cls);
+    if (!comps.invoke()) return parts;
+    void* value = comps.paramPtr("ReturnValue");
+    const FObjArray* arr = static_cast<const FObjArray*>(value);
+    if (arr && arr->data && arr->num > 0 && arr->num <= 64) parts.assign(arr->data, arr->data + arr->num);
+    if (FProperty* prop = FindProperty(comps.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
+    return parts;
+}
+}  // namespace
+
+int Adapter::TintFlag(UObject* flag, int team) {
+    if (!meshClass_) meshClass_ = FindClass("MeshComponent");
+    int n = 0;
+    for (UObject* part : ComponentsOf(flag, meshClass_)) n += TintMesh(part, KitSlot::Cloth, TeamKit::Full, team);
+    return n;
+}
+
+void Adapter::FlagFreeze(UObject* flag, bool frozen) {
+    UClass* prim = FindClass("PrimitiveComponent");
+    if (!flag || !prim) return;
+    std::vector<FlagBody>& saved = flagBodies_[flag];
+    if (frozen) {
+        if (saved.empty())
+            for (UObject* c : ComponentsOf(flag, prim)) {
+                FlagBody b; b.comp = c;
+                Call col(c, "GetCollisionEnabled"); if (col.invoke()) b.collision = col.get<uint8_t>("ReturnValue");
+                Call sim(c, "IsSimulatingPhysics"); if (sim.invoke()) b.simulating = sim.get<bool>("ReturnValue");
+                saved.push_back(b);
+            }
+        for (const FlagBody& b : saved) {
+            Call(b.comp, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
+            Call(b.comp, "SetCollisionEnabled").set<uint8_t>("NewType", 0).invoke();
+        }
+        return;
+    }
+    for (const FlagBody& b : saved) {
+        Call(b.comp, "SetCollisionEnabled").set<uint8_t>("NewType", b.collision).invoke();
+        if (b.simulating) Call(b.comp, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+    }
+}
+
+UObject* Adapter::SpawnFlagActor(int team, const FVector& at, std::string* className) {
+    if (!flagClass_) {
+        for (const char* n : kFlagClasses) if (UClass* c = FindClassLoose(n)) { flagClass_ = c; flagClassName_ = ObjectName(reinterpret_cast<UObject*>(c)); break; }
+        if (flagClass_) HSM_LOG("ctf: flag actor class %s", flagClassName_.c_str());
+        else { HSM_LOG("ctf: no flag actor class is loaded (tried Rake, Pitchfork A/B, Shovel A/B, Scythe, Lantern); the flags are HUD markers only"); return nullptr; }
+    }
+    if (className) *className = flagClassName_;
+    UObject* a = SpawnActorAt(flagClass_, at, FRotator{});
+    if (!a) { HSM_LOG("ctf: spawning the flag actor %s failed", flagClassName_.c_str()); return nullptr; }
+    FlagFreeze(a, true);
+    modActors_.emplace_back(a, ObjectIndex(a));
+    HSM_LOG("ctf: team %d flag spawned as %s at (%.0f, %.0f, %.0f): tinted %d parameter(s)", team, flagClassName_.c_str(), at.x, at.y, at.z, TintFlag(a, team));
+    return a;
+}
+
+void Adapter::FlagPlace(UObject* flag, UObject* carrier, const FVector& at, double yawDeg) {
+    if (!flag) return;
+    if (carrier) {
+        for (int h = 0; h < 2; ++h) {                      // out of a hand, the way a dropped weapon leaves it
+            UObject** held = Field<UObject*>(carrier, h == 0 ? "Weapon R" : "Weapon L");
+            if (!held || *held != flag) continue;
+            Call c(carrier, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
+            c.set<bool>(h == 0 ? "Dropped With no Damage" : "Dropped with No Damage", true);
+            c.invoke();
+        }
+    }
+    Call parent(flag, "GetAttachParentActor");
+    if (parent.invoke() && parent.get<UObject*>("ReturnValue"))
+        Call(flag, "K2_DetachFromActor").set<uint8_t>("LocationRule", 1).set<uint8_t>("RotationRule", 1).set<uint8_t>("ScaleRule", 1).invoke();
+    FlagFreeze(flag, true);
+    Call move(flag, "K2_SetActorLocationAndRotation");
+    move.set<FVector>("NewLocation", at).set<FRotator>("NewRotation", FRotator{0, yawDeg, 0}).set<bool>("bSweep", false).set<bool>("bTeleport", true);
+    move.invoke();
+}
+
+bool Adapter::FlagHeld(UObject* willie, UObject* flag) {
+    if (!willie || !flag) return false;
+    for (const char* hand : {"Weapon R", "Weapon L"}) { UObject** held = Field<UObject*>(willie, hand); if (held && *held == flag) return true; }
+    return false;
+}
+
+bool Adapter::FlagHold(UObject* willie, UObject* flag) {
+    if (!willie || !flag) return false;
+    for (int h = 0; h < 2; ++h) {
+        UObject** held = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
+        if (!held || (*held && !IsBodyWeapon(*held))) continue;     // a weapon in this hand: not ours to drop
+        FlagFreeze(flag, false);
+        Call take(willie, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
+        take.set<UObject*>(h == 0 ? "Weapon R" : "Weapon L", flag);
+        const bool called = take.valid() && take.invoke();
+        UObject** now = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
+        if (called && now && *now == flag) return true;
+        FlagFreeze(flag, true);
+    }
+    return false;
+}
+
+bool Adapter::FlagAttachedTo(UObject* carrier, UObject* flag) {
+    Call parent(flag, "GetAttachParentActor");
+    return carrier && flag && parent.invoke() && parent.get<UObject*>("ReturnValue") == carrier;
+}
+
+bool Adapter::FlagCarryOnBack(UObject* carrier, UObject* flag) {
+    UObject* mesh = carrier ? MeshOf(carrier) : nullptr;
+    if (!mesh || !flag) return false;
+    FlagFreeze(flag, true);
+    Call(flag, "K2_AttachToComponent").set<UObject*>("Parent", mesh).setName("SocketName", MakeName("Sheath_Slot_Back"))
+        .set<uint8_t>("LocationRule", 2).set<uint8_t>("RotationRule", 2).set<uint8_t>("ScaleRule", 2).set<bool>("bWeldSimulatedBodies", false).invoke();
+    return FlagAttachedTo(carrier, flag);
+}
+
 int Adapter::DropLoot(UObject* willie, uint32_t seed, int& weapons) {
     weapons = 0;
     if (!willie) return 0;
@@ -1512,6 +2089,54 @@ int Adapter::DropLoot(UObject* willie, uint32_t seed, int& weapons) {
     return shed;
 }
 
+namespace {
+struct LinearColor { float r, g, b, a; };
+
+// One passport colour field takes the kit colour with its own alpha kept: FabricColor3's smuggles the steel type
+// (Willie_BP reads floor(A*20)-1 out of it), and no colour's alpha is ours to change. An alpha that is not a finite
+// number carries nothing, so 1 goes in there.
+void PutColorKeepAlpha(uint8_t* field, const LinearColor& want) {
+    LinearColor old, put = want;
+    std::memcpy(&old, field, sizeof old);
+    put.a = std::isfinite(old.a) ? old.a : 1.f;
+    std::memcpy(field, &put, sizeof put);
+}
+
+// An armour piece's colour lives in its passport (the three fabric colours, and the leather colour on cloth); the
+// game's own Setup Armor Material then pushes them into the layer-associated 'Color Tint' parameters of a material,
+// which a by-name SetVectorParameterValue never reaches. So the passport is always rewritten (after the game reset a
+// piece to its own colours a re-push costs the same as the first) and the setup is always run, once per material of
+// the mesh, a plain material made dynamic first (what the piece's own construction script does). True when the setup
+// ran; `pushed` (pieces) and `madeDynamic` (materials) feed the tester's log line.
+bool RetintPassport(UObject* armor, FProperty* const (&colors)[3], FProperty* leather, const LinearColor& want, int& pushed, int& madeDynamic) {
+    uint8_t* passport = Field<uint8_t>(armor, "Armor Passport");
+    UObject** meshPtr = Field<UObject*>(armor, "Armor Mesh Skeletal");
+    if (!passport || !meshPtr || !*meshPtr) return false;
+    for (FProperty* c : colors) if (c) PutColorKeepAlpha(passport + PropertyOffset(c), want);
+    if (leather) PutColorKeepAlpha(passport + PropertyOffset(leather), want);
+    Call n(*meshPtr, "GetNumMaterials"); n.invoke();
+    int32_t count = n.get<int32_t>("ReturnValue");
+    bool ran = false;
+    for (int32_t m = 0; m < count && m < 32; ++m) {
+        Call gm(*meshPtr, "GetMaterial"); gm.set<int32_t>("ElementIndex", m).invoke();
+        UObject* mat = gm.get<UObject*>("ReturnValue");
+        if (!ClassNamed(mat, "MaterialInstanceDynamic")) {
+            Call make(*meshPtr, "CreateDynamicMaterialInstance");      // SourceMaterial null: the slot's current material
+            make.set<int32_t>("ElementIndex", m);
+            mat = make.invoke() ? make.get<UObject*>("ReturnValue") : nullptr;
+            if (mat) ++madeDynamic;
+        }
+        if (!mat) continue;
+        Call setup(armor, "Setup Armor Material");
+        setup.set<UObject*>("AddedArmorMesh", *meshPtr).setFrom("Passport", passport).set<UObject*>("SetupArmorDynamicMaterial", mat);
+        if (setup.invoke()) ran = true;
+    }
+    if (ran) ++pushed;
+    return ran;
+}
+bool IsArmorPiece(UObject* o) { return o && (ClassNamed(o, kArmorClass) || FindProperty(ClassOf(o), "Armor Passport")); }
+}  // namespace
+
 int Adapter::TintArmor(UObject* willie, float r, float g, float b) {
     Call att(willie, "GetAttachedActors");
     att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
@@ -1519,31 +2144,224 @@ int Adapter::TintArmor(UObject* willie, float r, float g, float b) {
     FObjArray* arr = static_cast<FObjArray*>(att.paramPtr("OutActors"));
     UObject* st = FindObject(kArmorStruct, "UserDefinedStruct");
     if (!arr || !st || arr->num <= 0 || arr->num > 256) return 0;
-    struct LinearColor { float r, g, b, a; } want{r, g, b, 1};
+    const LinearColor want{r, g, b, 1};
     FProperty* colors[] = {FindPropertyPrefix(st, "FabricColor1_"), FindPropertyPrefix(st, "FabricColor2_"), FindPropertyPrefix(st, "FabricColor3_")};
-    int changed = 0;
+    FProperty* leather = FindPropertyPrefix(st, "LeatherColor_");
+    int changed = 0, madeDynamic = 0;
     for (int32_t i = 0; i < arr->num; ++i) {
         UObject* armor = arr->data[i];
-        if (!ClassNamed(armor, kArmorClass) && !(armor && FindProperty(ClassOf(armor), "Armor Passport"))) continue;
-        uint8_t* passport = Field<uint8_t>(armor, "Armor Passport");
-        UObject** meshPtr = Field<UObject*>(armor, "Armor Mesh Skeletal");
-        if (!passport || !meshPtr || !*meshPtr) continue;
-        bool differs = false;
-        for (FProperty* c : colors) if (c && std::memcmp(passport + PropertyOffset(c), &want, sizeof want) != 0) { std::memcpy(passport + PropertyOffset(c), &want, sizeof want); differs = true; }
-        if (!differs) continue;
-        // Re-run the armor's own material setup with the edited passport for every dynamic material.
-        Call n(*meshPtr, "GetNumMaterials"); n.invoke();
-        int32_t count = n.get<int32_t>("ReturnValue");
-        for (int32_t m = 0; m < count && m < 32; ++m) {
-            Call gm(*meshPtr, "GetMaterial"); gm.set<int32_t>("ElementIndex", m).invoke();
-            UObject* mat = gm.get<UObject*>("ReturnValue");
-            if (!ClassNamed(mat, "MaterialInstanceDynamic")) continue;
-            Call setup(armor, "Setup Armor Material");
-            setup.set<UObject*>("AddedArmorMesh", *meshPtr).setFrom("Passport", passport).set<UObject*>("SetupArmorDynamicMaterial", mat).invoke();
-        }
-        ++changed;
+        if (!IsArmorPiece(armor)) continue;
+        const KitSlot slot = SlotForArmorClass(ObjectName(reinterpret_cast<UObject*>(ClassOf(armor))));   // leather only on cloth, as the kit does
+        RetintPassport(armor, colors, slot == KitSlot::Cloth ? leather : nullptr, want, changed, madeDynamic);
     }
     return changed;
+}
+
+// ---- Team kit (match/hsm_team_kit.h). The vector parameters of a material instance and of the instances it is made from,
+// read from the reflected VectorParameterValues array (the overrides each level of the chain holds); the base material's
+// own defaults are not listed there, so a parameter no instance overrides is not seen. Each distinct name is logged once
+// per session with the slot kind it was seen on: the output of the owner's in-game spike.
+namespace {
+struct FArrayHeader { uint8_t* data = nullptr; int32_t num = 0, max = 0; };
+struct VectorParamLayout {
+    bool ok = false;
+    int32_t nameOffset = 0, stride = 0;   // the parameter name's offset in an element (ParameterInfo.Name), the element size
+};
+const VectorParamLayout& ParamLayout() {
+    static const VectorParamLayout l = [] {
+        VectorParamLayout v;
+        UObject* vpv = FindStruct("VectorParameterValue");
+        UObject* info = FindStruct("MaterialParameterInfo");
+        FProperty* pi = vpv ? StructMember(vpv, "ParameterInfo") : nullptr;
+        FProperty* pv = vpv ? StructMember(vpv, "ParameterValue") : nullptr;
+        FProperty* guid = vpv ? StructMember(vpv, "ExpressionGUID") : nullptr;
+        FProperty* nm = info ? StructMember(info, "Name") : nullptr;
+        if (!pi || !pv || !guid || !nm) return v;
+        v.nameOffset = PropertyOffset(pi) + PropertyOffset(nm);
+        int32_t end = 0;
+        for (FProperty* p : {pi, pv, guid}) end = std::max(end, PropertyOffset(p) + PropertySize(p));
+        v.stride = (end + 3) & ~3;
+        v.ok = v.stride >= 32 && v.stride <= 128;
+        return v;
+    }();
+    return l;
+}
+
+// Collects the distinct vector parameter names up the instance chain of `mat` (at most 6 levels).
+void VectorParamNames(UObject* mat, std::vector<FName>& out) {
+    const VectorParamLayout& L = ParamLayout();
+    if (!L.ok) return;
+    for (int depth = 0; mat && depth < 6; ++depth) {
+        const FArrayHeader* h = Field<FArrayHeader>(mat, "VectorParameterValues");
+        if (!h) break;   // a plain Material: its parameters are not reflected
+        if (h->data && h->num > 0 && h->num <= 256)
+            for (int32_t i = 0; i < h->num; ++i) {
+                FName n{};
+                std::memcpy(&n, h->data + size_t(i) * size_t(L.stride) + size_t(L.nameOffset), sizeof n);
+                if (n.index <= 0 || NameToString(n).empty()) continue;
+                bool known = false;
+                for (const FName& o : out) if (o.index == n.index && o.number == n.number) { known = true; break; }
+                if (!known && out.size() < 64) out.push_back(n);
+            }
+        UObject** parent = Field<UObject*>(mat, "Parent");
+        mat = parent ? *parent : nullptr;
+    }
+}
+}  // namespace
+
+void Adapter::NoteKitParam(KitSlot slot, const std::string& name, bool tintable) {
+    std::set<std::string>& seen = kitParamsSeen_[size_t(slot)];
+    if (seen.size() >= 64 || !seen.insert(name).second) return;
+    HSM_LOG("tint: %s material parameter \"%s\" (%s)", KitSlotName(slot), name.c_str(), tintable ? "colour, set" : "left alone");
+}
+
+// Sets the colour on every tintable vector parameter of every material of one mesh component. The dynamic material
+// instance is made once: GetMaterial hands the component's own back on later calls. Returns how many were set.
+int Adapter::TintMesh(UObject* mesh, KitSlot slot, TeamKit kit, int team) {
+    if (!mesh) return 0;
+    const Rgba plain = KitColor(kit, slot, team), trim = KitColor(kit, slot, team, true);
+    if (plain.a == 0.f) return 0;
+    Call n(mesh, "GetNumMaterials");
+    if (!n.invoke()) return 0;
+    const int32_t count = n.get<int32_t>("ReturnValue");
+    int set = 0;
+    for (int32_t m = 0; m < count && m < 16; ++m) {
+        Call gm(mesh, "GetMaterial"); gm.set<int32_t>("ElementIndex", m);
+        if (!gm.invoke()) continue;
+        UObject* mat = gm.get<UObject*>("ReturnValue");
+        if (!mat) continue;
+        if (!ClassNamed(mat, "MaterialInstanceDynamic")) {
+            Call make(mesh, "CreateDynamicMaterialInstance");      // SourceMaterial null: the slot's current material
+            make.set<int32_t>("ElementIndex", m);
+            mat = make.invoke() ? make.get<UObject*>("ReturnValue") : nullptr;
+            if (!mat) continue;
+        }
+        std::vector<FName> names;
+        VectorParamNames(mat, names);
+        for (const FName& pn : names) {
+            const std::string name = NameToString(pn);
+            const bool ok = IsTintableParam(name);
+            NoteKitParam(slot, name, ok);
+            if (!ok) continue;
+            const Rgba& c = IsTrimParam(name) && slot == KitSlot::Shield ? trim : plain;
+            const LinearColor want{c.r, c.g, c.b, 1.f};
+            Call put(mat, "SetVectorParameterValue");
+            put.setName("ParameterName", pn).set("Value", want);
+            if (put.invoke()) ++set;
+        }
+    }
+    return set;
+}
+
+uint64_t Adapter::GearSignature(UObject* willie) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p) { h = (h ^ uint64_t(reinterpret_cast<uintptr_t>(p))) * 1099511628211ull; };
+    Call att(willie, "GetAttachedActors");
+    att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
+    if (att.invoke()) {
+        const FObjArray* arr = static_cast<const FObjArray*>(att.paramPtr("OutActors"));
+        if (arr && arr->data && arr->num > 0 && arr->num <= 256) for (int32_t i = 0; i < arr->num; ++i) mix(arr->data[i]);
+    }
+    for (const char* hand : {"Weapon R", "Weapon L"}) { UObject** held = Field<UObject*>(willie, hand); mix(held ? *held : nullptr); }
+    return h;
+}
+
+namespace {
+// The Willie fields the zombie traits touch (match/hsm_modes.h), resolved once per class.
+struct InfectedFields {
+    FProperty* zombie = nullptr;
+    std::vector<int32_t> painDoubles;
+    std::vector<FProperty*> painBools;
+    FProperty* consciousness = nullptr;
+    std::string consciousnessName;
+};
+const InfectedFields& InfectedFieldsFor(const UClass* cls) {
+    static std::map<const UClass*, InfectedFields> cache;
+    auto it = cache.find(cls);
+    if (it != cache.end()) return it->second;
+    InfectedFields f;
+    if (FProperty* p = FindProperty(cls, kInfectedZombieFlag); p && PropertyType(p) == "BoolProperty") f.zombie = p;
+    for (const char* n : kInfectedPainDoubles)
+        if (FProperty* p = FindProperty(cls, n); p && PropertyType(p) == "DoubleProperty") f.painDoubles.push_back(PropertyOffset(p));
+    for (const char* n : kInfectedPainBools)
+        if (FProperty* p = FindProperty(cls, n); p && PropertyType(p) == "BoolProperty") f.painBools.push_back(p);
+    for (const char* n : kInfectedConsciousnessFields)
+        if (FProperty* p = FindProperty(cls, n); p && PropertyType(p) == "DoubleProperty") { f.consciousness = p; f.consciousnessName = n; break; }
+    return cache.emplace(cls, std::move(f)).first->second;
+}
+}  // namespace
+
+Adapter::InfectedTraits Adapter::ApplyInfectedTraits(UObject* willie, double baseline) {
+    InfectedTraits t;
+    t.baseline = baseline;
+    if (!willie) return t;
+    const InfectedFields& f = InfectedFieldsFor(ClassOf(willie));
+    uint8_t* base = reinterpret_cast<uint8_t*>(willie);
+    if (f.zombie) { t.zombieFlag = true; SetBoolValue(f.zombie, base + PropertyOffset(f.zombie), true); }
+    for (int32_t off : f.painDoubles) { double zero = 0.0; std::memcpy(base + off, &zero, sizeof zero); ++t.painFields; }
+    for (FProperty* p : f.painBools) { SetBoolValue(p, base + PropertyOffset(p), false); ++t.painFields; }
+    if (f.consciousness) {
+        t.consciousness = f.consciousnessName;
+        double* c = reinterpret_cast<double*>(base + PropertyOffset(f.consciousness));
+        if (!std::isfinite(t.baseline)) t.baseline = *c;
+        *c = InfectedConsciousness(*c, InfectedConsciousnessFloor(t.baseline));
+    }
+    return t;
+}
+
+KitTally Adapter::TintKit(UObject* willie, int team, TeamKit kit) {
+    KitTally t;
+    if (!willie || kit == TeamKit::Off || KitColorsFor(team).base.a == 0.f) return t;
+    std::vector<UObject*> actors;
+    Call att(willie, "GetAttachedActors");
+    att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
+    if (att.invoke()) {
+        const FObjArray* arr = static_cast<const FObjArray*>(att.paramPtr("OutActors"));
+        if (arr && arr->data && arr->num > 0 && arr->num <= 256) actors.assign(arr->data, arr->data + arr->num);
+    }
+    for (const char* hand : {"Weapon R", "Weapon L"}) {     // held weapons are attached too, but reading the field costs nothing
+        UObject** held = Field<UObject*>(willie, hand);
+        if (held && *held && std::find(actors.begin(), actors.end(), *held) == actors.end()) actors.push_back(*held);
+    }
+    UObject* st = FindObject(kArmorStruct, "UserDefinedStruct");
+    FProperty* colors[3] = {st ? FindPropertyPrefix(st, "FabricColor1_") : nullptr, st ? FindPropertyPrefix(st, "FabricColor2_") : nullptr,
+                            st ? FindPropertyPrefix(st, "FabricColor3_") : nullptr};
+    FProperty* leather = st ? FindPropertyPrefix(st, "LeatherColor_") : nullptr;
+    if (!meshClass_) meshClass_ = FindClass("MeshComponent");
+    int pushedPieces = 0, madeDynamic = 0;
+    for (UObject* a : actors) {
+        if (!a || IsGarbage(a)) continue;
+        const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(a)));
+        if (IsArmorPiece(a)) {
+            const KitSlot slot = SlotForArmorClass(cls);
+            const Rgba c = KitColor(kit, slot, team);
+            if (c.a == 0.f) continue;
+            // The passport path only: TintMesh's by-name writes never reach the layer-associated 'Color Tint' parameters
+            // the game's own setup puts the passport into, and its blank dynamic instances would orphan the game's.
+            if (st && RetintPassport(a, colors, slot == KitSlot::Cloth ? leather : nullptr, LinearColor{c.r, c.g, c.b, 1.f}, pushedPieces, madeDynamic))
+                (slot == KitSlot::Plate ? t.plate : t.cloth) += 3;   // the passport's three fabric colours
+        } else if (IsWeapon(a) && !IsBodyWeapon(a) && meshClass_) {
+            if (IsProjectileClass(cls)) { ++t.skippedBlade; continue; }   // a crossbow's loaded bolt: never dressed
+            bool flag = false;
+            const bool shield = IsShieldClass(cls) || (GetBool(a, "Shield", flag) && flag);
+            Call comps(a, "K2_GetComponentsByClass");
+            comps.set<UClass*>("ComponentClass", meshClass_);
+            if (!comps.invoke()) continue;
+            void* value = comps.paramPtr("ReturnValue");
+            const FObjArray* arr = static_cast<const FObjArray*>(value);
+            std::vector<UObject*> parts;
+            if (arr && arr->data && arr->num > 0 && arr->num <= 64) parts.assign(arr->data, arr->data + arr->num);
+            if (FProperty* prop = FindProperty(comps.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
+            for (UObject* part : parts) {
+                const KitSlot slot = SlotForWeaponPart(ObjectName(part), shield);
+                if (!KitTints(kit, slot)) { if (slot == KitSlot::Blade) ++t.skippedBlade; continue; }
+                (slot == KitSlot::Shield ? t.shield : t.grip) += TintMesh(part, slot, kit, team);
+            }
+        }
+    }
+    if (pushedPieces > 0 && kitPushSeen_.insert(team).second)   // once per team, like NoteKitParam's names: the tester's evidence
+        HSM_LOG("adapter: kit %d: armour passport re-pushed on %d piece(s), %d material(s) made dynamic", team, pushedPieces, madeDynamic);
+    return t;
 }
 
 UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {

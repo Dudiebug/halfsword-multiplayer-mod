@@ -117,6 +117,7 @@ inline bool AdoptCandidate(bool witnessed, bool isWitness, double letGoMs, doubl
 struct LooseWeapon {
     V3 pos;                                 // actor location, world
     uint32_t classHash = 0;
+    bool modKept = false;   // an actor the mod spawned and keeps (the CTF flag) is never a stand-in hand's pickup
 };
 
 // Index into loose of the weapon of class cls nearest to either point (the owner's weapon now, and where the pose first
@@ -132,6 +133,7 @@ inline int PickAttachWithin(const std::vector<LooseWeapon>& loose, uint32_t cls,
     double bestD2 = radius * radius;
     for (size_t i = 0; i < loose.size(); ++i) {
         if (loose[i].classHash != cls) continue;
+        if (loose[i].modKept) continue;
         const double a = dist2(loose[i].pos, now), b = dist2(loose[i].pos, firstAt);
         const double d2 = a < b ? a : b;
         if (d2 <= bestD2 && (best < 0 || d2 < bestD2)) { best = int(i); bestD2 = d2; }
