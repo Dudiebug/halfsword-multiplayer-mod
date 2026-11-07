@@ -81,7 +81,7 @@ inline std::vector<ModBlockLine> ModBlockLines(const std::vector<std::string>& u
         if (moved) out.push_back({d, "It sends UE4SS to another mods folder. In ue4ss\\UE4SS-settings.ini, clear ModsFolderPath, ModsFolderPaths and ControllingModsTxt."});
         else if (changed) {
             const std::string low = DllPathLower(d);
-            if (low.rfind("ue4ss.dll", 0) == 0) out.push_back({d, "This isn't a UE4SS version this mod accepts. Get a supported one from " + std::string(kUe4ssDownload) + " and put its UE4SS.dll in the ue4ss folder."});
+            if (low.rfind("ue4ss.dll", 0) == 0) out.push_back({d, "This isn't a UE4SS version this mod accepts. Delete ue4ss\\UE4SS.dll and start the game: the mod puts its own back."});
             else if (low.rfind("dxgi.dll", 0) == 0) out.push_back({d, "This isn't ReShade, and it's where a cheat would go. Move it out of the game's folders, or replace it with a ReShade install."});
             else out.push_back({d, "This game file has been changed. In Steam: right-click Half Sword, Properties, Installed Files, Verify integrity of game files."});
         }

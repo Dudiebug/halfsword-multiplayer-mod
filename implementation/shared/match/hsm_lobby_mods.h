@@ -54,7 +54,7 @@ struct LobbyModsScene {
     std::array<ModRuleView, kModRuleRows> rules{};
     std::string summary;                 // "In force: Maps only, cheats blocked"
     std::string status;                  // why there is no list or no rule; empty when all is well
-    std::vector<ModRowView> items;       // refused first, then by kind and name, then required mods nobody runs; UE4SS's stock mods left out
+    std::vector<ModRowView> items;       // refused first, then by kind and name, then required mods nobody runs; UE4SS's stock mods left out unless refused
     std::string empty;                   // a list came and nobody runs a mod
     std::string truncated;
     std::vector<std::string> pending;    // host only
@@ -134,7 +134,6 @@ inline std::string ModPendingLine(const ModPending& p) {
     std::string why;
     switch (p.result.fail) {
         case RuleFail::Cheat: case RuleFail::NoMods: case RuleFail::NotAllowed: why = "runs " + p.result.mod; break;
-        case RuleFail::NoUe4ss: why = "runs UE4SS"; break;
         case RuleFail::Missing: why = "lacks " + p.result.mod; break;
         case RuleFail::TooMany: why = "runs too many mods"; break;
         default: why = "does not fit"; break;
@@ -144,7 +143,7 @@ inline std::string ModPendingLine(const ModPending& p) {
 
 inline const char* ModPresetHint(ModPreset p, bool host) {
     switch (p) {
-        case ModPreset::Vanilla: return "No mods: no map paks, no UE4SS.";
+        case ModPreset::Vanilla: return "No mods: no map paks, no UE4SS mods.";
         case ModPreset::MapsOnly: return "Map paks and known cosmetic mods.";
         case ModPreset::Bundle: return "Exactly the lobby's modpack.";
         case ModPreset::Custom: return host ? "Your own mods (or the list in mod_allow in HSMMod.ini)." : "The mods the host listed.";
@@ -184,9 +183,9 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
 
     if (l.haveList) {
         for (const SessionModEntry& e : l.mods.entries) {
-            if (e.item.kind == ModKind::Ue4ssStock) continue;
             const KnownVerdict v = VerdictOf(e.item);
             const RuleFail f = live ? ItemRefused(l.rule, e.item) : RuleFail::None;
+            if (e.item.kind == ModKind::Ue4ssStock && f == RuleFail::None) continue;
             ModRowView r;
             r.name = e.item.name;
             r.kind = ModKindName(e.item.kind);

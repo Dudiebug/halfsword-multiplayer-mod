@@ -189,8 +189,8 @@ static void Pending() {
     CHECK(ModPendingLine(leave) == "Ann: runs HSEnhancer, leaving in 42 s unless fixed");
     leave.result.fail = RuleFail::Missing; leave.result.mod = "Arena.pak";
     CHECK(ModPendingLine(leave) == "Ann: lacks Arena.pak, leaving in 42 s unless fixed");
-    leave.result.fail = RuleFail::NoUe4ss;
-    CHECK(ModPendingLine(leave) == "Ann: runs UE4SS, leaving in 42 s unless fixed");
+    leave.result.fail = RuleFail::NoMods; leave.result.mod = "ConsoleEnablerMod";
+    CHECK(ModPendingLine(leave) == "Ann: runs ConsoleEnablerMod, leaving in 42 s unless fixed");
     leave.graceSeconds = 0;
     CHECK(ModPendingLine(leave).empty());
     // Only the host gets the lines; empty ones are dropped.

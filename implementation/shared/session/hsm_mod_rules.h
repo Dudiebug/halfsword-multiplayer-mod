@@ -13,6 +13,7 @@
 #include "session/hsm_modpack.h"
 #include "session/hsm_stock_folders.h"
 #include "session/hsm_stock_maps.h"
+#include "session/hsm_ue4ss.h"
 #include "util/hsm_sha256.h"
 #include <algorithm>
 #include <cstddef>
@@ -68,7 +69,7 @@ struct ModItem {
 
 struct ModReport {
     std::vector<ModItem> items;
-    bool ue4ss = false;       // UE4SS runs in this process (its console's `set` alone is a cheat tool: Vanilla refuses it)
+    bool ue4ss = false;       // UE4SS runs in this process. Not a mod by itself: Vanilla refuses only its console mods (hsm_ue4ss.h)
     bool complete = false;    // every scan has finished and every hash is in
     bool truncated = false;   // more than kMaxModItems: the rest is not in the list
     bool operator==(const ModReport& o) const { return items == o.items && ue4ss == o.ue4ss && complete == o.complete && truncated == o.truncated; }
@@ -407,7 +408,6 @@ enum class RuleFail : uint8_t {
     Pending,      // the report is not complete yet: ask again
     Cheat,        // `mod` is a known cheat and the lobby blocks cheats
     NoMods,       // Vanilla: `mod` must go
-    NoUe4ss,      // Vanilla: UE4SS itself must go
     NotAllowed,   // `mod` is not allowed by this preset or list
     Missing,      // `mod` is required and not here (or another build)
     TooMany,      // the report was cut at kMaxModItems; only Anything accepts that
@@ -424,7 +424,10 @@ struct RuleResult {
 // NotAllowed when the preset refuses it, else None.
 inline RuleFail ItemPresetFail(const ModRule& rule, const ModItem& it) {
     if (rule.preset == ModPreset::Anything) return RuleFail::None;
-    if (rule.preset == ModPreset::Vanilla) return it.kind != ModKind::Ue4ssStock && it.kind != ModKind::Proxy ? RuleFail::NoMods : RuleFail::None;
+    if (rule.preset == ModPreset::Vanilla) {
+        if (it.kind == ModKind::Ue4ssStock) return ue4ss::IsConsoleMod(it.name) ? RuleFail::NoMods : RuleFail::None;
+        return it.kind != ModKind::Proxy ? RuleFail::NoMods : RuleFail::None;
+    }
     const KnownVerdict v = VerdictOf(it);
     bool allowed = it.kind == ModKind::Ue4ssStock || it.kind == ModKind::Proxy || v == KnownVerdict::Cosmetic || v == KnownVerdict::Stock;
     if (rule.preset == ModPreset::MapsOnly) allowed = allowed || it.kind == ModKind::MapPak;
@@ -463,10 +466,6 @@ inline RuleResult CheckMods(const ModRule& rule, const ModReport& rep) {
         if (r.fail == RuleFail::None) { r.fail = f; r.mod = it.name; } else ++r.more;
     }
     if (r.fail != RuleFail::None) return r;
-    if (rule.preset == ModPreset::Vanilla) {
-        if (rep.ue4ss) r.fail = RuleFail::NoUe4ss;
-        return r;
-    }
     if (rule.preset == ModPreset::Bundle || rule.preset == ModPreset::Custom)
         for (const ModAllow& a : rule.list) {
             if (!a.required) continue;
@@ -486,7 +485,6 @@ inline std::string RuleFailText(const ModRule& rule, const RuleResult& r) {
         case RuleFail::Pending: return "Still checking your mods. Try again in a moment.";
         case RuleFail::Cheat: return "This lobby blocks cheats: remove " + r.mod + ".";
         case RuleFail::NoMods: return "This lobby is Vanilla: remove " + r.mod + others + ".";
-        case RuleFail::NoUe4ss: return "This lobby is Vanilla: it takes no UE4SS. Remove UE4SS or join another lobby.";
         case RuleFail::NotAllowed: return "This lobby (" + preset + ") does not allow " + r.mod + others + (r.more ? ": remove them." : ": remove it.");
         case RuleFail::Missing: return "This lobby needs " + r.mod + ": install the host's build of it.";
         case RuleFail::TooMany: return "You run more than 96 mods; this lobby (" + preset + ") cannot check them all.";
@@ -501,7 +499,7 @@ inline std::string RuleFailShort(const RuleResult& r) {
         case RuleFail::None: return {};
         case RuleFail::Pending: return "Checking your mods";
         case RuleFail::Cheat: return "Blocks " + r.mod;
-        case RuleFail::NoMods: case RuleFail::NoUe4ss: return "Vanilla only";
+        case RuleFail::NoMods: return "Vanilla only";
         case RuleFail::NotAllowed:   // "No Abyss.pak" read as a file the player lacked
             return "Remove " + r.mod + (r.more ? " +" + std::to_string(r.more) : "");
         case RuleFail::Missing: return "Needs " + r.mod;

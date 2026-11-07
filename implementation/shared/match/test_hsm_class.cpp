@@ -225,7 +225,7 @@ int main() {
     CHECK(stillOn.size() == 1 && stillOn[0] == "Keep");
     // Each changed file gets the fix that works for it. Steam only restores the game's own.
     const std::vector<ModBlockLine> changedLines = ModBlockLines({}, {"UE4SS.dll (changed)", "dxgi.dll (changed)", "tbb.dll (changed)"}, false);
-    CHECK(changedLines.size() == 3 && changedLines[0].how.find("github.com/UE4SS-RE") != std::string::npos && changedLines[0].how.find("Steam") == std::string::npos);
+    CHECK(changedLines.size() == 3 && changedLines[0].how.find("the mod puts its own back") != std::string::npos && changedLines[0].how.find("Steam") == std::string::npos);
     CHECK(changedLines[1].how.find("ReShade") != std::string::npos && changedLines[1].how.find("Steam") == std::string::npos && changedLines[2].how.find("Verify") != std::string::npos);
     // Three copies of one temporary DLL are one line, and it says where.
     const std::vector<ModBlockLine> outsideLines = ModBlockLines({}, {}, false, {"C:\\Temp\\a\\190_E658703.dll", "C:\\Temp\\b\\190_E658703.dll", "C:\\Temp\\c.dll"});

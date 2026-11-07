@@ -14,9 +14,11 @@ OPT=$([ "$CFG" = Debug ] && echo "-O0 -g" || echo "-O2")
 mkdir -p build/obj
 
 COMMON="${HSM_EXTRA:-} $OPT -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -fstack-protector-strong"
+# Only reading a zip from memory (src/ue4ss_bundle.cpp). Its structs depend on these, so every file gets them.
+COMMON="$COMMON -DMINIZ_NO_STDIO -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES"
 # The build string players compare (session/hsm_build.h): kModVersion plus this checkout's commit (and -dirty), if any.
 DESCRIBE=$(git describe --always --dirty --exclude='*' 2>/dev/null | tr -cd 'A-Za-z0-9._+-' || true)
-INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/minhook/include"
+INC="-Isrc -I../../shared -I../../shared/protocol -Ithird_party/minhook/include -Ithird_party/miniz"
 
 JOBS=${BUILD_JOBS:-$(( ($(nproc 2>/dev/null || echo 2) + 1) / 2 ))}
 case "$JOBS" in ''|*[!0-9]*|0) echo "build: BUILD_JOBS must be a positive number" >&2; exit 2 ;; esac
@@ -35,6 +37,7 @@ compile() {
 for f in third_party/minhook/src/{buffer,hook,trampoline}.c third_party/minhook/src/hde/hde64.c; do
   compile "build/obj/$(basename "${f%.c}").o" "$CC" $COMMON -w -Ithird_party/minhook/include -c "$f"
 done
+compile build/obj/miniz.o "$CC" $COMMON -w -c third_party/miniz/miniz.c
 for f in src/*.cpp src/*/*.cpp; do
   [ -e "$f" ] || continue
   desc=()

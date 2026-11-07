@@ -279,7 +279,13 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). Direct IP (`role=host`, `role=client`, `host=`, `port=`) was removed in 0.8.0: an old
    value is logged once as ignored and Steam is used. Players join through Steam lobbies.
 4. Logs go to `HSMMod.log` in the same folder.
-   **UE4SS (optional):** install UE4SS as usual, then copy HSMMod's `dwmapi.dll` over UE4SS's `dwmapi.dll`. HSMMod
+   **UE4SS:** nothing to install. `dwmapi.dll` carries a UE4SS build (`third_party/ue4ss`) and unpacks it to `ue4ss/` next
+   to the exe, keeping any file already in that folder. An older accepted build in `ue4ss/` gets its DLL swapped. A
+   build the mod doesn't know gets a popup at start: Yes swaps it, No keeps and loads it, and online play refuses it.
+   `ue4ss_keep` under `[mod]` holds the hash you said no to; remove it to be asked again. An old-layout `UE4SS.dll` or
+   a 2.x `xinput1_3.dll` gets `.off` on its name, and mods in an old `Mods` folder beside the exe don't move. The
+   console and cheat manager mods are off in the unpacked `mods.txt`. The log says `ue4ss: bundled build installed`
+   or `replaced another build`. HSMMod
    chain-loads UE4SS from its worker thread (`ue4ss_load.cpp`, never DllMain): `ue4ss/UE4SS.dll` (UE4SS 3.x layout),
    else `UE4SS.dll` next to the exe. Updating UE4SS later overwrites HSMMod's proxy, so copy ours back (the
    multiplayer page warns when the `dwmapi.dll` next to the exe is not ours). `[mod]` in `HSMMod.ini`: `ue4ss=1`
@@ -381,7 +387,7 @@ A kicked or banned player goes back to the main menu, and the multiplayer page o
 
 The host of a lobby chooses which mods its players may run, in `HSMMod.ini` under `[mod]`:
 
-- `mod_rule=vanilla`: no mods and no UE4SS. `maps` (default): custom map paks and known cosmetic mods. `bundle`:
+- `mod_rule=vanilla`: no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps` (default): custom map paks and known cosmetic mods. `bundle`:
   exactly the files of the lobby's modpack (`pack=`). `custom`: the list in `mod_allow=` (or, when it is empty,
   whatever the host runs). `anything`: no limit.
 - `mod_cheats=block` (default) refuses anyone running a known cheat mod (HS Enhancer, the UE4SS cheat mods); `allow`

@@ -148,11 +148,18 @@ static void TestPresets() {
     // A scan still running: ask again.
     ModReport running; CHECK(CheckMods(Rule(ModPreset::Anything), running).fail == RuleFail::Pending);
 
-    // Vanilla: no paks, no UE4SS even with only its stock mods.
+    // Vanilla: no paks and no UE4SS mods. UE4SS alone is no mod, but its console's `set` is a cheat tool.
     CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({map})).fail == RuleFail::NoMods);
     CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({face})).fail == RuleFail::NoMods);
-    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report(Ue4ssStock(), true)).fail == RuleFail::NoUe4ss);
-    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({}, true)).fail == RuleFail::NoUe4ss);
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({}, true)).ok());
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Ue4ssStock, "BPModLoaderMod"), Item(ModKind::Ue4ssStock, "BPML_GenericFunctions"), Item(ModKind::Ue4ssStock, "Keybinds")}, true)).ok());
+    for (const char* console : ue4ss::kConsoleMods) {
+        const RuleResult refused = CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Ue4ssStock, "Keybinds"), Item(ModKind::Ue4ssStock, console)}, true));
+        CHECK(refused.fail == RuleFail::NoMods && refused.mod == console);
+    }
+    { const RuleResult all = CheckMods(Rule(ModPreset::Vanilla), Report(Ue4ssStock(), true)); CHECK(all.fail == RuleFail::NoMods && all.more == 2); }
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Ue4ssMod, "HulkMod")}, true)).fail == RuleFail::NoMods);
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Proxy, "winmm.dll")})).ok());
 
     // Maps only: maps, cosmetics, stock UE4SS.
     std::vector<ModItem> ok = Ue4ssStock(); ok.push_back(map); ok.push_back(face); ok.push_back(killcam);

@@ -225,6 +225,7 @@ struct Config {
     // before HSMMod's ProcessEvent hook is installed, after (default) once the hook is in.
     bool ue4ss = true;
     bool ue4ssBefore = false;
+    std::string ue4ssKeep;   // ue4ss_keep: the hash of a UE4SS.dll the player chose to keep over the bundled build
     // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
     bool record = false;
     // [mod] pack=<name>: the modpack in Paks/~mods/<name>/ (HSMPack.ini) a host announces in its lobby; off: none; empty: the only

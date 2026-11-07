@@ -112,7 +112,7 @@ constexpr char kDefaultIni[] =
     "votekick=1\n"
     "\n"
     "[mod]\n"
-    "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it); 0: do not.\n"
+    "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it), and replaces any other build with its own, asking first about one it does not know; 0: neither. ue4ss_keep: the hash of the build you said to keep.\n"
     "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
     "ue4ss=1\n"
     "ue4ss_order=after\n"
@@ -122,7 +122,7 @@ constexpr char kDefaultIni[] =
     "; pack=<name>: the modpack (Content/Paks/~mods/<name>/ with its HSMPack.ini) your lobbies announce; every player needs the same files.\n"
     "; Empty: the only valid pack installed. off: none. See docs/MODPACK.md.\n"
     "pack=\n"
-    "; Mod rules for the lobbies you host: mod_rule=vanilla (no mods, no UE4SS), maps (custom map paks and cosmetic mods;\n"
+    "; Mod rules for the lobbies you host: mod_rule=vanilla (no mods; UE4SS alone is fine), maps (custom map paks and cosmetic mods;\n"
     "; the default), bundle (exactly the pack= above), custom (mod_allow=, or what you run), anything, classes (balanced HSE and Half Wolverine classes). mod_cheats=block\n"
     "; refuses players running a known cheat mod (allow: let them in). mod_official=1 takes official HSMMod releases only.\n"
     "; mod_allow=A, B*1a2b3c4d, +Needed: the custom list (*: the first 8 hex of its SHA-256, +: required).\n"
@@ -348,6 +348,7 @@ Config LoadConfig() {
     c.serverAdmins = ReadString(ini, L"server_admins", "");
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
+    c.ue4ssKeep = ReadModString(ini, L"ue4ss_keep", "");
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
     c.modPack = ReadModString(ini, L"pack", "");
     c.modRules = ReadModString(ini, L"mod_rules", "1") != "0";
