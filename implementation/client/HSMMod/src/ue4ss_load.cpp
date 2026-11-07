@@ -192,4 +192,5 @@ void Run(const Config& cfg) {
 std::string ReportVersion() { std::lock_guard<std::mutex> lock(g_mu); return g_version; }
 std::string ReportMods() { std::lock_guard<std::mutex> lock(g_mu); return g_mods; }
 std::string Notice() { std::lock_guard<std::mutex> lock(g_mu); return g_notice; }
+std::vector<std::string> EnabledModNames(const std::wstring& modsDir) { return ReadMods(modsDir); }
 }  // namespace hsm::ue4ss

@@ -87,5 +87,7 @@ size_t Receive(int channel, std::vector<Message>& out, int max = 64);
 void AcceptSession(SteamId user);
 void CloseSession(SteamId user);
 int PingMs(SteamId user);                // -1 if unknown
+// The session's route (SteamNetConnectionInfo_t m_nFlags, m_idPOPRelay, m_idPOPRemote); false unless connected.
+bool SessionRoute(SteamId user, int32_t& flags, uint32_t& relayPop, uint32_t& remotePop);
 
 }  // namespace hsm::steam

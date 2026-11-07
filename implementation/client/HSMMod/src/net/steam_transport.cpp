@@ -1,6 +1,7 @@
 #include "net/steam_transport.h"
 #include "hsm_protocol.h"
 #include "log.h"
+#include "protocol/hsm_send_policy.h"
 #include "steam/steam_api.h"
 
 namespace hsm {
@@ -26,6 +27,7 @@ void SteamTransport::DropPeer(uint64_t steamId) {
     auto it = byId_.find(steamId);
     if (it == byId_.end()) return;
     NetEvent e; e.kind = NetEvent::Disconnected; e.peer = it->second; e.steamId = steamId;
+    routes_.Forget(steamId);
     bySlot_.erase(it->second); byId_.erase(it);
     steam::CloseSession(steamId);
     queue_.push_back(std::move(e));
@@ -36,20 +38,21 @@ uint64_t SteamTransport::SteamOf(uint32_t peer) const { auto it = bySlot_.find(p
 
 void SteamTransport::Stop() {
     for (auto& [id, peer] : byId_) steam::CloseSession(id);
-    byId_.clear(); bySlot_.clear(); queue_.clear(); head_ = 0;
+    byId_.clear(); bySlot_.clear(); queue_.clear(); head_ = 0; routes_.Clear();
 }
 
-void SteamTransport::Send(uint32_t peer, uint8_t channel, std::vector<uint8_t> data, bool reliable) {
+void SteamTransport::Send(uint32_t peer, uint8_t channel, const std::vector<uint8_t>& data, bool reliable) {
     uint64_t id = SteamOf(peer);
     if (!id) return;
-    int flags = steam::kAutoRestart | (reliable ? steam::kReliable : steam::kNoNagle);
+    // Streams and a blow's messages go now; other reliable traffic keeps Steam's batching (protocol/hsm_send_policy.h).
+    int flags = steam::kAutoRestart | (reliable ? steam::kReliable : 0) | (SendFlushes(data.data(), data.size(), reliable) ? steam::kNoNagle : 0);
     if (!steam::Send(id, channel, data.data(), uint32_t(data.size()), flags) && !sendFailLogged_) {
         sendFailLogged_ = true;
         HSM_LOG("steam-net: SendMessageToUser to %llu failed (further failures not logged)", (unsigned long long)id);
     }
 }
 
-void SteamTransport::Broadcast(uint8_t channel, std::vector<uint8_t> data, bool reliable) {
+void SteamTransport::Broadcast(uint8_t channel, const std::vector<uint8_t>& data, bool reliable) {
     for (auto& [peer, id] : bySlot_) Send(peer, channel, data, reliable);
 }
 
@@ -79,6 +82,14 @@ uint32_t SteamTransport::RoundTripMs(uint32_t peer) {
     uint64_t id = SteamOf(peer);
     int ping = id ? steam::PingMs(id) : -1;
     return ping > 0 ? uint32_t(ping) : 0;
+}
+
+std::string SteamTransport::RouteChange(uint32_t peer) {
+    uint64_t id = SteamOf(peer);
+    int32_t flags = 0; uint32_t relayPop = 0, remotePop = 0;
+    if (!id || !steam::SessionRoute(id, flags, relayPop, remotePop)) return {};
+    const steam::Route r = steam::RouteFrom(flags, relayPop, remotePop);
+    return routes_.Note(id, r) ? steam::Describe(r) : std::string{};
 }
 
 }  // namespace hsm

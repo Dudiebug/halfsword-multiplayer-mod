@@ -457,5 +457,13 @@ int PingMs(SteamId user) {
     // Only a connected session (k_ESteamNetworkingConnectionState_Connected) has a ping; any other state reads zeros.
     return g.GetSessionConnectionInfo(g_msgs, &id, nullptr, &status) == 3 ? status.ping : -1;
 }
+bool SessionRoute(SteamId user, int32_t& flags, uint32_t& relayPop, uint32_t& remotePop) {
+    if (!g_ready) return false;
+    NetIdentity id = Identity(user);
+    NetConnectionInfo info{};
+    if (g.GetSessionConnectionInfo(g_msgs, &id, &info, nullptr) != 3) return false;
+    flags = info.flags; relayPop = info.relayPop; remotePop = info.remotePop;
+    return true;
+}
 
 }  // namespace hsm::steam

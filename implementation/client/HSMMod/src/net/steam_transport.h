@@ -3,6 +3,7 @@
 // and messages from anyone else are discarded. Game thread only (the Steam API calls are non-blocking).
 #pragma once
 #include "net/transport.h"
+#include "steam/hsm_steam_route.h"
 #include <unordered_map>
 
 namespace hsm {
@@ -19,11 +20,12 @@ public:
     uint64_t SteamOf(uint32_t peer) const;
 
     void Stop() override;
-    void Send(uint32_t peer, uint8_t channel, std::vector<uint8_t> data, bool reliable) override;
-    void Broadcast(uint8_t channel, std::vector<uint8_t> data, bool reliable) override;
+    void Send(uint32_t peer, uint8_t channel, const std::vector<uint8_t>& data, bool reliable) override;
+    void Broadcast(uint8_t channel, const std::vector<uint8_t>& data, bool reliable) override;
     void Disconnect(uint32_t peer) override;
     bool Poll(NetEvent& out) override;
     uint32_t RoundTripMs(uint32_t peer) override;
+    std::string RouteChange(uint32_t peer) override;
 
 private:
     void Pump();
@@ -32,6 +34,7 @@ private:
     std::unordered_map<uint32_t, uint64_t> bySlot_;
     uint32_t nextPeer_ = 1;
     bool sendFailLogged_ = false;
+    steam::RouteWatch routes_;
     std::vector<NetEvent> queue_;
     size_t head_ = 0;
 };
