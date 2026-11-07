@@ -8932,6 +8932,7 @@ bool StartMod(const Config& cfg) {
         return false;
     });
     HookFunctionsMatching([](const std::string& n) { return n == "ReceiveTick"; }, [](UObject* obj, UFunction* fn, void* params) {
+        NoteGameThread();   // before anything that checks the thread
         if (g_session->IsTickBlocked(obj)) return true;   // a stand-in: never ticks
         static int seenClasses = 0;
         if (!g_gameModeClass && seenClasses < 12) {     // startup diagnostics: which Blueprints tick before the game mode

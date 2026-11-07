@@ -166,7 +166,8 @@ inline bool OutsideDllFine(std::string_view pathLower, std::string_view windowsD
     const bool steamDir = dir.ends_with("\\steam\\") || (!steamDirLower.empty() && dir == steamDirLower) || (!steamClientDirLower.empty() && dir == steamClientDirLower);
     if (file.rfind("gameoverlay", 0) == 0 && (steamDir || has("\\steam\\"))) return true;
     // Steam's own client, in every game it runs. In Program Files it's fine by that; a player with Steam on E:\Steam was told to close it.
-    if ((file == "steamclient64.dll" || file == "tier0_s64.dll" || file == "vstdlib_s64.dll") && steamDir) return true;
+    // Joining a lobby loads two more: steamwebrtc64 (its P2P networking) and crashhandler64. A player was sent out of a lobby by them.
+    if ((file == "steamclient64.dll" || file == "tier0_s64.dll" || file == "vstdlib_s64.dll" || file == "steamwebrtc64.dll" || file == "crashhandler64.dll") && steamDir) return true;
     if (file.rfind("discordhook", 0) == 0 && has("\\appdata\\local\\discord")) return true;
     if (file.rfind("graphics-hook", 0) == 0 && has("\\obs-studio-hook\\")) return true;
     if (file.rfind("medal-hook", 0) == 0 && has("\\appdata\\local\\medal\\hookdll\\")) return true;   // Medal, for clips. A tester had to close it to play

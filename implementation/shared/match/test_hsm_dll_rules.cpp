@@ -37,10 +37,11 @@ int main() {
     CHECK(!OutsideDllFine("c:\\users\\me\\appdata\\local\\medal\\hookdll\\medalhook_9812\\speedhack.dll") && !OutsideDllFine("c:\\temp\\medal-hook64-v2.dll"));
     for (const char* p : {"c:\\users\\me\\downloads\\speedhack.dll", "c:\\programdata\\x\\cheat.dll", "c:\\temp\\gameoverlayrenderer64.dll", "c:\\temp\\discordhook64.dll", "d:\\windows\\cheat.dll", "c:\\temp\\windows\\cheat.dll"}) CHECK(!OutsideDllFine(p));
     // Steam installed outside Program Files, and RivaTuner wherever it was put: a player's real paths.
-    for (const char* p : {"e:\\steam\\steamclient64.dll", "e:\\steam\\tier0_s64.dll", "e:\\steam\\vstdlib_s64.dll", "d:\\games\\steam\\steamclient64.dll",
+    for (const char* p : {"e:\\steam\\steamclient64.dll", "e:\\steam\\tier0_s64.dll", "e:\\steam\\vstdlib_s64.dll", "d:\\games\\steam\\steamclient64.dll", "e:\\steam\\steamwebrtc64.dll", "e:\\steam\\crashhandler64.dll",
                           "f:\\gpu stuff\\msi\\rivatuner statistics server\\rtsshooks64.dll"}) CHECK(OutsideDllFine(p));
     // Steam in a folder with any name, going by where Steam says it is. Nothing else in that folder earns anything by it.
-    for (const char* p : {"g:\\valve client\\steamclient64.dll", "g:\\valve client\\tier0_s64.dll", "g:\\valve client\\vstdlib_s64.dll", "g:\\valve client\\gameoverlayrenderer64.dll"})
+    for (const char* p : {"g:\\valve client\\steamclient64.dll", "g:\\valve client\\tier0_s64.dll", "g:\\valve client\\vstdlib_s64.dll", "g:\\valve client\\gameoverlayrenderer64.dll",
+                          "g:\\valve client\\steamwebrtc64.dll", "g:\\valve client\\crashhandler64.dll"})
         CHECK(OutsideDllFine(p, "c:\\windows\\", "g:\\valve client\\") && !OutsideDllFine(p));
     CHECK(!OutsideDllFine("g:\\valve client\\speedhack.dll", "c:\\windows\\", "g:\\valve client\\"));
     CHECK(!OutsideDllFine("g:\\valve client\\mods\\steamclient64.dll", "c:\\windows\\", "g:\\valve client\\"));
@@ -50,7 +51,8 @@ int main() {
     // Steam moved by hand: SteamPath names the copy left behind, and the running client says where it really is.
     const std::string oldCopy = "c:\\program files (x86)\\steam\\", moved = DllFolderOfLower("C:\\Users\\Me\\Desktop\\New folder\\steamclient64.dll");
     for (const char* p : {"c:\\users\\me\\desktop\\new folder\\steamclient64.dll", "c:\\users\\me\\desktop\\new folder\\tier0_s64.dll",
-                          "c:\\users\\me\\desktop\\new folder\\vstdlib_s64.dll", "c:\\users\\me\\desktop\\new folder\\gameoverlayrenderer64.dll"})
+                          "c:\\users\\me\\desktop\\new folder\\vstdlib_s64.dll", "c:\\users\\me\\desktop\\new folder\\gameoverlayrenderer64.dll",
+                          "c:\\users\\me\\desktop\\new folder\\steamwebrtc64.dll", "c:\\users\\me\\desktop\\new folder\\crashhandler64.dll"})
         CHECK(OutsideDllFine(p, "c:\\windows\\", oldCopy, moved) && !OutsideDllFine(p, "c:\\windows\\", oldCopy));
     CHECK(!OutsideDllFine("c:\\users\\me\\desktop\\new folder\\speedhack.dll", "c:\\windows\\", oldCopy, moved));
     CHECK(!OutsideDllFine("c:\\users\\me\\desktop\\new folder\\mods\\steamclient64.dll", "c:\\windows\\", oldCopy, moved));
@@ -60,7 +62,7 @@ int main() {
     // With nothing read, a bare name is in no folder of Steam's.
     CHECK(!OutsideDllFine("steamclient64.dll"));
     // The names alone earn nothing: only in Steam's own folder, or RivaTuner's.
-    for (const char* p : {"c:\\temp\\steamclient64.dll", "e:\\steam\\mods\\steamclient64.dll", "e:\\steam\\speedhack.dll", "c:\\temp\\rtsshooks64.dll",
+    for (const char* p : {"c:\\temp\\steamclient64.dll", "e:\\steam\\mods\\steamclient64.dll", "c:\\temp\\steamwebrtc64.dll", "e:\\steam\\mods\\crashhandler64.dll", "e:\\steam\\speedhack.dll", "c:\\temp\\rtsshooks64.dll",
                           "f:\\rivatuner statistics server\\speedhack.dll"}) CHECK(!OutsideDllFine(p));
     // UE4SS: only the one that comes with the mod, and only from its own mods folder.
     CHECK(DllNeedsHash(win + "ue4ss\\ue4ss.dll") && JudgeGameDll(win + "ue4ss\\ue4ss.dll", "94c2ebd3ca9f4c4212898d727df5482937f586771c67502635ebd4367422052a") == DllVerdict::Fine);
