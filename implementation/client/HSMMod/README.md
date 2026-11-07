@@ -387,7 +387,7 @@ A kicked or banned player goes back to the main menu, and the multiplayer page o
 
 The host of a lobby chooses which mods its players may run, in `HSMMod.ini` under `[mod]`:
 
-- `mod_rule=vanilla`: no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps` (default): custom map paks and known cosmetic mods. `bundle`:
+- `mod_rule=vanilla`: no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps` (default): custom map paks (a pak with a map that replaces no stock file and has nothing under `/Game/Mods`) and known cosmetic mods. `bundle`:
   exactly the files of the lobby's modpack (`pack=`). `custom`: the list in `mod_allow=` (or, when it is empty,
   whatever the host runs). `anything`: no limit.
 - `mod_cheats=block` (default) refuses anyone running a known cheat mod (HS Enhancer, the UE4SS cheat mods); `allow`

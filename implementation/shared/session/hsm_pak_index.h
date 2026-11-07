@@ -17,6 +17,7 @@
 // parsed; the caller then lists that pak's maps without attribution. Only the .umap names are kept: a package path
 // (/Game/Maps/Foo) for each, which is what OpenLevel takes.
 #pragma once
+#include "session/hsm_stock_packages.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -155,7 +156,8 @@ inline bool EndsWithNoCase(std::string_view s, std::string_view suffix) {
 // "../../../HalfswordUE5/Content/Maps/Foo/Bar.umap" -> "/Game/Maps/Foo/Bar"; Engine/Content -> /Engine; a plugin's
 // Content (HalfswordUE5/Plugins/<Name>/Content/...) -> /<Name>/.... Empty when the file is not a .umap under one of those
 // roots or any segment has a character a package path cannot carry (spaces and dots included: such a name is refused).
-inline std::string PakFileToPackagePath(std::string_view file) {
+// `anyName`: any characters. Such a path is still a real file of the pak, it just can't be opened by name.
+inline std::string PakFileToPackagePath(std::string_view file, bool anyName = false) {
     if (!EndsWithNoCase(file, ".umap")) return {};
     file.remove_suffix(5);
     std::vector<std::string> seg;
@@ -170,7 +172,7 @@ inline std::string PakFileToPackagePath(std::string_view file) {
     seg.erase(seg.begin(), seg.begin() + long(i));
     for (const std::string& s : seg) {
         if (s.empty() || s == "..") return {};
-        for (char c : s) if (!PakNameChar(c)) return {};
+        if (!anyName) for (char c : s) if (!PakNameChar(c)) return {};
     }
     if (seg.size() < 3) return {};
     std::string root;
@@ -188,17 +190,18 @@ inline std::string PakFileToPackagePath(std::string_view file) {
 }
 
 // What a pak holds besides its maps, for the map/content split (session/hsm_mod_rules.h ClassifyPak): the package
-// folders of its other package files (.uasset .uexp .ubulk .uptnl), deduplicated, at most kMaxPakAssetDirs. overflow: more
-// folders than that, a package file whose folder cannot be a package path, or an .ini anywhere (a config override).
-// Shader archives, the asset registry and other cooked side files do not count, and neither do a map's own files where it
-// has no folder of its own (pak_detail::SettleRootFiles).
+// folders of its other package files (.uasset .uexp .ubulk .uptnl), deduplicated, at most kMaxPakAssetDirs, and which of them
+// replace a stock package. overflow: more folders than that, a package file outside any content root, or an .ini anywhere (a
+// config override). Shader archives, the asset registry and other cooked side files do not count.
 inline constexpr size_t kMaxPakAssetDirs = 512;
+inline constexpr size_t kMaxPakStockFiles = 8;      // named in the log; one is enough to decide
 struct PakAssets {
     std::vector<std::string> dirs;
+    std::vector<std::string> stockFiles;  // package paths this pak replaces, at most kMaxPakStockFiles
     bool overflow = false;
-    const char* overflowWhy = "";        // what set overflow, for the log
-    size_t badMaps = 0;                  // .umap files whose path cannot be a package path: not in the maps list
-    std::vector<std::string> rootFiles;  // package files straight under a content root, until the maps are known
+    const char* overflowWhy = "";         // what set overflow, for the log
+    size_t badMaps = 0;                   // .umap files whose path cannot be a package path: not in the maps list
+    std::string badMapName;               // the first of them, for the log
 };
 
 namespace pak_detail {
@@ -210,44 +213,31 @@ inline void NoteAssetDir(const std::string& dir, PakAssets* a) {
     a->dirs.push_back(dir);
 }
 
+inline void NoteStockFile(const std::string& pkg, PakAssets* a) {
+    if (!IsStockPackage(pkg) || a->stockFiles.size() >= kMaxPakStockFiles) return;
+    for (const std::string& f : a->stockFiles) if (f == pkg) return;
+    a->stockFiles.push_back(pkg);
+}
+
 inline void NoteAsset(const std::string& fullPath, std::string_view name, PakAssets* a) {
     if (!a || a->overflow) return;
     if (EndsWithNoCase(name, ".ini")) { Overflow(a, "a config file"); return; }
     if (!EndsWithNoCase(name, ".uasset") && !EndsWithNoCase(name, ".uexp") && !EndsWithNoCase(name, ".ubulk") && !EndsWithNoCase(name, ".uptnl")) return;
     const size_t cut = fullPath.find_last_of("/\\");
-    const std::string pkg = PakFileToPackagePath((cut == std::string::npos ? std::string() : fullPath.substr(0, cut + 1)) + "x.umap");
+    const std::string pkg = PakFileToPackagePath((cut == std::string::npos ? std::string() : fullPath.substr(0, cut + 1)) + "x.umap", true);
     if (pkg.size() < 3) { Overflow(a, "a package file outside any content root"); return; }
     const std::string dir = pkg.substr(0, pkg.size() - 2);
-    if (dir.find('/', 1) == std::string::npos) {   // straight under a content root: a root map's own file, or not
-        if (a->rootFiles.size() >= kMaxPakAssetDirs) { Overflow(a, "too many asset folders"); return; }
-        a->rootFiles.push_back(dir + "/" + (cut == std::string::npos ? fullPath : fullPath.substr(cut + 1)));   // a legacy name is a whole path
-        return;
-    }
+    const std::string file = cut == std::string::npos ? fullPath : fullPath.substr(cut + 1);   // a legacy name is a whole path
+    NoteStockFile(dir + "/" + file.substr(0, file.rfind('.')), a);
     NoteAssetDir(dir, a);
 }
 
-// A cooked map is its .umap and a .uexp beside it, maybe a .ubulk or .uptnl, and a <map>_BuiltData package. A map straight under
-// a content root (/Game/Hole) has them there, where they would read as assets beside the stock ones. A .uasset with the map's
-// own name is another package, not part of the map. Only here: a map in a stock folder keeps them counted, as a stock asset of
-// that name cannot be told from it by the folder list (session/hsm_mod_rules.h).
-inline bool IsRootMapFile(std::string_view file, const std::vector<std::string>& maps) {
-    const size_t dot = file.rfind('.');
-    if (dot == std::string_view::npos) return false;
-    const std::string_view stem = file.substr(0, dot);
-    const bool notUasset = !EndsWithNoCase(file, ".uasset");
-    for (const std::string& m : maps) {
-        if (notUasset && stem.size() == m.size() && EndsWithNoCase(stem, m)) return true;
-        const std::string built = m + "_BuiltData";
-        if (stem.size() == built.size() && EndsWithNoCase(stem, built)) return true;
-    }
-    return false;
-}
-
-inline void SettleRootFiles(const std::vector<std::string>& maps, PakAssets* a) {
-    if (!a) return;
-    for (const std::string& f : a->rootFiles)
-        if (!a->overflow && !IsRootMapFile(f, maps)) NoteAssetDir(f.substr(0, f.rfind('/')), a);
-    a->rootFiles.clear();
+// A .umap that can't be a package path: a space or a dot in its path, or no content root at all.
+inline void NoteBadMap(const std::string& fullPath, PakAssets* a) {
+    if (!a || a->overflow) return;
+    const std::string pkg = PakFileToPackagePath(fullPath, true);
+    if (pkg.empty()) { Overflow(a, "a package file outside any content root"); return; }
+    if (a->badMaps++ == 0) a->badMapName = pkg;
 }
 }  // namespace pak_detail
 
@@ -270,13 +260,12 @@ inline PakParse ParsePakDirectoryIndex(const uint8_t* d, size_t n, const std::st
             if (!EndsWithNoCase(name, ".umap")) { pak_detail::NoteAsset(mountPoint + dir + name, name, assets); continue; }
             if (maps.size() >= kMaxPakMaps) continue;
             const std::string pkg = PakFileToPackagePath(mountPoint + dir + name);
-            if (pkg.empty()) { if (assets) ++assets->badMaps; continue; }
+            if (pkg.empty()) { pak_detail::NoteBadMap(mountPoint + dir + name, assets); continue; }
             bool dup = false;
             for (const std::string& m : maps) if (m == pkg) dup = true;
             if (!dup) maps.push_back(pkg);
         }
     }
-    pak_detail::SettleRootFiles(maps, assets);
     return c.left() == 0 ? PakParse::Ok : PakParse::Malformed;
 }
 
@@ -315,12 +304,11 @@ inline PakParse LegacyPass(const uint8_t* d, size_t n, uint32_t version, bool v8
         if (!EndsWithNoCase(name, ".umap")) { NoteAsset(mount + name, name, assets); continue; }
         if (maps.size() >= kMaxPakMaps) continue;
         const std::string pkg = PakFileToPackagePath(mount + name);
-        if (pkg.empty()) { if (assets) ++assets->badMaps; continue; }
+        if (pkg.empty()) { NoteBadMap(mount + name, assets); continue; }
         bool dup = false;
         for (const std::string& m : maps) if (m == pkg) dup = true;
         if (!dup) maps.push_back(pkg);
     }
-    SettleRootFiles(maps, assets);
     return PakParse::Ok;                             // v8+ may have trailing bytes (a hash-less filler); entries are what count
 }
 }  // namespace pak_detail

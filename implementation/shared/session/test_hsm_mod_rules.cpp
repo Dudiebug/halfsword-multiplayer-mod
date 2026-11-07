@@ -67,65 +67,54 @@ static void TestClassify() {
     CHECK(ClassifyPak({"/Game/jmblocks/Blocks", "/Game/jmblocks/Maps/Arena"}, {"/Game/jmblocks/Meshes", "/Game/jmblocks/Maps/Arena"}, false) == ModKind::MapPak);
     CHECK(ClassifyPak({"/Game/Maps/MyArena/Arena"}, {"/Game/Maps/MyArena/Props"}, false) == ModKind::MapPak);   // own subfolder of a stock folder
     CHECK(ClassifyPak({"/HalfCraft/Maps/Craft"}, {"/HalfCraft/Maps/Blocks"}, false) == ModKind::MapPak);         // a plugin root
-    // A map alone anywhere is a map; assets beside a map in a stock folder could replace stock ones.
     CHECK(ClassifyPak({"/Game/Maps/Tower"}, {}, false) == ModKind::MapPak);
-    CHECK(ClassifyPak({"/Game/Maps/Tower"}, {"/Game/Maps"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Game/Character/Arena"}, {"/Game/Character/Blueprints"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Engine/Maps/X/Y"}, {"/Engine/Maps/X"}, false) == ModKind::ContentPak);
-    // 2026-11-05: a map straight under /Game (Hole.pak, Highway.pak) could never be a map pak: its assets had no folder to sit
-    // in. The cooked shape, with the map's own files beside it, is in test_hsm_pak_index.cpp.
-    CHECK(ClassifyPak({"/Game/Hole"}, {"/Game/Hole/Textures", "/Game/hole"}, false) == ModKind::MapPak);
-    CHECK(ClassifyPak({"/Game/Hole"}, {"/Game/Weapons"}, false) == ModKind::ContentPak);          // NEGATIVE CONTROL
-    CHECK(ClassifyPak({"/Game/Hole"}, {"/Game"}, false) == ModKind::ContentPak);                  // beside it: a stock asset's place
-    CHECK(ClassifyPak({"/Game/Hole"}, {"/Game/HoleExtras"}, false) == ModKind::ContentPak);       // a prefix is not a parent
-    CHECK(ClassifyPak({"/Game/Maps"}, {"/Game/Maps/Stock"}, false) == ModKind::ContentPak);       // named after a stock folder
-    CHECK(ClassifyPak({"/Game/Character"}, {"/Game/Character/Blueprints"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Game/Hole", "/Game/Abyss/Maps/A"}, {"/Game/Abyss/Maps/B", "/Game/Hole/C"}, false) == ModKind::MapPak);
-    CHECK(ClassifyPak({"/Hole/Hole"}, {"/Hole/Hole/Textures"}, false) == ModKind::MapPak);        // a plugin root, the same
-    // A stub map does not vouch for a folder the stock game ships, however deep.
-    CHECK(ClassifyPak({"/Game/Assets/Weapons/Blueprints/T"}, {"/Game/Assets/Weapons/Blueprints"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Game/ui/weaponcustomization/T"}, {"/Game/UI/WeaponCustomization"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Game/Assets/Weapons/Blueprints/New/T"}, {"/Game/Assets/Weapons/Blueprints/New/X"}, false) == ModKind::MapPak);   // NEGATIVE CONTROL
-    // BPModLoaderMod runs what sits in /Game/Mods, and every lobby allows it.
+    // 2026-11-07, a log with 17 mod paks: not one counted as a map, as real maps keep props, sounds and starter content all over.
+    CHECK(ClassifyPak({"/Game/CustomMaps/AeroFlat", "/Game/CustomMaps/MMA"}, {"/Game/CustomMapContent", "/Game/CustomSound", "/Game/Stadium"}, false) == ModKind::MapPak);
+    CHECK(ClassifyPak({"/Game/gm_flatgrass"}, {"/Game/Materials", "/Game/Meshes", "/Game/Textures"}, false) == ModKind::MapPak);
+    CHECK(ClassifyPak({"/Game/CustomMaps/BackRooms/level"}, {"/Game"}, false) == ModKind::MapPak);
+    CHECK(ClassifyPak({"/Game/CustomMaps/TOMB"}, {"/Game/Fab/Props_Pack_-_Cobwebs", "/Game"}, false) == ModKind::MapPak);
+    // A new file in a stock folder only adds. What it replaces is told by name, not by folder.
+    CHECK(ClassifyPak({"/Game/Maps/Tower"}, {"/Game/Maps"}, false) == ModKind::MapPak);
+    PakClass c = ClassifyPakWhy({"/Game/Hole"}, {"/Game/Character/Blueprints"}, false, "", 0, {"/Game/Character/Blueprints/AI_BP"});
+    CHECK(c.kind == ModKind::ContentPak && c.why == "replaces stock files: /Game/Character/Blueprints/AI_BP");
+    CHECK(ClassifyPakWhy({"/Game/Hole"}, {}, false, "", 0, {"/Game/A", "/Game/B"}).why == "replaces stock files: /Game/A /Game/B");
+    // BPModLoaderMod runs what sits in /Game/Mods, and every lobby allows it. Weapon paks live there, test map or not.
     CHECK(ClassifyPak({"/Game/Mods/Cheat/T"}, {"/Game/Mods/Cheat"}, false) == ModKind::ContentPak);
-    CHECK(!MapFolderOwnsAssets("/Game/Mods") && !MapFolderOwnsAssets("/Game/mods/x") && MapFolderOwnsAssets("/Game/ModsOfMine"));
+    CHECK(ClassifyPak({"/Game/Mods/Smitor/Lightsaber/Lightsabertest"}, {"/Game/Mods/Smitor/Lightsaber", "/Game"}, false) == ModKind::ContentPak);
+    CHECK(ClassifyPak({"/Game/Mine/Arena"}, {"/Game/Mine", "/Game/mods/x"}, false) == ModKind::ContentPak);   // a stub map doesn't vouch for it
+    CHECK(ClassifyPak({"/Engine/Maps/X/Y"}, {"/Engine/Maps/X"}, false) == ModKind::ContentPak);
+    CHECK(MapPakKeepsOut("/Game/Mods") && MapPakKeepsOut("/Game/mods/x") && MapPakKeepsOut("/Engine/X") && MapPakKeepsOut("/engine"));
+    CHECK(!MapPakKeepsOut("/Game/ModsOfMine") && !MapPakKeepsOut("/Game") && !MapPakKeepsOut("/Enginex") && !MapPakKeepsOut("/Mods/X"));
+    // A pak outside those folders that adds a weapon and a test map (GunsEtc) passes: the weapon only exists on its own map.
+    CHECK(ClassifyPak({"/Game/GunsEtc/Maps/TestMap"}, {"/Game/GunsEtc/Maps", "/Game/Weapons/Guns"}, false) == ModKind::MapPak);
     // A map at a stock package's path replaces it, with no asset to show for it.
     CHECK(ClassifyPak({"/Game/Maps/Arenas/Map_Arena_EastTower"}, {}, false) == ModKind::ContentPak);
     CHECK(ClassifyPak({"/Game/maps/arenas/map_arena_easttower"}, {}, false) == ModKind::ContentPak);
     CHECK(ClassifyPak({"/Game/RT_Blood"}, {}, false) == ModKind::ContentPak);
     CHECK(ClassifyPak({"/Game/RT_Mine"}, {}, false) == ModKind::MapPak);                          // NEGATIVE CONTROL
-    // The stock list: every parent listed, or a folder that passes could hold a stock one.
-    CHECK(kStockFolderCount > 1000 && kStockRootPackageCount > 0);
-    for (size_t i = 0; i < kStockFolderCount; ++i) {
-        const std::string parent = PackageFolder(kStockFolders[i]);
-        CHECK(FolderDepth(parent) < 1 || FolderDepth(parent) == 1 || IsStockFolder(parent));
-    }
+    // The stock list holds every stock package, in any case, and nothing else.
+    CHECK(std::size(kStockPackageHashes) > 10000 && std::is_sorted(std::begin(kStockPackageHashes), std::end(kStockPackageHashes)));
+    CHECK(IsStockPackage("/Game/Character/Blueprints/AI_BP") && IsStockPackage("/game/CHARACTER/blueprints/ai_bp"));
+    CHECK(!IsStockPackage("/Game/Character/Blueprints/AI_BP2") && !IsStockPackage("/Game/Character/Blueprints") && !IsStockPackage(""));
+    for (size_t i = 0; i < kStockMapPathCount; ++i) CHECK(IsStockPackage(kStockMapPaths[i]));
     // What the log says. The class comes from the same call.
-    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/Hole/T"}, false).why.empty());
-    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/Hole/T", "/Game/Weapons", "/Game/UI"}, false).why ==
-          "2 asset folder(s) outside its maps' own: /Game/Weapons, /Game/UI");
-    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/A", "/Game/B", "/Game/C", "/Game/D"}, false).why ==
-          "4 asset folder(s) outside its maps' own: /Game/A, /Game/B, /Game/C, ...");
+    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/Hole/T", "/Game/UI"}, false).why.empty());
+    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/Hole/T", "/Game/Mods/A", "/Engine/B"}, false).why ==
+          "2 asset folder(s) in /Game/Mods or /Engine: /Game/Mods/A, /Engine/B");
+    CHECK(ClassifyPakWhy({"/Game/Hole"}, {"/Game/Mods/A", "/Game/Mods/B", "/Game/Mods/C", "/Game/Mods/D"}, false).why ==
+          "4 asset folder(s) in /Game/Mods or /Engine: /Game/Mods/A, /Game/Mods/B, /Game/Mods/C, ...");
     CHECK(ClassifyPakWhy({"/Game/Hole"}, {}, true, "a config file").why == "a config file");
     CHECK(ClassifyPakWhy({"/Game/Hole"}, {}, true).kind == ModKind::ContentPak);
     CHECK(ClassifyPakWhy({"/Game/Maps/Arenas/Map_Arena_EastTower"}, {}, false).why == "replaces stock /Game/Maps/Arenas/Map_Arena_EastTower");
-    CHECK(ClassifyPakWhy({}, {"/Game"}, false, "", 1).why == "a map's file name cannot be a package path");
+    // A map that can't be a package path is still a map; the rest of the pak is judged the same.
+    c = ClassifyPakWhy({}, {"/Game"}, false, "", 1);
+    CHECK(c.kind == ModKind::MapPak && c.why == "a map's file name cannot be a package path");
+    CHECK(ClassifyPakWhy({}, {"/Game/Mods/Gun"}, false, "", 1).kind == ModKind::ContentPak);
+    CHECK(ClassifyPakWhy({}, {}, false, "", 1, {"/Game/RT_Blood"}).kind == ModKind::ContentPak);
+    CHECK(ClassifyPakWhy({}, {}, true, "a config file", 1).kind == ModKind::ContentPak);
     CHECK(ClassifyPakWhy({}, {"/Game/Weapons"}, false).why.empty());    // a pak with no maps needs no reason
-    // A weapon pak that ships a test map (GunsEtc, Remington870): weapons outside the map's folder.
-    CHECK(ClassifyPak({"/Game/GunsEtc/Maps/TestMap"}, {"/Game/GunsEtc/Maps", "/Game/Weapons/Guns"}, false) == ModKind::ContentPak);
-    CHECK(ClassifyPak({"/Game/GunsEtc/Maps/TestMap"}, {"/Game/GunsEtc/Weapons"}, false) == ModKind::ContentPak);
     CHECK(ClassifyPak({}, {"/Game/Weapons"}, false) == ModKind::ContentPak);
     CHECK(ClassifyPak({"/Game/A/B/C"}, {"/Game/A/B"}, true) == ModKind::ContentPak);                // overflow
-    CHECK(ClassifyPak({"/Game/A/B/C"}, {"/Game/A/BC"}, false) == ModKind::ContentPak);              // a prefix is not a parent
-    CHECK(ClassifyPak({"/Game/A/B/C"}, {"/game/a/b/x"}, false) == ModKind::MapPak);                 // any case
-    CHECK(PackageFolder("/Game/Maps/Foo/Bar") == "/Game/Maps/Foo" && PackageFolder("/Game").empty() && FolderDepth("/Game/Maps/Foo") == 3);
-    CHECK(MapFolderOwnsAssets("/Game/Mine") && !MapFolderOwnsAssets("/Game/maps") && !MapFolderOwnsAssets("/Game") && !MapFolderOwnsAssets("/Engine/X"));
-    bool someStockDeep = false;
-    for (size_t i = 0; i < kStockMapPathCount; ++i) {
-        const std::string f = PackageFolder(kStockMapPaths[i]);
-        if (UnderFolder(f, "/Game") && FolderDepth(f) >= 3) { someStockDeep = true; CHECK(!MapFolderOwnsAssets(f)); }
-    }
-    CHECK(someStockDeep);
 }
 
 static void TestPresets() {

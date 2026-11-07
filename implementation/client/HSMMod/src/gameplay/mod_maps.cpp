@@ -236,11 +236,12 @@ void ScanOnce() {
         const PakParse r = ReadPakMaps(f.path, f.size, maps, assets);
         // An unread index cannot show the pak holds only maps: it counts as a content pak.
         PakClass judged;
-        if (r == PakParse::Ok) judged = ClassifyPakWhy(maps, assets.dirs, assets.overflow, assets.overflowWhy, assets.badMaps);
+        if (r == PakParse::Ok) judged = ClassifyPakWhy(maps, assets.dirs, assets.overflow, assets.overflowWhy, assets.badMaps, assets.stockFiles);
         else judged.why = std::string("index not read: ") + PakParseName(r);
         kinds[i] = judged.kind;
         HSM_LOG("maps: mod pak %s %llu %s %s%s", f.name.c_str(), (unsigned long long)f.size, Short(sha).c_str(), ModKindName(judged.kind),
                 judged.why.empty() ? "" : (" (" + judged.why + ")").c_str());
+        if (r == PakParse::Ok && assets.badMaps) HSM_LOG("maps: mod pak %s: %zu map(s) can't go on the map list, first %s", f.name.c_str(), assets.badMaps, assets.badMapName.c_str());
         if (r == PakParse::Ok && !maps.empty()) pakMaps.push_back({i, maps});
         Publish(paks, pakMaps, packs, kinds, true, false);
     }

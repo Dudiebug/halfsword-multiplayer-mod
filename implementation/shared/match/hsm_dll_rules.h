@@ -137,19 +137,40 @@ inline DllVerdict JudgeGameDll(std::string_view relLower, std::string_view sha25
     return DllVerdict::Unknown;
 }
 
+// A folder as OutsideDllFine wants it: lower case, with one trailing backslash. Empty stays empty.
+inline std::string DllFolderLower(std::string_view folder) {
+    std::string out = DllPathLower(folder);
+    while (!out.empty() && out.back() == '\\') out.pop_back();
+    return out.empty() ? out : out + "\\";
+}
+
+// The folder a file's path is in, in the same form. Empty when the path has no folder.
+inline std::string DllFolderOfLower(std::string_view file) {
+    const std::string lower = DllPathLower(file);
+    const size_t slash = lower.find_last_of('\\');
+    return slash == std::string::npos ? std::string() : lower.substr(0, slash + 1);
+}
+
 // A DLL from anywhere else on the machine: true when it says nothing about cheating. Windows itself, installed programs (both need admin
 // to write to), Microsoft's own data, and the overlays people run. Everything else is somewhere a player can drop a file.
-inline bool OutsideDllFine(std::string_view pathLower, std::string_view windowsDirLower = "c:\\windows\\") {
+// `steamDirLower`: where Steam says it's installed (SteamPath). `steamClientDirLower`: the folder of the running client (its ActiveProcess key),
+// which keeps the path's real case and can't name a copy left behind. Both as DllFolderLower gives them, and empty when they couldn't be read.
+inline bool OutsideDllFine(std::string_view pathLower, std::string_view windowsDirLower = "c:\\windows\\", std::string_view steamDirLower = {}, std::string_view steamClientDirLower = {}) {
     const auto has = [&](std::string_view s) { return pathLower.find(s) != std::string_view::npos; };
     if (pathLower.rfind(windowsDirLower, 0) == 0 || (pathLower.size() > 3 && (has(":\\program files\\") || has(":\\program files (x86)\\") || has(":\\programdata\\microsoft\\")))) return true;
     // NVIDIA's driver downloads DLSS models as DLLs with names like 190_E658703.dll. A tester with DLSS on hit this.
     if (has(":\\programdata\\nvidia\\") || has("\\nvidia\\ngx\\") || has("\\appdata\\local\\nvidia\\")) return true;
     const size_t slash = pathLower.find_last_of('\\');
     const std::string_view file = slash == std::string_view::npos ? pathLower : pathLower.substr(slash + 1);
-    if (file.rfind("gameoverlay", 0) == 0 && has("\\steam\\")) return true;
+    const std::string_view dir = pathLower.substr(0, pathLower.size() - file.size());
+    const bool steamDir = dir.ends_with("\\steam\\") || (!steamDirLower.empty() && dir == steamDirLower) || (!steamClientDirLower.empty() && dir == steamClientDirLower);
+    if (file.rfind("gameoverlay", 0) == 0 && (steamDir || has("\\steam\\"))) return true;
+    // Steam's own client, in every game it runs. In Program Files it's fine by that; a player with Steam on E:\Steam was told to close it.
+    if ((file == "steamclient64.dll" || file == "tier0_s64.dll" || file == "vstdlib_s64.dll") && steamDir) return true;
     if (file.rfind("discordhook", 0) == 0 && has("\\appdata\\local\\discord")) return true;
     if (file.rfind("graphics-hook", 0) == 0 && has("\\obs-studio-hook\\")) return true;
     if (file.rfind("medal-hook", 0) == 0 && has("\\appdata\\local\\medal\\hookdll\\")) return true;   // Medal, for clips. A tester had to close it to play
+    if (file.rfind("rtsshooks", 0) == 0 && has("\\rivatuner statistics server\\")) return true;   // RivaTuner's overlay, which MSI Afterburner brings along
     return false;
 }
 

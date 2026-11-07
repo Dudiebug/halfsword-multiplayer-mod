@@ -203,24 +203,26 @@ static void Pending() {
 
 static void Steppers() {
     ModChoice c{ModPreset::Vanilla, true, false};
-    CHECK(StepModRule(c, ModRuleRow::Preset, -1).preset == ModPreset::Anything);
+    CHECK(StepModRule(c, ModRuleRow::Preset, -1).preset == ModPreset::Classes);
     CHECK(StepModRule(c, ModRuleRow::Preset, 1).preset == ModPreset::MapsOnly);
     c.preset = ModPreset::Anything;
-    CHECK(StepModRule(c, ModRuleRow::Preset, 1).preset == ModPreset::Vanilla);
+    CHECK(StepModRule(c, ModRuleRow::Preset, 1).preset == ModPreset::Classes);   // Classes is a stop of its own
     CHECK(StepModRule(c, ModRuleRow::Preset, -1).preset == ModPreset::Custom);
     ModChoice t = StepModRule(c, ModRuleRow::Cheats, 1);
     CHECK(!t.blockCheats && t.preset == c.preset && !t.officialOnly);
     t = StepModRule(c, ModRuleRow::Official, -1);
     CHECK(t.officialOnly && t.blockCheats);
     CHECK(StepModRule(StepModRule(c, ModRuleRow::Cheats, 1), ModRuleRow::Cheats, -1) == c);
-    // The class presets are not stepped into, and stepping leaves them at either end of the five.
+    // Unrestricted is never stepped into, and steps as Classes. From the default, one row gets to Classes.
     for (ModPreset p : {ModPreset::Classes, ModPreset::Unrestricted}) {
         ModChoice k = c; k.preset = p;
         CHECK(StepModRule(k, ModRuleRow::Preset, 1).preset == ModPreset::Vanilla);
         CHECK(StepModRule(k, ModRuleRow::Preset, -1).preset == ModPreset::Anything);
     }
-    ModChoice w = c; w.preset = ModPreset::Anything;
-    CHECK(StepModRule(w, ModRuleRow::Preset, 1).preset == ModPreset::Vanilla);
+    ModChoice w = c;
+    for (int i = 0; i < 12; ++i) { w = StepModRule(w, ModRuleRow::Preset, 1); CHECK(w.preset != ModPreset::Unrestricted); }
+    w.preset = ModPreset::MapsOnly;
+    CHECK(StepModRule(StepModRule(w, ModRuleRow::Preset, -1), ModRuleRow::Preset, -1).preset == ModPreset::Classes);
 }
 
 int main() {

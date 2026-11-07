@@ -11,8 +11,7 @@
 #include "session/hsm_build.h"
 #include "session/hsm_known_mods.h"
 #include "session/hsm_modpack.h"
-#include "session/hsm_stock_folders.h"
-#include "session/hsm_stock_maps.h"
+#include "session/hsm_stock_packages.h"
 #include "session/hsm_ue4ss.h"
 #include "util/hsm_sha256.h"
 #include <algorithm>
@@ -182,82 +181,52 @@ inline bool IsSupportedUe4ssMod(std::string_view name) {
 
 // ------------------------------------------------------------------ map pak or content pak
 
-// The folder of a package path: "/Game/Maps/Foo/Bar" -> "/Game/Maps/Foo".
-inline std::string PackageFolder(std::string_view pkg) {
-    const size_t k = pkg.rfind('/');
-    return k == std::string_view::npos || k == 0 ? std::string() : std::string(pkg.substr(0, k));
-}
-inline size_t FolderDepth(std::string_view folder) { return size_t(std::count(folder.begin(), folder.end(), '/')); }
 inline bool UnderFolder(std::string_view dir, std::string_view folder) {
     if (folder.empty() || dir.size() < folder.size()) return false;
     if (!modrules_detail::EqNoCase(dir.substr(0, folder.size()), folder)) return false;
     return dir.size() == folder.size() || dir[folder.size()] == '/';
 }
 
-// Is this a folder the stock game ships (or a parent of one), in any case?
-inline bool IsStockFolder(std::string_view folder) {
-    for (size_t i = 0; i < kStockFolderCount; ++i) if (modrules_detail::EqNoCase(kStockFolders[i], folder)) return true;
-    return false;
-}
+// Folders a map pak may not touch. UE4SS's BPModLoaderMod, allowed in every lobby, runs what sits in /Game/Mods: weapon mods
+// live there. /Engine is the engine's.
+inline bool MapPakKeepsOut(std::string_view dir) { return UnderFolder(dir, "/Engine") || UnderFolder(dir, "/Game/Mods"); }
 
-// Would this map replace a stock package? A stock map, or a package straight under a content root (a root map's own files do
-// not count as assets, session/hsm_pak_index.h). Deeper stock assets need no list: a map's files there count as assets.
-inline bool ReplacesStockPackage(std::string_view map) {
-    using modrules_detail::EqNoCase;
-    for (size_t i = 0; i < kStockMapPathCount; ++i) if (EqNoCase(kStockMapPaths[i], map)) return true;
-    for (size_t i = 0; i < kStockRootPackageCount; ++i) if (EqNoCase(kStockRootPackages[i], map)) return true;
-    return false;
-}
-
-// May a map's folder hold the map pak's other assets? Only a folder the stock game does not ship: a file in one could replace
-// a stock asset, and a stub map must not vouch for it (/Game/Maps/MyArena yes, /Game/Maps or /Game/Assets/Weapons/Blueprints
-// no). As every parent of a stock folder is listed, nothing below a folder that passes is stock either. /Engine never, and
-// /Game/Mods never: UE4SS's BPModLoaderMod, allowed in every lobby, runs what sits there. A plugin root needs two levels.
-inline bool MapFolderOwnsAssets(std::string_view folder) {
-    if (FolderDepth(folder) < 2 || UnderFolder(folder, "/Engine") || UnderFolder(folder, "/Game/Mods")) return false;
-    return !IsStockFolder(folder);
-}
-
-// A pak is a map pak when its index lists at least one map, none replaces a stock package, and every other asset sits under the
-// folder of one of its maps, a folder the mod owns (MapFolderOwnsAssets). A map straight under a content root (/Game/Hole) has
-// no folder of its own: the one named after it (/Game/Hole/...) counts as its folder.
-// `assetDirs`: the package folders of the pak's non-map files (session/hsm_pak_index.h); `overflow`: the index had more
-// folders than were kept, or a file outside any content root that could change the game (.ini). Anything else is a
-// content pak: a weapon pak that ships a test map adds weapons and must not pass as a map.
-// `why`: what kept a pak that looks like a map pak from being one, for the log. Empty for a pak with nothing to explain.
+// A pak is a map pak when its index lists at least one map and it can only add to the game: it replaces no stock package and
+// has nothing a loader runs. Where its other assets sit doesn't matter. A file in a new place is only reached by the pak's own
+// maps, and real maps spread props, sounds and starter content over many folders.
+// `maps`: the pak's maps. `badMaps`: more maps whose names can't be package paths; they count, but can't go on the map list.
+// `assetDirs`: the package folders of its other files. `stockFiles`: those files that replace a stock package. `overflow`: the
+// index had more folders than were kept, or a file that could change the game wherever it sits (.ini). All from
+// session/hsm_pak_index.h. Anything else is a content pak.
+// `why`: what a map pak's owner should know, or what kept it from being one, for the log. Empty for nothing to explain.
 struct PakClass {
     ModKind kind = ModKind::ContentPak;
     std::string why;
 };
 inline PakClass ClassifyPakWhy(const std::vector<std::string>& maps, const std::vector<std::string>& assetDirs, bool overflow,
-                               std::string_view overflowWhy = {}, size_t badMaps = 0) {
+                               std::string_view overflowWhy = {}, size_t badMaps = 0, const std::vector<std::string>& stockFiles = {}) {
     constexpr size_t kNamed = 3;   // folders named in `why`
     PakClass c;
-    if (maps.empty()) {
-        if (badMaps) c.why = "a map's file name cannot be a package path";
+    if (maps.empty() && !badMaps) return c;
+    if (overflow) { c.why = overflowWhy.empty() ? std::string("its index was not fully read") : std::string(overflowWhy); return c; }
+    for (const std::string& m : maps) if (IsStockPackage(m)) { c.why = "replaces stock " + m; return c; }
+    if (!stockFiles.empty()) {
+        c.why = "replaces stock files:";
+        for (const std::string& f : stockFiles) c.why += " " + f;
         return c;
     }
-    if (overflow) { c.why = overflowWhy.empty() ? std::string("its index was not fully read") : std::string(overflowWhy); return c; }
-    for (const std::string& m : maps) if (ReplacesStockPackage(m)) { c.why = "replaces stock " + m; return c; }
-    std::vector<std::string> folders;
-    for (const std::string& m : maps) {
-        const std::string f = PackageFolder(m);
-        const std::string own = FolderDepth(f) < 2 ? m : f;
-        if (MapFolderOwnsAssets(own)) folders.push_back(own);
-    }
-    size_t outside = 0;
+    size_t kept = 0;
     std::string named;
     for (const std::string& d : assetDirs) {
-        bool inside = false;
-        for (const std::string& f : folders) if (UnderFolder(d, f)) { inside = true; break; }
-        if (inside) continue;
-        if (++outside <= kNamed) named += (outside > 1 ? ", " : "") + d;
+        if (!MapPakKeepsOut(d)) continue;
+        if (++kept <= kNamed) named += (kept > 1 ? ", " : "") + d;
     }
-    if (outside) {
-        c.why = std::to_string(outside) + " asset folder(s) outside its maps' own: " + named + (outside > kNamed ? ", ..." : "");
+    if (kept) {
+        c.why = std::to_string(kept) + " asset folder(s) in /Game/Mods or /Engine: " + named + (kept > kNamed ? ", ..." : "");
         return c;
     }
     c.kind = ModKind::MapPak;
+    if (badMaps) c.why = "a map's file name cannot be a package path";
     return c;
 }
 inline ModKind ClassifyPak(const std::vector<std::string>& maps, const std::vector<std::string>& assetDirs, bool overflow) {

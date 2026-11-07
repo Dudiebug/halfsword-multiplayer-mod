@@ -223,14 +223,13 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
     return s;
 }
 
-// A host's click on a rule row: the preset steps round its five, the switches flip.
+// A host's click on a rule row: the preset steps round its six, the switches flip.
 inline ModChoice StepModRule(ModChoice c, ModRuleRow row, int dir) {
     switch (row) {
         case ModRuleRow::Preset: {
-            // The five mod presets. Classes and Unrestricted are picked with this tab's checkbox (Unrestricted has its
-            // disclaimer there); stepping from either leaves classes, to Vanilla forward or Anything back.
-            if (IsClassesPreset(c.preset)) c.preset = dir < 0 ? ModPreset::Vanilla : ModPreset::Anything;
-            const int n = int(ModPreset::Anything) + 1;
+            // Vanilla to Classes. Unrestricted is set with this tab's checkbox (it has its disclaimer there), so it steps as Classes.
+            if (c.preset == ModPreset::Unrestricted) c.preset = ModPreset::Classes;
+            const int n = int(ModPreset::Classes) + 1;
             c.preset = ModPreset(((int(c.preset) + (dir < 0 ? -1 : 1)) % n + n) % n);
             break;
         }

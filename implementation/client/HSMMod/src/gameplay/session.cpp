@@ -738,8 +738,9 @@ public:
         if (!IsHost()) for (uint8_t s : meshPeers_.Slots()) if (const uint32_t p = meshPeers_.PeerOfSlot(s)) note(p, s);
     }
 
-    // One line every 5 s in a session fight (see LogOwnerHealth).
-    void LogHealth() { LogOwnerHealth(); }
+    // One line every 5 s in a session fight (see LogOwnerHealth). A client joining from a fight has a network before the
+    // Welcome starts owner sync, and the health lines read systems that aren't up until then: Claims' stand-ins crashed it.
+    void LogHealth() { if (streams_.Started()) LogOwnerHealth(); }
 
     // Mesh: off prints nothing. Host: what each client says it hears directly and how many relays that saved. Client: the
     // direct peers, streams that arrived and were used, anything else from a non-host peer that was dropped.
@@ -2182,6 +2183,18 @@ private:
         wchar_t winDir[MAX_PATH] = {};
         GetWindowsDirectoryW(winDir, MAX_PATH);
         const std::string windowsLower = DllPathLower(Utf8Of(winDir)) + "\\";
+        const auto steamValue = [](const wchar_t* key, const wchar_t* name) {
+            wchar_t value[MAX_PATH] = {};
+            DWORD bytes = sizeof value;
+            return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_SZ, nullptr, value, &bytes) == ERROR_SUCCESS ? Utf8Of(value) : std::string();
+        };
+        const std::string steamPath = steamValue(L"Software\\Valve\\Steam", L"SteamPath");
+        const std::string steamClient = steamValue(L"Software\\Valve\\Steam\\ActiveProcess", L"SteamClientDll64");
+        const std::string steamLower = DllFolderLower(steamPath), steamClientLower = DllFolderOfLower(steamClient);
+        if (static std::string logged; logged != steamClient + "|" + steamPath) {
+            logged = steamClient + "|" + steamPath;
+            HSM_LOG("rules: steam folder: client %s, SteamPath %s", steamClient.empty() ? "(none)" : steamClient.c_str(), steamPath.empty() ? "(none)" : steamPath.c_str());
+        }
         std::set<std::string> seen;
         const auto judge = [&](const std::wstring& path, bool loaded) {
             const std::string lower = DllPathLower(Utf8Of(path.c_str()));
@@ -2189,7 +2202,7 @@ private:
             const size_t slash = lower.find_last_of('\\');
             const std::string file = Utf8Of(path.c_str() + (path.find_last_of(L"\\/") + 1));
             if (lower.rfind(rootLower, 0) != 0) {
-                if (!OutsideDllFine(lower, windowsLower)) {
+                if (!OutsideDllFine(lower, windowsLower, steamLower, steamClientLower)) {
                     if (std::find(scan.outside.begin(), scan.outside.end(), file) == scan.outside.end()) scan.outside.push_back(file);   // the card: no folder names go to others
                     scan.outsidePaths.push_back(Utf8Of(path.c_str()));
                     if (static std::set<std::string> logged; logged.insert(lower).second) HSM_LOG("rules: loaded from outside the game: %s", scan.outsidePaths.back().c_str());
