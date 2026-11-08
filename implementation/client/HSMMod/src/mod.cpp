@@ -5,6 +5,8 @@
 #include "hsm_protocol.h"
 #include "gameplay/save_guard.h"
 #include "log.h"
+#include "paths.h"
+#include "session/hsm_cmdline.h"
 #include "ue4ss_load.h"
 
 namespace hsm {
@@ -12,6 +14,10 @@ bool StartMod(const Config& cfg);   // implemented in gameplay/session.cpp
 namespace game { std::string ModBuild(); }   // gameplay/lobby.cpp
 
 DWORD WINAPI ModMain(void*) {
+    // "Play alone, mod off" started this game: wait for the one that started it to close first, so the two never write the mod's files at once.
+    if (const std::string cl = CommandLineUtf8(); !CommandLineIgnoresHsmFlags(cl))
+        if (const int parent = CmdArgInt(cl, "hsmwaitfor", 0, 1, 0x7fffffff))
+            if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, DWORD(parent))) { WaitForSingleObject(h, 30000); CloseHandle(h); }
     LogInit();
     InstallCrashLog();
     HSM_LOG("HalfSwordMP loaded (protocol rev %u)", unsigned(kProtocolRevision));

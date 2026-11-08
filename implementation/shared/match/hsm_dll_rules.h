@@ -8,6 +8,7 @@
 #include <cctype>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hsm {
 
@@ -67,6 +68,15 @@ inline bool LooksLikeKnownDxgi(std::string_view fileBytes) {
     return fileBytes.find("crosire") != std::string_view::npos || fileBytes.find("ReShade") != std::string_view::npos || fileBytes.find("dxvk") != std::string_view::npos;
 }
 
+// Graphics add-ons that no vendor signs, pinned by SHA-256 where players put them, beside the exe. A newer version is a new line here, never
+// a looser check: the hash is what keeps a cheat from taking one of these names. Each was read and named before it went in.
+struct KnownAddOnDll { std::string_view file, sha256, what; };
+inline constexpr KnownAddOnDll kKnownAddOnDlls[] = {
+    {"version.dll", "f131734e9bf1fd191a9f60fad54231cd88e45ada3c957bd02c8763f8e9ad4440", "DLSS Enabler 4.9.0.15 (OptiScaler 0.9.5-pre3 inside)"},
+    {"nvngx_dlssnr.dll", "6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927", "NVIDIA DLSSNR 310.8 from the DLSS 5 one-click pack (its signature cut off)"},
+    {"renodx-dlss5.addon64", "79871879324053d49931a9f8c1865fcb83e8146df4a56b146d7a8a14cc7e70fe", "RenoDX DLSS5 Generic 10.8.0, a ReShade add-on"},
+};
+
 inline std::string DllPathLower(std::string_view path) {
     std::string out(path);
     for (char& c : out) c = c == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -116,6 +126,7 @@ inline constexpr std::string_view kWin64Dir = "halfswordue5\\binaries\\win64\\";
 // Whether a judgement needs the file's hash, so the rest aren't read at all.
 inline bool DllNeedsHash(std::string_view relLower) {
     if (relLower == std::string(kWin64Dir) + "ue4ss\\ue4ss.dll") return true;
+    for (const KnownAddOnDll& d : kKnownAddOnDlls) if (relLower == std::string(kWin64Dir) + std::string(d.file)) return true;
     return std::any_of(std::begin(kGameDlls), std::end(kGameDlls), [&](const PinnedDll& d) { return d.path == relLower && !d.sha256.empty(); });
 }
 
@@ -133,6 +144,7 @@ inline DllVerdict JudgeGameDll(std::string_view relLower, std::string_view sha25
         return relLower.size() > tail.size() && relLower.substr(relLower.size() - tail.size()) == tail ? DllVerdict::Fine : DllVerdict::Unknown;
     }
     if (relLower == win64 + "dxgi.dll") return dxgiKnown ? DllVerdict::Fine : DllVerdict::Changed;
+    for (const KnownAddOnDll& d : kKnownAddOnDlls) if (relLower == win64 + std::string(d.file) && sha256 == d.sha256) return DllVerdict::Fine;
     for (const PinnedDll& d : kGameDlls) if (d.path == relLower) return d.sha256.empty() || d.sha256 == sha256 ? DllVerdict::Fine : DllVerdict::Changed;
     return DllVerdict::Unknown;
 }
@@ -150,6 +162,19 @@ inline std::string DllFolderOfLower(std::string_view file) {
     const size_t slash = lower.find_last_of('\\');
     return slash == std::string::npos ? std::string() : lower.substr(0, slash + 1);
 }
+
+// Graphics vendors swap their own DLLs in: newer DLSS, Streamline (the frame generation "bridge" files), FSR and XeSS. Players replace them
+// with newer versions all the time, so a pinned hash would block them. What can't be faked is the vendor's code signature, checked by
+// Windows (WinVerifyTrust), so a file with a valid signature from one of these publishers is fine wherever it is. The name on the
+// certificate is the publisher's legal name, exactly.
+inline constexpr std::string_view kTrustedDllSigners[] = {
+    "NVIDIA Corporation", "Advanced Micro Devices, Inc.", "Advanced Micro Devices Inc.", "Intel Corporation", "Microsoft Corporation", "Microsoft Windows",
+};
+inline bool TrustedDllSigner(std::string_view signer) {
+    return std::find(std::begin(kTrustedDllSigners), std::end(kTrustedDllSigners), signer) != std::end(kTrustedDllSigners);
+}
+// A verdict once the signature is known: an unknown or changed file signed by a trusted vendor is that vendor's, not a cheat.
+inline DllVerdict WithSigner(DllVerdict v, std::string_view validSigner) { return v != DllVerdict::Fine && TrustedDllSigner(validSigner) ? DllVerdict::Fine : v; }
 
 // A DLL from anywhere else on the machine: true when it says nothing about cheating. Windows itself, installed programs (both need admin
 // to write to), Microsoft's own data, and the overlays people run. Everything else is somewhere a player can drop a file.
@@ -173,6 +198,19 @@ inline bool OutsideDllFine(std::string_view pathLower, std::string_view windowsD
     if (file.rfind("medal-hook", 0) == 0 && has("\\appdata\\local\\medal\\hookdll\\")) return true;   // Medal, for clips. A tester had to close it to play
     if (file.rfind("rtsshooks", 0) == 0 && has("\\rivatuner statistics server\\")) return true;   // RivaTuner's overlay, which MSI Afterburner brings along
     return false;
+}
+
+// A drive and the device Windows says it is (QueryDosDevice): "c:" and "\device\harddiskvolume3", both as DllPathLower gives them.
+struct DriveDevice { std::string drive, device; };
+
+// A mapped file's name as Windows gives it (\Device\HarddiskVolume3\Users\...) with its drive letter instead, so OutsideDllFine can judge it.
+// Lower case in, lower case out. Unchanged when no drive matches (a share or a device without a letter): OutsideDllFine then passes less.
+inline std::string DosPathOfDeviceLower(std::string_view deviceLower, const std::vector<DriveDevice>& drives) {
+    for (const DriveDevice& d : drives) {
+        if (d.device.empty() || deviceLower.size() <= d.device.size() || deviceLower[d.device.size()] != '\\') continue;
+        if (deviceLower.compare(0, d.device.size(), d.device) == 0) return d.drive + std::string(deviceLower.substr(d.device.size()));
+    }
+    return std::string(deviceLower);
 }
 
 }  // namespace hsm

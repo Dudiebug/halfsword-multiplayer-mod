@@ -13,7 +13,7 @@
 
 namespace hsm::update {
 // Starts the check (a no-op when disabled or already started). Returns at once; the worker logs the outcome.
-void Start(bool enabled);
+void Start(bool enabled, const std::string& devUrl);   // devUrl: report_url, for a dev build's dev releases
 // Game thread: "HSMMod 0.7.0-pre3 is out (you have 0.7.0-pre2). Get it from GitHub: Dudiebug/halfsword-multiplayer-mod"
 // once a newer release is known, else empty.
 std::string Notice();

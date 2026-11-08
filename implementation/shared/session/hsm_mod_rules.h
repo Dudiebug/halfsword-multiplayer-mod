@@ -309,6 +309,16 @@ inline bool IsCheatUnder(ModPreset preset, const ModItem& it) {
 // The rule a host publishes and enforces: what it chose, with cheats allowed when the host runs a cheat itself (it
 // cannot block what it runs; the browser says so) and official-only off when the host is not on an official build.
 enum class Official : uint8_t { Unknown = 0, Yes = 1, No = 2 };
+// Which releases the update notice follows, so a player hears only of public releases and a tester of test builds. Public: the
+// build is its public release's own file, or its version isn't in the public list but is older than the newest there (an old
+// public build the short list no longer reaches). Dev: a dev-only release newer than every public one, or a file that differs
+// from its public release (a local build).
+enum class UpdateChannel : uint8_t { Public, Dev };
+inline UpdateChannel UpdateChannelOf(Official o, bool newerThanEveryPublic) {
+    if (o == Official::Yes) return UpdateChannel::Public;
+    if (o == Official::No) return UpdateChannel::Dev;
+    return newerThanEveryPublic ? UpdateChannel::Dev : UpdateChannel::Public;
+}
 inline ModRule EffectiveRule(const ModRule& chosen, const ModReport& hostReport, Official hostOfficial) {
     ModRule r = chosen;
     for (const ModItem& it : hostReport.items) if (IsCheatUnder(chosen.preset, it)) r.blockCheats = false;

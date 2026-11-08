@@ -46,6 +46,7 @@ public:
     virtual bool HelpImprove() const = 0;                            // help_improve in HSMMod.ini: also send the log when someone in the lobby files a report
     virtual void SetHelpImprove(bool on) = 0;                        // also written back to HSMMod.ini (and marks the question answered)
     virtual bool HelpImproveAsked() const = 0;                       // the one-time question on the first MULTIPLAYER click was answered
+    virtual bool RestartGame(bool modOff) = 0;                       // starts a new copy of the game (mod off for that launch only), then quits this one
 
     // The multiplayer menus (the page's voice block, the in-match Esc menu). Voice settings are written to HSMMod.ini.
     virtual bool InSession() const = 0;                              // joined (a client welcomed) or hosting

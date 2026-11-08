@@ -65,6 +65,13 @@ inline LobbyBlock DecodeLobbyBlock(std::string_view v) {
     return b;
 }
 
+// Whether the supported-mods list keeps this player out of a lobby with this mod rule. Classes lobbies always use it, and mod_block=all
+// takes it to the rest, but not to `anything`: that host chose no limit, and the host's own gate still refuses cheats unless they're allowed.
+inline bool ModListKeepsOut(ModPreset preset, LobbyBlock rule) {
+    if (preset == ModPreset::Anything) return false;
+    return IsClassesPreset(preset) || rule.allLobbies;
+}
+
 // The block overlay: each thing in the way and how to take it out, plainly enough to follow with no idea what UE4SS is.
 struct ModBlockLine { std::string what, how, modsTxtName = {}, setAsideFile = {}; };   // modsTxtName: mods.txt can turn it off, under this name; setAsideFile: a DLL beside the exe that can be renamed for a game
 inline std::vector<ModBlockLine> ModBlockLines(const std::vector<std::string>& ue4ssMods, const std::vector<std::string>& dlls, bool hse, const std::vector<std::string>& outside = {}) {

@@ -186,7 +186,7 @@ struct Config {
     bool blockHse = true;     // block_hse=: in lobbies you host, HS Enhancer is refused. Guests go by the host
     bool modBlockAll = true;  // mod_block=: in lobbies you host. all: unsupported mods are refused everywhere; classes: only with classes
     std::string classCustomName[kCustomClassSlots];   // class_custom1_name=..: what the player called it; checked wherever it's read
-    int classBiteKey = 'H';   // class_bite_key=: bites, for a class with Bite. A letter or F1 to F12
+    int classBiteKey = 'B';   // class_bite_key=: bites, for a class with Bite. A letter or F1 to F12
     bool clawMirror = true;   // claw_mirror=0: don't draw Half Wolverine's claws on other players' fighters, or tell them about yours
     int buildCardKey = 'K';   // build_card_key=: brings cards back, holds them, steps through them, sends them away. One letter, or F1 to F12.
     std::string buildName;

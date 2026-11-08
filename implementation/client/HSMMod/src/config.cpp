@@ -1,4 +1,5 @@
 #include "config.h"
+#include "match/hsm_class.h"
 #include "match/hsm_match.h"
 #include "match/hsm_roles.h"
 #include "session/hsm_cmdline.h"
@@ -53,7 +54,7 @@ constexpr char kDefaultIni[] =
     "; 1: a class that uses Half Wolverine writes its parts into that mod's settings when the game starts, and yours come back when you pick another class; 0: leave its file alone\n"
     "class_wolverine=1\n"
     "; the key that bites, for a class with Bite. A letter or F1 to F12.\n"
-    "class_bite_key=H\n"
+    "class_bite_key=B\n"
     "; 1: when you pick a class, Half Wolverine is refreshed in place (UE4SS reloads its mods); 0: restart the game instead\n"
     "wolverine_refresh=1\n"
     "; the class checker key: shows other players' classes, holds them on screen, steps through them and sends them away. A letter or F1 to F12.\n"
@@ -311,10 +312,17 @@ Config LoadConfig() {
         c.classCustomName[i] = ReadString(ini, (L"class_custom" + std::to_wstring(i + 1) + L"_name").c_str(), "");
     }
     {
-        const std::string k = ReadString(ini, L"class_bite_key", "H");
+        std::string k = ReadString(ini, L"class_bite_key", "B");
+        if (const std::string moved = ReadString(ini, L"bite_key_moved", "0"); moved != "1") {   // once: H was the default before B
+            const bool move = BiteKeyMovesToB(k, moved);
+            if (move) k = "B";
+            std::vector<std::pair<std::string, std::string>> keys = {{"bite_key_moved", "1"}};
+            if (move) keys.push_back({"class_bite_key", "B"});
+            if (SaveIniValues(keys) && move) HSM_LOG("config: class_bite_key moved from H to B (the new default)");
+        }
         if (k.size() == 1 && std::isalpha(static_cast<unsigned char>(k[0]))) c.classBiteKey = std::toupper(static_cast<unsigned char>(k[0]));
         else if (k.size() >= 2 && (k[0] == 'F' || k[0] == 'f') && std::atoi(k.c_str() + 1) >= 1 && std::atoi(k.c_str() + 1) <= 12) c.classBiteKey = VK_F1 + std::atoi(k.c_str() + 1) - 1;
-        else HSM_LOG("config: class_bite_key=%s is not a letter or F1 to F12; using H", k.c_str());
+        else HSM_LOG("config: class_bite_key=%s is not a letter or F1 to F12; using B", k.c_str());
     }
     {
         const std::string k = ReadString(ini, L"build_card_key", "K");

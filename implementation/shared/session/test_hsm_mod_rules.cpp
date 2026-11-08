@@ -524,6 +524,11 @@ int main() {
     TestLobbyView();
     TestTexts();
     TestWire();
+    // The update notice: public builds hear of public releases only; a dev-only release or a local build follows the dev ones.
+    CHECK(UpdateChannelOf(Official::Yes, false) == UpdateChannel::Public && UpdateChannelOf(Official::Yes, true) == UpdateChannel::Public);
+    CHECK(UpdateChannelOf(Official::No, false) == UpdateChannel::Dev);                                   // a local build of a public version
+    CHECK(UpdateChannelOf(Official::Unknown, true) == UpdateChannel::Dev);                               // a test build ahead of the public ones
+    CHECK(UpdateChannelOf(Official::Unknown, false) == UpdateChannel::Public);                           // an old public build past the list
     if (g_fail) { std::printf("test_hsm_mod_rules: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_mod_rules: PASS\n");
     return 0;

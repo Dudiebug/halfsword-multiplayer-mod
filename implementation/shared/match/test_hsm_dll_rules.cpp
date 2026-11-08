@@ -36,6 +36,16 @@ int main() {
     CHECK(OutsideDllFine("c:\\users\\me\\appdata\\local\\medal\\hookdll\\medalhook_9812\\medal-hook64-v2.dll"));
     CHECK(!OutsideDllFine("c:\\users\\me\\appdata\\local\\medal\\hookdll\\medalhook_9812\\speedhack.dll") && !OutsideDllFine("c:\\temp\\medal-hook64-v2.dll"));
     for (const char* p : {"c:\\users\\me\\downloads\\speedhack.dll", "c:\\programdata\\x\\cheat.dll", "c:\\temp\\gameoverlayrenderer64.dll", "c:\\temp\\discordhook64.dll", "d:\\windows\\cheat.dll", "c:\\temp\\windows\\cheat.dll"}) CHECK(!OutsideDllFine(p));
+    // Discord's overlay hides itself from the module list, so its image is named by device. With the drive back it passes as when listed.
+    const std::vector<DriveDevice> drives = {{"d:", "\\device\\harddiskvolume1"}, {"c:", "\\device\\harddiskvolume10"}, {"z:", ""}};
+    const std::string hidden = DosPathOfDeviceLower("\\device\\harddiskvolume10\\users\\me\\appdata\\local\\discord\\app-1.0.9\\modules\\discord_hook\\discordhook64.dll", drives);
+    CHECK(hidden == "c:\\users\\me\\appdata\\local\\discord\\app-1.0.9\\modules\\discord_hook\\discordhook64.dll" && OutsideDllFine(hidden));
+    CHECK(!OutsideDllFine(DosPathOfDeviceLower("\\device\\harddiskvolume10\\users\\me\\appdata\\local\\discord\\speedhack.dll", drives)));
+    CHECK(DosPathOfDeviceLower("\\device\\harddiskvolume1\\x.dll", drives) == "d:\\x.dll");
+    // Volume1 isn't the start of volume10's name, a share has no drive, and a bare device name isn't a file on it.
+    CHECK(DosPathOfDeviceLower("\\device\\harddiskvolume11\\x.dll", drives) == "\\device\\harddiskvolume11\\x.dll");
+    CHECK(DosPathOfDeviceLower("\\device\\mup\\server\\x.dll", drives) == "\\device\\mup\\server\\x.dll");
+    CHECK(DosPathOfDeviceLower("\\device\\harddiskvolume1", drives) == "\\device\\harddiskvolume1");
     // Steam installed outside Program Files, and RivaTuner wherever it was put: a player's real paths.
     for (const char* p : {"e:\\steam\\steamclient64.dll", "e:\\steam\\tier0_s64.dll", "e:\\steam\\vstdlib_s64.dll", "d:\\games\\steam\\steamclient64.dll", "e:\\steam\\steamwebrtc64.dll", "e:\\steam\\crashhandler64.dll",
                           "f:\\gpu stuff\\msi\\rivatuner statistics server\\rtsshooks64.dll"}) CHECK(OutsideDllFine(p));
@@ -70,6 +80,19 @@ int main() {
     CHECK(JudgeGameDll(win + "ue4ss\\ue4ss.dll", "82e3b900b43e0e0376144143a6391fd0a89bdd4edcf2b9b7dc246b2c0f1757b6") == DllVerdict::Fine);
     CHECK(!Ue4ssSettingsMoveMods("[Overrides]\r\n; Path\r\nModsFolderPath =\r\n;   +ModsFolderPaths = C:/MyMods\r\nControllingModsTxt =\r\n[General]\r\nHotReloadKey = R\r\n"));
     CHECK(Ue4ssSettingsMoveMods("ModsFolderPath = C:/x\r\n") && Ue4ssSettingsMoveMods("  +ModsFolderPaths = ../x\n") && Ue4ssSettingsMoveMods("ControllingModsTxt=x") && !Ue4ssSettingsMoveMods(""));
+    // Vendor-signed upscaler and frame generation files pass whatever their name or version; a lookalike name with no signature doesn't.
+    CHECK(WithSigner(DllVerdict::Changed, "NVIDIA Corporation") == DllVerdict::Fine && WithSigner(DllVerdict::Unknown, "Intel Corporation") == DllVerdict::Fine);
+    CHECK(WithSigner(DllVerdict::Unknown, "Advanced Micro Devices, Inc.") == DllVerdict::Fine);
+    CHECK(WithSigner(DllVerdict::Unknown, "") == DllVerdict::Unknown && WithSigner(DllVerdict::Changed, "") == DllVerdict::Changed);
+    CHECK(WithSigner(DllVerdict::Unknown, "NVIDIA") == DllVerdict::Unknown && WithSigner(DllVerdict::Unknown, "nvidia corporation") == DllVerdict::Unknown);
+    CHECK(WithSigner(DllVerdict::Unknown, "NVIDIA Corporation ") == DllVerdict::Unknown && WithSigner(DllVerdict::Fine, "") == DllVerdict::Fine);
+    // Unsigned graphics add-ons pass beside the exe only as the exact file that was read; the same name with other bytes doesn't.
+    CHECK(DllNeedsHash(win + "version.dll") && DllNeedsHash(win + "renodx-dlss5.addon64") && DllNeedsHash(win + "nvngx_dlssnr.dll"));
+    CHECK(JudgeGameDll(win + "version.dll", "f131734e9bf1fd191a9f60fad54231cd88e45ada3c957bd02c8763f8e9ad4440") == DllVerdict::Fine);
+    CHECK(JudgeGameDll(win + "renodx-dlss5.addon64", "79871879324053d49931a9f8c1865fcb83e8146df4a56b146d7a8a14cc7e70fe") == DllVerdict::Fine);
+    CHECK(JudgeGameDll(win + "version.dll", "00") == DllVerdict::Unknown && JudgeGameDll(win + "nvngx_dlssnr.dll", "") == DllVerdict::Unknown);
+    CHECK(JudgeGameDll(win + "winmm.dll", "f131734e9bf1fd191a9f60fad54231cd88e45ada3c957bd02c8763f8e9ad4440") == DllVerdict::Unknown);   // pinned by place too
+    CHECK(JudgeGameDll(win + "ue4ss\\version.dll", "f131734e9bf1fd191a9f60fad54231cd88e45ada3c957bd02c8763f8e9ad4440") == DllVerdict::Unknown);
     std::printf("ok\n");
     return 0;
 }

@@ -16,9 +16,9 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre39-test";
+constexpr const char* kModVersion = "0.8.0-pre40-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre39";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre40";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -36,6 +36,7 @@ struct LobbyListing {
     int maxPlayers = kMaxLobbyMembers;   // the host's player limit (hsm_max); 8 when the lobby has none
     bool locked = false;  // asks for a password (hsm_lock); the password is never listed
     LobbyPack pack;       // the modpack the host announced (hsm_pack/hsm_packv/hsm_packh); empty: none. Checked live, not here
+    bool banned = false;  // the owner is on the global ban list (session/hsm_global_bans.h): left out of the list
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
     std::string mods;     // the lobby's mod rule tag ("mods: Vanilla"), empty for the default (session/hsm_mod_rules.h LobbyRuleTag)

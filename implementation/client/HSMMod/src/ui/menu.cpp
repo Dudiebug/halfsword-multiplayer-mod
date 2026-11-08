@@ -144,7 +144,8 @@ struct State {
     // Not in a lobby: HOST on the left, the browser on the right. In one: players and chat left, the tabs right.
     Box mainRow, idleLeft, inLeft, idleRight, inRight, settingsView;
     HostView hostFriends, hostPublic;
-    Flat refresh, invite, readyUp, balance, leave, close, settingsOpen;
+    Flat refresh, invite, readyUp, balance, leave, close, settingsOpen, alone;
+    bool aloneArmed = false;
     std::array<Flat, kFilterChips> chips;
     Text browserCount, browserEmpty;
     BrowserFilter filter;                    // the chips' state, kept while the game runs
@@ -598,7 +599,7 @@ void BuildBlock(Canvas& root) {
     Text folder = NewText("", 14, style::kMenuDim);
     g.blockFolder = MakeFlat("OPEN THE FOLDER", 18);
     g.blockClose = MakeFlat("PLAY ALONE", 18);
-    g.blockTurnOff = MakeFlat("TURN THEM OFF FOR NEXT GAME", 18);
+    g.blockTurnOff = MakeFlat("TURN THEM OFF AND RESTART", 18);
     g.blockDone = NewText("", 16, style::kMenuOk);
     if (!g.block || !width || !frame || !face || !column || !buttons || !g.blockList || !title || !g.blockIntro || !easy || !manual || !folder || !g.blockFolder.card || !g.blockClose.card) {
         HSM_LOG("ui: the unsupported mods overlay could not be made; the lobby's status line still says why");
@@ -706,7 +707,11 @@ bool HandleBlock(Session& session) {
         }
         if (g.blockTurnOff.card && !(g.blockModsTxt.empty() && g.blockDlls.empty()) && Clicked(g.blockTurnOff.card)) {
             const bool ok = game::modrules::TurnOffForNextGame(g.blockModsTxt, g.blockDlls);
-            g.blockDone.Set(ok ? "Done. Restart the game to play online. Everything comes back when that game closes, and no files were deleted." : "That didn't work. Do it by hand: each line says how.");
+            // The game restarts by itself; if it can't, the player restarts it. Everything comes back when that next game closes.
+            const bool restarting = ok && session.RestartGame(false);
+            g.blockDone.Set(!ok ? "That didn't work. Do it by hand: each line says how."
+                            : restarting ? "Restarting the game without them. They come back when that game closes, and no files were deleted."
+                                         : "Done, but the game couldn't restart itself: restart it to play online. Everything comes back when that game closes.");
             if (ok) g.blockTurnOff.card.button.Show(false);
         }
         if (g.blockTurnOff.card) Paint(g.blockTurnOff.card);
@@ -1258,7 +1263,8 @@ bool BuildPanel() {
     g.settingsOpen = MakeFlat("SETTINGS", 16);
     g.classOpen = MakeFlat("YOUR CLASS", 16);
     g.reportOpen = MakeFlat("REPORT A BUG", 16);
-    AddFlatH(footer, g.close, 10); AddFlatH(footer, g.classOpen, 10); AddFlatH(footer, g.settingsOpen, 10); AddFlatH(footer, g.reportOpen, 18);
+    g.alone = MakeFlat("PLAY ALONE, MOD OFF", 16);   // restarts the game without the mod; the next ordinary start has it again
+    AddFlatH(footer, g.close, 10); AddFlatH(footer, g.classOpen, 10); AddFlatH(footer, g.settingsOpen, 10); AddFlatH(footer, g.alone, 10); AddFlatH(footer, g.reportOpen, 18);
     g.reportHow = NewText("In a fight: press Enter and type /bug and what happened. Your HSMMod log goes with it.", 13, style::kMenuDim);
     if (g.reportHow) { g.reportHow.Wrap(true); AddToHorizontalBox(footer, g.reportHow, 1, 0).Align(HAlign::Fill, VAlign::Center); }
     g.panel.Show(false);
@@ -1450,6 +1456,7 @@ void Draw(const LobbyScene& s) {
     if (g.classRow) { g.classRow.Show(!s.classLine.empty()); g.classRowText.Set(s.classLine); }
     if (g.pwHostBox) { g.pwHostBox.Show(s.hostPassword); g.pwHostNote.Set(s.passwordNote); }
     g.leave.card.button.Show(s.in);
+    g.alone.card.button.Show(!s.in);   // not from a lobby: quitting there would drop everyone in it
 
     for (size_t i = 0; i < g.modes.size() && i < s.modes.size(); ++i) {
         ModeView& v = g.modes[i];
@@ -1901,7 +1908,11 @@ void HandleClicks(Session& session) {
     auto act = [&](bool clicked, bool allowed) { bool go = clicked && allowed; acted = acted || go; return go; };
 
     // The footer.
-    if (Clicked(g.close.card)) { ClosePage(); return; }
+    if (Clicked(g.close.card)) { ClosePage(); g.aloneArmed = false; g.alone.label.Set("PLAY ALONE, MOD OFF"); return; }
+    if (act(Clicked(g.alone.card), !s.in)) {   // two clicks: the first says what happens
+        if (!g.aloneArmed) { g.aloneArmed = true; g.alone.label.Set("SURE? THE GAME RESTARTS"); }
+        else { g.aloneArmed = false; g.alone.label.Set(session.RestartGame(true) ? "RESTARTING..." : "COULDN'T RESTART (SEE LOG)"); }
+    }
     if (act(Clicked(g.settingsOpen.card), true)) { g.settingsShown = !g.settingsShown; g.classShown = false; if (!g.settingsShown) g.voice.StopBinding(); }
     if (act(Clicked(g.classOpen.card), true)) {
         g.settingsShown = false; g.voice.StopBinding();
@@ -2180,7 +2191,7 @@ void HandleClicks(Session& session) {
     }
 
     // Paint after the polls (a card's Hovered() is the one its Clicked() just saw).
-    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.settingsOpen, &g.reportOpen,
+    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.settingsOpen, &g.alone, &g.reportOpen,
                     &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.updateNow}) Paint(f->card);
     for (Flat& f : g.chips) Paint(f.card);
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Paint(h->card);

@@ -22,6 +22,10 @@ static const char* kGood =
 static std::string Swap(std::string s, const std::string& a, const std::string& b) { s.replace(s.find(a), a.size(), b); return s; }
 
 int main() {
+    // A host who chose `anything` with cheats allowed hosts with a cheat mod in: the supported list kept them out even of their own lobby.
+    CHECK(!ModListKeepsOut(ModPreset::Anything, {true, true}) && !ModListKeepsOut(ModPreset::Anything, {false, false}));
+    CHECK(ModListKeepsOut(ModPreset::MapsOnly, {true, true}) && !ModListKeepsOut(ModPreset::MapsOnly, {true, false}));
+    CHECK(ModListKeepsOut(ModPreset::Classes, {true, false}) && ModListKeepsOut(ModPreset::Unrestricted, {false, false}));
     CHECK(IsSupportedUe4ssMod("HSEnhancer") && IsSupportedUe4ssMod("Keybinds") && !IsSupportedUe4ssMod("HulkMod") && !IsSupportedUe4ssMod("AbilityFrameworkMod"));
     CHECK(IsExpectedExeDll("boost_regex-mt-x64.dll") && !IsExpectedExeDll("boost_cheat.dll") && !IsExpectedExeDll("tbbx.dll") && IsExpectedExeDll("DWMAPI.DLL") && !IsExpectedExeDll("xinput1_3.dll") && !IsExpectedExeDll("version.dll"));
 

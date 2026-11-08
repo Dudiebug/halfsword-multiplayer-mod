@@ -55,6 +55,7 @@
 #include "hsm_input.h"
 #include "hsm_inputdelay.h"
 #include "session/hsm_map_reset.h"
+#include "session/hsm_global_bans.h"
 #include "sync/hsm_remote.h"
 #include "log.h"
 #include "ue4ss_load.h"
@@ -136,6 +137,9 @@
 #include "ue/hook.h"
 #include "ue/script_hook.h"
 #include <windows.h>
+#include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 #include <array>
 #include <chrono>
 #include <deque>
@@ -479,7 +483,7 @@ public:
         pumpMs_[part] += ms;
         pumpMaxMs_[part] = std::max(pumpMaxMs_[part], ms);
     }
-    void ClearPumpCost() { pumpMs_.fill(0); pumpMaxMs_.fill(0); pumpLookups_.fill(0); driveFed_ = driveSkipped_ = 0; }
+    void ClearPumpCost() { tickPartMs_.fill(0); pumpMs_.fill(0); pumpMaxMs_.fill(0); pumpLookups_.fill(0); driveFed_ = driveSkipped_ = 0; }
 
     // " | pump ms/frame: net A streams B ... (max P x ms)": P is the part with the longest single run in the window.
     std::string PumpLine(double frames) const {
@@ -613,12 +617,16 @@ public:
             game::shareddice::Install();
         }
         if (!selfTestOk_) return;
+        // Where the rest of the tick goes: the pump parts cover about 1 ms a frame of a mod tick that averaged 3 to 8 ms in the
+        // 2026-11-05 playtest. Each lap adds the time since the last one to its part (only while the health line samples).
+        TickLaps laps(*this);
         if (steamMode()) { lobby_.Tick(); game::modpack::Tick(lobby_); game::modrules::LobbyTick(lobby_); }
         if (steamMode()) LobbyPlayersTick();
         if (steamMode()) MigrationTick();
         if (SteamServer()) ServerLobbyTick();
         // Level change first: everything after this point must use the current world, never the old game mode.
         bool levelChanged = gameMode != lastGameMode_;
+        laps.Lap(TickPart::Lobby);
         if (levelChanged) FlushReflectionCache();     // the old level's classes are gone (again each retry: harmless)
         if (levelChanged) ShowProfilerMessage(ue::prof::StopCapture());
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
@@ -635,13 +643,17 @@ public:
             if (done) HSM_LOG("session: menu level: cursor and UI input given back");
         }
         TickWolverineReload();
+        laps.Lap(TickPart::Setup);
         if (!inFight_) ui::Tick(*this, gameMode);   // the main menu exists only in menu levels (its scan walks every object)
         else if (FighterLevel()) ui::LeaveMenus();
+        laps.Lap(TickPart::Menu);
         if (net_ && FighterLevel()) { TickOwnBuild(); TickStockFlags(); }
         if (FighterLevel()) { ClassStatsTick(); GuestClassTick(); ClassLookTick(); }
         EnsureLocalFighter();
         test::Tick(adapter_, InFightLevel(), dt);
+        laps.Lap(TickPart::Fighter);
         if (cfg_.record) recorder_.Tick(adapter_, gameMode, FighterLevel(), currentLevel_, adapter_.PlayerWillie(0), dt);
+        laps.Lap(TickPart::Recorder);
         ApplyHeldInput();
         if (mirror_.Active() && net_) mirror_.Command({"off"}, adapter_, true, InFightLevel());   // offline bench only
         mirror_.Tick(adapter_, dt);
@@ -674,7 +686,9 @@ public:
             if (!IsHost() || !ModerationLine(*line, 0, false)) SendChat(*line);
         if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
         if (!net_) { if (localFighter_) VoiceIdleTick(); ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
+        laps.Lap(TickPart::Guards);
         if (IsHost()) HostTick(dt); else ClientTick(dt);
+        laps.Lap(TickPart::Net);
         AbyssTick();
         VoiceTick();
         TintTick();
@@ -695,6 +709,7 @@ public:
             if (!typing) pauseMenuWas_ = menu;
         }
         if (net_) { BenchedBodyTick(); SpectateTick(); }
+        laps.Lap(TickPart::Voice);
         // Once a game run, in the first session fight: how to report a bug (the relay must be set).
         if (bugHintAt_ && NowMs() >= bugHintAt_) {
             bugHintAt_ = 0; bugHintShown_ = true;
@@ -715,13 +730,28 @@ public:
         ui::ChatTick(hud);
         if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && !ui::Typing() && cfg_.buildCards) ui::BuildCardToggle();
         ui::BuildCardTick(hud.visible);
+        laps.Lap(TickPart::Hud);
         CardCheckTick();
         ClassRuleTick();
         SelfRuleTick();
         HostRuleTick();
         ClawWeaponTick();
         ClawMirrorTick();
+        laps.Lap(TickPart::Rules);
     }
+    enum class TickPart : uint8_t { Lobby, Setup, Menu, Fighter, Recorder, Guards, Net, Voice, Hud, Rules, Count };
+    static constexpr const char* kTickPartNames[] = {"lobby", "setup", "menu", "fighter", "recorder", "guards", "net", "voice", "hud", "rules"};
+    std::array<double, size_t(TickPart::Count)> tickPartMs_{};
+    struct TickLaps {
+        SessionImpl& s; std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+        explicit TickLaps(SessionImpl& owner) : s(owner) {}
+        void Lap(TickPart p) {
+            if (!s.sampling_ || s.tickMs_.size() >= kFrameSamples) return;
+            const auto now = std::chrono::steady_clock::now();
+            s.tickPartMs_[size_t(p)] += std::chrono::duration<double, std::milli>(now - t).count();
+            t = now;
+        }
+    };
 
     // Each Steam session's route (direct or through which Valve relay), the first time it is seen and whenever it changes:
     // a high ping on a relayed pair is the route, not the distance (steam/hsm_steam_route.h).
@@ -932,6 +962,9 @@ public:
                           double(rc.misses - lookupMissesAtWindow_) / frames);
             line += b;
             line += PumpLine(frames);
+            line += " | tick parts ms/frame:";
+            for (size_t i = 0; i < tickPartMs_.size(); ++i) { std::snprintf(b, sizeof b, " %s %.2f", kTickPartNames[i], tickPartMs_[i] / frames); line += b; }
+            tickPartMs_.fill(0);
             if (driveFed_ + driveSkipped_) {   // axis events played on other players' fighters (drive_lean spares some)
                 std::snprintf(b, sizeof b, " | drive events fed %.1f skipped %.1f /frame", double(driveFed_) / frames, double(driveSkipped_) / frames);
                 line += b;
@@ -1897,6 +1930,35 @@ public:
     }
     bool HelpImprove() const override { return cfg_.helpImprove; }
     bool HelpImproveAsked() const override { return cfg_.helpImproveAsked; }
+    // A new copy of the game, then this one quits. With modOff it gets -hsmrole=off for that launch only, so the mod is back the next
+    // time the game starts the ordinary way. It waits for this one to close (-hsmwaitfor), so the two never share the mod's files and
+    // this one's exit puts back what it set aside first. Steam's variables come with the environment.
+    bool RestartGame(bool modOff) override {
+        wchar_t exe[MAX_PATH * 2] = {};
+        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
+        if (!n || n >= MAX_PATH * 2) return false;
+        const std::string args = RelaunchArgs(CommandLineUtf8(), GetCurrentProcessId(), modOff);
+        const char* what = modOff ? "play alone with the mod off" : "restart";
+        const int w = MultiByteToWideChar(CP_UTF8, 0, args.c_str(), -1, nullptr, 0);
+        if (w <= 0) return false;
+        std::wstring wide(size_t(w), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, args.c_str(), -1, wide.data(), w);
+        wide.pop_back();
+        std::wstring line = L"\"" + std::wstring(exe) + L"\" " + wide;
+        std::wstring dir(exe, n);
+        dir.resize(dir.find_last_of(L"\\/") + 1);
+        STARTUPINFOW si{}; si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(exe, line.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi)) {
+            HSM_LOG("session: %s: could not start the game (error %lu)", what, GetLastError());
+            return false;
+        }
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        HSM_LOG("session: %s: started the game (pid %lu) with %s; quitting this one", what, pi.dwProcessId, args.c_str());
+        quitRequested_ = true;
+        quitWhy_ = modOff ? "restarting with the mod off" : "restarting";
+        return true;
+    }
     void SetHelpImprove(bool on) override {
         cfg_.helpImprove = on;
         hitProbe_.SetOn(on);
@@ -2146,6 +2208,52 @@ private:
         cache[path] = {stamp, hex};
         return hex;
     }
+    // The publisher on a file's Authenticode signature when Windows says it's valid, else empty. wintrust and crypt32 are loaded when first
+    // needed (the mod's imports stay what a stock system has). No revocation check: that would go online. Kept until the file changes.
+    static std::string ValidSignerOf(const std::wstring& path) {
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return {};
+        const unsigned long long stamp = (static_cast<unsigned long long>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+        static std::mutex lock;
+        static std::map<std::wstring, std::pair<unsigned long long, std::string>> cache;
+        {
+            std::lock_guard<std::mutex> hold(lock);
+            auto it = cache.find(path);
+            if (it != cache.end() && it->second.first == stamp) return it->second.second;
+        }
+        using VerifyFn = LONG(WINAPI*)(HWND, GUID*, LPVOID);
+        using ProvFn = void*(WINAPI*)(HANDLE);
+        using SignerFn = void*(WINAPI*)(void*, DWORD, BOOL, DWORD);
+        using NameFn = DWORD(WINAPI*)(const void*, DWORD, DWORD, void*, LPWSTR, DWORD);
+        static const HMODULE wt = LoadLibraryW(L"wintrust.dll");
+        static const HMODULE cr = LoadLibraryW(L"crypt32.dll");
+        static const auto verify = wt ? reinterpret_cast<VerifyFn>(GetProcAddress(wt, "WinVerifyTrust")) : nullptr;
+        static const auto provData = wt ? reinterpret_cast<ProvFn>(GetProcAddress(wt, "WTHelperProvDataFromStateData")) : nullptr;
+        static const auto provSigner = wt ? reinterpret_cast<SignerFn>(GetProcAddress(wt, "WTHelperGetProvSignerFromChain")) : nullptr;
+        static const auto certName = cr ? reinterpret_cast<NameFn>(GetProcAddress(cr, "CertGetNameStringW")) : nullptr;
+        std::string signer;
+        if (verify && provData && provSigner && certName) {
+            WINTRUST_FILE_INFO file{}; file.cbStruct = sizeof file; file.pcwszFilePath = path.c_str();
+            WINTRUST_DATA data{}; data.cbStruct = sizeof data; data.dwUIChoice = WTD_UI_NONE; data.fdwRevocationChecks = WTD_REVOKE_NONE;
+            data.dwUnionChoice = WTD_CHOICE_FILE; data.pFile = &file; data.dwStateAction = WTD_STATEACTION_VERIFY;
+            data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
+            GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+            if (verify(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data) == 0) {
+                auto* prov = static_cast<CRYPT_PROVIDER_DATA*>(provData(data.hWVTStateData));
+                auto* sgnr = prov ? static_cast<CRYPT_PROVIDER_SGNR*>(provSigner(prov, 0, FALSE, 0)) : nullptr;
+                if (sgnr && sgnr->csCertChain && sgnr->pasCertChain && sgnr->pasCertChain[0].pCert) {
+                    wchar_t name[256] = {};
+                    certName(sgnr->pasCertChain[0].pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, name, 256);
+                    signer = Utf8Of(name);
+                }
+            }
+            data.dwStateAction = WTD_STATEACTION_CLOSE;
+            verify(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+        }
+        std::lock_guard<std::mutex> hold(lock);
+        cache[path] = {stamp, signer};
+        return signer;
+    }
     static std::string Utf8Of(const wchar_t* w) {
         char out[MAX_PATH * 3] = {};
         WideCharToMultiByte(CP_UTF8, 0, w, -1, out, sizeof out, nullptr, nullptr);
@@ -2212,7 +2320,13 @@ private:
             const std::string rel = lower.substr(rootLower.size());
             bool found = false;
             const bool dxgi = rel == std::string(kWin64Dir) + "dxgi.dll";
-            const DllVerdict v = JudgeGameDll(rel, DllNeedsHash(rel) ? HashFile(path) : std::string(), dxgi && LooksLikeKnownDxgi(ReadWholeFile(path, found)));
+            DllVerdict v = JudgeGameDll(rel, DllNeedsHash(rel) ? HashFile(path) : std::string(), dxgi && LooksLikeKnownDxgi(ReadWholeFile(path, found)));
+            if (v != DllVerdict::Fine) {
+                const std::string signer = ValidSignerOf(path);
+                v = WithSigner(v, signer);
+                if (static std::set<std::string> logged; logged.insert(lower).second)
+                    HSM_LOG("rules: %s is %s (signed by %s)", file.c_str(), v == DllVerdict::Fine ? "fine" : "not allowed", signer.empty() ? "nobody valid" : signer.c_str());
+            }
             if (v == DllVerdict::Fine) return;
             if (loaded && v == DllVerdict::Unknown && slash != std::string::npos) {   // a copy just lying there isn't HS Enhancer running
                 // HS Enhancer's loader, under any name. It counts as HS Enhancer, and earns nothing else: a chainloader could copy the text.
@@ -2263,6 +2377,14 @@ private:
         wchar_t localAppData[MAX_PATH] = {};
         if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH)) paksIn(std::wstring(localAppData) + L"\\HalfswordUE5\\Saved\\Paks\\");
         // An image in memory the module list doesn't name was hidden from it. Windows maps some files this way for itself, so where it's from still counts.
+        // The mapped name is a device path (\Device\HarddiskVolume3\...): with its drive letter back, the overlays that hide themselves
+        // (Discord's) pass by the same rules as when they're listed.
+        std::vector<DriveDevice> drives;
+        for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
+            const wchar_t drive[3] = {letter, L':', 0};
+            wchar_t target[MAX_PATH] = {};
+            if (QueryDosDeviceW(drive, target, MAX_PATH)) drives.push_back({DllPathLower(Utf8Of(drive)), DllPathLower(Utf8Of(target))});
+        }
         MEMORY_BASIC_INFORMATION mbi{};
         for (const char* at = nullptr; VirtualQuery(at, &mbi, sizeof mbi) == sizeof mbi; at = static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize) {
             if (mbi.Type != MEM_IMAGE || mbi.AllocationBase != mbi.BaseAddress || listed.count(mbi.BaseAddress)) continue;
@@ -2271,8 +2393,13 @@ private:
             const std::string lower = DllPathLower(Utf8Of(device));
             if (lower.find("\\windows\\") != std::string::npos || lower.find("\\program files") != std::string::npos || lower.find("\\programdata\\microsoft\\") != std::string::npos) continue;
             if (lower.find(".mui") != std::string::npos) continue;
+            const std::string dos = DosPathOfDeviceLower(lower, drives);
+            if (dos.rfind(rootLower, 0) != 0 && OutsideDllFine(dos, windowsLower, steamLower, steamClientLower)) {
+                if (static std::set<std::string> logged; logged.insert(dos).second) HSM_LOG("rules: a hidden module in memory, allowed by where it is: %s", dos.c_str());
+                continue;
+            }
             const std::string name = Utf8Of(device + (std::wstring(device).find_last_of(L"\\/") + 1));
-            HSM_LOG("rules: a hidden module in memory: %s", name.c_str());
+            if (static std::set<std::string> logged; logged.insert(dos).second) HSM_LOG("rules: a hidden module in memory: %s (%s)", name.c_str(), dos.c_str());
             scan.game.push_back(name + " (hidden)");
         }
         return scan;
@@ -2487,6 +2614,7 @@ private:
     mutable std::string lastBlockLog_;
     void LogBlockOnce(const std::string& line) const { if (line != lastBlockLog_) { lastBlockLog_ = line; HSM_LOG("%s", line.c_str()); } }
     std::string OnlineBlockReason(ModPreset preset, LobbyBlock rule) const {
+        if (GloballyBanned(steam::MySteamId())) { LogBlockOnce("rules: this account is banned from HalfSwordMP"); return "This Steam account is banned from HalfSwordMP online play. You can still play alone."; }
         const bool classes = IsClassesPreset(preset);
         if (!classes && !rule.allLobbies) return {};
         std::vector<std::string> names;
@@ -2497,7 +2625,8 @@ private:
         names = scan.game;
         for (const std::string& n : listed.unsupported) if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
         names.insert(names.end(), scan.outside.begin(), scan.outside.end());
-        if (!names.empty()) {
+        if (!names.empty() && !ModListKeepsOut(preset, rule)) LogBlockOnce("rules: the lobby's mod rule is anything: not checking " + names[0] + (names.size() > 1 ? " and the rest" : ""));
+        else if (!names.empty()) {
             std::string list;
             for (size_t i = 0; i < names.size() && i < 3; ++i) list += (i ? ", " : "") + names[i];
             if (names.size() > 3) list += " and " + std::to_string(names.size() - 3) + " more";
@@ -2615,7 +2744,7 @@ private:
             }
             return err("unknown action");
         }
-        if (c.verb == "quit") { quitRequested_ = true; return ok(); }
+        if (c.verb == "quit") { quitRequested_ = true; quitWhy_ = "agent request"; return ok(); }
         if (c.verb == "widgets") return WidgetsJson();
         if (c.verb == "pause" && c.args.size() == 1) { adapter_.SetGamePaused(c.args[0] == "on"); return ok(); }
         if (c.verb == "prof") return ue::prof::Command(c.args);
@@ -2705,7 +2834,7 @@ private:
             }
         }
         if (quitRequested_ || (quitAfterMs_ && now - startedAt_ >= quitAfterMs_)) {
-            HSM_LOG("session: quitting (%s)", quitRequested_ ? "agent request" : "-hsmquit timer");
+            HSM_LOG("session: quitting (%s)", quitRequested_ ? quitWhy_ : "-hsmquit timer");
             quitRequested_ = false; quitAfterMs_ = 0;
             adapter_.QuitGame();
             return;
@@ -5171,7 +5300,11 @@ private:
         std::optional<uint8_t> slot;
         bool rejoined = false;
         uint64_t key = ev.steamId ? ev.steamId : (uint64_t(1) << 63) | ev.peer;
-        if (h.revision != kProtocolRevision) r.reason = RejectReason::BadRevision;
+        if (GloballyBanned(ev.steamId)) {   // banned from every lobby, whatever build they run
+            r.reason = RejectReason::Banned;
+            HSM_LOG("rules: refused %s: banned from HalfSwordMP", util::StripControlChars(h.name).c_str());
+        }
+        else if (h.revision != kProtocolRevision) r.reason = RejectReason::BadRevision;
         else if (h.buildKey != BuildKey()) r.reason = RejectReason::BuildMismatch;
         else if (const BuildGate bg = ModRulesOn() ? CheckJoinBuild(game::ModBuild(), h.modBuild, game::AllowBuildMismatch()) : BuildGate::Ok; bg != BuildGate::Ok) {
             r.reason = RejectReason::ModBuild;   // mod rules 4a: the same HSMMod build hash (PR #9), unless allow_build_mismatch=1
@@ -8858,6 +8991,7 @@ private:
     // agent bridge / auto-run
     std::array<Held, kAxisCount> held_{};
     bool quitRequested_ = false, automated_ = false;
+    const char* quitWhy_ = "agent request";
     uint32_t startedAt_ = 0, quitAfterMs_ = 0, nextAuto_ = 0, lastModeTick_ = 0, lastEarlyPump_ = 0, lastPauseCheck_ = 0, noPawnSince_ = 0;
     std::string autoLevel_;
     std::vector<std::string> mirrorArgs_;           // -hsmmirror as a "mirror on ..." command; empty when not given
@@ -8919,7 +9053,7 @@ bool StartMod(const Config& cfg) {
     game::modrules::Configure(cfg);
     report::Configure(cfg.reports, cfg.reportUrl);
     game::modpack::SetConfigured(cfg.modPack);
-    update::Start(cfg.updateCheck);   // a worker thread; the menu page and UpdateNoticeTick show the result
+    update::Start(cfg.updateCheck, cfg.reportUrl);   // a worker thread; the menu page and UpdateNoticeTick show the result
     g_session = new SessionImpl(cfg);
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));

@@ -16,6 +16,10 @@
 
 namespace hsm {
 
+// Bite's key moved from H to B. An INI still on H moves once: the mod marks it bite_key_moved=1 the first time it reads it, so a
+// player who picks H again afterwards keeps it.
+inline bool BiteKeyMovesToB(std::string_view key, std::string_view moved) { return moved != "1" && (key == "H" || key == "h"); }
+
 constexpr double kRuleStatMin = 0.10, kRuleMassMin = 0.50, kRuleMassMax = 5.00, kRuleMassStep = 0.50, kRuleStatMax = 2.00;   // every multiplier in force, 1.0 being the game's own
 constexpr double kRuleEarnFloor = 0.70;                         // lowering a stat past this earns no more power
 constexpr double kRulePairGap = 0.10;                           // run and walk: how far one's lowering pays past the other
@@ -417,7 +421,7 @@ inline const char* ClassFieldInfo(int i) {
         case 3: return "A bigger, more muscular build in fights, from Half Wolverine, and the strongest grip and lift there is. Costs 40 power.";
         case 4: return "You ignore pain and its effects, so hits don't slow you down. Very strong: it costs 100 power, so you have to give up a lot for it.";
         case 5: return "Removes the wait between kicks, so you can kick again straight away. Costs 25 power.";
-        case 6: return "Adds a bite attack on your bite key, H unless you've changed it. Press once to bite and again to let go. Costs 5 power.";
+        case 6: return "Adds a bite attack on your bite key, B unless you've changed it. Press once to bite and again to let go. Costs 5 power.";
         case 7: return "Your joints can't be dislocated. Costs 20 power.";
         case 8: return "How fast you run. Most fighting happens at a walk, so this costs and earns less than WALK. Lowering it earns nothing while WALK is raised, and pays fully only when WALK comes down too.";
         case 9: return "How fast you walk, your main speed in a fight, so this costs and earns more than RUN. Lowering it earns nothing while RUN is raised, and pays fully only when RUN comes down too.";

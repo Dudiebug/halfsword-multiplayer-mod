@@ -8,6 +8,8 @@ static int g_fail = 0;
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #x); ++g_fail; } } while (0)
 
 int main() {
+    // Bite: H, the old default, moves to B once; a key the player chose, or H after the move, stays.
+    CHECK(BiteKeyMovesToB("H", "") && BiteKeyMovesToB("h", "0") && !BiteKeyMovesToB("H", "1") && !BiteKeyMovesToB("G", "") && !BiteKeyMovesToB("F5", ""));
     // The built-ins keep the power the launcher's versions had, and all fit the rules.
     struct Want { const char* name; double power; };
     for (const Want& w : {Want{"Man-at-Arms", 0}, {"Revenant", 12.75}, {"Barber-Surgeon", 5.5}, {"Crusader", -9.75}, {"Pugilist", -10.5}, {"Footpad", 12.25}, {"Knight", 11.5}, {"Flagellant", 7.0}, {"Wrestler", 11.0}, {"Pilgrim", 10.5}, {"Veteran", 13.0}, {"Verity", 15.0}, {"Wulf", 11.5}, {"Ironside", 5.75}, {"Old Scar", 5.0}}) {

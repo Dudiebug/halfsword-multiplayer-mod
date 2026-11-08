@@ -6,6 +6,7 @@
 #include "log.h"
 #include "match/hsm_build_card.h"
 #include "session/hsm_build.h"
+#include "session/hsm_global_bans.h"
 #include "session/hsm_password.h"
 #include "session/hsm_player_limit.h"
 #include "ue/engine.h"
@@ -118,7 +119,7 @@ void Lobby::Tick() {
                 break;
             case steam::Event::LobbyList: {
                 listings_.clear();
-                for (steam::SteamId id : e.lobbies) listings_.push_back(Describe(id));
+                for (steam::SteamId id : e.lobbies) if (LobbyListing l = Describe(id); !l.banned) listings_.push_back(std::move(l));
                 std::stable_sort(listings_.begin(), listings_.end(), [](const LobbyListing& a, const LobbyListing& b) { return a.compatible > b.compatible; });
                 SetStatus(e.ok ? std::to_string(listings_.size()) + " public lobbies found" : "Could not list lobbies");
                 break;
@@ -148,7 +149,9 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     l.players = int(members.size()) - (server && !members.empty() ? 1 : 0);
     l.maxPlayers = ParsePlayerLimit(steam::LobbyData(lobby, "hsm_max"));   // peer-written; an old lobby has none: 8
     std::string proto = steam::LobbyData(lobby, "hsm_proto"), build = steam::LobbyData(lobby, "hsm_build");
+    l.banned = GloballyBanned(steam::LobbyOwner(lobby));   // Steam names the owner once the lobby is joined, and often in the list
     if (proto.empty()) l.reason = "not a HalfSwordMP lobby";
+    else if (l.banned) l.reason = "the host is banned from HalfSwordMP";
     else if (proto != ProtocolStr()) l.reason = "different mod version (host " + steam::LobbyData(lobby, "hsm_ver") + ", you " + kModVersion + ")";
     else if (build != BuildKeyHex()) l.reason = "different game version";
     else if (LobbyIsFull(l.players, l.maxPlayers) && std::find(members.begin(), members.end(), steam::MySteamId()) == members.end())

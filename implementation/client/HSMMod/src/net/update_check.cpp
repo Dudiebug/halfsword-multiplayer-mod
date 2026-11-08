@@ -19,6 +19,7 @@ namespace {
 constexpr const char kRepo[] = "Dudiebug/halfsword-multiplayer-mod";
 
 std::atomic<bool> g_started{false};
+std::string g_devUrl;   // report_url: the relay answers the dev releases (GET /v1/releases/dev), which need a GitHub login
 std::mutex g_mu;
 std::string g_notice;
 bool g_chatShown = false;
@@ -46,6 +47,37 @@ std::string Reason(const net::HttpResponse& r, const char* host = "api.github.co
     return "GitHub answered " + std::to_string(r.status);
 }
 
+// A build that isn't its public release's own file (a dev-only release, or a local build) hears of dev releases instead, from the
+// relay. Their downloads are private, so it's a notice only, with no UPDATE NOW.
+void CheckDev(const Version& running, const std::string& cur) {
+    std::string rest = g_devUrl.rfind("https://", 0) == 0 ? g_devUrl.substr(8) : std::string();
+    const size_t slash = rest.find('/');
+    const std::string host = rest.substr(0, slash);
+    std::string base = slash == std::string::npos ? "" : rest.substr(slash);
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    bool ok = !host.empty();
+    for (char ch : host + base)
+        ok = ok && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '/' || ch == '_');
+    if (!ok) { HSM_LOG("update: dev build, no dev release check (report_url is not https://host)"); return; }
+    net::HttpRequest req;
+    req.host = net::Wide(host);
+    req.path = net::Wide(base + "/v1/releases/dev");
+    req.headers = L"Accept: application/json";
+    req.agent = L"HSMMod/" + net::Wide(cur);
+    req.maxBody = kMaxReleasesJson;
+    req.timeoutMs = 15000;
+    const net::HttpResponse r = net::Http(req);
+    if (r.fail != net::HttpResponse::Fail::None || r.status != 200) { HSM_LOG("update: dev build, dev release check failed (%s)", Reason(r, host.c_str()).c_str()); return; }
+    const ReleaseList list = ParseReleases(r.body);
+    if (list.releases.empty() && !list.complete) { HSM_LOG("update: dev build, dev release check failed (the answer was not a release list)"); return; }
+    const std::optional<UpdateOffer> offer = NewestOffer(list.releases, running);
+    if (!offer) { HSM_LOG("update: dev build, up to date with the dev releases (%s)", cur.c_str()); return; }
+    const std::string latest = FormatVersion(offer->version);
+    HSM_LOG("update: dev build: HSMMod %s is out on the dev repo (this is %s)", latest.c_str(), cur.c_str());
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_notice = "Test build HSMMod " + latest + " is out (you have " + cur + "). Get it from the dev repo's releases.";
+}
+
 void Check() {
     const std::optional<Version> running = RunningVersion(game::kModVersion);
     if (!running) { HSM_LOG("update: check failed (this build's version %s is not known)", game::kModVersion); return; }
@@ -69,6 +101,11 @@ void Check() {
         g_official.store(uint8_t(o));
         HSM_LOG("update: this build is %s%s", OfficialName(o), known ? "" : " (no release digest for this version)");
     }
+
+    bool ahead = true;   // newer than every public release: a dev-only build
+    for (const ReleaseInfo& rel : list.releases)
+        if (const std::optional<Version> v = ParseVersion(rel.tag); v && !rel.draft && CompareVersion(*v, *running) >= 0) ahead = false;
+    if (UpdateChannelOf(Official(g_official.load()), ahead) == UpdateChannel::Dev) { CheckDev(*running, cur); return; }
 
     const std::optional<UpdateOffer> offer = NewestOffer(list.releases, *running);
     if (!offer) { HSM_LOG("update: up to date (%s)", cur.c_str()); return; }
@@ -230,7 +267,8 @@ void RemoveLeftovers() {
 }
 }  // namespace
 
-void Start(bool enabled) {
+void Start(bool enabled, const std::string& devUrl) {
+    g_devUrl = devUrl;
     RemoveLeftovers();
     if (!enabled) { HSM_LOG("update: check off (update_check=0)"); return; }
     if (g_started.exchange(true)) return;
