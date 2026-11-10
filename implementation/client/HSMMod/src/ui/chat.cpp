@@ -3,6 +3,7 @@
 #include "ui/skin.h"
 #include "match/hsm_hud_style.h"
 #include "hsm_chat.h"
+#include "gameplay/fetch_link.h"
 #include "log.h"
 #include <windows.h>
 #include <array>
@@ -348,6 +349,10 @@ void ChatTick(const HudScene& m) {
         d.swallowVk = 0;
         d.stale = true;
         if (d.session.typing()) Feed(!Foreground() ? hsm::ChatEvent::FocusLost : hsm::ChatEvent::HudHidden, now);
+    } else if (!d.session.typing() && game::fetchlink::KeysHeld()) {
+        // Fetch's menu has the keyboard: the chat key is Fetch's, and what is pressed meanwhile is forgotten when it closes
+        // (Drain). A line already being typed is left as it is (Fetch closes its menu then).
+        d.stale = true;
     } else {
         if (d.stale) { Drain(); d.stale = false; }
         if (d.pending) OpenPending(now);

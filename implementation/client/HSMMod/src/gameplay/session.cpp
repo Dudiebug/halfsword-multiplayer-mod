@@ -27,6 +27,7 @@
 #include "gameplay/hit_probe.h"
 #include "gameplay/combat_sync.h"
 #include "gameplay/equip_sync.h"
+#include "gameplay/fetch_link.h"
 #include "gameplay/fx_sync.h"
 #include "gameplay/gear.h"
 #include "gameplay/grab_sync.h"
@@ -494,7 +495,7 @@ public:
     // The profiler's hotkey and frame mark (every game mode tick; PumpAgentEarly polls the key, every 50 ms, while none ticks).
     void ProfilerTick(bool frame) {
         std::string msg = frame ? ue::prof::Frame() : std::string();
-        if (msg.empty() && !ui::Typing()) msg = ue::prof::PollHotkey();
+        if (msg.empty() && !ui::Typing() && !game::fetchlink::KeysHeld()) msg = ue::prof::PollHotkey();
         ShowProfilerMessage(msg);
     }
     void ShowProfilerMessage(const std::string& msg) {
@@ -607,6 +608,14 @@ public:
             game::shareddice::Install();
         }
         if (!selfTestOk_) return;
+        // Fetch (dsound.dll) on the link page: what this mod is doing, in the menus and solo play too, and whether Fetch's
+        // menu has the keyboard, before any of the mod's keys are read below (gameplay/fetch_link.h).
+        {
+            interop::HsmFacts link;
+            link.inLobby = lobby_.InLobby(); link.joined = InSession(); link.isHost = IsHost(); link.hostPhysics = HostPhysics();
+            link.typing = ui::Typing() || ui::MenuTyping();
+            game::fetchlink::Tick(link, uint32_t(std::isfinite(dt) ? std::clamp(dt, 0.f, 10.f) * 1000.f : 0.f));
+        }
         // Where the rest of the tick goes: the pump parts cover about 1 ms a frame of a mod tick that averaged 3 to 8 ms in the
         // 2026-11-05 playtest. Each lap adds the time since the last one to its part (only while the health line samples).
         TickLaps laps(*this);
@@ -728,7 +737,7 @@ public:
         HudScene hud = BuildHud();
         ui::HudTick(hud, NameTags(hud), Format(info_.format), CtfMarkers(hud));
         ui::ChatTick(hud);
-        if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && !ui::Typing() && cfg_.buildCards) ui::BuildCardToggle();
+        if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && !ui::Typing() && !game::fetchlink::KeysHeld() && cfg_.buildCards) ui::BuildCardToggle();
         ui::BuildCardTick(hud.visible);
         laps.Lap(TickPart::Hud);
         CardCheckTick();
@@ -3484,7 +3493,7 @@ private:
         UObject* const me = adapter_.PlayerWillie(0);
         if (applies && picked->noPain) adapter_.ClearPain(me);
         // The game's own bite: one press starts it and the next ends it (Willie_BP Bite Event).
-        if (const SHORT key = GetAsyncKeyState(cfg_.classBiteKey); (key & 1) && applies && picked->bite && me && !ui::Typing()) {
+        if (const SHORT key = GetAsyncKeyState(cfg_.classBiteKey); (key & 1) && applies && picked->bite && me && !ui::Typing() && !game::fetchlink::KeysHeld()) {
             Call(me, "Bite Event").invoke();
             HSM_LOG("classes: bite");
         }
@@ -3859,6 +3868,7 @@ private:
             // What I pressed while it was held never reached my fighter: the difference is played now.
             const uint32_t held = capture_.buttons(), diff = held ^ nativeButtons_;
             int fired = 0;
+            const game::fetchlink::Replaying replaying;   // Fetch's recorder saw these when they were pressed
             for (size_t i = 0; i < kActionCount; ++i) {
                 const Action a = Action(i);
                 if (!((diff >> i) & 1u) || a == Action::ToggleCameraLock || a == Action::MiddleMouse) continue;
@@ -4156,6 +4166,7 @@ private:
         if (delay <= 0) delayedIn_.Clear();
     }
     void ReplayDelayed(UObject* me, const DelayedInput::Out& o) {
+        const game::fetchlink::Replaying replaying;   // Fetch's recorder saw these when they were pressed
         replayingDelayed_ = true;   // the hook lets these through
         for (const auto& [act, pressed] : o.actions) {
             adapter_.FireAction(me, Action(act), pressed);
@@ -6474,7 +6485,7 @@ private:
         const bool coop = act == GiveUpAction::GiveUpFight;
         const bool claim = act == GiveUpAction::ClaimWin;   // a Progression fight won: G goes on (the next round or the Tavern)
         const bool waiting = act == GiveUpAction::Waiting;
-        if (MatchLevel() && act != GiveUpAction::None && !ui::Typing()) {
+        if (MatchLevel() && act != GiveUpAction::None && !ui::Typing() && !game::fetchlink::KeysHeld()) {
             if (GetAsyncKeyState('G') & 0x8000) {   // the key first: asking whose window is in front is the dearer call
                 DWORD pid = 0;
                 if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
@@ -7058,7 +7069,7 @@ private:
         l.host = hostHasFighter_ ? Roster::EntityForSlot(kHostSlot) : uint8_t(0);   // no HOST badge when the host has no fighter
         l.infoAtMs = infoAt_;            // MatchInfo comes once a second; the scene runs its clocks on between
         l.dead = ownDiedAt_ != 0; l.diedAtMs = ownDiedAt_;
-        l.tab = ui::HudTabHeld();
+        l.tab = ui::HudTabHeld() && !game::fetchlink::KeysHeld();
         l.oneFight = oneFight_;
         if (const MapInfo* map = FindMap(currentLevel_)) l.map = map->display;
         l.banner = banner_.shot();
@@ -7341,11 +7352,11 @@ private:
         UObject* a = IsHost() ? EntityActor(e) : ClientActor(e);
         return a && adapter_.BoneLocation(a, "head", out);
     }
-    // The game window in front and nobody typing: push to talk may read its key.
+    // The game window in front, nobody typing and Fetch's menu shut: push to talk may read its key.
     static bool VoiceKeyAllowed() {
         DWORD pid = 0;
         if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
-        return pid == GetCurrentProcessId() && !ui::Typing();
+        return pid == GetCurrentProcessId() && !ui::Typing() && !game::fetchlink::KeysHeld();
     }
     game::VoiceSettings VoiceSettingsFromConfig() const {
         game::VoiceSettings s;
@@ -7563,7 +7574,7 @@ private:
         const bool wasFree = camState_.free();
         camState_.SetAllowed(IsHost() ? match_.config().freeCam : info_.freeCam != 0);   // the host turning it off ends a flight at once
         bool ours = false;
-        if (!ui::Typing() && !adapter_.PauseMenuOpen()) {
+        if (!ui::Typing() && !adapter_.PauseMenuOpen() && !game::fetchlink::KeysHeld()) {
             DWORD pid = 0;
             if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
             ours = pid == GetCurrentProcessId();
@@ -7635,7 +7646,7 @@ private:
         }
         spectate_.Refresh(me, myTeam, cands);
         bool right = GetAsyncKeyState(VK_RIGHT) & 0x8000, left = GetAsyncKeyState(VK_LEFT) & 0x8000;
-        if ((right || left) && (ui::Typing() || adapter_.PauseMenuOpen())) right = left = false;   // arrows belong to the chat / menu
+        if ((right || left) && (ui::Typing() || adapter_.PauseMenuOpen() || game::fetchlink::KeysHeld())) right = left = false;   // arrows belong to the chat / menu / Fetch's menu
         if (right || left) {   // the keys first: asking whose window is in front costs more
             DWORD pid = 0;
             if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);

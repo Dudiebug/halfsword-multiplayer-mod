@@ -17,9 +17,9 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre43-test";
+constexpr const char* kModVersion = "0.8.0-pre44-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre43";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre44";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.

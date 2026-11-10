@@ -1,5 +1,6 @@
 #include "ui/mp_widgets.h"
 #include "ui/skin.h"
+#include "gameplay/fetch_link.h"
 #include "gameplay/session.h"
 #include "match/hsm_hud_style.h"
 #include "log.h"
@@ -198,6 +199,7 @@ void VoiceBlock::PollBinding(Session& session, const MpVoice& v) {
 void VoiceBlock::Tick(Session& session) {
     if (!root_) return;
     MpVoice v = session.VoiceView();
+    if (binding_ && game::fetchlink::KeysHeld()) binding_ = false;   // Fetch's menu took the keyboard: its keys are not a binding
     if (binding_) { PollBinding(session, v); if (!binding_) v = session.VoiceView(); }
     const VoiceScene sc = BuildVoiceScene(v, binding_);
     for (size_t i = 0; i < rows_.size(); ++i) {

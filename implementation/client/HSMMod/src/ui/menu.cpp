@@ -6,6 +6,7 @@
 #include "ui/skin.h"
 #include "util/hsm_names.h"
 #include "gameplay/damage_pin.h"
+#include "gameplay/fetch_link.h"
 #include "gameplay/mod_maps.h"
 #include "gameplay/mod_rules.h"
 #include "enhancer.h"
@@ -159,6 +160,7 @@ struct State {
     Text reportNote;
     uint32_t reportSeen = 0;   // Session::ReportStatusSeq last shown in reportNote
     bool reportOpenNow = false;
+    bool reportTyping = false;   // the report box has the keyboard (MenuTyping)
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF (SETTINGS)
     Flat lookToggle;                         // MENU LOOK: GAME ART / CLASSIC (SETTINGS); ui_style, used from the next start
     Text lookNote;
@@ -629,7 +631,7 @@ bool HandleWarn(Session& session) {
     game::Lobby& lobby = session.lobby();
     if (g.warnOpen && g.warnKind == State::WarnKind::Switch && !lobby.SwitchAskPending().lobby) { g.warnOpen = false; g.warn.Show(false); }   // the lobby went away
     if (!g.warnOpen) return false;
-    const bool on = Clicked(g.warnOn.card), cancelClick = Clicked(g.warnCancel.card), esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    const bool on = Clicked(g.warnOn.card), cancelClick = Clicked(g.warnCancel.card), esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0 && !game::fetchlink::KeysHeld();   // Esc in Fetch's menu is Fetch's
     const bool cancel = cancelClick || esc;
     Paint(g.warnOn.card); Paint(g.warnCancel.card);
     if (on) {
@@ -1781,7 +1783,7 @@ void HandleClicks(Session& session) {
         if (lobby.state() == game::Lobby::State::Idle) lobby.RefreshList();   // the browser is filled on arrival
     };
     if (g.askOpen) {                            // the one-time question: nothing else on the menu until it is answered
-        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.escDown;
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.escDown && !game::fetchlink::KeysHeld();
         g.escDown = esc;
         const bool yes = Clicked(g.askYes.card), no = Clicked(g.askNo.card) || escEdge;
         Paint(g.askYes.card); Paint(g.askNo.card);
@@ -1804,7 +1806,7 @@ void HandleClicks(Session& session) {
         if (!g.panelOpen) openPage();                  // an invite arrived on the bare main menu
     }
     if (g.pwOpen) {
-        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.pwEscDown;
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.pwEscDown && !game::fetchlink::KeysHeld();
         const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !g.pwEnterDown;
         g.pwEscDown = esc; g.pwEnterDown = enter;
         const bool focused = g.pwText.Focused();
@@ -1847,7 +1849,7 @@ void HandleClicks(Session& session) {
         return;
     }
     if (openClicked) { if (g.panelOpen) ClosePage(); else openPage(); }
-    if (!g.panelOpen) { SetLobbyTyping(false); return; }
+    if (!g.panelOpen) { SetLobbyTyping(false); g.reportTyping = false; return; }
     const LobbyScene& s = g.scene;
     bool acted = false;
     auto act = [&](bool clicked, bool allowed) { bool go = clicked && allowed; acted = acted || go; return go; };
@@ -1885,6 +1887,7 @@ void HandleClicks(Session& session) {
             g.reportOpenNow = false; g.reportBox.Show(false);
         }
     }
+    g.reportTyping = g.reportOpenNow && g.reportText && g.reportText.Focused();
     if (const uint32_t seq = session.ReportStatusSeq(); seq != g.reportSeen) {
         g.reportSeen = seq;
         g.reportNote.Set(s.in ? std::string() : session.ReportStatus());
@@ -2201,6 +2204,8 @@ void Tick(Session& session, UObject* worldContext) {
     }
 }
 
+bool MenuTyping() { return g.panelOpen && g.reportTyping; }
+
 // Fight levels: no main menu belongs on screen. A client that joined with the multiplayer page open kept the page over
 // the match (test 2026-10-27), so close our page and take any main menu still in the viewport off it.
 bool PanelOpen() { return g.panelOpen && g.menu && StillAlive(g.menu, g.menuIndex, g.menuClass) && InViewport(g.menu); }
@@ -2211,6 +2216,7 @@ void LeaveMenus() {
     if (now < next) return;
     next = now + 2000;
     SetLobbyTyping(false);
+    g.reportTyping = false;
     if (g.panelOpen && StillAlive(g.menu, g.menuIndex, g.menuClass)) { g.panelOpen = false; g.panel.Show(false); }
     for (const char* name : {"UI_Startup_Menu_C", "UI_MainMenuSNF_C"})
         for (UObject* o : FindInstances(name))
