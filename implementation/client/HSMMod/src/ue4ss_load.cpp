@@ -6,6 +6,7 @@
 #include <mutex>
 #include <vector>
 #include "log.h"
+#include "match/hsm_online_rules.h"
 #include "paths.h"
 #include "session/hsm_ue4ss.h"
 #include "ue4ss_bundle.h"
@@ -81,14 +82,16 @@ std::string FileVersion(const std::wstring& path) {
     return out;
 }
 
-// Enabled mod names for the report: names only, never file contents beyond the parsed "Name : 1" lines.
-std::vector<std::string> ReadMods(const std::wstring& modsDir) {
+std::string ReadModsTxt(const std::wstring& modsDir) {
     std::string text;
     if (FILE* f = _wfopen((modsDir + L"mods.txt").c_str(), L"rb")) {
         text.resize(kMaxModsTxtBytes);
         text.resize(std::fread(text.data(), 1, text.size(), f));
         std::fclose(f);
     }
+    return text;
+}
+std::vector<std::string> EnabledFolders(const std::wstring& modsDir) {
     std::vector<std::string> folders;
     WIN32_FIND_DATAW fd;
     if (HANDLE h = FindFirstFileW((modsDir + L"*").c_str(), &fd); h != INVALID_HANDLE_VALUE) {
@@ -99,7 +102,31 @@ std::vector<std::string> ReadMods(const std::wstring& modsDir) {
         }
         FindClose(h);
     }
-    return EnabledMods(ParseModsTxt(text), folders);
+    return folders;
+}
+// Enabled mod names for the report: names only, never file contents beyond the parsed "Name : 1" lines.
+std::vector<std::string> ReadMods(const std::wstring& modsDir) { return EnabledMods(ParseModsTxt(ReadModsTxt(modsDir)), EnabledFolders(modsDir)); }
+
+// UE4SS's console mods off in mods.txt, every other byte kept (ue4ss_console=0). Before UE4SS loads, so it reads them off;
+// written beside and moved in whole. A UE4SS that already started keeps them for this one game.
+void TurnConsoleOff(const std::wstring& modsDir, bool started) {
+    const std::string text = ReadModsTxt(modsDir);
+    if (text.size() >= kMaxModsTxtBytes) { HSM_LOG("ue4ss: mods.txt too long; console mods left as they are"); return; }
+    const std::vector<std::string> on = ConsoleModsOn(ParseModsTxt(text), EnabledFolders(modsDir));
+    if (on.empty()) return;
+    const std::string out = ModsTxtWithOff(text, on);
+    const std::wstring path = modsDir + L"mods.txt", tmp = path + L".hsm-tmp";
+    bool ok = false;
+    if (FILE* f = _wfopen(tmp.c_str(), L"wb")) {
+        ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
+        ok = std::fclose(f) == 0 && ok;
+    }
+    ok = ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!ok) DeleteFileW(tmp.c_str());
+    std::string names;
+    for (const std::string& n : on) names += (names.empty() ? "" : ", ") + n;
+    HSM_LOG("ue4ss: console mods %s: %s%s (ue4ss_console=1 leaves them on)", ok ? "turned off" : "could not be turned off", names.c_str(),
+            ok && started ? "; UE4SS already started, so from the next start" : "");
 }
 
 void Set(const std::string& version, const std::string& mods) {
@@ -153,6 +180,7 @@ void Run(const Config& cfg) {
         return;
     }
     const std::wstring base = pick == Pick::Proxy2x ? dir : dir + Wide(RelDir(pick)) + (RelDir(pick)[0] ? L"\\" : L"");
+    if (!cfg.ue4ssConsole) TurnConsoleOff(base + L"Mods\\", pick == Pick::Proxy2x || GetModuleHandleW(L"UE4SS.dll"));
     const std::string mods = FormatMods(ReadMods(base + L"Mods\\"));
     if (pick == Pick::Proxy2x) {
         std::string v = FileVersion(dir + L"xinput1_3.dll");

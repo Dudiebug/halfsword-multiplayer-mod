@@ -131,6 +131,12 @@ static void TestConsoleMods() {
     for (const char* m : kConsoleMods) CHECK(IsConsoleMod(m));
     CHECK(IsConsoleMod("consoleenablermod"));
     CHECK(!IsConsoleMod("Keybinds") && !IsConsoleMod("BPModLoaderMod") && !IsConsoleMod(""));
+    // What the start turns off: the console mods on by mods.txt or by an enabled.txt it doesn't list, by their stock names.
+    CHECK(ConsoleModsOn(ParseModsTxt("Keybinds : 1\nConsoleEnablerMod : 0\nCheatManagerEnablerMod : 0\nConsoleCommandsMod : 0\n"), {}).empty());
+    std::vector<std::string> on = ConsoleModsOn(ParseModsTxt("Keybinds : 1\nconsoleenablermod : 1\nConsoleCommandsMod : 0\n"),
+                                                {"CheatManagerEnablerMod", "ConsoleCommandsMod", "HalfWolverine"});
+    CHECK(on.size() == 2 && on[0] == "CheatManagerEnablerMod" && on[1] == "ConsoleEnablerMod");   // ": 0" beats enabled.txt
+    CHECK(ConsoleModsOn({}, {"Keybinds", "HalfWolverine"}).empty());
 }
 
 int main() {

@@ -140,6 +140,7 @@ constexpr char kDefaultIni[] =
     "[mod]\n"
     "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it), and replaces any other build with its own, asking first about one it does not know; 0: neither. ue4ss_keep: the hash of the build you said to keep.\n"
     "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
+    "; ue4ss_console=0 (default): HSMMod turns UE4SS's console and cheat manager mods off in mods.txt at every start (a Vanilla lobby refuses them); 1: leaves them as you set them.\n"
     "ue4ss=1\n"
     "ue4ss_order=after\n"
     "; record=1: write a 60 Hz recording of every fighter, prop and gameplay event in each fight level to HSMRec-<date>-<time>.hsmrec\n"
@@ -409,6 +410,7 @@ Config LoadConfig() {
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
     c.ue4ssKeep = ReadModString(ini, L"ue4ss_keep", "");
+    c.ue4ssConsole = ReadModString(ini, L"ue4ss_console", "0") == "1";
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
     c.modPack = ReadModString(ini, L"pack", "");
     c.modRules = ReadModString(ini, L"mod_rules", "1") != "0";

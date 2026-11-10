@@ -82,8 +82,8 @@ inline bool SameName(std::string_view a, std::string_view b) {
     return true;
 }
 }  // namespace detail
-// UE4SS's stock console and cheat manager mods. The console's `set` is a cheat tool on its own, so the bundled build has them off
-// and a Vanilla lobby refuses them; UE4SS without them is not a mod to a lobby.
+// UE4SS's stock console and cheat manager mods. The console's `set` is a cheat tool on its own, so HSMMod turns them off at
+// every start (ue4ss_console=0, ConsoleModsOn) and a Vanilla lobby refuses them; UE4SS without them is not a mod to a lobby.
 inline constexpr const char* kConsoleMods[] = {"CheatManagerEnablerMod", "ConsoleCommandsMod", "ConsoleEnablerMod"};
 inline bool IsConsoleMod(std::string_view name) {
     for (const char* m : kConsoleMods) if (detail::SameName(m, name)) return true;
@@ -156,6 +156,15 @@ inline std::vector<std::string> EnabledMods(const std::vector<ModEntry>& txt, co
         for (const ModEntry& e : txt) if (detail::SameName(e.name, n)) { listed = true; break; }
         if (!listed) add(n);
     }
+    return out;
+}
+
+// The console mods this mods.txt and these enabled.txt folders turn on, by their stock names (what ModsTxtWithOff writes).
+inline std::vector<std::string> ConsoleModsOn(const std::vector<ModEntry>& txt, const std::vector<std::string>& enabledFolders) {
+    const std::vector<std::string> on = EnabledMods(txt, enabledFolders);
+    std::vector<std::string> out;
+    for (const char* m : kConsoleMods)
+        for (const std::string& n : on) if (detail::SameName(m, n)) { out.push_back(m); break; }
     return out;
 }
 

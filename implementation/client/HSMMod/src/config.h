@@ -228,6 +228,7 @@ struct Config {
     bool ue4ss = true;
     bool ue4ssBefore = false;
     std::string ue4ssKeep;   // ue4ss_keep: the hash of a UE4SS.dll the player chose to keep over the bundled build
+    bool ue4ssConsole = false;   // ue4ss_console=1: leave UE4SS's console mods as mods.txt has them; 0 (default): turn them off at every start
     // ---- competitive netcode (protocol rev 42; docs/PLAN_COMPETITIVE_NETCODE.md). On by default: competitive=0 goes back to the old behaviour. ----
     // competitive=1: the competitive preset. Every netcode key below takes its competitive default (playout 0.85 / 4 ms,
     // input_delay auto, deflect 1, late_send 1, combat_copies 1, min_fps 60) unless the key itself is in the file.

@@ -8,9 +8,8 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
 > **Status:** v0.7.3 is the current release. Expect rough edges and please report what you find with `/bug` in the
 > game. Everyone in a session needs the same version (0.7.3 connects only to 0.7.3).
 >
-> **Prerelease:** v0.8.0-pre21 tries out optional host physics, the same strength for every player by tier, steadier
-> bridges and chains, Zombies on the Abyss and give-up in Survival and Zombies, with fixes from the latest play-session
-> reports. It connects only to 0.8.0-pre21.
+> **Prerelease:** v0.8.0-pre7 tries out object and shatter sync, modded maps, UE4SS loading, a map reset every round
+> and shared map randomness, with fixes from the latest play-session reports. It connects only to 0.8.0-pre7.
 
 **Community:** find players, get help and talk about the mod on the [HSMMod Discord](https://discord.gg/QZcSFnwxra).
 
@@ -45,7 +44,7 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
    this.
 5. Start the game and click **MULTIPLAYER** on the main menu. `HSMMod.ini` is created next to the DLL on first run.
 
-Every player needs the same mod version and the same game build (Steam build 24185754). On any other game build the
+Every player needs the same mod version and the same game build (Steam build 26568321). On any other game build the
 mod logs "unsupported build" and does nothing.
 
 ## Features
@@ -172,9 +171,12 @@ once: YES turns it on, NO THANKS (or Esc) leaves it off, and it never asks again
 HELP IMPROVE THE MOD button at the top of the multiplayer page or on the Esc menu in a session fight.
 
 With it on:
-- your log (redacted the same way) goes to the report server by itself when someone in your lobby files a report;
-- if your game crashed, the next start files a crash report: its public text is the crash line only (error code and
-  code offset), and your logs stay private;
+- your log (redacted the same way) goes to the report server by itself when someone in your lobby files a report (for a
+  crash report, the report server passes the end of it on to Sentry, as below);
+- if your game crashed, the next start sends a crash report to [Sentry](https://sentry.io), the crash tracking service
+  the maintainers use. It holds the crash line (error code and code offset), the versions and match setup listed above,
+  and the end of your log from that session (redacted the same way). It goes through the report server, so Sentry does
+  not see your IP address, and none of it is public;
 - your log also gets a short combat summary every few seconds (which weapon struck whom and what the mod did with each
   blow), so missed hits like the flail's can be tracked down. It stays in your log and is only sent as above.
 

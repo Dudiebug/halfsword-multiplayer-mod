@@ -6,7 +6,7 @@ startup, the same load point UE4SS uses), forwards every dwmapi export to the re
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
-Supported build: Steam 24185754 (exe key `0x8EFA122909712000`). On any other build the mod logs
+Supported build: Steam 26568321 only (exe key `0xA54B1DAD09712000`). On any other build the mod logs
 "unsupported build" and does nothing.
 
 ## Build and checks (Linux, no MSVC)
