@@ -435,6 +435,7 @@ void SettleHseEarly(bool lock) {
     g_hseOwnEmpty = ownSize == 0;
     g_hseRestoreAtExit = g_hseLockedThisGame = true;
     g_hseStart = HseStart::Locked;
+    enhancer::hold::CloseAtStart(int(kRuleLockedKeyCode));   // its menu opens at the start, and no key closes it now
 }
 void LogHseStart() {
     switch (g_hseCopy) {
@@ -483,7 +484,39 @@ void CheckHseLock() {
     g_hseOn = on;
 }
 bool OffStill() { return g_hseStartOff && !g_hseOn && !g_hseHeldOn; }
+
+// The report from before mods went off for a lobby (session/hsm_mod_switch.h PlanBack): HSMMod-mods-all.dat, a ModList
+// message, written by the game that restarts and kept across chained restarts while any mod is off or HS Enhancer is
+// locked for a lobby. A game with everything on deletes it. g_fullSet: this game's is settled (read at the start of a
+// game with mods off, or taken from the report at its first restart), so a second restart doesn't take a smaller one.
+ModReport g_full;
+bool g_fullKnown = false, g_fullSet = false;
+std::wstring FullReportPath() { return ModFilePath(L"HSMMod-mods-all.dat"); }
+void LoadFullReport() {
+    const std::wstring path = FullReportPath();
+    if (!g_modsOffThisGame && !g_hseLockedThisGame) { DeleteFileW(path.c_str()); return; }
+    g_fullSet = true;
+    const std::string bytes = ReadTextFile(path);
+    ModListMsg m;
+    g_fullKnown = !bytes.empty() && Decode(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), m) && m.report.complete;
+    if (g_fullKnown) g_full = m.report;
+    HSM_LOG("modrules: your mods from before the restart: %s", g_fullKnown ? "known (a lobby that takes them all offers them back)" : "not known (no lobby offers them back)");
+}
+void SaveFullReport() {
+    if (!g_fullSet) { g_full = g.report; g_fullKnown = g.report.complete; g_fullSet = true; }
+    bool saved = false;
+    if (g_fullKnown) {
+        ModListMsg m; m.report = g_full;
+        const std::vector<uint8_t> b = Encode(m);
+        saved = WriteFileBytes(FullReportPath(), std::string(b.begin(), b.end()));
+    }
+    if (!saved) { DeleteFileW(FullReportPath().c_str()); HSM_LOG("modrules: your mods from before could not be kept: no lobby offers them back"); }
+}
 }  // namespace
+
+const ModReport* OwnBeforeSwitch() { return (g_modsOffThisGame || LockedStill()) && g_fullKnown ? &g_full : nullptr; }
+bool HseLockedForLobby() { return LockedStill(); }
+bool HseKeysHoldable() { return enhancer::hold::Ready(); }
 
 bool HseLocked() { return LockedStill() || (OffStill() && enhancer::hold::On()); }
 bool HseHoldable() { return LockedStill() || (OffStill() && enhancer::hold::Ready()); }
@@ -500,7 +533,12 @@ void HoldTick(const Lobby& lobby) {
     const bool wanted = !lobby.IsHost() && (lobby.Joining() || (lobby.InLobby() && RuleRefusesHse(lobby.RoomRule())));
     if (wanted == g_hseHoldWanted) return;
     g_hseHoldWanted = wanted;
-    if (wanted) { g_hseNextCheck = 0; CheckHseLock(); }   // the file read again before the report says locked
+    if (wanted) {
+        g_hseNextCheck = 0;
+        CheckHseLock();   // the file read again before the report says locked
+        // HSE's menu key as HSE has it (read at its start; a new one is saved at once): the hold lets it through.
+        enhancer::hold::MenuKey(HseMenuKey(ReadFileHead(HseIniPath())));
+    }
     enhancer::hold::Set(wanted);
     if (!enhancer::Detected()) return;
     if (!wanted) HSM_LOG("modrules: HS Enhancer's keys are free again");
@@ -534,6 +572,7 @@ bool TurnOffForNextGame(const std::vector<std::string>& mods, const std::vector<
         else HSM_LOG("modrules: no pak file found for %s: it stays on", name.c_str());
     }
     sw.lockHse = lockHse || g_hseLockedThisGame;   // a locked game hands the lock on, like the mods it has off
+    SaveFullReport();   // before anything goes off, or as the game before had it: what a lobby that takes it all brings back
     if ((!sw.paks.empty() || sw.lockHse) && !WriteFileBytes(SwitchFilePath(), EncodeSwitchFile(sw))) return false;
     if (!WriteFileBytes(ModsStatePath(), "next")) return false;
     // Already the game with mods off: the next one takes the whole set over (state "next", one aside list), so this
@@ -543,6 +582,16 @@ bool TurnOffForNextGame(const std::vector<std::string>& mods, const std::vector<
     if (g_hseRestoreAtExit) { PutHseBack(g_hseIni, g_hseOwn); g_hseRestoreAtExit = false; }
     HSM_LOG("modrules: for the next game: %u UE4SS mod(s) off in mods.txt, %u DLL(s) set aside, %u pak(s) to set aside%s", unsigned(mods.size()), dlls,
             unsigned(sw.paks.size()), sw.lockHse ? ", HS Enhancer locked" : "");
+    return true;
+}
+bool ModsBackForNextGame(bool lockHse) {
+    // Mods off for the next game already (a restart that didn't happen): this game's exit puts nothing back.
+    if (!g_modsOffThisGame && ReadTextFile(ModsStatePath()) == "next") return false;
+    // This game's exit puts every mod back (RestoreModsTxt) and HS Enhancer's own settings: the new game waits for it to
+    // close before it reads a file (ApplySwitchEarly), then locks HSE again only when asked.
+    SwitchFile sw; sw.pid = GetCurrentProcessId(); sw.lockHse = lockHse;
+    if (!WriteFileBytes(SwitchFilePath(), EncodeSwitchFile(sw))) return false;
+    HSM_LOG("modrules: for the next game: every mod back%s", lockHse ? ", HS Enhancer locked again" : ", HS Enhancer as you set it");
     return true;
 }
 // The process is exiting (DllMain): plain Windows calls on paths kept ready, and no logging. A crash skips this, and the next start puts it back.
@@ -587,6 +636,7 @@ bool TakeRejoin(RejoinFile& out) {
 void Configure(const Config& cfg) {
     ModsTxtAtStart();
     LogHseStart();
+    LoadFullReport();
     ApplyWolverineClass(cfg);
     EnableUe4ssHotReload(cfg);
     g_enabled = cfg.modRules;
@@ -653,7 +703,7 @@ ModRule HostRule(const Lobby& lobby) {
         const LobbyPack pack = lobby.Pack();
         for (const LocalPack& lp : modmaps::Packs())
             if (lp.valid && pack.any() && lp.manifest.name == pack.name) { r.list = BundleList(lp.manifest); break; }
-        if (r.list.empty()) r.preset = ModPreset::MapsOnly;   // no pack announced (yet): nothing to bundle
+        if (r.list.empty()) r.list = BundleFromReport(g.report);   // no pack announced (or not found): the host's own mods, every one required
     } else if (r.preset == ModPreset::Custom && !g_allowFromIni) {
         r.list = ListFromReport(g.report);
     }

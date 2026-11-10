@@ -17,9 +17,9 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre44-test";
+constexpr const char* kModVersion = "0.8.0-pre45-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre44";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre45";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -47,6 +47,7 @@ struct LobbyListing {
     std::string modsText; // the mod rules' full sentence for this machine (what to remove), when they turn it away
     std::string ruleText; // the lobby's rule in words (RuleSummary), for the switch-off question
     SwitchPlan plan;      // what this machine would turn off for a restart to fit the rule (session/hsm_mod_switch.h); empty when it fits, or was tried
+    BackPlan back;        // mods off for another lobby that this one takes: what a restart brings back (PlanBack); empty: nothing
     bool switchable = false;   // !compatible only because of the plan, which has no blockers: joinable after a restart
 };
 
@@ -101,9 +102,11 @@ public:
     // The switch-off at join (session/hsm_mod_switch.h): a lobby's rule refuses mods this machine can turn off. The page
     // asks once (SwitchAskPending), then ConfirmSwitch turns them off for the next game, writes the rejoin file and
     // restarts the game, which joins the lobby on its own. rejoin: the lobby we are in changed its rule under us.
-    struct SwitchAsk { steam::SteamId lobby = 0; std::string name, ruleText; SwitchPlan plan; bool rejoin = false; };
+    // back: the other way, asked in a lobby that takes the mods this game has off for another (PlanBack): the restart
+    // turns them all back on and rejoins; NOT NOW stays, and that lobby doesn't ask again this game.
+    struct SwitchAsk { steam::SteamId lobby = 0; std::string name, ruleText; SwitchPlan plan; bool rejoin = false; bool back = false; BackPlan backPlan; };
     const SwitchAsk& SwitchAskPending() const { return switchAsk_; }   // lobby == 0: nothing asked
-    void CancelSwitchAsk() { switchAsk_ = SwitchAsk{}; }
+    void CancelSwitchAsk() { if (switchAsk_.back) backDeclined_ = switchAsk_.lobby; switchAsk_ = SwitchAsk{}; }
     bool ConfirmSwitch();
     std::function<bool()> restartGame;                             // starts a new copy of the game and quits this one (Session::RestartGame)
     std::function<void(const std::string& text)> onRuleChanged;    // the host changed this lobby's mod rule: a line for the player
@@ -155,6 +158,8 @@ private:
     void RuleTick();                      // lobby data changed: a new mod rule is told, and the switch-off offered
     SwitchAsk switchAsk_;
     steam::SteamId rejoinLobby_ = 0;      // joined again after a restart with mods off: no second restart for it
+    steam::SteamId backDeclined_ = 0;     // NOT NOW to the mods-back restart here: not asked again this game
+    void AskBack(steam::SteamId lobby, const std::string& name, const std::string& ruleText, const BackPlan& b);
     ModRule lastRule_;                    // this lobby's rule as last seen (RuleTick)
     bool lastRuleNamed_ = false;
     int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads

@@ -641,7 +641,7 @@ bool HandleWarn(Session& session) {
             case State::WarnKind::Switch: lobby.ConfirmSwitch(); break;
         }
     } else if (cancel && g.warnKind == State::WarnKind::Switch) {
-        const bool leave = cancelClick && lobby.SwitchAskPending().rejoin;   // LEAVE LOBBY: out before the host's grace runs out. Esc only closes the question
+        const bool leave = cancelClick && lobby.SwitchAskPending().rejoin && !lobby.SwitchAskPending().back;   // LEAVE LOBBY: out before the host's grace runs out. Esc only closes the question
         lobby.CancelSwitchAsk();
         if (leave) lobby.Leave();
     }
@@ -1827,6 +1827,22 @@ void HandleClicks(Session& session) {
     }
     // The switch-off question: a lobby's rule refuses mods this machine can turn off for a restart (gameplay/lobby.cpp
     // SwitchAsk), at a join or when the host changed the rule under us. HandleWarn takes the answer.
+    if (!g.warnOpen && g.warn) if (const game::Lobby::SwitchAsk& ask = lobby.SwitchAskPending(); ask.lobby && ask.back) {
+        // The other way: this lobby takes the mods this game has off for another one (session/hsm_mod_switch.h PlanBack).
+        g.warnKind = State::WarnKind::Switch;
+        g.warnTitle.Set("YOUR MODS CAN COME BACK");
+        std::string body = "Host allows: " + ask.ruleText + ". These are off for another lobby, and this one takes them:";
+        for (const std::string& line : BackSummary(ask.backPlan, 6)) body += "\n   " + line;
+        if (ask.backPlan.lockHse) body += "\nHS Enhancer stays locked: this lobby blocks it.";
+        g.warnBody.Set(body);
+        g.warnMods.Set("The game restarts with them on and comes back to this lobby. NOT NOW keeps you here as you are.");
+        g.warnOn.label.Set("RESTART AND REJOIN");
+        g.warnCancel.label.Set("NOT NOW");
+        g.warnOpen = true; g.warn.Show(true);
+        HSM_LOG("ui: asking about a restart with %s for this lobby", BackWords(ask.backPlan).c_str());
+        if (!g.panelOpen) openPage();
+        return;
+    }
     if (!g.warnOpen && g.warn) if (const game::Lobby::SwitchAsk& ask = lobby.SwitchAskPending(); ask.lobby) {
         g.warnKind = State::WarnKind::Switch;
         g.warnTitle.Set(ask.rejoin ? "THIS LOBBY'S MODS CHANGED" : ask.name.empty() ? "JOINING THE LOBBY" : "JOINING " + ask.name);

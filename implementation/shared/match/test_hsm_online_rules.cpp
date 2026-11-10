@@ -21,6 +21,18 @@ static const char* kGood =
 
 static std::string Swap(std::string s, const std::string& a, const std::string& b) { s.replace(s.find(a), a.size(), b); return s; }
 
+// HSE's menu key, read as HSE reads it: a locked file's 143, the player's own, or Insert.
+static void TestHseMenuKey() {
+    CHECK(HseMenuKey("") == 0x2D && HseMenuKey("[Keybinds]\r\nunbind_key = 8\r\n") == 0x2D);
+    CHECK(HseMenuKey("[Keybinds]\r\ntoggle_gui_key = 143\r\n") == 143);
+    CHECK(HseMenuKey(LockedHseIni("[Keybinds]\r\ntoggle_gui_key = 45\r\n")) == 143);
+    CHECK(HseMenuKey("\xEF\xBB\xBF[Keybinds]\ntoggle_gui_key=112\n") == 112);
+    CHECK(HseMenuKey("[Keybinds]\r\ntoggle_gui_key = 0x70\r\n") == 0x70 && HseMenuKey("[Keybinds]\r\ntoggle_gui_key = 36abc\r\n") == 36);
+    for (const char* bad : {"-1", "0", "256", "91", "92", "93", "abc", "", "-45"})
+        CHECK(HseMenuKey(std::string("[Keybinds]\r\ntoggle_gui_key = ") + bad + "\r\n") == 0x2D);
+    CHECK(HseMenuKey("[Other]\r\ntoggle_gui_key = 112\r\n") == 0x2D);   // only under [Keybinds]
+}
+
 // HSE's file locked for one game: LockedHseIni writes it, HseLockProblems checks it.
 static void TestHseLock() {
     const std::string real =
@@ -117,6 +129,7 @@ static void TestHseStartOff() {
 }
 
 int main() {
+    TestHseMenuKey();
     TestHseLock();
     TestHseStartOff();
     CHECK(HseRuleProblems(kGood).empty());

@@ -256,6 +256,24 @@ static void TestLists() {
     ModReport host = Report({weapons, Item(ModKind::Ue4ssStock, "Keybinds"), Item(ModKind::Module, "HSEnhancer"), Item(ModKind::HseLocked, "HSEnhancer", 9)}, true);
     std::vector<ModAllow> mine = ListFromReport(host);
     CHECK(mine.size() == 1 && mine[0].name == "ModularWeapons.pak" && !mine[0].required);
+
+    // Bundle with no pack: what the host runs, every one required and pinned; HS Enhancer never (block_hse decides).
+    ModReport host2 = Report({weapons, Item(ModKind::Ue4ssMod, "HalfWolverine", 4), Item(ModKind::Ue4ssMod, "HSEnhancer", 5), Item(ModKind::Ue4ssStock, "Keybinds"),
+                              Item(ModKind::Proxy, "winmm.dll", 6), Item(ModKind::Module, "HSEnhancer")}, true);
+    std::vector<ModAllow> same = BundleFromReport(host2);
+    CHECK(same.size() == 2);
+    for (const ModAllow& a : same) CHECK(a.required && !a.pin.empty() && a.name != "HSEnhancer");
+    ModRule hostBundle = Rule(ModPreset::Bundle); hostBundle.list = same;
+    CHECK(CheckMods(hostBundle, Report({weapons, Item(ModKind::Ue4ssMod, "HalfWolverine", 4)})).ok());
+    CHECK(CheckMods(hostBundle, Report({weapons})).fail == RuleFail::Missing);                                 // all of them, not some
+    CHECK(CheckMods(hostBundle, Report({weapons, Item(ModKind::Ue4ssMod, "HalfWolverine", 7)})).fail != RuleFail::None);   // another build
+    CHECK(CheckMods(hostBundle, Report({weapons, Item(ModKind::Ue4ssMod, "HalfWolverine", 4), Item(ModKind::MapPak, "Extra_P.pak", 8)})).fail == RuleFail::NotAllowed);
+    CHECK(BundleFromReport(Report({})).empty());
+
+    // A locked HS Enhancer named loaded again (UnlockReportHse).
+    ModReport lockedRep = Report({Item(ModKind::HseLocked, "HSEnhancer", 0), weapons});
+    UnlockReportHse(lockedRep);
+    CHECK(HasHse(lockedRep) && !HasLockedHse(lockedRep));
 }
 
 static void TestEffective() {

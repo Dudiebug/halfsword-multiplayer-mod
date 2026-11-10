@@ -125,6 +125,74 @@ static void TestSummaryAndTag() {
     CHECK(SwitchWords(both) == "4 mods off and HS Enhancer locked");
 }
 
+static void TestPlanBack() {
+    const ModItem wolf = Item(ModKind::Ue4ssMod, "HalfWolverine"), skins = Item(ModKind::ContentPak, "Skins.pak", 3), arena = Item(ModKind::MapPak, "Arena_P.pak", 2);
+    const ModItem dll = Item(ModKind::Proxy, "version.dll", 4), stock = Item(ModKind::Ue4ssStock, "Keybinds", 0), hse = Item(ModKind::Module, "HSEnhancer", 0);
+    const ModReport full = Report({wolf, skins, arena, dll, stock});
+    const ModReport vanillaNow = Report({stock});   // the game that restarted for a Vanilla lobby
+    // An Anything lobby takes them all: everything comes back.
+    BackPlan a = PlanBack(Rule(ModPreset::Anything), full, vanillaNow, false, true);
+    CHECK(a.Any() && a.names.size() == 4 && Has(a.names, "HalfWolverine") && Has(a.names, "Skins.pak") && Has(a.names, "Arena_P.pak") && Has(a.names, "version.dll"));
+    CHECK(!a.unlockHse && !a.lockHse);
+    CHECK(BackWords(a) == "your 4 mods back");
+    // Maps only still refuses some of them: no restart for part of it.
+    CHECK(!PlanBack(Rule(ModPreset::MapsOnly), full, vanillaNow, false, true).Any());
+    // A lobby as strict as the one before: nothing.
+    CHECK(!PlanBack(Rule(ModPreset::Vanilla), full, vanillaNow, false, true).Any());
+    // Everything is on already (this game has them all): nothing.
+    CHECK(!PlanBack(Rule(ModPreset::Anything), full, full, false, true).Any());
+    // Only some were off (the game restarted for a Maps only lobby): those come back.
+    BackPlan some = PlanBack(Rule(ModPreset::Anything), full, Report({arena, dll, stock}), false, true);
+    CHECK(some.names.size() == 2 && Has(some.names, "HalfWolverine") && Has(some.names, "Skins.pak") && BackWords(some) == "your 2 mods back");
+    // Not known yet, or a list only the host can check: nothing.
+    CHECK(!PlanBack(Rule(ModPreset::Anything), Report({wolf}, false), vanillaNow, false, true).Any());
+    CHECK(!PlanBack(Rule(ModPreset::Anything), full, Report({stock}, false), false, true).Any());
+    ModRule hashOnly = Rule(ModPreset::Custom); hashOnly.listHashOnly = true;
+    CHECK(!PlanBack(hashOnly, full, vanillaNow, false, true).Any());
+    // Bundle with the host's own mods (BundleFromReport): this machine runs exactly those, so they come back.
+    ModRule bundle = Rule(ModPreset::Bundle);
+    bundle.list = BundleFromReport(Report({wolf, skins, arena}));
+    BackPlan b = PlanBack(bundle, full, vanillaNow, false, true);
+    CHECK(b.names.size() == 4);   // the proxy passes every preset but Vanilla
+    bundle.list = BundleFromReport(Report({wolf, skins}));   // the host lacks the map: it would refuse it
+    CHECK(!PlanBack(bundle, full, vanillaNow, false, true).Any());
+
+    // HS Enhancer. Full report with it loaded; this game locked it (and turned the mods off).
+    const ModReport fullHse = Report({wolf, hse, stock});
+    ModReport lockedNow = Report({hse, stock}); LockReportHse(lockedNow);
+    ModReport lockedNoMods = lockedNow;
+    // A lobby that allows HSE: it comes back whole, with the mod.
+    BackPlan h = PlanBack(Rule(ModPreset::Anything, false), fullHse, lockedNow, true, true);
+    CHECK(h.unlockHse && !h.lockHse && h.names.size() == 1 && BackWords(h) == "your mod and HS Enhancer back");
+    std::vector<std::string> lines = BackSummary(h, 6);
+    CHECK(lines.size() == 2 && lines[0] == "HS Enhancer (menu, hotkeys and features)" && lines[1] == "HalfWolverine");
+    // A lobby that blocks it, keys holdable: the mod comes back, HSE held (no lock).
+    BackPlan held = PlanBack(Rule(ModPreset::Anything), fullHse, lockedNoMods, true, true);
+    CHECK(held.names.size() == 1 && !held.unlockHse && !held.lockHse && BackWords(held) == "your mod back");
+    // Keys not holdable: the mod comes back and HSE is locked again.
+    BackPlan relock = PlanBack(Rule(ModPreset::Anything), fullHse, lockedNoMods, true, false);
+    CHECK(relock.names.size() == 1 && relock.lockHse && !relock.unlockHse);
+    // Only HSE was locked and the lobby blocks it too: nothing to gain.
+    const ModReport fullOnlyHse = Report({hse, stock});
+    CHECK(!PlanBack(Rule(ModPreset::Anything), fullOnlyHse, lockedNow, true, true).Any());
+    CHECK(!PlanBack(Rule(ModPreset::Anything), fullOnlyHse, lockedNow, true, false).Any());
+    // Only HSE was locked and this lobby allows it (Vanilla never does: its preset refuses it).
+    BackPlan only = PlanBack(Rule(ModPreset::Anything, false), fullOnlyHse, lockedNow, true, true);
+    CHECK(only.unlockHse && only.names.empty() && BackWords(only) == "HS Enhancer back");
+    // The full report saved by a game whose HSE was held (named locked there): read as loaded.
+    ModReport fullHeld = fullHse; LockReportHse(fullHeld);
+    CHECK(PlanBack(Rule(ModPreset::Anything, false), fullHeld, lockedNow, true, true).unlockHse);
+    CHECK(!PlanBack(Rule(ModPreset::Vanilla, false), fullHeld, lockedNow, true, true).Any());   // Vanilla still refuses the mod
+    ModReport onlyHeld = fullOnlyHse; LockReportHse(onlyHeld);
+    CHECK(PlanBack(Rule(ModPreset::Anything, false), onlyHeld, lockedNow, true, true).unlockHse);
+    CHECK(!PlanBack(Rule(ModPreset::Vanilla, false), onlyHeld, lockedNow, true, true).Any());   // Vanilla refuses HSE by its preset
+    // Cut summary.
+    BackPlan many; many.names = {"a", "b", "c", "d"}; many.unlockHse = true;
+    std::vector<std::string> cut = BackSummary(many, 3);
+    CHECK(cut.size() == 3 && cut[2] == "+3 more");
+    CHECK(BackSummary(many, 0).size() == 5);
+}
+
 static void TestPakRel() {
     CHECK(PakRelOk("~mods/Skins.pak") && PakRelOk("Arena_P.pak") && PakRelOk("~mods/Pack/deep/x.pak") && PakRelOk("~mods\\win\\x.pak"));
     CHECK(!PakRelOk("") && !PakRelOk("/abs.pak") && !PakRelOk("\\abs.pak") && !PakRelOk("C:/x.pak") && !PakRelOk("../up.pak") && !PakRelOk("~mods/../x.pak"));
@@ -188,6 +256,7 @@ int main() {
     TestPlanBlockers();
     TestPlanPendingAndUnchecked();
     TestSummaryAndTag();
+    TestPlanBack();
     TestPakRel();
     TestSwitchFile();
     TestAsideLines();

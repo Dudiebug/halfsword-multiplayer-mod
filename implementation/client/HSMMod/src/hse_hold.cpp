@@ -21,6 +21,17 @@ std::atomic<HWND> g_window{nullptr};                              // the window 
 std::atomic<WNDPROC> g_hse{nullptr}, g_below{nullptr};            // HSE's WndProc, and what it passes things on to
 std::atomic<bool> g_installed{false}, g_ansi{false};              // HSMMod's procedure is in HSE's place, and as which kind
 std::atomic<bool> g_hold{false};
+std::atomic<int> g_menuKey{0};        // let through a hold: HSE's menu can still close (and open, uselessly: nothing reaches it)
+// A locked game's menu: open at the start (Gui::isVisible starts true, every version). Closed by HSMMod once, on the
+// window's thread (a registered message), with the key the lock gave it. From 0.6 HSE keeps raw input (WM_INPUT) to
+// itself while its menu is open, and passes it on while closed: that says whether it is open still (a version popup can
+// keep it so). 0.5.3 passes WM_INPUT on either way: one close, and the menu counts as closed.
+std::atomic<int> g_closeKey{0};
+std::atomic<bool> g_menuShown{true}, g_inputTells{false};
+std::atomic<UINT> g_closeMsg{0};
+ULONGLONG g_nextClose = 0;
+thread_local bool t_inputPassed = false;   // HSE passed this WM_INPUT on
+thread_local bool t_closing = false;       // HSE handed its menu key by HSMMod: nothing it passes on goes further
 bool g_attached = false, g_patched = false, g_loggedReady = false, g_loggedTaken = false;
 ULONGLONG g_nextTry = 0;
 
@@ -41,9 +52,30 @@ template <bool A> LRESULT CallProc(WNDPROC p, HWND h, UINT m, WPARAM w, LPARAM l
 
 // The window's procedure where HSE's was: HSE right behind it, or, held, input straight to what HSE passes things on to.
 // Installed as the kind HSE's was (ANSI or Unicode), so each message reaches HSE as it did before.
+// HSE's menu key pressed, straight to HSE: open, it closes (both versions take the press before anything else).
+template <bool A> void CloseMenu(HWND h, WNDPROC hse) {
+    const int key = g_closeKey.load();
+    if (!hse || key <= 0 || !g_menuShown.load()) return;
+    const LPARAM scan = LPARAM(MapVirtualKeyW(UINT(key), MAPVK_VK_TO_VSC) & 0xFF) << 16;
+    t_closing = true;
+    CallProc<A>(hse, h, WM_KEYDOWN, WPARAM(key), 1 | scan);
+    t_closing = false;
+    g_menuShown.store(false);
+    HSM_LOG("enhancer: HS Enhancer is locked and its menu was open: closed for you");
+}
+
 template <bool A> LRESULT CALLBACK HoldProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     const WNDPROC hse = g_hse.load(std::memory_order_acquire), below = g_below.load(std::memory_order_acquire);
-    if (below && (!hse || (g_hold.load(std::memory_order_relaxed) && IsInput(m)))) return CallProc<A>(below, h, m, w, l);
+    if (m != 0 && m == g_closeMsg.load(std::memory_order_relaxed)) { CloseMenu<A>(h, hse); return 0; }
+    const int key = g_menuKey.load(std::memory_order_relaxed);
+    const bool menuKey = key > 0 && int(w) == key && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN);
+    if (below && (!hse || (g_hold.load(std::memory_order_relaxed) && IsInput(m) && !menuKey))) return CallProc<A>(below, h, m, w, l);
+    if (hse && m == WM_INPUT && g_inputTells.load(std::memory_order_relaxed)) {
+        t_inputPassed = false;
+        const LRESULT r = CallProc<A>(hse, h, m, w, l);
+        g_menuShown.store(!t_inputPassed, std::memory_order_relaxed);
+        return r;
+    }
     return CallProc<A>(hse ? hse : below, h, m, w, l);
 }
 bool IsHoldProc(LONG_PTR p) { return p == reinterpret_cast<LONG_PTR>(&HoldProc<false>) || p == reinterpret_cast<LONG_PTR>(&HoldProc<true>); }
@@ -77,6 +109,8 @@ template <bool A> LONG_PTR WINAPI GetHook(HWND h, int index) {
 // HSE's CallWindowProc: what it passes things on to, learned here when HSMMod took HSE's place after it had installed.
 // Never back into HoldProc, which would loop.
 template <bool A> LRESULT WINAPI CallHook(WNDPROC p, HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (t_closing) return 0;
+    if (m == WM_INPUT) t_inputPassed = true;
     if (IsHoldProc(reinterpret_cast<LONG_PTR>(p))) p = g_below.load();
     else if (p && h == g_window.load() && !g_below.load()) g_below.store(p, std::memory_order_release);
     if (!g_window.load()) g_window.store(h);   // HSE passes this window's messages on: it subclasses it
@@ -105,6 +139,7 @@ int PatchImport(HMODULE mod, const char* name, void* hook, std::atomic<void*>& r
                                            std::strcmp(reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData)->Name, name) == 0
                                      : user32 && reinterpret_cast<const void*>(slots->u1.Function) == user32;
             if (!match) continue;
+            if (!hook) { ++n; continue; }   // only counted
             void** at = reinterpret_cast<void**>(&slots->u1.Function);
             DWORD was = 0;
             if (!VirtualProtect(at, sizeof(void*), PAGE_READWRITE, &was)) continue;
@@ -154,9 +189,18 @@ void TakeOver() {
 }
 }  // namespace
 
-void Attach(void* hseModule) {
+bool Subclasses(void* module) {
+    const auto mod = static_cast<HMODULE>(module);
+    std::atomic<void*> none{nullptr};
+    if (!mod) return false;
+    return PatchImport(mod, "CallWindowProcW", nullptr, none) + PatchImport(mod, "CallWindowProcA", nullptr, none) > 0 &&
+           PatchImport(mod, "SetWindowLongPtrW", nullptr, none) + PatchImport(mod, "SetWindowLongPtrA", nullptr, none) > 0;
+}
+
+void Attach(void* hseModule, bool exported) {
     if (g_attached || !hseModule) return;
     g_attached = true;
+    g_inputTells.store(exported);
     const auto mod = static_cast<HMODULE>(hseModule);
     const auto* base = reinterpret_cast<const uint8_t*>(mod);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
@@ -176,6 +220,14 @@ void Attach(void* hseModule) {
 
 void Tick() {
     if (!g_patched) return;
+    if (g_closeKey.load() > 0 && Ready() && g_menuShown.load()) {   // once a second at most, in case it is lost
+        const ULONGLONG now = GetTickCount64();
+        if (now >= g_nextClose) {
+            g_nextClose = now + 1000;
+            if (!g_closeMsg.load()) g_closeMsg.store(RegisterWindowMessageW(L"HSMMod.CloseHseMenu"));
+            if (const UINT msg = g_closeMsg.load()) PostMessageW(g_window.load(), msg, 0, 0);
+        }
+    }
     if (!g_installed.load()) {
         const ULONGLONG now = GetTickCount64();
         if (now >= g_nextTry) { g_nextTry = now + 1000; TakeOver(); }
@@ -191,5 +243,7 @@ void Tick() {
 
 bool Ready() { return g_installed.load() && g_hse.load() && g_below.load(); }
 void Set(bool on) { g_hold.store(on, std::memory_order_relaxed); }
+void MenuKey(int vk) { g_menuKey.store(vk); }
+void CloseAtStart(int vk) { g_closeKey.store(vk); }
 bool On() { return g_hold.load(std::memory_order_relaxed) && Ready(); }
 }  // namespace hsm::enhancer::hold

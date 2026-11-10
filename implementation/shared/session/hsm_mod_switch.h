@@ -4,6 +4,8 @@
 //
 //   PlanSwitch       the rule against this machine's report: what to turn off, by kind, and what can't be fixed that way
 //   SwitchSummary    the plan as the dialog lists it
+//   PlanBack         the other way: a game with mods off for one lobby, in a lobby that takes them all, restarts with
+//                    them back (the report from before they went off against the rule)
 //   switch file      HSMMod-switch.txt, written by the game that restarts, read by the new one in DllMain before the
 //                    engine opens any pak: which paks to set aside, whether to lock HS Enhancer, which process to wait for
 //   aside list       HSMMod-files-off.txt lines: a bare name is a DLL beside the exe, "pak <rel>" a pak under Content/Paks
@@ -92,6 +94,58 @@ inline std::string SwitchTag(const SwitchPlan& p) {
     const size_t n = p.Count();
     if (n == 0 && p.lockHse) return "Restart: HS Enhancer locked";
     return "Restart: " + std::to_string(n) + (n == 1 ? " mod off" : " mods off") + (p.lockHse ? ", HSE locked" : "");
+}
+
+// ---- mods back ------------------------------------------------------------------------------------------------------
+// This game has mods off (or HS Enhancer locked) for a lobby, and `full` is the report from before (kept across restarts
+// until they are all back: gameplay/mod_rules.cpp OwnBeforeSwitch). A restart turns everything back on and joins the
+// lobby again when the lobby takes the whole report, with HS Enhancer held where it blocks HSE and the keys can be held
+// (`hseHoldable`), or locked again where they can't (lockHse). Nothing when that restart would bring nothing back, when
+// the lobby still refuses some of it, or when only the host can check its list.
+struct BackPlan {
+    std::vector<std::string> names;   // what comes back: the items of `full` that `now` lacks (HS Enhancer apart)
+    bool unlockHse = false;           // HS Enhancer is locked now and the lobby allows it: back whole
+    bool lockHse = false;             // the lobby blocks HS Enhancer and its keys can't be held: the new game locks it again
+    bool Any() const { return !names.empty() || unlockHse; }
+};
+inline BackPlan PlanBack(const ModRule& rule, const ModReport& full, const ModReport& now, bool hseLockedNow, bool hseHoldable) {
+    BackPlan b;
+    if (!full.complete || !now.complete || full.truncated) return b;
+    if (rule.listHashOnly && (rule.preset == ModPreset::Custom || rule.preset == ModPreset::Bundle)) return b;
+    ModReport guest = full;
+    UnlockReportHse(guest);
+    const bool refusesHse = RuleRefusesHse(rule);
+    if (refusesHse && hseHoldable) LockReportHse(guest);   // held in the new game: no lock, every rule takes it
+    const SwitchPlan p = PlanSwitch(rule, guest);
+    if (!p.blockers.empty() || p.Count() > 0) return b;   // not all of it fits: no restart for part of it
+    b.lockHse = p.lockHse;
+    for (const ModItem& it : full.items) {
+        if (IsHseItem(it) || it.kind == ModKind::HseLocked || it.kind == ModKind::Ue4ssStock) continue;
+        bool have = false;
+        for (const ModItem& n : now.items) if (n.kind == it.kind && n.name == it.name) { have = true; break; }
+        if (!have) b.names.push_back(it.name);
+    }
+    b.unlockHse = hseLockedNow && HasHse(guest) && !refusesHse;
+    if (!b.Any()) b.lockHse = false;
+    return b;
+}
+// "your 2 mods back", "HS Enhancer back", "your mod and HS Enhancer back"
+inline std::string BackWords(const BackPlan& b) {
+    const size_t n = b.names.size();
+    const std::string mods = n == 1 ? "your mod" : "your " + std::to_string(n) + " mods";
+    if (!b.unlockHse) return mods + " back";
+    return n == 0 ? std::string("HS Enhancer back") : mods + " and HS Enhancer back";
+}
+// The dialog's lines: each name, "HS Enhancer (menu, hotkeys and features)", then "+N more" past maxLines.
+inline std::vector<std::string> BackSummary(const BackPlan& b, size_t maxLines) {
+    std::vector<std::string> all;
+    if (b.unlockHse) all.push_back("HS Enhancer (menu, hotkeys and features)");
+    all.insert(all.end(), b.names.begin(), b.names.end());
+    if (maxLines == 0 || all.size() <= maxLines) return all;
+    const size_t keep = maxLines > 1 ? maxLines - 1 : 0;
+    std::vector<std::string> out(all.begin(), all.begin() + std::ptrdiff_t(keep));
+    out.push_back("+" + std::to_string(all.size() - keep) + " more");
+    return out;
 }
 
 // ---- the switch file: "pid N", "pak <rel>" lines (rel under Content/Paks, forward slashes), "hse lock" ------------------

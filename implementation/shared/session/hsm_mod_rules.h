@@ -156,6 +156,11 @@ inline void LockReportHse(ModReport& r) {
     for (ModItem& it : r.items) if (IsHseItem(it)) it.kind = ModKind::HseLocked;
     NormalizeReport(r);
 }
+// Back the other way: each locked HS Enhancer item named as the loaded module it is (IsHseItem), sorted again.
+inline void UnlockReportHse(ModReport& r) {
+    for (ModItem& it : r.items) if (it.kind == ModKind::HseLocked) it.kind = ModKind::Module;
+    NormalizeReport(r);
+}
 
 // ------------------------------------------------------------------ map pak or content pak
 
@@ -216,7 +221,8 @@ inline ModKind ClassifyPak(const std::vector<std::string>& maps, const std::vect
 // What each preset lets through (ItemPresetFail), HS Enhancer aside (blockHse decides on it in every preset):
 //   Vanilla                        UE4SS's stock mods, console mods excepted
 //   Maps only                      stock + proxy DLLs + map paks
-//   Bundle / Custom                stock + proxy DLLs + the list (the pack's paks / mod_allow, or what the host runs: "same as host")
+//   Bundle / Custom                stock + proxy DLLs + the list (Bundle: the pack's paks, or with no pack what the host
+//                                  runs, each required; Custom: mod_allow, or what the host runs, none required: "same as host")
 //   Anything / Classes             everything (Classes checks HS Enhancer's and Half Wolverine's settings instead, match/hsm_online_rules.h)
 enum class ModPreset : uint8_t { Vanilla = 0, MapsOnly = 1, Bundle = 2, Custom = 3, Anything = 4, Classes = 5, Unrestricted = 6 };
 inline constexpr uint8_t kMaxModPreset = 6;
@@ -308,6 +314,19 @@ inline std::vector<ModAllow> BundleList(const PackManifest& m) {
     for (const PackPak& p : m.paks) {
         if (out.size() >= kMaxModAllow) break;
         ModAllow a; a.name = p.file; a.pin = Sha256Hex(p.sha).substr(0, kModPinHex); a.required = true;
+        out.push_back(a);
+    }
+    return out;
+}
+
+// Bundle with no pack announced: what the host runs, each pinned to its build and required (BundleFromReport), the
+// same list as Custom's "same as host" otherwise. HS Enhancer is never on it: block_hse decides on that.
+inline std::vector<ModAllow> BundleFromReport(const ModReport& r) {
+    std::vector<ModAllow> out;
+    for (const ModItem& it : r.items) {
+        if (out.size() >= kMaxModAllow) break;
+        if (it.kind == ModKind::Ue4ssStock || it.kind == ModKind::Module || it.kind == ModKind::Proxy || it.kind == ModKind::HseLocked || IsHseItem(it)) continue;
+        ModAllow a; a.name = it.name; a.pin = it.hashed ? Sha256Hex(it.sha).substr(0, kModPinHex) : std::string(); a.required = true;
         out.push_back(a);
     }
     return out;

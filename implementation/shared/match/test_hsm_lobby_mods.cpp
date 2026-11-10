@@ -166,14 +166,17 @@ static void RuleRows() {
 }
 
 static void DiffersHints() {
-    // The host chose Bundle with no pack announced: Maps only is in force.
+    // The host chose Bundle with no pack announced: its own mods are the bundle.
     LobbyModsLocal l = Lobby(true);
     l.chosen = ModChoice{ModPreset::Bundle, true, true};
-    l.rule = Rule(ModPreset::MapsOnly, false);   // it runs HS Enhancer itself; not an official build
+    l.rule = Rule(ModPreset::Bundle, false);   // it runs HS Enhancer itself; not an official build
     LobbyModsScene s = BuildLobbyMods(l);
-    CHECK(s.rules[0].value == "Bundle" && s.rules[0].hint.find("Maps only applies") != std::string::npos);
+    CHECK(s.rules[0].value == "Bundle" && s.rules[0].hint.find("exactly the mods you run") != std::string::npos);
+    CHECK(std::string(ModPresetHint(ModPreset::Bundle, false)).find("exactly the host's mods") != std::string::npos);
     CHECK(s.rules[1].value == "On" && s.rules[1].hint == "You run HS Enhancer yourself, so this lobby allows it.");
     CHECK(s.rules[2].value == "On" && s.rules[2].hint.find("not an official release") != std::string::npos);
+    l.rule = Rule(ModPreset::MapsOnly, false);
+    s = BuildLobbyMods(l);
     CHECK(s.summary == "In force: Maps only, HS Enhancer allowed.");
     // A member sees the rule in force, no host hints.
     LobbyModsLocal m = l; m.host = false;

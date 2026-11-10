@@ -140,7 +140,8 @@ inline const char* ModPresetHint(ModPreset p, bool host) {
     switch (p) {
         case ModPreset::Vanilla: return "No mods: no paks, no UE4SS mods, no proxy DLLs.";
         case ModPreset::MapsOnly: return "Map paks only.";
-        case ModPreset::Bundle: return "Exactly the lobby's modpack.";
+        case ModPreset::Bundle: return host ? "Exactly your modpack, or with none announced, exactly the mods you run: everyone needs them all."
+                                            : "Exactly the host's modpack, or with none announced, exactly the host's mods: you need them all.";
         case ModPreset::Custom: return host ? "Same as host: the mods you run (or the list in mod_allow in HSMMod.ini)." : "The host's own mods (or the list it set).";
         case ModPreset::Anything: return "Any mods.";
         case ModPreset::Classes: return "Native classes. Any mods.";
@@ -159,8 +160,6 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
     ModRuleView& preset = s.rules[0];
     preset.id = ModRuleRow::Preset; preset.label = "Mods allowed"; preset.value = ModPresetName(shown.preset);
     preset.hint = ModPresetHint(shown.preset, l.host);
-    if (l.host && l.rulesOn && shown.preset == ModPreset::Bundle && l.rule.preset == ModPreset::MapsOnly)
-        preset.hint += " No modpack is announced, so Maps only applies.";
     ModRuleView& hse = s.rules[1];
     hse.id = ModRuleRow::Hse; hse.label = "Block HS Enhancer"; hse.value = onOff(shown.blockHse);
     hse.hint = "Refuses players who run Half Sword Enhancer.";

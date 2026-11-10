@@ -11,7 +11,7 @@ namespace hsm::enhancer {
 namespace {
 constexpr uint64_t kScanEveryMs = 5000;
 bool g_detected = false;
-void* g_module = nullptr;   // the module exporting HSE_Initialize: HSE itself, not its loader (hse_hold.cpp patches it)
+void* g_module = nullptr;   // HSE itself, not its loader (hse_hold.cpp patches it; hse_hold.h Subclasses)
 uint64_t g_nextScan = 0;
 
 std::string Utf8(const wchar_t* w) {
@@ -53,7 +53,8 @@ void Scan() {
             HSM_LOG("enhancer: Half Sword Enhancer detected: %s (name=%d export=%d version=%d)", Utf8(me.szExePath).c_str(),
                     s.fileName ? 1 : 0, s.exportName ? 1 : 0, s.version ? 1 : 0);
         }
-        if (s.exportName) { g_module = me.hModule; hold::Attach(me.hModule); }
+        // HSE's own module: its export from 0.6; before (0.5.3, its release still), the one that subclasses the window.
+        if (s.exportName || hold::Subclasses(me.hModule)) { g_module = me.hModule; hold::Attach(me.hModule, s.exportName); }
     }
     CloseHandle(snap);
 }

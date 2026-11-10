@@ -35,6 +35,15 @@ bool TurnOffForNextGame(const std::vector<std::string>& mods, const std::vector<
 // (HseStartOffIni). Plain Win32 (loader lock, no log yet). A pak that can't be renamed, or a file that can't be
 // written, leaves the mod as it is: the host then refuses it in plain words, no second restart.
 void ApplySwitchEarly();
+// The other way (session/hsm_mod_switch.h PlanBack): this game has mods off for a lobby, and the next one has them all
+// back. This game's exit puts them back as always; the switch file makes the next game wait for that, and lock HS
+// Enhancer again when lockHse. False: not written, or this game already set mods off for the next one.
+bool ModsBackForNextGame(bool lockHse);
+// The report from before mods went off for a lobby (kept across restarts until they are all back), in a game that has
+// some off or HS Enhancer locked for one; null otherwise, or when it isn't known.
+const ModReport* OwnBeforeSwitch();
+bool HseLockedForLobby();   // this game locked HS Enhancer for a lobby, and it is locked still
+bool HseKeysHoldable();     // HSMMod is in HS Enhancer's window hook: a new game can hold its keys (enhancer::hold)
 void RestoreModsTxt();                // at exit: puts it back if this was that game, and HS Enhancer's own settings
 // HS Enhancer can't do anything here: this game locked it and its file is locked still, or it started with its features
 // off, they are off still (its file is read again every 5 s) and its keys are held (enhancer::hold, from HoldTick). The

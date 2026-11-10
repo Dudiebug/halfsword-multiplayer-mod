@@ -110,7 +110,7 @@ void Lobby::Tick() {
                     if (l.switchable && (!l.pack.any() || modpack::Check(l.pack).verdict == PackVerdict::Ok)) {   // the rule refuses mods a restart can turn off: ask
                         steam::LeaveLobby(e.lobby); state_ = State::Idle;
                         SetStatus("This lobby needs some of your mods off: restart?");
-                        switchAsk_ = SwitchAsk{e.lobby, l.name, l.ruleText, l.plan, false};
+                        switchAsk_ = SwitchAsk{e.lobby, l.name, l.ruleText, l.plan, false, false, {}};
                         break;
                     }
                     if (!l.compatible) { steam::LeaveLobby(e.lobby); state_ = State::Idle; SetStatus(l.modsText.empty() ? "Cannot join: " + l.reason : l.modsText); break; }
@@ -126,6 +126,7 @@ void Lobby::Tick() {
                         break;
                     }
                     Enter(e.lobby);
+                    AskBack(e.lobby, l.name, l.ruleText, l.back);   // mods off for another lobby that this one takes
                 }
                 break;
             case steam::Event::LobbyMembersChanged:
@@ -191,6 +192,10 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
             if (onlyMods && lobby != rejoinLobby_ && !(rule.officialOnly && modrules::OwnOfficial() == Official::No)) l.plan = PlanSwitch(rule, modrules::OwnAsGuest());
             l.switchable = onlyMods && l.plan.Switchable();
         }
+        // Mods off for another lobby, and this one takes them all: a restart brings them back (session/hsm_mod_switch.h).
+        if (modrules::Enabled() && l.reason.empty() && !(rule.officialOnly && modrules::OwnOfficial() == Official::No))
+            if (const ModReport* full = modrules::OwnBeforeSwitch())
+                l.back = PlanBack(rule, *full, modrules::Own(), modrules::HseLockedForLobby(), modrules::HseKeysHoldable());
     }
     l.compatible = l.reason.empty();
     return l;
@@ -236,19 +241,29 @@ void Lobby::RememberPassword(const std::string& password) {
 
 void Lobby::AskPassword(steam::SteamId lobby, const std::string& note) { askLobby_ = lobby; askNote_ = note; }
 
+void Lobby::AskBack(steam::SteamId lobby, const std::string& name, const std::string& ruleText, const BackPlan& b) {
+    if (!b.Any() || lobby == backDeclined_ || switchAsk_.lobby) return;
+    HSM_LOG("lobby: this lobby takes the mods this game has off: offering a restart with %s", BackWords(b).c_str());
+    SwitchAsk ask; ask.lobby = lobby; ask.name = name; ask.ruleText = ruleText; ask.rejoin = true; ask.back = true; ask.backPlan = b;
+    switchAsk_ = ask;
+}
+
 bool Lobby::ConfirmSwitch() {
     const SwitchAsk ask = switchAsk_;
     switchAsk_ = SwitchAsk{};
     if (!ask.lobby) return false;
-    HSM_LOG("lobby: restarting with %s for %s (%s)", SwitchWords(ask.plan).c_str(), ask.name.empty() ? "a lobby" : ask.name.c_str(), ask.ruleText.c_str());
-    if (!modrules::TurnOffForNextGame(ask.plan.modsTxt, ask.plan.exeDlls, ask.plan.paks, ask.plan.lockHse)) { SetStatus("Could not turn the mods off (see HSMMod.log)"); return false; }
+    const std::string words = ask.back ? BackWords(ask.backPlan) : SwitchWords(ask.plan);
+    HSM_LOG("lobby: restarting with %s for %s (%s)", words.c_str(), ask.name.empty() ? "a lobby" : ask.name.c_str(), ask.ruleText.c_str());
+    if (ask.back) {
+        if (!modrules::ModsBackForNextGame(ask.backPlan.lockHse)) { SetStatus("Could not set up the restart (see HSMMod.log)"); return false; }
+    } else if (!modrules::TurnOffForNextGame(ask.plan.modsTxt, ask.plan.exeDlls, ask.plan.paks, ask.plan.lockHse)) { SetStatus("Could not turn the mods off (see HSMMod.log)"); return false; }
     RejoinFile r;
     r.lobby = ask.lobby;
     r.until = uint64_t(std::time(nullptr)) + kRejoinWindowS;
     if (passwordLobby_ == ask.lobby) r.password = password_;   // typed for this lobby, or remembered from its host
     if (!modrules::WriteRejoin(r)) HSM_LOG("lobby: could not write the rejoin file: the lobby has to be joined by hand after the restart");
     if (!restartGame || !restartGame()) { SetStatus("Could not restart the game: start it again yourself, then join"); return false; }
-    SetStatus("Restarting with " + SwitchWords(ask.plan) + "...");
+    SetStatus("Restarting with " + words + "...");
     return true;
 }
 
@@ -265,10 +280,15 @@ void Lobby::RuleTick() {
     HSM_LOG("lobby: the host changed the mod rules: %s", RuleSummary(rule).c_str());
     if (IsHost()) return;   // the host's own change: its chat line says so
     if (onRuleChanged) onRuleChanged("Host changed mods: " + RuleSummary(rule));
-    if (!modrules::Enabled() || lobby_ == rejoinLobby_ || switchAsk_.lobby) return;
-    const SwitchPlan plan = PlanSwitch(rule, modrules::OwnAsGuest());
-    if (!plan.Switchable()) return;
-    switchAsk_ = SwitchAsk{lobby_, steam::LobbyData(lobby_, "name"), RuleSummary(rule), plan, true};
+    if (!modrules::Enabled() || switchAsk_.lobby) return;
+    if (lobby_ != rejoinLobby_) {
+        const SwitchPlan plan = PlanSwitch(rule, modrules::OwnAsGuest());
+        if (plan.Switchable()) { switchAsk_ = SwitchAsk{lobby_, steam::LobbyData(lobby_, "name"), RuleSummary(rule), plan, true, false, {}}; return; }
+    }
+    // Looser now: the mods this game has off for another lobby may all fit (Describe's back, for a rule change).
+    if (rule.officialOnly && modrules::OwnOfficial() == Official::No) return;
+    if (const ModReport* full = modrules::OwnBeforeSwitch())
+        AskBack(lobby_, steam::LobbyData(lobby_, "name"), RuleSummary(rule), PlanBack(rule, *full, modrules::Own(), modrules::HseLockedForLobby(), modrules::HseKeysHoldable()));
 }
 
 int Lobby::MaxPlayers() const { return InLobby() ? ParsePlayerLimit(steam::LobbyData(lobby_, "hsm_max")) : maxPlayers_; }

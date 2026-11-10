@@ -322,6 +322,33 @@ inline std::string LockedHseIni(std::string_view ini) {
     return out;
 }
 
+// HSE's menu key as HSE reads it at start (KeybindManager, 2026-11): [Keybinds] toggle_gui_key when it is a key HSE takes
+// (1-255, but not a Windows or menu key; a locked file's 143 is one), otherwise Insert. A number is read as SimpleIni
+// reads one: digits from the start, "0x" for hex.
+inline int HseMenuKey(std::string_view ini) {
+    if (ini.substr(0, 3) == "\xEF\xBB\xBF") ini.remove_prefix(3);
+    constexpr int kInsert = 0x2D;
+    const auto v = RuleIniValue(ini, "Keybinds", "toggle_gui_key");
+    if (!v || v->empty()) return kInsert;
+    std::string_view s = *v;
+    bool neg = false;
+    if (s.front() == '-' || s.front() == '+') { neg = s.front() == '-'; s.remove_prefix(1); }
+    int base = 10;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s.remove_prefix(2); }
+    long k = 0;
+    size_t digits = 0;
+    for (char c : s) {
+        const int d = c >= '0' && c <= '9' ? c - '0' : base == 16 && c >= 'a' && c <= 'f' ? c - 'a' + 10
+                    : base == 16 && c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) break;
+        if (k < 100000) k = k * base + d;
+        ++digits;
+    }
+    if (!digits || neg) return kInsert;
+    const bool valid = k > 0 && k < 256 && k != 0x5B && k != 0x5C && k != 0x5D;   // VK_LWIN, VK_RWIN, VK_APPS
+    return valid ? int(k) : kInsert;
+}
+
 // A file LockedHseIni wrote, locked still or changed since: its menu key is still the one no key sends, which a player's
 // own file never has. The next start puts the player's copy back over such a file, and leaves any other alone.
 inline bool HseIniFromLock(std::string_view ini) { return RuleIniValue(ini, "Keybinds", "toggle_gui_key") == kRuleLockedMenuKey; }
