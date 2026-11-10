@@ -1,5 +1,6 @@
 #include "ui/build_card.h"
 #include "ui/umg.h"
+#include "ui/skin.h"
 #include "log.h"
 #include <windows.h>
 
@@ -11,11 +12,10 @@ constexpr ULONGLONG kScanEveryMs = 1000;
 constexpr int kZOrder = 55;           // under the chat and the banners
 constexpr float kWidth = 430;
 constexpr float kTextSize = 15;
-// The launcher's terminal palette, as linear colours: #E8C8A0, #C07040, #804030, #100808.
-constexpr Rgba kBright{0.807f, 0.578f, 0.352f, 1};
-constexpr Rgba kMain{0.527f, 0.162f, 0.051f, 1};
-constexpr Rgba kFrame{0.216f, 0.051f, 0.030f, 1};
-constexpr Rgba kBack{0.0052f, 0.0024f, 0.0024f, 0.86f};
+// Ink on the game's parchment: the player's name dark, the rest in the rubric. Classic look: the launcher's terminal
+// palette as linear colours, #E8C8A0 and #C07040.
+Rgba Bright() { return style::ClassicMenus() ? Rgba{0.807f, 0.578f, 0.352f, 1} : style::kMenuText; }
+Rgba Main() { return style::ClassicMenus() ? Rgba{0.527f, 0.162f, 0.051f, 1} : style::kMenuAccentInk; }
 
 struct Widgets {
     UClass* hudClass = nullptr;
@@ -32,7 +32,8 @@ BuildCardQueue g_queue;
 Text MakeLine(Box& column, Rgba color) {
     Text t = w.kit.MakeText();
     if (!t) return t;
-    t.Font(kTextSize, 1, {0, 0, 0, 0.9f});
+    if (style::ClassicMenus()) t.Font(kTextSize, 1, {0, 0, 0, 0.9f}); else t.Font(kTextSize);
+    skin::Font(t, skin::Face::Body);
     t.Color(color);
     t.Align(Justify::Left);
     t.Wrap(true);
@@ -49,22 +50,24 @@ bool Build() {
     w.box = w.kit.MakeFixed();
     w.box.Width(kWidth);
     root.Add(w.box).Anchor({{0.012, 0.03}, {0.012, 0.03}}, {0, 0}).AutoSize().Z(kZOrder);
-    // A one-pixel frame: the dim panel shows round the dark one.
-    Panel frame = w.kit.MakePanel();
-    frame.Color(kFrame);
-    frame.Padding({1, 1, 1, 1});
-    w.box.Content(frame).Align(HAlign::Fill, VAlign::Top);
+    // The game's parchment button: its gilt frame round the card.
     Panel back = w.kit.MakePanel();
-    back.Color(kBack);
-    back.Padding({10, 6, 10, 7});
-    frame.Content(back).Align(HAlign::Fill, VAlign::Fill);
+    skin::Paint(back, skin::Art::Card);
+    skin::Pad(back, skin::Art::Card, {16, 12, 16, 12});
+    w.box.Content(back).Align(HAlign::Fill, VAlign::Top);
     Box column = w.kit.MakeColumn();
     back.Content(column).Align(HAlign::Fill, VAlign::Top);
-    w.head = MakeLine(column, kMain);
-    w.head.Set("> FIGHTER ENTRY");
-    w.player = MakeLine(column, kBright);
-    w.build = MakeLine(column, kMain);
-    w.mods = MakeLine(column, kMain);
+    w.head = MakeLine(column, Main());
+    if (style::ClassicMenus()) {
+        w.head.Set("> FIGHTER ENTRY");
+    } else {
+        w.head.Set("Fighter Entry");
+        w.head.Font(20);
+        skin::Font(w.head, skin::Face::Heading);
+    }
+    w.player = MakeLine(column, Bright());
+    w.build = MakeLine(column, Main());
+    w.mods = MakeLine(column, Main());
     if (!w.mods) { HSM_LOG("buildcard: could not make the widgets"); return false; }
     w.box.Show(false);
     HSM_LOG("buildcard: added to UI_HUD");

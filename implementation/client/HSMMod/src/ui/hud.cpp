@@ -1,5 +1,6 @@
 #include "ui/hud.h"
 #include "ui/umg.h"
+#include "ui/skin.h"
 #include "log.h"
 #include "hsm_protocol.h"
 #include <windows.h>
@@ -13,7 +14,7 @@ namespace {
 constexpr int32_t kZOrder = 50;
 constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12, kFlagLines = 2;   // eight fighters, three team bands, slack
 constexpr Rgba kOutline{0, 0, 0, 0.9f}, kClear{0, 0, 0, 0};
-constexpr Rgba kFeedMine{0.22f, 0.025f, 0.02f, 0.80f}, kFeedOther{0.02f, 0.017f, 0.014f, 0.55f};
+constexpr Rgba kMine{0.95f, 0.55f, 0.08f, 0.45f};   // our own scoreboard row: the amber of the game's pressed button, under the ink
 
 struct Block { Box column; Panel panel; Text label, score; };
 struct FeedLine { Panel panel; std::array<Text, kFeedSpans> spans; };
@@ -52,10 +53,33 @@ Text MakeText(float size, int32_t outline, Rgba color = style::kBone, Justify ju
     return t;
 }
 
+// Text written on the game's parchment: ink in its typeface, no outline (the classic look: light text with the dark
+// outline, on smoke). Its colour goes through Ink().
+Text MakeInk(float size, Rgba color = style::kMenuText, Justify justify = Justify::Left, skin::Face face = skin::Face::Body) {
+    Text t = g.kit.MakeText();
+    if (!t) return t;
+    if (style::ClassicMenus()) t.Font(size, 1, kOutline); else t.Font(size);
+    skin::Font(t, face);
+    t.Color(style::OnParchment(color));
+    t.Align(justify);
+    return t;
+}
+
+// A scene colour (made for the dark HUD) as ink on parchment.
+void Ink(Text& t, Rgba c) { t.Color(style::OnParchment(c)); }
+
 Panel MakePanel(Rgba color, Margin padding) {
     Panel p = g.kit.MakePanel();
     p.Color(color);
     p.Padding(padding);
+    return p;
+}
+
+// A panel of the game's art (its plain colour when the art is not loaded), `room` inside the art's frame or edges.
+Panel MakeArt(skin::Art art, Margin room, Rgba tint = {1, 1, 1, 1}) {
+    Panel p = g.kit.MakePanel();
+    skin::Paint(p, art, tint);
+    skin::Pad(p, art, room);
     return p;
 }
 
@@ -89,13 +113,13 @@ BoardLine MakeBoardLine(Box& column, float size, Rgba ink) {
     l.swatch.Size({10, 22});
     l.swatch.Color(kClear);
     row.Add(l.swatch).Align(HAlign::Left, VAlign::Center).Padding({0, 0, 10, 0});
-    l.name = MakeText(size, 1, ink); Cell(row, l.name, 240);
-    l.badge = MakeText(14, 1, style::kWarn); Cell(row, l.badge, 60);
-    l.kills = MakeText(size, 1, ink, Justify::Right); Cell(row, l.kills, 50);
-    l.deaths = MakeText(size, 1, ink, Justify::Right); Cell(row, l.deaths, 50);
-    l.score = MakeText(size, 1, ink, Justify::Right); Cell(row, l.score, 80);
-    l.ping = MakeText(size, 1, style::kIron, Justify::Right); Cell(row, l.ping, 90);
-    l.status = MakeText(14, 1, style::kBloodInk, Justify::Right); Cell(row, l.status, 70);
+    l.name = MakeInk(size, ink); Cell(row, l.name, 240);
+    l.badge = MakeInk(14, style::kMenuWarn); Cell(row, l.badge, 60);
+    l.kills = MakeInk(size, ink, Justify::Right); Cell(row, l.kills, 50);
+    l.deaths = MakeInk(size, ink, Justify::Right); Cell(row, l.deaths, 50);
+    l.score = MakeInk(size, ink, Justify::Right); Cell(row, l.score, 80);
+    l.ping = MakeInk(size, style::kMenuDim, Justify::Right); Cell(row, l.ping, 90);
+    l.status = MakeInk(14, style::kMenuAccentInk, Justify::Right); Cell(row, l.status, 70);
     return l;
 }
 
@@ -107,23 +131,23 @@ void BuildTop(Canvas& root) {
     for (Block& b : g.blocks) {
         b.column = g.kit.MakeColumn();
         strip.Add(b.column).Padding({4, 0, 4, 0});
-        b.panel = MakePanel(style::kSmoke, {16, 2, 16, 2});
+        b.panel = MakeArt(skin::Art::Plate, {16, 6, 16, 6});
         b.column.Add(b.panel).Align(HAlign::Fill, VAlign::Top);
         Box row = g.kit.MakeRow();
         b.panel.Content(row);
-        b.label = MakeText(20, 1);
+        b.label = MakeInk(21);
         row.Add(b.label).Align(HAlign::Left, VAlign::Center).Padding({0, 0, 12, 0});
-        b.score = MakeText(32, 2);
+        b.score = MakeInk(34, style::kMenuText, Justify::Left, skin::Face::Heading);
         row.Add(b.score).Align(HAlign::Left, VAlign::Center);
     }
     g.bar = MakeBar(g.barBox, g.top, 320, 5, {0, 6, 0, 0});
-    g.pill = MakePanel(style::kSmoke, {14, 2, 14, 2});
+    g.pill = MakeArt(skin::Art::Plate, {16, 5, 16, 5});
     g.top.Add(g.pill).Align(HAlign::Center, VAlign::Top).Padding({0, 6, 0, 0});
     Box pillRow = g.kit.MakeRow();
     g.pill.Content(pillRow);
-    g.pillText = MakeText(18, 1);
+    g.pillText = MakeInk(19);
     pillRow.Add(g.pillText).Align(HAlign::Left, VAlign::Center);
-    g.clock = MakeText(18, 1, style::kIron);
+    g.clock = MakeInk(19, style::kMenuDim);
     pillRow.Add(g.clock).Align(HAlign::Left, VAlign::Center).Padding({14, 0, 0, 0});
     for (Text& t : g.flagLines) {
         t = MakeText(18, 2, style::kBone, Justify::Center);
@@ -138,29 +162,30 @@ void BuildTop(Canvas& root) {
 void BuildCentre(Canvas& root) {
     g.bannerBox = g.kit.MakeColumn();
     root.Add(g.bannerBox).Anchor({{0.5, 0.30}, {0.5, 0.30}}, {0.5, 0.5}).AutoSize().Z(kZOrder + 1);
-    g.banner = MakeText(76, 3, style::kBone, Justify::Center);
+    g.banner = MakeText(80, 3, style::kBone, Justify::Center);
+    skin::Font(g.banner, skin::Face::Heading);   // the game's own titles
     g.bannerBox.Add(g.banner).Align(HAlign::Center, VAlign::Top);
     g.bannerSub = MakeText(26, 2, style::kBone, Justify::Center);
     g.bannerBox.Add(g.bannerSub).Align(HAlign::Center, VAlign::Top);
 
-    g.hold = MakePanel(style::kSmoke, {22, 8, 22, 10});
+    g.hold = MakeArt(skin::Art::Sheet, {20, 6, 20, 6});
     root.Add(g.hold).Anchor({{0.5, 0.56}, {0.5, 0.56}}, {0.5, 0.5}).AutoSize().Z(kZOrder + 1);
     Box holdCol = g.kit.MakeColumn();
     g.hold.Content(holdCol);
-    g.holdText = MakeText(30, 2, style::kBloodInk, Justify::Center);
+    g.holdText = MakeInk(30, style::kMenuAccentInk, Justify::Center, skin::Face::Heading);
     holdCol.Add(g.holdText).Align(HAlign::Center, VAlign::Top);
     g.holdBar = MakeBar(g.holdBarBox, holdCol, 280, 8, {0, 8, 0, 0});
 
-    g.dead = MakePanel(style::kSmoke, {28, 12, 28, 14});
+    g.dead = MakeArt(skin::Art::Sheet, {26, 8, 26, 8});
     root.Add(g.dead).Anchor({{0.5, 0.70}, {0.5, 0.70}}, {0.5, 0.5}).AutoSize().Z(kZOrder);
     Box col = g.kit.MakeColumn();
     g.dead.Content(col);
-    g.deadTitle = MakeText(34, 2, style::kBone, Justify::Center);
+    g.deadTitle = MakeInk(38, style::kMenuAccentInk, Justify::Center, skin::Face::Heading);
     col.Add(g.deadTitle).Align(HAlign::Center, VAlign::Top);
-    g.deadDetail = MakeText(22, 1, style::kBone, Justify::Center);
+    g.deadDetail = MakeInk(22, style::kMenuText, Justify::Center);
     col.Add(g.deadDetail).Align(HAlign::Center, VAlign::Top);
     g.deadBar = MakeBar(g.deadBarBox, col, 300, 6, {0, 8, 0, 0});
-    g.deadHint = MakeText(16, 1, style::kIron, Justify::Center);
+    g.deadHint = MakeInk(16, style::kMenuDim, Justify::Center);
     col.Add(g.deadHint).Align(HAlign::Center, VAlign::Top).Padding({0, 10, 0, 0});
 }
 
@@ -168,29 +193,30 @@ void BuildFeed(Canvas& root) {
     g.feed = g.kit.MakeColumn();
     root.Add(g.feed).Anchor({{0.985, 0.10}, {0.985, 0.10}}, {1, 0}).AutoSize().Z(kZOrder);
     for (FeedLine& f : g.feedLines) {
-        f.panel = MakePanel(kFeedOther, {10, 1, 10, 1});
+        f.panel = MakeArt(skin::Art::Plate, {14, 4, 14, 4});
         g.feed.Add(f.panel).Align(HAlign::Right, VAlign::Top).Padding({0, 0, 0, 3});
         Box row = g.kit.MakeRow();
         f.panel.Content(row);
-        for (Text& t : f.spans) { t = MakeText(20, 1); row.Add(t).Align(HAlign::Left, VAlign::Center); }
+        for (Text& t : f.spans) { t = MakeInk(20); row.Add(t).Align(HAlign::Left, VAlign::Center); }
     }
 }
 
 void BuildBoard(Canvas& root) {
     g.board = g.kit.MakeBlur();
-    g.board.Strength(8);
+    // The game's scroll is opaque: nothing to blur, and a blur showed as a grey box round its rods. Classic: smoke over a blur.
+    g.board.Strength(style::ClassicMenus() ? 8.f : 0.f);
     root.Add(g.board).Anchor({{0.5, 0.17}, {0.5, 0.17}}, {0.5, 0}).AutoSize().Z(kZOrder + 2);
-    Panel back = MakePanel(style::kSmoke, {22, 14, 22, 16});
+    Panel back = MakeArt(skin::Art::Scroll, {36, 14, 26, 34});   // the game's scroll, inside its rods
     g.board.Content(back);
     Box col = g.kit.MakeColumn();
     back.Content(col);
-    g.boardTitle = MakeText(22, 1);
+    g.boardTitle = MakeInk(28, style::kMenuAccentInk, Justify::Left, skin::Face::Heading);
     col.Add(g.boardTitle).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 0, 10});
-    g.boardHeader = MakeBoardLine(col, 15, style::kIron);
+    g.boardHeader = MakeBoardLine(col, 15, style::kMenuDim);
     g.boardHeader.name.Set("PLAYER"); g.boardHeader.kills.Set("K"); g.boardHeader.deaths.Set("D");
     g.boardHeader.score.Set("SCORE"); g.boardHeader.ping.Set("PING");
-    for (BoardLine& l : g.boardLines) l = MakeBoardLine(col, 20, style::kBone);
-    g.boardFooter = MakeText(20, 1, style::kWarn);
+    for (BoardLine& l : g.boardLines) l = MakeBoardLine(col, 20, style::kMenuText);
+    g.boardFooter = MakeInk(20, style::kMenuWarn);
     col.Add(g.boardFooter).Align(HAlign::Left, VAlign::Top).Padding({0, 10, 0, 0});
 }
 
@@ -373,8 +399,8 @@ void ApplyTop(const HudScene& s) {
         b.column.Show(i < s.strip.size());
         if (i >= s.strip.size()) continue;
         const ScoreBlock& sb = s.strip[i];
-        b.label.Set(sb.label); b.label.Color(sb.color);
-        b.score.Set(std::to_string(sb.score)); b.score.Color(sb.color);
+        b.label.Set(sb.label); Ink(b.label, sb.color);
+        b.score.Set(std::to_string(sb.score)); Ink(b.score, sb.color);
     }
     for (size_t i = 0; i < g.flagLines.size(); ++i) {
         if (!g.flagLines[i]) continue;
@@ -383,7 +409,7 @@ void ApplyTop(const HudScene& s) {
     g.barBox.Show(s.timeBar);
     if (s.timeBar) g.bar.Percent(s.timeFrac);
     g.pill.Show(s.pill.visible);
-    if (s.pill.visible) { g.pillText.Set(s.pill.text); g.pillText.Color(s.pill.color); }
+    if (s.pill.visible) { g.pillText.Set(s.pill.text); Ink(g.pillText, s.pill.color); }
     Line(g.clock, s.clock, s.timeBar && !s.clock.empty());
     Apply(g.info, s.info);
 }
@@ -391,7 +417,7 @@ void ApplyTop(const HudScene& s) {
 void ApplyHold(const HoldView& h) {
     g.hold.Show(h.visible);
     if (!h.visible) return;
-    g.holdText.Set(h.text); g.holdText.Color(h.color);
+    g.holdText.Set(h.text); Ink(g.holdText, h.color);
     g.holdBarBox.Show(h.bar);
     if (h.bar) g.holdBar.Percent(h.frac);
 }
@@ -412,26 +438,26 @@ void ApplyFeed(const std::vector<FeedView>& feed) {
         f.panel.Show(i < feed.size());
         if (i >= feed.size()) continue;
         const FeedView& v = feed[i];
-        f.panel.Color(v.row.mine ? kFeedMine : kFeedOther);
+        skin::Paint(f.panel, v.row.mine ? skin::Art::PlatePicked : skin::Art::Plate);   // our own kills on the amber button
         f.panel.Opacity(v.opacity);
         for (size_t k = 0; k < f.spans.size(); ++k) {
             bool has = k < v.row.spans.size();
             f.spans[k].Show(has);
-            if (has) { f.spans[k].Set(v.row.spans[k].text); f.spans[k].Color(v.row.spans[k].color); }
+            if (has) { f.spans[k].Set(v.row.spans[k].text); Ink(f.spans[k], v.row.spans[k].color); }
         }
     }
 }
 
 void ApplyBoardLine(BoardLine& l, const BoardRow& r) {
     bool band = r.kind == BoardRow::Kind::Band;
-    l.frame.Color(r.local ? style::kBlood : kClear);
-    l.panel.Color(band ? Rgba{r.swatch.r, r.swatch.g, r.swatch.b, 0.45f} : kClear);
+    l.frame.Color(r.local ? (style::ClassicMenus() ? style::kBlood : kMine) : kClear);
+    l.panel.Color(band ? Rgba{r.swatch.r, r.swatch.g, r.swatch.b, 0.30f} : kClear);
     l.swatch.Color(band ? kClear : r.swatch);
-    l.name.Set(r.tag.empty() ? r.name : r.name + "  " + r.tag); l.name.Color(r.ink);
+    l.name.Set(r.tag.empty() ? r.name : r.name + "  " + r.tag); Ink(l.name, r.ink);
     l.badge.Set(r.host ? "HOST" : "");
-    l.kills.Set(band ? "" : std::to_string(r.kills)); l.kills.Color(r.ink);
-    l.deaths.Set(band ? "" : std::to_string(r.deaths)); l.deaths.Color(r.ink);
-    l.score.Set(std::to_string(r.score)); l.score.Color(r.ink);
+    l.kills.Set(band ? "" : std::to_string(r.kills)); Ink(l.kills, r.ink);
+    l.deaths.Set(band ? "" : std::to_string(r.deaths)); Ink(l.deaths, r.ink);
+    l.score.Set(std::to_string(r.score)); Ink(l.score, r.ink);
     l.ping.Set(band || !r.pingMs ? "" : std::to_string(r.pingMs) + " ms");
     l.status.Set(r.dead ? "DEAD" : r.down ? "DOWN" : "");
 }

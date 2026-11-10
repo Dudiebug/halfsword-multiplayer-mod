@@ -6,6 +6,7 @@
 #include "config.h"
 #include "file_hash.h"
 #include "log.h"
+#include "match/hsm_dll_rules.h"
 #include "match/hsm_online_rules.h"
 #include "miniz.h"
 

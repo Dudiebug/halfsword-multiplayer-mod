@@ -80,6 +80,9 @@ public:
     // C0 (0.8.0-pre7): the hit audit, kept only while on (help_improve). AuditLine: since the previous call; empty when
     // nothing was struck.
     void SetAudit(bool on) { if (on != audit_) { audit_ = on; strikes_.clear(); landed_.clear(); } }
+    // Rev 42 (combat/hsm_claimcheck.h, HSMMod.ini claim_check): how a blow against my fighter is checked against where my
+    // fighter really was when the attacker's screen showed it.
+    void SetClaimCheck(combat::ClaimCheckMode mode) { checkMode_ = mode; }
     std::string AuditLine();
 
 private:
@@ -150,6 +153,8 @@ private:
     std::array<double, kMaxWillies + 1> resetDcdMs_{};                   // per stand-in victim: when its DCD gate clears (0: no reset pending)
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box
     Counters n_, reported_;
+    combat::ClaimCheckMode checkMode_ = combat::ClaimCheckMode::Log;
+    sync::ClaimNetStats check_;   // rev 42: the claim check's verdicts and distances
     // C0: blows on stand-ins by what struck them, and their fate; claims replayed on my fighter by striking component.
     struct Strike { uint32_t contacts = 0, blocked = 0, gated = 0, limited = 0, noClaim = 0, coalesced = 0, zero = 0, capped = 0, sent = 0;
                     double damage = 0; };

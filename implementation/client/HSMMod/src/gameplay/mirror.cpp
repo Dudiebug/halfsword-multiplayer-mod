@@ -60,7 +60,10 @@ std::string Mirror::Command(const std::vector<std::string>& args, Adapter& adapt
     o.brain = false;
     UObject* s = adapter.SpawnFighter(o);
     if (!s) return Err("stand-in spawn failed (see log)");
+    const double quantile = quantile_, marginMs = marginMs_, leadMs = leadMs_;
     *this = Mirror{};
+    SetPlayout(quantile, marginMs, leadMs);
+    standIns_.SetPlayout(quantile, marginMs, leadMs);
     adapter_ = &adapter;
     standIn_ = s;
     standInIndex_ = ObjectIndex(s);
@@ -77,9 +80,9 @@ std::string Mirror::Command(const std::vector<std::string>& args, Adapter& adapt
     nextLogMs_ = now + kLogEveryMs;
     active_ = true;
     InstallGuard();
-    HSM_LOG("mirror: on (link %.0f +- %.0f ms, %.1f %% loss; stand-in %s %.0f uu to the right%s; the network stand-in path)",
-            linkCfg_.delayMs, linkCfg_.jitterMs, linkCfg_.lossPct, ObjectName(s).c_str(), offsetUu_,
-            keepTick_ ? "; its Willie tick runs" : "");
+    HSM_LOG("mirror: on (link %.0f +- %.0f ms, %.1f %% loss; stand-in %s %.0f uu to the right%s; the network stand-in path; "
+            "playout quantile %.2f margin %.0f ms lead %.0f ms)", linkCfg_.delayMs, linkCfg_.jitterMs, linkCfg_.lossPct, ObjectName(s).c_str(),
+            offsetUu_, keepTick_ ? "; its Willie tick runs" : "", quantile, marginMs, leadMs);
     return "{\"ok\":true,\"standin\":" + JsonString(ObjectName(s)) + "}";
 }
 

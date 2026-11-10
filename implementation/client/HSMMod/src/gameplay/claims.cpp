@@ -459,6 +459,9 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
     const uint32_t ts = streams_->ClockMs(SteadyNowMs());
     HitClaim claim = combat::MakeClaim(in, boneWorld, 0, attacker, victim, ts, source, key.strikeComponent, std::string{});
     if (prop) combat::StruckByProp(claim, prop->id, prop->velocity, boneWorld);
+    // Rev 42: the victim's own pose time this stand-in showed, and the contact in world space, so the victim can check the
+    // blow against where its fighter really was then (combat/hsm_claimcheck.h). 0: no shown pose yet, nothing to check.
+    if (uint32_t shown = 0; standIns_->ShownOwnerTs(victim, shown)) { claim.victimViewTsMs = shown; claim.worldLocation = in.location; }
     pending_ = Pending{standIn, std::move(claim), std::move(key), prop != nullptr, {}};
 }
 
@@ -514,6 +517,23 @@ void Claims::ReplayNow(const HitClaim& c, double nowMs) {
     UObject* mesh = victim ? adapter_->Mesh(victim) : nullptr;
     if (!mesh) { ++n_.noVictim; return; }   // between lives: the blow has nothing to land on
     if (!PeerBoneOk(c)) return;
+    if (checkMode_ != combat::ClaimCheckMode::Off) {   // rev 42: was my fighter where the attacker's screen showed it?
+        const combat::SelfPoseHistory* h = streams_->SelfHistory(c.victim);
+        const combat::ClaimCheckResult r = h ? combat::CheckClaim(*h, c, streams_->ClockMs(nowMs)) : combat::ClaimCheckResult{};
+        if (r.verdict == combat::ClaimVerdict::Unchecked) ++check_.unchecked;
+        else {
+            check_.dist.Add(nowMs, r.distUu);
+            if (r.verdict == combat::ClaimVerdict::Ok) ++check_.ok;
+            else {
+                ++check_.far;
+                if (check_.far <= 5 || check_.far % 100 == 0)
+                    HSM_LOG("claims: #%u from e%u on %s is %.0f uu from where e%u was %.0f ms ago%s (%s)", c.claimId, c.attacker,
+                            c.hitBone.c_str(), r.distUu, c.victim, r.rewindMs, r.capped ? " (rewind capped)" : "",
+                            checkMode_ == combat::ClaimCheckMode::On ? "dropped" : "logged only");
+                if (checkMode_ == combat::ClaimCheckMode::On) { ++check_.dropped; return; }
+            }
+        }
+    }
     const FName bone = c.hitBone.empty() ? FName{} : MakeName(c.hitBone);
     Call index(mesh, "GetBoneIndex");
     index.setName("BoneName", bone).invoke();
@@ -862,7 +882,9 @@ std::string Claims::HealthLine() {
                   d(a.blockedPropCopy, b.blockedPropCopy), d(a.getDamageBlocked, b.getDamageBlocked), d(a.blockedFlag, b.blockedFlag),
                   d(a.effects, b.effects), d(a.effectsSkipped, b.effectsSkipped), d(a.clashes, b.clashes), d(a.clashUnmatched, b.clashUnmatched), d(a.badBone, b.badBone));
     reported_ = n_;
-    return line;
+    std::string out = line;
+    if (checkMode_ != combat::ClaimCheckMode::Off) out += " | " + sync::ClaimLine(check_, SteadyNowMs());   // rev 42
+    return out;
 }
 
 }  // namespace hsm::game

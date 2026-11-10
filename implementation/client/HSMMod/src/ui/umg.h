@@ -36,6 +36,20 @@ template <class T> struct Sent {
     }
 };
 
+// A texture brush (the game's own UI art): stretched over the widget, nine-sliced (`slice`: the corner and edge
+// shares of the texture that keep their size, drawn at `size` px for the whole texture), or tiled at `size` px.
+struct Look {
+    ue::UObject* texture = nullptr;
+    Margin slice{};                           // 0..1 of the texture; all 0: stretched (or tiled)
+    Vec2 size{};                              // px the whole texture is drawn at (slices and tiles); 0: its own size
+    bool tile = false;
+    bool mirror = false;                      // drawn mirrored left to right
+    bool operator==(const Look& o) const {
+        return texture == o.texture && std::memcmp(&slice, &o.slice, sizeof slice) == 0 && size.x == o.size.x && size.y == o.size.y &&
+               tile == o.tile && mirror == o.mirror;
+    }
+};
+
 // Where a child sits in the panel that holds it. Set while building (not diffed).
 class Slot {
 public:
@@ -96,6 +110,8 @@ public:
     void Shadow(Vec2 offset, Rgba color);
     void Align(Justify j);
     void Wrap(bool on);
+    // One of the game's typefaces (a UFont, see GameFont) in place of the copied one; the size and outline stay.
+    void Face(ue::UObject* font);
 private:
     friend class Kit;
     struct FontKey { float size; int32_t outline; Rgba color; };
@@ -112,12 +128,15 @@ private:
 class Panel : public Widget {
 public:
     Slot Content(const Widget& child);
-    void Color(Rgba c);
+    void Color(Rgba c);                       // the fill, or the tint over a texture
     void Padding(Margin m);
     void ContentAlign(HAlign h, VAlign v);
+    void Texture(const Look& look);           // the brush draws a texture (Color tints it); a null texture: a plain fill again
 private:
     Sent<Rgba> color_;
     Sent<Margin> padding_;
+    Look look_;
+    bool lookKnown_ = false;
 };
 
 // BackgroundBlur: blurs what is behind it, around one child.
@@ -149,8 +168,9 @@ public:
     void Width(float w);
     void Height(float h);
     void MinWidth(float w);
+    void MinHeight(float h);
 private:
-    Sent<float> width_, height_, minWidth_;
+    Sent<float> width_, height_, minWidth_, minHeight_;
 };
 
 // ScaleBox set to ScaleToFit, DownOnly: its child at its own size, shrunk (never grown) to fit the space it is given.
@@ -189,10 +209,13 @@ public:
     void Color(Rgba c);
     void Size(Vec2 s);
     void Texture(ue::UObject* texture);
+    void Texture(const Look& look);           // as Panel::Texture
 private:
     Sent<Rgba> color_;
     Sent<Vec2> size_;
     Sent<ue::UObject*> texture_;
+    Look look_;
+    bool lookKnown_ = false;
 };
 
 // Button with one child (its label). Clicked() reports a release over the button, once.
@@ -276,6 +299,14 @@ ue::UObject* FindTextBlock(ue::UObject* root, int depth);     // the first TextB
 std::string Describe(ue::UObject* widget);                    // "Name : Class", plus a TextBlock's font/colour/text or a Button's brushes
 
 bool InViewport(ue::UObject* userWidget);
+
+// The game's own UI art and typefaces, by object name (a Texture2D, a Font), while the engine has them loaded; nullptr
+// otherwise (the caller keeps its plain colours).
+ue::UObject* GameTexture(const char* name);
+// A texture's own size in pixels (through WidgetBlueprintLibrary.MakeBrushFromTexture, which fills a brush at that
+// size: this build reflects no texture size of its own); {0, 0} when it cannot be read.
+Vec2 TextureSize(ue::UObject* texture);
+ue::UObject* GameFont(const char* name);
 // The first of `instances` that is on screen, or nullptr.
 ue::UObject* OnScreen(const std::vector<ue::UObject*>& instances);
 

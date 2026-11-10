@@ -7,7 +7,9 @@
 #pragma once
 #include "gameplay/adapter.h"
 #include "gameplay/standin_rig.h"
+#include "combat/hsm_claimcheck.h"
 #include "hsm_owner.h"
+#include "sync/hsm_netstats.h"
 #include "sync/hsm_poseplay.h"
 #include "sync/hsm_roottrack.h"
 #include "sync/hsm_slowsend.h"
@@ -40,6 +42,8 @@ public:
     // The hand-off epoch each Pose and Vitals carries for its entity (sync/hsm_handoff.h); 0 when unset.
     void SetEpochOf(std::function<uint8_t(uint8_t)> epochOf) { epochOf_ = std::move(epochOf); }
     uint64_t PosesSent() const { return posesSent_; }
+    // Rev 42 (claim check): an owned fighter's own recent bones on this stream clock, nullptr when not owned or not read.
+    const combat::SelfPoseHistory* SelfHistory(uint8_t entity) const;
     uint64_t VitalsSent() const { return vitalsSent_; }
 
 private:
@@ -49,6 +53,7 @@ private:
         double nextPoseMs = 0, nextVitalsMs = 0;
         sync::V3 pelvis{};
         bool havePelvis = false, failLogged = false;
+        combat::SelfPoseHistory history;   // rev 42: what the claim check rewinds
     };
     std::array<std::unique_ptr<Owned>, kMaxWillies + 1> owned_{};
     double startMs_ = 0, prevDtS_ = 0;
@@ -119,6 +124,15 @@ public:
     // (sync::ReplicaServoParams: full gain, no caps, no contact yield). Off: the owner-sync servo.
     void SetReplica(bool on) { replica_ = on; }
     void SetAudit(bool on);   // opt-in field audit and two-handed motion measurements (help-improve)
+    // Rev 42 (competitive netcode Phase 2): the playout buffer's jitter quantile and margin for every feed, and the lead the
+    // stand-ins are sampled with (HSMMod.ini playout_quantile, playout_margin_ms, standin_lead_ms).
+    void SetPlayout(double quantile, double marginMs, double leadMs) { quantile_ = quantile; marginMs_ = marginMs; leadMs_ = leadMs; }
+    // The round trip to an entity's owner, ms (0 unknown), for the staleness the netcode stats show.
+    void SetRttOf(std::function<double(uint8_t)> rttOf) { rttOf_ = std::move(rttOf); }
+    // Rev 42: an entity's netcode measurements (sync/hsm_netstats.h); nullptr for an invalid entity.
+    sync::FighterNetStats* NetStats(uint8_t entity);
+    // The offset of an entity's pose stream clock (local minus owner, least seen) and whether there is one.
+    bool StreamOffset(uint8_t entity, double& offsetMs) const;
     bool Replica() const { return replica_; }
     std::string HealthLine();                            // since the previous call; empty with no stand-in
     int Count() const;
@@ -138,6 +152,7 @@ private:
         uint64_t poses = 0, rejected = 0;
         sync::SlowSenderMeter slow;   // item 7a: why this owner's poses come slowly (set on the first pose)
         bool slowSet = false;
+        sync::FighterNetStats stats;   // rev 42: staleness, error, input margins (survives respawns, as the feed does)
     };
     struct Actor {
         ~Actor() { rig.Unbind(); }
@@ -189,6 +204,8 @@ private:
     uint64_t ticks_ = 0;
     bool audit_ = false;
     bool replica_ = false;
+    double quantile_ = sync::kPlayJitterQuantile, marginMs_ = sync::kPlayDelayMarginMs, leadMs_ = 0.0;
+    std::function<double(uint8_t)> rttOf_;
 };
 
 }  // namespace hsm::game

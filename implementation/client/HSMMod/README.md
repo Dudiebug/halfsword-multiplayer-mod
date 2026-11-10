@@ -385,18 +385,32 @@ A kicked or banned player goes back to the main menu, and the multiplayer page o
 
 ## Lobby mod rules
 
-The host of a lobby chooses which mods its players may run, in `HSMMod.ini` under `[mod]`:
+The host of a lobby chooses which mods its players may run, in `HSMMod.ini` under `[mod]` or on the MODS tab in game.
+Only the game folder counts: paks under `Content/Paks`, UE4SS mods that are on and proxy DLLs beside the exe are a
+player's mods. Nothing outside the game folder is looked at, and no list judges a mod: the host's mode decides.
 
-- `mod_rule=vanilla`: no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps` (default): custom map paks (a pak with a map that replaces no stock file and has nothing under `/Game/Mods`) and known cosmetic mods. `bundle`:
-  exactly the files of the lobby's modpack (`pack=`). `custom`: the list in `mod_allow=` (or, when it is empty,
-  whatever the host runs). `anything`: no limit.
-- `mod_cheats=block` (default) refuses anyone running a known cheat mod (HS Enhancer, the UE4SS cheat mods); `allow`
-  lets them in. A host who runs a cheat mod itself cannot block cheats, and the lobby list names it ("host runs
-  HSEnhancer").
+- `mod_rule=vanilla` (default): no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps`: map
+  paks (a pak with a map that replaces no stock file and has nothing under `/Game/Mods`) and proxy DLLs. `bundle`:
+  exactly the files of the lobby's modpack (`pack=`). `custom`: the list in `mod_allow=`, or, when it is empty, whatever
+  the host runs ("Same as host"). `anything` and `classes`: every mod. An `HSMMod.ini` that already has a `mod_rule=`
+  line keeps it.
+- `block_hse=1` (default) refuses anyone running HS Enhancer unlocked, in every mode; `0` lets them in. A joiner never
+  has to remove it: its keys are held there (below). A host who runs it itself always allows it, and the lobby list says so. (Older builds wrote `mod_cheats=block|allow`; it is still read.)
 - `mod_official=1` takes official HSMMod releases only (checked against the release's `dwmapi.dll` by the update
   check). A self-built HSMMod cannot turn it on.
 - `mod_allow=A.pak, B*1a2b3c4d, +Needed.pak`: the custom list. `*` pins the first 8 hex digits of the file's SHA-256,
   `+` makes a mod required.
+
+A player whose mods a lobby refuses isn't told to delete anything: the browser row reads `Restart: N mods off`, Join
+asks once (RESTART AND JOIN), and the mod turns those mods off (`Name : 0` in `mods.txt`, `.off` on paks and DLLs),
+restarts the game and joins the lobby again. Everything comes back when the game closes. HS Enhancer isn't turned off
+or uninstalled: every game starts with its features off in `%APPDATA%\Half Sword Enhancer\config.ini` (its keys kept),
+and where a lobby refuses it, HSMMod holds its keys back (it sits in HSE's place in the game window), so no restart is
+needed. With a feature still on at the join, the restart locks it whole for one game (`Restart: HS Enhancer locked`):
+`config.ini` is copied to `HSMMod-hse-own.ini` first and comes back when the game closes. What a restart can't fix (a mod the lobby requires, more than 96 mods) keeps
+the plain refusal. A rule change
+mid-lobby runs the same flow: everyone sees `Host changed mods: ...`, and a player who no longer fits gets RESTART AND
+REJOIN or LEAVE LOBBY inside the host's 60 s grace. Details: `docs/PLAN_MOD_RULES.md`.
 
 These four keys can be edited while the game runs: save `HSMMod.ini` and the lobby takes the new rule within 2 s.
 The host can also change the first three on the lobby's MODS tab; the tab writes them back to `HSMMod.ini`.
@@ -408,7 +422,7 @@ What players see:
 - Every player needs the same HSMMod file as the host. Someone on another build is refused at the join with both
   build hashes, unless the host sets `allow_build_mismatch=1`.
 - After joining, your HSMMod sends the host the names and hashes of your mods (paks under `Content/Paks`, enabled
-  UE4SS mods, proxy DLLs next to the game, a detected HS Enhancer). Nothing else is read. Proxy DLLs such as ReShade's
+  UE4SS mods, proxy DLLs next to the game, a detected HS Enhancer, locked or not). Nothing else is read. Proxy DLLs such as ReShade's
   `dxgi.dll` are listed but never refused by a rule. You get your fighter once the host has checked the list; until
   then you can chat, but chat commands and votes wait. If your mods do not fit, you go back to the menu and the
   multiplayer page says what to remove or install.

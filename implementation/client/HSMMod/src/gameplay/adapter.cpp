@@ -1292,6 +1292,12 @@ void Adapter::Teleport(UObject* actor, const FVector& to) {
     c.set("NewLocation", to).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
 }
 
+void Adapter::NudgeActor(UObject* actor, const FVector& delta) {
+    const FVector at = ActorLocation(actor);
+    Call c(actor, "K2_SetActorLocation");
+    c.set("NewLocation", FVector{at.x + delta.x, at.y + delta.y, at.z + delta.z}).set<bool>("bSweep", false).set<bool>("bTeleport", false).invoke();
+}
+
 bool Adapter::BindInputs(UObject* willie) {
     if (!bindings_.empty()) return true;
     UClass* cls = ClassOf(willie);
@@ -1442,6 +1448,18 @@ bool Adapter::Push(UObject* willie, const std::string& bone, const FVector& impu
     UObject* mesh = MeshOf(willie);
     if (!mesh || bone.empty()) return false;
     return Call(mesh, "AddImpulse").set<FVector>("Impulse", impulse).setName("BoneName", MakeName(bone)).set<bool>("bVelChange", false).invoke();
+}
+
+bool Adapter::PushWeapon(UObject* willie, int slot, const FVector& impulse) {
+    if (!willie || slot < 0 || slot > 1) return false;
+    UObject** field = Field<UObject*>(willie, slot == 0 ? "Weapon R" : "Weapon L");
+    UObject* weapon = field ? *field : nullptr;
+    if (!weapon || ObjectAt(ObjectIndex(weapon)) != weapon) return false;
+    Call root(weapon, "K2_GetRootComponent");
+    if (!root.invoke()) return false;
+    UObject* comp = root.get<UObject*>("ReturnValue");
+    if (!comp || ObjectAt(ObjectIndex(comp)) != comp) return false;
+    return Call(comp, "AddImpulse").set<FVector>("Impulse", impulse).setName("BoneName", FName{}).set<bool>("bVelChange", false).invoke();
 }
 
 void Adapter::DriveTowards(UObject* willie, const WillieState& target, float dt) {

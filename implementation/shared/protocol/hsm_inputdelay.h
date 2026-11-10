@@ -6,6 +6,7 @@
 #pragma once
 #include "hsm_protocol.h"
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -150,5 +151,50 @@ private:
     std::array<uint32_t, kAxisCount> zeroAt_{};
     std::array<bool, kAxisCount> zeroSet_{};
 };
+
+// ---- owner sync: the match input delay (competitive netcode Phase 6, docs/PLAN_COMPETITIVE_NETCODE.md 6.1 and 6.2) ----------------
+// Under owner sync each player's own fighter answers at once and the others see it late. A small FIXED delay on every
+// player's own buttons and movement (never the look axes: they turn the camera) gives their inputs that much time to reach
+// the other machines before they execute (sync/hsm_inputline.h), so every machine runs every fighter from the same
+// inputs at the same time -- the hybrid of modern rollback fighting games (Killer Instinct and Injustice 2 fix it at 3
+// frames). The host picks it at match start and every player uses the same value; it never changes during a fight
+// (SF6's mid-match changes were its one netcode complaint). [net] input_delay = 0 (off, the default) | auto | 1..4
+// (frames of 1/60 s). Read on the host only; clients take the host's (the lobby's hsm_delay value).
+constexpr int kMatchDelayMaxFrames = 4;
+constexpr double kMatchFrameMs = 1000.0 / 60.0;
+enum class MatchDelayMode : uint8_t { Off, Auto, Frames };
+struct MatchDelaySetting { MatchDelayMode mode = MatchDelayMode::Off; int frames = 0; bool valid = true; };
+inline MatchDelaySetting ParseMatchInputDelay(const std::string& raw) {
+    std::string s;
+    for (char c : raw) if (!std::isspace(static_cast<unsigned char>(c))) s.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+    MatchDelaySetting r;
+    if (s.empty() || s == "0" || s == "off") return r;
+    if (s == "auto") { r.mode = MatchDelayMode::Auto; return r; }
+    char* end = nullptr;
+    const long v = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end || v < 0 || v > kMatchDelayMaxFrames) { r.valid = false; return r; }
+    if (v == 0) return r;
+    r.mode = MatchDelayMode::Frames; r.frames = int(v);
+    return r;
+}
+inline uint16_t MatchDelayFramesToMs(int frames) { return uint16_t(std::lround(std::clamp(frames, 0, kMatchDelayMaxFrames) * kMatchFrameMs)); }
+// Auto: enough frames to cover the slowest player's one-way trip plus its jitter -- every input arrives before it is due
+// -- at most kMatchDelayMaxFrames; beyond that the timeline predicts (SnapNet: delay below ~50 ms of latency, delay plus
+// prediction above). rttsMs: every player's round trip to the host (0 = unknown: left out).
+inline int AutoMatchDelayFrames(const std::vector<uint32_t>& rttsMs, double jitterMs) {
+    uint32_t worst = 0;
+    for (uint32_t r : rttsMs) worst = std::max(worst, r);
+    if (worst == 0) return 0;
+    const double need = double(worst) * 0.5 + std::max(0.0, jitterMs) + 4.0;   // + a few ms for the frame the input waits for
+    return std::clamp(int(std::ceil(need / kMatchFrameMs)), 1, kMatchDelayMaxFrames);
+}
+inline int MatchDelayFrames(const MatchDelaySetting& s, const std::vector<uint32_t>& rttsMs, double jitterMs) {
+    switch (s.mode) {
+    case MatchDelayMode::Off: return 0;
+    case MatchDelayMode::Frames: return std::clamp(s.frames, 0, kMatchDelayMaxFrames);
+    case MatchDelayMode::Auto: return AutoMatchDelayFrames(rttsMs, jitterMs);
+    }
+    return 0;
+}
 
 }  // namespace hsm

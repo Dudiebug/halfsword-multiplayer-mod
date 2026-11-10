@@ -39,9 +39,6 @@ public:
     virtual bool ClassesOff() const = 0;                                  // HS Enhancer is on and allowed here, so this player has no class
     virtual void SetAllowHse(bool on) = 0;                                // this machine's lobbies, the one it's hosting included
     virtual bool HasWolverine() const = 0;                                // Half Wolverine is on
-    virtual std::vector<hsm::ModBlockLine> ModBlock() const = 0;          // what keeps this machine from online play, and how to take it out
-    virtual bool ModBlockAlways() const = 0;                              // mod_block=all: say so at the menu. Otherwise when a lobby refuses
-    virtual bool TakeBlockAttempt() = 0;                                  // a lobby was just refused; once
     virtual std::string ClassNote() const = 0;                       // what it is, and what it still needs
     virtual bool HelpImprove() const = 0;                            // help_improve in HSMMod.ini: also send the log when someone in the lobby files a report
     virtual void SetHelpImprove(bool on) = 0;                        // also written back to HSMMod.ini (and marks the question answered)

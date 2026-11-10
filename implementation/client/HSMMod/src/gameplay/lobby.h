@@ -4,6 +4,7 @@
 #include "match/hsm_online_rules.h"
 #include "match/hsm_match.h"
 #include "session/hsm_mod_rules.h"
+#include "session/hsm_mod_switch.h"
 #include "session/hsm_modpack.h"
 #include "steam/steam_api.h"
 #include <cstdint>
@@ -16,15 +17,18 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre40-test";
+constexpr const char* kModVersion = "0.8.0-pre43-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre40";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre43";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
 std::string ModBuild();
 // allow_build_mismatch in HSMMod.ini (config.h): the host may start a match with other builds in. Set once at start.
 void SetAllowBuildMismatch(bool on);
+// direct_p2p in HSMMod.ini (rev 42): Steam may share this machine's addresses with lobby members for a direct path. Set
+// once at start, before Steam networking starts.
+void SetDirectP2P(bool on);
 bool AllowBuildMismatch();
 
 struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
@@ -39,8 +43,11 @@ struct LobbyListing {
     bool banned = false;  // the owner is on the global ban list (session/hsm_global_bans.h): left out of the list
     bool compatible = false;
     std::string reason;   // why it is not joinable, if !compatible
-    std::string mods;     // the lobby's mod rule tag ("mods: Vanilla"), empty for the default (session/hsm_mod_rules.h LobbyRuleTag)
+    std::string mods;     // the lobby's mod rule tag ("mods: Maps only"), empty for the default (session/hsm_mod_rules.h LobbyRuleTag)
     std::string modsText; // the mod rules' full sentence for this machine (what to remove), when they turn it away
+    std::string ruleText; // the lobby's rule in words (RuleSummary), for the switch-off question
+    SwitchPlan plan;      // what this machine would turn off for a restart to fit the rule (session/hsm_mod_switch.h); empty when it fits, or was tried
+    bool switchable = false;   // !compatible only because of the plan, which has no blockers: joinable after a restart
 };
 
 class Lobby {
@@ -54,13 +61,12 @@ public:
     // stays; false (or unset): leave the lobby, as before 0.7.0-pre5.
     std::function<bool(steam::SteamId oldOwner, steam::SteamId newOwner)> onOwnerChanged;
     std::function<void(steam::SteamId from, const std::string& text)> onChat;   // a lobby chat line (ours too); the text is unchecked
-    LobbyBlock hostBlock;                        // how strict this machine's lobbies are (block_hse=, mod_block=)
-    LobbyBlock CurrentBlock() const;             // this lobby's, from its host; hostBlock outside one
-    ModPreset hostPreset = ModPreset::MapsOnly;  // the rule of this machine's lobbies (mod_rule=)
+    bool BlockHse() const;                       // HS Enhancer is refused: this lobby's switch, from its host; this machine's choice outside one
+    ModPreset hostPreset = ModChoice{}.preset;  // the rule of this machine's lobbies (mod_rule=)
     bool InClassesLobby() const;                 // the lobby this machine is in uses classes (mod_rule=classes or unrestricted)
     bool InUnrestrictedLobby() const;            // ...with no class power budget (mod_rule=unrestricted)
     std::function<std::string()> myRuleSheet;   // this machine's class settings (hsm_online_rules.h)
-    std::function<std::string(ModPreset, LobbyBlock)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
+    std::function<std::string(ModPreset, bool blockHse)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
     std::function<void()> onEnterCard;   // a new lobby: the old lobby's cards go
     void RepublishMyCard();   // the card again, if it changed since it was sent
     std::function<std::string()> myCard;                                        // this machine's build card (hsm_build_card.h), asked for on entering a lobby
@@ -92,6 +98,15 @@ public:
     steam::SteamId PasswordAsk() const { return askLobby_; }
     const std::string& PasswordNote() const { return askNote_; }
     void CancelPasswordAsk() { askLobby_ = 0; askNote_.clear(); }
+    // The switch-off at join (session/hsm_mod_switch.h): a lobby's rule refuses mods this machine can turn off. The page
+    // asks once (SwitchAskPending), then ConfirmSwitch turns them off for the next game, writes the rejoin file and
+    // restarts the game, which joins the lobby on its own. rejoin: the lobby we are in changed its rule under us.
+    struct SwitchAsk { steam::SteamId lobby = 0; std::string name, ruleText; SwitchPlan plan; bool rejoin = false; };
+    const SwitchAsk& SwitchAskPending() const { return switchAsk_; }   // lobby == 0: nothing asked
+    void CancelSwitchAsk() { switchAsk_ = SwitchAsk{}; }
+    bool ConfirmSwitch();
+    std::function<bool()> restartGame;                             // starts a new copy of the game and quits this one (Session::RestartGame)
+    std::function<void(const std::string& text)> onRuleChanged;    // the host changed this lobby's mod rule: a line for the player
     void SetPublicState(const std::string& state, const std::string& map, const std::string& mode);
     void RefreshList();
     // Match settings (lobby data, host writes) and teams (own pick in member data, host moves in lobby data).
@@ -101,9 +116,8 @@ public:
     void SetMapPick(const std::string& path);
     LobbyPack Pack() const;                         // the host's announced modpack (session/hsm_modpack.h); empty: none
     void SetPack(const LobbyPack& pack);            // host: announce it (empty: none); gameplay/mod_pack.cpp
-    // Host: announce the lobby's mod rule and the host's own cheat mods (gameplay/mod_rules.cpp LobbyTick); only changed
-    // keys are written.
-    void SetModRule(const ModRule& rule, const std::string& hostCheats);
+    // Host: announce the lobby's mod rule (gameplay/mod_rules.cpp LobbyTick); only changed keys are written.
+    void SetModRule(const ModRule& rule);
     // This lobby's rule as its lobby data names it (what a member is held to; the MODS tab). `named`: the host wrote one
     // (a lobby without hsm_mrule reads as NoRule).
     ModRule RoomRule(bool* named = nullptr) const;
@@ -119,6 +133,7 @@ public:
     State state() const { return state_; }
     bool IsHost() const { return state_ == State::InLobby && owner_ == steam::MySteamId(); }
     bool InLobby() const { return state_ == State::InLobby; }
+    bool Joining() const { return state_ == State::Joining; }   // Join asked Steam, the lobby not entered yet
     bool ServerLobby() const;                       // a role=server lobby: the owner is the server, not a player
     int PlayerCount() const;                        // members, minus the server in a role=server lobby
     steam::SteamId id() const { return lobby_; }
@@ -137,6 +152,11 @@ private:
     steam::SteamId passwordLobby_ = 0;
     steam::SteamId askLobby_ = 0;         // the lobby the page should ask a password for
     std::string askNote_;                 // why it asks again ("Wrong password")
+    void RuleTick();                      // lobby data changed: a new mod rule is told, and the switch-off offered
+    SwitchAsk switchAsk_;
+    steam::SteamId rejoinLobby_ = 0;      // joined again after a restart with mods off: no second restart for it
+    ModRule lastRule_;                    // this lobby's rule as last seen (RuleTick)
+    bool lastRuleNamed_ = false;
     int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads
     std::string officialSent_;   // the kMemberOfficialKey value last written (SetOfficial)
     bool server_ = false;   // Host(type, true): this machine runs role=server

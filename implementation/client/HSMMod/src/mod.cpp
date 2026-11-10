@@ -1,6 +1,7 @@
 // Worker thread: load config, then (unless role=off) bring up the engine layer and networking.
 #include <windows.h>
 #include "config.h"
+#include "match/hsm_hud_style.h"
 #include "file_hash.h"
 #include "hsm_protocol.h"
 #include "gameplay/save_guard.h"
@@ -24,6 +25,7 @@ DWORD WINAPI ModMain(void*) {
     // The build string carries this DLL's hash (session/hsm_build.h); made here, off the game thread.
     HSM_LOG("build: %s%s", game::ModBuild().c_str(), OwnBinaryHash().empty() ? " (could not read my own DLL: no hash)" : "");
     Config cfg = LoadConfig();
+    style::UseMenuLook(cfg.uiClassic);   // before any widget is made (the game thread builds them later)
     game::SweepAtStartup();   // S1: before the role gate, so role=off still handles a crashed session's backup
     // UE4SS is chain-loaded here, on the worker thread (never in DllMain: the loader lock). role=off still loads it:
     // HSMMod's proxy replaced UE4SS's, so skipping it would silently turn the player's mods off.

@@ -904,6 +904,26 @@ void FighterRig::Drive(const sync::FighterCommand& cmd) {
         if (weapons_[w].read && !weapons_[w].driven && !Pinned(w) && GripLoose(w)) HoldStill(weapons_[w]);
 }
 
+void FighterRig::Nudge(const sync::Reconciler::Nudge& n) {
+    if (!StillValid()) return;
+    for (int i = 0; i < sync::kPoseBones; ++i) {
+        if (!n.any[size_t(i)] || !sync::kPoseHasBody[size_t(i)]) continue;
+        setLin_.put(0, ToF(n.linUu[size_t(i)])).put(1, true).put(2, bones_[i]);
+        setLin_.invoke(mesh_);
+        setAng_.put(0, ToF(n.angDeg[size_t(i)])).put(1, true).put(2, bones_[i]);
+        setAng_.invoke(mesh_);
+    }
+    for (int w = 0; w < sync::kPoseWeapons; ++w) {
+        const size_t k = size_t(sync::kPoseBones) + size_t(w);
+        Weapon& wp = weapons_[w];
+        if (!n.any[k] || !wp.read || !wp.root || Pinned(w)) continue;
+        wp.setLin.put(0, ToF(n.linUu[k])).put(1, true).put(2, FName{});
+        wp.setLin.invoke(wp.root);
+        wp.setAng.put(0, ToF(n.angDeg[k])).put(1, true).put(2, FName{});
+        wp.setAng.invoke(wp.root);
+    }
+}
+
 // The hand's current grip constraint is one this rig freed (its limits stay free: they are never restored).
 bool FighterRig::GripLoose(int hand) const {
     UObject* c = gripLoose_[hand];

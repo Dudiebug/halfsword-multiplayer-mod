@@ -238,6 +238,10 @@ public:
     // The stand-in was struck by something Step cannot see: yield for impactMs (ServoState::NotifyImpact).
     void NotifyImpact(double nowMs) { state_.NotifyImpact(nowMs, params_); }
     const ServoParams& Params() const { return params_; }
+    // Rev 42 (competitive netcode Phase 2, [net] standin_lead_ms): sample the stream this far toward the present (the
+    // pose player extrapolates past its newest frame, capped). 0: as before.
+    void SetLeadMs(double ms) { leadMs_ = std::isfinite(ms) ? std::clamp(ms, 0.0, kPlayLeadMaxMs) : 0.0; }
+    double LeadMs() const { return leadMs_; }
 
     // now: the stand-in's bodies as read this frame; nextDtS: the coming physics step (clamped here); target
     // receives this frame's sampled pose.
@@ -246,7 +250,7 @@ public:
         s.struck = DetectImpact(nowMs, now);
         if (s.struck) state_.NotifyImpact(nowMs, params_);   // yielding from this frame's command on
         lastCmd_ = FighterCommand{};                          // until a command is computed below
-        if (!player.Sample(static_cast<int64_t>(std::llround(nowMs)), target, &s.info)) return s;
+        if (!player.Sample(static_cast<int64_t>(std::llround(nowMs)), target, &s.info, leadMs_)) return s;
         s.have = true;
         s.pelvisErrUu = BoneError(now, target, kBonePelvis);
         if (s.pelvisErrUu < 0.0) return s;   // no pelvis read: nothing to place it by, and no frame to servo from
@@ -291,6 +295,7 @@ private:
 
     ServoParams params_;
     bool useAcc_ = true;
+    double leadMs_ = 0.0;
     bool placed_ = false;
     AimBuilder aim_;
     ServoState state_;

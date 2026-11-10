@@ -47,9 +47,31 @@ inline std::string CardModsFrom(std::string_view reportMods) {
         size_t end = reportMods.find(", ", at);
         if (end == std::string_view::npos) end = reportMods.size();
         std::string_view name = reportMods.substr(at, end - at);
-        if (!name.empty() && !IsStockUe4ssMod(name)) { if (!out.empty()) out += ", "; out += name; }
+        if (!name.empty() && !ue4ss::IsStockMod(name)) { if (!out.empty()) out += ", "; out += name; }
         at = end + 2;
     }
+    return out;
+}
+
+// The card's mods in a game that locked HS Enhancer (gameplay/mod_rules.cpp): each HS Enhancer name goes, and
+// kCardHseLocked ends the list once when one went or `loaded` (its loader seen). A Classes host that blocks HS Enhancer
+// refuses a card naming "HSEnhancer" (match/hsm_online_rules.h CheckClassValue); a locked one passes it.
+inline constexpr const char* kCardHseLocked = "HS Enhancer (locked)";
+inline std::string CardModsHseLocked(std::string_view mods, bool loaded) {
+    std::string out;
+    bool hse = loaded;
+    size_t at = 0;
+    while (at <= mods.size()) {
+        size_t end = mods.find(", ", at);
+        if (end == std::string_view::npos) end = mods.size();
+        const std::string_view name = mods.substr(at, end - at);
+        at = end + 2;
+        if (IsEnhancerModName(name)) { hse = true; continue; }
+        if (name.empty()) continue;
+        if (!out.empty()) out += ", ";
+        out += name;
+    }
+    if (hse) out += out.empty() ? std::string(kCardHseLocked) : ", " + std::string(kCardHseLocked);
     return out;
 }
 

@@ -17,7 +17,7 @@ static ModItem Item(ModKind k, const char* name, uint8_t seed = 0) {
 static ModReport Report(std::vector<ModItem> items, bool ue4ss = false) {
     ModReport r; r.items = std::move(items); r.ue4ss = ue4ss; r.complete = true; NormalizeReport(r); return r;
 }
-static ModRule Rule(ModPreset p, bool cheats = true) { ModRule r; r.preset = p; r.blockCheats = cheats; return r; }
+static ModRule Rule(ModPreset p, bool blockHse = true) { ModRule r; r.preset = p; r.blockHse = blockHse; return r; }
 static std::vector<ModItem> Ue4ssStock() {
     std::vector<ModItem> v;
     for (const char* n : {"BPModLoaderMod", "BPML_GenericFunctions", "Keybinds", "CheatManagerEnablerMod", "ConsoleEnablerMod", "ConsoleCommandsMod"})
@@ -46,19 +46,44 @@ static void TestNormalize() {
     CHECK(big.items.size() == kMaxModItems && big.truncated);
 }
 
-static void TestVerdicts() {
-    CHECK(VerdictOf(Item(ModKind::Ue4ssMod, "HSEnhancer")) == KnownVerdict::Cheat);
-    CHECK(VerdictOf(Item(ModKind::Ue4ssMod, "hsenhancer")) == KnownVerdict::Cheat);                 // any case
-    CHECK(VerdictOf(Item(ModKind::Module, "HSEnhancer")) == KnownVerdict::Cheat);
-    CHECK(VerdictOf(Item(ModKind::ContentPak, "HSEnhancer")) == KnownVerdict::Unknown);           // kind matters
-    CHECK(VerdictOf(Item(ModKind::Ue4ssMod, "HSHelper")) == KnownVerdict::Suspect);
-    CHECK(VerdictOf(Item(ModKind::Proxy, "winmm.dll")) == KnownVerdict::Suspect);
-    CHECK(VerdictOf(Item(ModKind::ContentPak, "StatusEffects.pak")) == KnownVerdict::Gameplay);
-    CHECK(VerdictOf(Item(ModKind::ContentPak, "zWillieFace_P.pak", 9)) == KnownVerdict::Cosmetic);
-    CHECK(VerdictOf(Item(ModKind::Ue4ssStock, "Keybinds")) == KnownVerdict::Stock);
-    CHECK(VerdictOf(Item(ModKind::Ue4ssMod, "SomethingNew")) == KnownVerdict::Unknown);
-    CHECK(IsStockUe4ssMod("keybinds") && !IsStockUe4ssMod("HSEnhancer") && !IsStockUe4ssMod("LineTraceMod"));
-    CHECK(HasCheat(Report({Item(ModKind::Ue4ssMod, "BiteMod")})) && !HasCheat(Report({Item(ModKind::Ue4ssMod, "HSHelper")})));
+static void TestHse() {
+    // The one named mod: its UE4SS folder or the loaded-DLL Module item, any case. A pak or proxy DLL of that name is not it.
+    CHECK(IsHseItem(Item(ModKind::Ue4ssMod, "HSEnhancer")) && IsHseItem(Item(ModKind::Ue4ssMod, "hsenhancer")));
+    CHECK(IsHseItem(Item(ModKind::Module, "HSEnhancer")));
+    CHECK(!IsHseItem(Item(ModKind::ContentPak, "HSEnhancer")) && !IsHseItem(Item(ModKind::Proxy, "HSEnhancer")) && !IsHseItem(Item(ModKind::Ue4ssStock, "HSEnhancer")));
+    CHECK(!IsHseItem(Item(ModKind::Ue4ssMod, "HSEnhancerX")) && !IsHseItem(Item(ModKind::Ue4ssMod, "HSHelper")) && !IsHseItem(Item(ModKind::Ue4ssMod, "BiteMod")));
+    CHECK(HasHse(Report({Item(ModKind::MapPak, "A.pak"), Item(ModKind::Module, "HSEnhancer")})) && !HasHse(Report({Item(ModKind::Ue4ssMod, "HSHelper")})) && !HasHse(Report({})));
+    // Locked for this game: no longer an HSE item, its own kind
+    const ModItem locked = Item(ModKind::HseLocked, "HSEnhancer");
+    CHECK(!IsHseItem(locked) && std::string(ModKindName(ModKind::HseLocked)) == "HS Enhancer, locked");
+    CHECK(HasLockedHse(Report({locked})) && !HasHse(Report({locked})) && !HasLockedHse(Report({Item(ModKind::Module, "HSEnhancer")})) && !HasLockedHse(Report({})));
+    // LockReportHse: each HSE item, and only those, becomes HseLocked, hash kept, sorted again by kind
+    ModReport lr = Report({Item(ModKind::Module, "HSEnhancer"), Item(ModKind::Ue4ssMod, "HSEnhancer", 2), Item(ModKind::Ue4ssMod, "Other", 3), Item(ModKind::ContentPak, "HSEnhancer", 4)});
+    LockReportHse(lr);
+    CHECK(lr.items.size() == 4 && lr.items[0].kind == ModKind::ContentPak && lr.items[1].kind == ModKind::Ue4ssMod && lr.items[1].name == "Other");
+    CHECK(lr.items[2].kind == ModKind::HseLocked && lr.items[2].hashed && lr.items[3].kind == ModKind::HseLocked && !lr.items[3].hashed);
+    CHECK(!HasHse(lr) && HasLockedHse(lr));
+    ModReport none = Report({Item(ModKind::Ue4ssMod, "Other", 3)});
+    LockReportHse(none);
+    CHECK(none.items.size() == 1 && none.items[0].kind == ModKind::Ue4ssMod && !HasLockedHse(none));
+    // UE4SS's stock mods, by name: the six it ships enabled, and nothing else.
+    for (const ModItem& it : Ue4ssStock()) CHECK(ue4ss::IsStockMod(it.name));
+    CHECK(ue4ss::IsStockMod("keybinds") && !ue4ss::IsStockMod("HSEnhancer") && !ue4ss::IsStockMod("LineTraceMod") && !ue4ss::IsStockMod(""));
+    for (const char* c : ue4ss::kConsoleMods) CHECK(ue4ss::IsStockMod(c));
+    // RuleRefusesHse: a loaded HS Enhancer refused by the switch or by the preset (its guests hold HSE's keys)
+    const auto rule = [](ModPreset p, bool block) { ModRule r; r.preset = p; r.blockHse = block; return r; };
+    CHECK(RuleRefusesHse(rule(ModPreset::Anything, true)) && !RuleRefusesHse(rule(ModPreset::Anything, false)));
+    CHECK(!RuleRefusesHse(rule(ModPreset::Classes, false)) && !RuleRefusesHse(rule(ModPreset::Unrestricted, false)));
+    CHECK(RuleRefusesHse(rule(ModPreset::Vanilla, false)) && RuleRefusesHse(rule(ModPreset::MapsOnly, false)));
+    ModRule custom = rule(ModPreset::Custom, false);
+    CHECK(RuleRefusesHse(custom));                       // Same as host, and the host has no HS Enhancer
+    custom.list.push_back(ModAllow{"hsenhancer", "", false});
+    CHECK(!RuleRefusesHse(custom));                      // on the list, any case
+    custom.listHashOnly = true;
+    CHECK(RuleRefusesHse(custom));                       // only the host can read the list: held
+    custom.listHashOnly = false;
+    custom.blockHse = true;
+    CHECK(RuleRefusesHse(custom));                       // the switch wins over the list
 }
 
 static void TestClassify() {
@@ -130,7 +155,6 @@ static void TestPresets() {
     // Nothing at all fits everything.
     for (uint8_t p = 0; p <= kMaxModPreset; ++p) CHECK(CheckMods(Rule(ModPreset(p)), Report({})).ok());
     // Unrestricted Classes judges mods exactly as Classes does: it lifts the class budget, and nothing else.
-    CHECK(IsSupportedUe4ssMod("ImmersiveCombat"));
     CHECK(IsClassesPreset(ModPreset::Unrestricted) && IsClassesPreset(ModPreset::Classes) && !IsClassesPreset(ModPreset::Anything));
     { ModPreset parsed = ModPreset::Vanilla; CHECK(ParseModPreset("unrestricted", parsed) && parsed == ModPreset::Unrestricted); CHECK(DecodeLobbyRule(EncodeLobbyRule(Rule(ModPreset::Unrestricted))).preset == ModPreset::Unrestricted); }
     CHECK(std::string(ModPresetName(ModPreset::Unrestricted)) == "Unrestricted Classes");
@@ -148,36 +172,54 @@ static void TestPresets() {
     }
     { const RuleResult all = CheckMods(Rule(ModPreset::Vanilla), Report(Ue4ssStock(), true)); CHECK(all.fail == RuleFail::NoMods && all.more == 2); }
     CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Ue4ssMod, "HulkMod")}, true)).fail == RuleFail::NoMods);
-    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({Item(ModKind::Proxy, "winmm.dll")})).ok());
+    // A proxy DLL beside the exe is a mod to Vanilla: its name cannot tell an overlay from a mod loader.
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({winmm})).fail == RuleFail::NoMods);
 
-    // Maps only: maps, cosmetics, stock UE4SS.
-    std::vector<ModItem> ok = Ue4ssStock(); ok.push_back(map); ok.push_back(face); ok.push_back(killcam);
+    // Maps only: map paks and stock UE4SS. A content pak, a UE4SS mod of any kind: not a map.
+    std::vector<ModItem> ok = Ue4ssStock(); ok.push_back(map);
     CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report(ok, true)).ok());
     RuleResult r = CheckMods(Rule(ModPreset::MapsOnly), Report({map, weapons}));
     CHECK(r.fail == RuleFail::NotAllowed && r.mod == "ModularWeapons.pak");
-    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({helper})).fail == RuleFail::NotAllowed);    // suspect: not a map
-    // Proxy DLLs (ReShade, ASI loaders) are reported, never refused by a preset; a known cheat among them still is.
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({map, face})).fail == RuleFail::NotAllowed);     // a cosmetic pak is a content pak
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({killcam})).fail == RuleFail::NotAllowed);       // no good/bad table: a UE4SS mod is a mod
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({helper})).fail == RuleFail::NotAllowed);
+    // Proxy DLLs (ReShade, ASI loaders) are reported and pass every preset but Vanilla.
     const ModItem dxgi = Item(ModKind::Proxy, "dxgi.dll", 8);
-    for (const ModPreset p : {ModPreset::Vanilla, ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom})
+    for (const ModPreset p : {ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom, ModPreset::Anything, ModPreset::Classes})
         CHECK(CheckMods(Rule(p), Report({winmm, dxgi})).ok());
     r = CheckMods(Rule(ModPreset::Vanilla), Report({dxgi, map}));
-    CHECK(r.fail == RuleFail::NoMods && r.mod == "Tavern.pak");
-    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({dxgi, module})).fail == RuleFail::Cheat);
+    CHECK(r.fail == RuleFail::NoMods && r.mod == "Tavern.pak" && r.more == 1);                     // map paks sort first
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({dxgi, module})).fail == RuleFail::Hse);
 
-    // Cheats come first, whatever the preset.
+    // HS Enhancer comes first, whatever the preset, Classes included.
     r = CheckMods(Rule(ModPreset::Anything), Report({weapons, enhancer}));
-    CHECK(r.fail == RuleFail::Cheat && r.mod == "HSEnhancer");
-    CHECK(CheckMods(Rule(ModPreset::Anything), Report({module})).fail == RuleFail::Cheat);
+    CHECK(r.fail == RuleFail::Hse && r.mod == "HSEnhancer");
+    CHECK(CheckMods(Rule(ModPreset::Anything), Report({module})).fail == RuleFail::Hse);
+    CHECK(CheckMods(Rule(ModPreset::Classes), Report({module})).fail == RuleFail::Hse);
     CHECK(CheckMods(Rule(ModPreset::Anything, false), Report({weapons, enhancer, module, winmm})).ok());
-    CHECK(CheckMods(Rule(ModPreset::MapsOnly, false), Report({enhancer})).fail == RuleFail::NotAllowed);   // cheats allowed, still not a map
-    // A renamed cheat is still caught by the module scan.
-    CHECK(CheckMods(Rule(ModPreset::Anything), Report({Item(ModKind::Ue4ssMod, "TotallyLegit", 4), module})).fail == RuleFail::Cheat);
+    CHECK(CheckMods(Rule(ModPreset::Classes, false), Report({weapons, enhancer, module, winmm})).ok());
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly, false), Report({enhancer})).fail == RuleFail::NotAllowed);   // HSE allowed, still not a map
+    // Locked HS Enhancer passes every preset, blocked or not, as the item alone and beside a map
+    const ModItem locked = Item(ModKind::HseLocked, "HSEnhancer", 4);
+    for (uint8_t p = 0; p <= kMaxModPreset; ++p)
+        for (bool block : {true, false}) {
+            CHECK(CheckMods(Rule(ModPreset(p), block), Report({locked})).ok());
+            CHECK(ItemPresetFail(Rule(ModPreset(p), block), locked) == RuleFail::None);
+            CHECK(ItemRefused(Rule(ModPreset(p), block), locked) == RuleFail::None);
+        }
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({map, locked})).ok());
+    CHECK(CheckMods(Rule(ModPreset::Vanilla), Report({locked, helper})).fail == RuleFail::NoMods);   // the lock covers HS Enhancer only
+    // A renamed HSE mod folder is still caught by the loaded-DLL signature (the Module item).
+    CHECK(CheckMods(Rule(ModPreset::Anything), Report({Item(ModKind::Ue4ssMod, "TotallyLegit", 4), module})).fail == RuleFail::Hse);
+    // Other mods are nobody's business but the preset's: no cheat list.
+    CHECK(CheckMods(Rule(ModPreset::Anything), Report({Item(ModKind::Ue4ssMod, "BiteMod"), Item(ModKind::Ue4ssMod, "InfiniteStamina")})).ok());
 
-    // Anything takes a cut list; the others refuse it.
+    // Anything and Classes take a cut list; the others refuse it.
     ModReport big;
     for (size_t i = 0; i < kMaxModItems + 1; ++i) big.items.push_back(Item(ModKind::MapPak, ("m" + std::to_string(100 + i) + ".pak").c_str()));
     big.complete = true; NormalizeReport(big);
-    CHECK(CheckMods(Rule(ModPreset::Anything), big).ok() && CheckMods(Rule(ModPreset::MapsOnly), big).fail == RuleFail::TooMany);
+    CHECK(CheckMods(Rule(ModPreset::Anything), big).ok() && CheckMods(Rule(ModPreset::Classes), big).ok());
+    CHECK(CheckMods(Rule(ModPreset::MapsOnly), big).fail == RuleFail::TooMany && CheckMods(Rule(ModPreset::Vanilla), big).fail == RuleFail::TooMany);
 }
 
 static void TestLists() {
@@ -192,7 +234,8 @@ static void TestLists() {
     r = CheckMods(custom, Report({other, Item(ModKind::MapPak, "Tavern.pak", 1)}));
     CHECK(r.fail == RuleFail::NotAllowed && r.mod == "ModularWeapons.pak");                      // the pin decides
     CHECK(CheckMods(custom, Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::MapPak, "Other.pak", 3)})).fail == RuleFail::NotAllowed);
-    CHECK(CheckMods(custom, Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::ContentPak, "zWillieFace_P.pak", 5)})).ok());   // cosmetic extra
+    CHECK(CheckMods(custom, Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::ContentPak, "zWillieFace_P.pak", 5)})).fail == RuleFail::NotAllowed);   // an extra off the list, cosmetic or not
+    CHECK(CheckMods(custom, Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::Proxy, "dxgi.dll", 5)})).ok());   // a proxy DLL is no list item
 
     // Bad entries are skipped: a short pin, a marker inside, an empty one.
     CHECK(ParseAllowList("a*12, b*zzzzzzzz, , c|+d*ABCDEF01").size() == 2);
@@ -210,7 +253,7 @@ static void TestLists() {
     CHECK(r.fail == RuleFail::NotAllowed && r.mod == "ModularWeapons.pak");                       // an extra pak no longer passes
 
     // Custom with no list: what the host runs.
-    ModReport host = Report({weapons, Item(ModKind::Ue4ssStock, "Keybinds"), Item(ModKind::Module, "HSEnhancer")}, true);
+    ModReport host = Report({weapons, Item(ModKind::Ue4ssStock, "Keybinds"), Item(ModKind::Module, "HSEnhancer"), Item(ModKind::HseLocked, "HSEnhancer", 9)}, true);
     std::vector<ModAllow> mine = ListFromReport(host);
     CHECK(mine.size() == 1 && mine[0].name == "ModularWeapons.pak" && !mine[0].required);
 }
@@ -220,16 +263,17 @@ static void TestEffective() {
     ModReport clean = Report({});
     ModReport cheater = Report({Item(ModKind::Module, "HSEnhancer")});
     CHECK(EffectiveRule(chosen, clean, Official::Yes) == chosen);
-    {   // Classes takes HS Enhancer and Half Wolverine, not other cheats or unknown mods; a host running HSE still blocks cheats.
-        const ModRule classes = Rule(ModPreset::Classes);
+    {   // Classes takes any mod, like Anything; HS Enhancer follows the one switch there too. A host that runs HSE cannot block it.
+        const ModRule classes = Rule(ModPreset::Classes, false);
         CHECK(CheckMods(classes, Report({Item(ModKind::Module, "HSEnhancer"), Item(ModKind::Ue4ssMod, "HSEnhancer"), Item(ModKind::Ue4ssMod, "HalfWolverine"), Item(ModKind::Proxy, "winmm.dll")})).ok());
         CHECK(CheckMods(classes, Report({Item(ModKind::MapPak, "Arena.pak"), Item(ModKind::ContentPak, "Armour.pak")})).ok());
-        CHECK(CheckMods(classes, Report({Item(ModKind::Ue4ssMod, "BiteMod")})).fail == RuleFail::Cheat);
-        CHECK(CheckMods(classes, Report({Item(ModKind::Ue4ssMod, "HulkMod")})).fail == RuleFail::NotAllowed);
-        CHECK(EffectiveRule(classes, cheater, Official::Yes).blockCheats);
-        CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Cheat);   // the other rules are unchanged
+        CHECK(CheckMods(classes, Report({Item(ModKind::Ue4ssMod, "BiteMod"), Item(ModKind::Ue4ssMod, "HulkMod")})).ok());
+        CHECK(CheckMods(Rule(ModPreset::Classes), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);
+        CHECK(!EffectiveRule(Rule(ModPreset::Classes), cheater, Official::Yes).blockHse);
+        CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);   // the other rules are unchanged
     }
-    CHECK(!EffectiveRule(chosen, cheater, Official::Yes).blockCheats);
+    CHECK(!EffectiveRule(chosen, cheater, Official::Yes).blockHse);
+    CHECK(EffectiveRule(chosen, Report({Item(ModKind::Ue4ssMod, "BiteMod")}), Official::Yes).blockHse);   // only HSE itself lifts the switch
     CHECK(!EffectiveRule(chosen, clean, Official::No).officialOnly && EffectiveRule(chosen, clean, Official::Unknown).officialOnly);
 }
 
@@ -237,16 +281,17 @@ static void TestLobbyData() {
     ModRule r = Rule(ModPreset::Custom); r.officialOnly = false;
     r.list = {{"Tavern.pak", "1a2b3c4d", true}, {"ImmersiveCombat", "", false}};
     LobbyModData d = EncodeLobbyRule(r);
-    CHECK(d.rule == "3" && d.cheats == "1" && d.official == "0" && d.list == "+Tavern.pak*1a2b3c4d|ImmersiveCombat");
+    CHECK(d.rule == "3" && d.hse == "1" && d.official == "0" && d.list == "+Tavern.pak*1a2b3c4d|ImmersiveCombat");
     CHECK(DecodeLobbyRule(d) == r);
     CHECK(EncodeLobbyRule(Rule(ModPreset::MapsOnly)).list.empty());
+    CHECK(EncodeLobbyRule(Rule(ModPreset::Anything, false)).hse == "0" && !DecodeLobbyRule(EncodeLobbyRule(Rule(ModPreset::Anything, false))).blockHse);
     for (uint8_t p = 0; p <= kMaxModPreset; ++p) { ModRule x = Rule(ModPreset(p)); if (p != 2 && p != 3) CHECK(DecodeLobbyRule(EncodeLobbyRule(x)) == x); }
-    // No rule published: Anything with cheats blocked.
-    CHECK(DecodeLobbyRule({}) == NoRule() && NoRule().preset == ModPreset::Anything && NoRule().blockCheats && !NoRule().officialOnly);
+    // No rule published: Anything with HS Enhancer blocked.
+    CHECK(DecodeLobbyRule({}) == NoRule() && NoRule().preset == ModPreset::Anything && NoRule().blockHse && !NoRule().officialOnly);
     // Garbage reads strict.
     LobbyModData bad{"9", "x", "", ""};
     ModRule b = DecodeLobbyRule(bad);
-    CHECK(b.preset == ModPreset::Vanilla && b.blockCheats && !b.officialOnly);
+    CHECK(b.preset == ModPreset::Vanilla && b.blockHse && !b.officialOnly);
     CHECK(DecodeLobbyRule({"12", "0", "1", ""}).preset == ModPreset::Vanilla);
     // A list too long for lobby data publishes its hash only; the browser leaves the check to the host.
     ModRule longList = Rule(ModPreset::Custom);
@@ -257,7 +302,7 @@ static void TestLobbyData() {
     CHECK(seen.listHashOnly && seen.list.empty());
     RuleResult res = CheckMods(seen, Report({Item(ModKind::ContentPak, "x.pak", 1)}));
     CHECK(res.fail == RuleFail::Unchecked && res.ok());
-    CHECK(CheckMods(seen, Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Cheat);   // cheats still caught
+    CHECK(CheckMods(seen, Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);   // HS Enhancer still caught
 }
 
 static void TestBuildGate() {
@@ -302,28 +347,40 @@ static void TestGrace() {
     CHECK(GraceSecondsLeft(ModGrace{}, 0) == 0);
 }
 
+// A host who changed nothing allows no mods; a bad mod_rule= falls back to the same, never to something looser.
+static void TestDefaultIsNoMods() {
+    const ModChoice c;
+    CHECK(c.preset == ModPreset::Vanilla && c.blockHse && !c.officialOnly);
+    CHECK(ModRule{}.preset == ModPreset::Vanilla && ModRule{}.blockHse);
+    ModPreset bad = c.preset;
+    CHECK(!ParseModPreset("nonsense", bad) && bad == ModPreset::Vanilla);
+    const ModRule rule = Rule(c.preset);
+    CHECK(CheckMods(rule, Report({})).fail == RuleFail::None);
+    CHECK(CheckMods(rule, Report({Item(ModKind::MapPak, "Hole.pak")})).fail == RuleFail::NoMods);
+    CHECK(CheckMods(rule, Report({Item(ModKind::ContentPak, "Sword.pak")})).fail == RuleFail::NoMods);
+}
+
 static void TestLobbyView() {
-    const auto Rule = [](ModPreset p, bool cheats = true) { ModRule r = ::Rule(p, cheats); r.officialOnly = false; return r; };   // the INI default
-    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly)).empty());
-    CHECK(LobbyRuleTag(Rule(ModPreset::Vanilla)) == "mods: Vanilla");
-    CHECK(LobbyRuleTag(Rule(ModPreset::Anything, false)) == "mods: Anything, cheats ok");
+    const auto Rule = [](ModPreset p, bool blockHse = true) { ModRule r = ::Rule(p, blockHse); r.officialOnly = false; return r; };   // the INI default
+    CHECK(LobbyRuleTag(Rule(ModPreset::Vanilla)).empty());
+    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly)) == "mods: Maps only");
+    CHECK(LobbyRuleTag(Rule(ModPreset::Vanilla, false)) == "mods: Vanilla, HS Enhancer ok");
+    { ModRule r = Rule(ModPreset::Vanilla); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Vanilla, official only"); }
+    CHECK(LobbyRuleTag(Rule(ModPreset::Anything, false)) == "mods: Anything, HS Enhancer ok");
+    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly, false)) == "mods: Maps only, HS Enhancer ok");
     { ModRule r = Rule(ModPreset::MapsOnly); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Maps only, official only"); }
+    { ModRule r = Rule(ModPreset::Classes, false); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Classes, HS Enhancer ok, official only"); }
     CHECK(LobbyRuleTag(NoRule()) == "mods: Anything");
-    // The host's own cheats (peer-written): named, bad names dropped, at most three and a count.
-    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly, false), "HSEnhancer") == "mods: Maps only, cheats ok, host runs HSEnhancer");
-    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly), "HSEnhancer") == "mods: Maps only, host runs HSEnhancer");
-    CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly), " , ").empty());
-    CHECK(HostCheatNames("A, B|x, , C, D, E") == "A, C, D +1");
-    CHECK(HostCheatNames(std::string(kMaxModItemName + 1, 'a')).empty());
-    CHECK(ViewLobbyRule(Rule(ModPreset::Anything, false), Report({}), Official::Yes, "BiteMod").tag == "mods: Anything, cheats ok, host runs BiteMod");
+    CHECK(ViewLobbyRule(Rule(ModPreset::Anything, false), Report({}), Official::Yes).tag == "mods: Anything, HS Enhancer ok");
     const ModReport clean = Report({Item(ModKind::MapPak, "Arena_P.pak", 3)});
     const ModReport cheat = Report({Item(ModKind::Module, "HSEnhancer")});
-    // A cheat in a lobby that blocks them: the note and the sentence name it.
+    // HS Enhancer in a lobby that blocks it: the note and the sentence say so.
     {
         const LobbyModView v = ViewLobbyRule(Rule(ModPreset::MapsOnly), cheat, Official::Yes);
-        CHECK(v.reason == "Blocks HSEnhancer" && v.text == "This lobby blocks cheats: remove HSEnhancer." && v.tag.empty());
+        CHECK(v.reason == "Blocks HS Enhancer" && v.text == "This lobby blocks HS Enhancer unless HSMMod can lock it: remove it, or join a lobby that allows it." && v.tag == "mods: Maps only");
     }
     CHECK(ViewLobbyRule(Rule(ModPreset::Anything, false), cheat, Official::Yes).reason.empty());
+    CHECK(ViewLobbyRule(Rule(ModPreset::Classes, false), cheat, Official::Yes).reason.empty());
     // Still scanning: no verdict (the host decides).
     { ModReport scanning = cheat; scanning.complete = false; CHECK(ViewLobbyRule(Rule(ModPreset::Vanilla), scanning, Official::No).reason.empty()); }
     // Official only: an unofficial build is turned away, an unknown one is not.
@@ -381,7 +438,7 @@ static void TestPlayerMods() {
         PlayerMods p; p.haveList = true; p.report = cheat;
         const PlayerModVerdict v = StepPlayerMods(p, maps, true, 10);
         CHECK(v.step == PlayerModStep::Remove && v.reason == RejectReason::ModsNotAllowed);
-        CHECK(v.detail == "This lobby blocks cheats: remove HSEnhancer.");
+        CHECK(v.detail == "This lobby blocks HS Enhancer unless HSMMod can lock it: remove it, or join a lobby that allows it.");
         CHECK(p.held);
     }
     {
@@ -424,11 +481,11 @@ static void TestPlayerMods() {
 
 static void TestTexts() {
     ModRule maps = Rule(ModPreset::MapsOnly);
-    CHECK(RuleSummary(maps) == "Maps only, cheats blocked, official builds only");
-    CHECK(RuleSummary(Rule(ModPreset::Anything, false)).find("cheats allowed") != std::string::npos);
-    RuleResult r; r.fail = RuleFail::Cheat; r.mod = "HSEnhancer";
-    CHECK(RuleFailText(maps, r) == "This lobby blocks cheats: remove HSEnhancer.");
-    CHECK(RuleFailShort(r) == "Blocks HSEnhancer");
+    CHECK(RuleSummary(maps) == "Maps only, HS Enhancer blocked, official builds only");
+    CHECK(RuleSummary(Rule(ModPreset::Anything, false)) == "Anything, HS Enhancer allowed, official builds only");
+    RuleResult r; r.fail = RuleFail::Hse; r.mod = "HSEnhancer";
+    CHECK(RuleFailText(maps, r) == "This lobby blocks HS Enhancer unless HSMMod can lock it: remove it, or join a lobby that allows it.");
+    CHECK(RuleFailShort(r) == "Blocks HS Enhancer");
     {   // The browser row names what to take out; "No Abyss.pak" read as a file the player was missing.
         RuleResult x;
         x.fail = RuleFail::NotAllowed;
@@ -460,8 +517,13 @@ static void TestTexts() {
     items.push_back(Item(ModKind::Ue4ssMod, "HSHelper", 3));
     items.push_back(Item(ModKind::Proxy, "winmm.dll", 4));
     const std::string line = ReportLogLine(Report(items, true));
-    CHECK(line == "1 map paks, 0 content paks, ue4ss 8 (6 stock), proxies [winmm.dll], cheats [HSEnhancer], suspects [HSHelper, winmm.dll]");
+    CHECK(line == "1 map paks, 0 content paks, ue4ss 8 (6 stock), proxies [winmm.dll], HS Enhancer");
+    CHECK(ReportLogLine(Report({Item(ModKind::ContentPak, "A.pak", 1)})) == "0 map paks, 1 content paks, ue4ss off, proxies []");
+    { ModReport cut = Report({Item(ModKind::Module, "HSEnhancer")}); cut.truncated = true; cut.complete = false;
+      CHECK(ReportLogLine(cut) == "0 map paks, 0 content paks, ue4ss off, proxies [], HS Enhancer (list cut) (scan running)"); }
     CHECK(ReportLogLine(ModReport{}).find("ue4ss off") != std::string::npos);
+    CHECK(ReportLogLine(Report({Item(ModKind::HseLocked, "HSEnhancer")})) == "0 map paks, 0 content paks, ue4ss off, proxies [], HS Enhancer (locked)");
+    CHECK(ReportLogLine(Report({Item(ModKind::HseLocked, "HSEnhancer"), Item(ModKind::Module, "HSEnhancer")})) == "0 map paks, 0 content paks, ue4ss off, proxies [], HS Enhancer");
 }
 
 static void TestWire() {
@@ -470,6 +532,7 @@ static void TestWire() {
     std::vector<ModItem> items = Ue4ssStock();
     items.push_back(Item(ModKind::MapPak, "Tavern.pak", 1));
     items.push_back(Item(ModKind::Module, "HSEnhancer"));
+    items.push_back(Item(ModKind::HseLocked, "HSEnhancer", 5));
     m.report = Report(items, true);
     std::vector<uint8_t> b = Encode(m);
     ModListMsg back;
@@ -477,11 +540,12 @@ static void TestWire() {
     // Every truncation fails; a trailing byte fails.
     for (size_t n = 0; n < b.size(); ++n) { ModListMsg x; CHECK(!Decode(b.data(), n, x)); }
     b.push_back(0); { ModListMsg x; CHECK(!Decode(b.data(), b.size(), x)); } b.pop_back();
-    // Bad fields fail: official 3, an unknown flag, a kind 0 or 7, a hashed byte 2.
+    // Bad fields fail: official 3, an unknown flag, a kind 0 or 8, a hashed byte 2.
     { auto c = b; c[4] = 3; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
     { auto c = b; c[5] = 8; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
     { auto c = b; c[7] = 0; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
-    { auto c = b; c[7] = 7; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
+    { auto c = b; c[7] = 8; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
+    { auto c = b; c[7] = 7; ModListMsg x; CHECK(Decode(c.data(), c.size(), x) && x.report.items[0].kind == ModKind::HseLocked); }   // 7, the last kind, decodes
     { auto c = b; c[8] = 2; ModListMsg x; CHECK(!Decode(c.data(), c.size(), x)); }
     // A full list fits a packet.
     ModListMsg full;
@@ -510,7 +574,7 @@ static void TestWire() {
 int main() {
     TestNames();
     TestNormalize();
-    TestVerdicts();
+    TestHse();
     TestClassify();
     TestPresets();
     TestLists();
@@ -521,6 +585,7 @@ int main() {
     TestGrace();
     TestPlayerMods();
     TestHeldIgnores();
+    TestDefaultIsNoMods();
     TestLobbyView();
     TestTexts();
     TestWire();

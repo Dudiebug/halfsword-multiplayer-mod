@@ -35,6 +35,12 @@ struct Event {
 struct Message { SteamId from = 0; int channel = 0; std::vector<uint8_t> data; double ageMs = -1; };   // ageMs: since Steam received it (-1 unknown)
 
 enum SendFlags : int { kUnreliable = 0, kNoNagle = 1, kReliable = 8, kAutoRestart = 32 };
+// true: share this machine's addresses (ICE) so a peer that is not a Steam friend can get a direct path instead of the
+// relay; false: the Steam client's default. Call before sessions open (optional export; false without it).
+bool AllowDirectP2P(bool on);
+// Rev 42 (chat /net): a live session's link as Steam sees it. False when the session is not connected.
+struct LinkInfo { int pingMs = -1; float quality = -1.f; bool relayed = false; };   // quality: share of packets delivered, 0..1
+bool Link(SteamId user, LinkInfo& out);
 
 // Lifecycle (game thread). Init() returns false until steam_api64.dll is loaded and Steam is initialised.
 bool Init();

@@ -1,8 +1,9 @@
-// What online play allows, compiled into the mod so it can't be edited like a launcher's files. A client checks itself
-// before it hosts or joins, and every other player's copy checks the mods on that player's card. A modified client can
-// still lie: this raises the cost of cheating and gives the host something to act on. Game-independent.
+// What Classes lobbies allow, compiled into the mod so it can't be edited like a launcher's files: HS Enhancer's and Half
+// Wolverine's settings sheets, read on every player's machine from the card the other player sends. Nothing here judges the
+// rest of a player's PC: what's in the game folder is the player's mods, and the host's rule (session/hsm_mod_rules.h)
+// decides on those. A modified client can still lie: this raises the cost of cheating and gives the host something to act
+// on. Game-independent.
 #pragma once
-#include "hsm_dll_rules.h"
 #include "match/hsm_build_card.h"
 #include "match/hsm_class.h"
 #include <algorithm>
@@ -27,19 +28,8 @@ inline std::string RuleLower(std::string_view s) {
     return out;
 }
 
-// A DLL that belongs next to the game exe: the game's own, the proxies this setup uses, HSE's standalone copy.
-inline bool IsExpectedExeDll(std::string_view file) {
-    const std::string n = RuleLower(file);
-    for (const char* ok : {"dwmapi.dll", "dxgi.dll", "ue4ss.dll", "hsenhancer.dll", "main.dll"}) if (n == ok) return true;
-    for (const PinnedDll& d : kGameDlls) {
-        const size_t slash = d.path.find_last_of('\\');
-        if (d.path.substr(slash + 1) == n) return true;
-    }
-    return false;
-}
-
-// A UE4SS mod list ("A, B"): which class mods it holds, and what a Classes lobby refuses.
-struct RuleMods { bool hse = false, wolverine = false; std::vector<std::string> unsupported; };
+// A UE4SS mod list ("A, B"): which class mods it holds.
+struct RuleMods { bool hse = false, wolverine = false; };
 inline RuleMods ReadRuleMods(std::string_view reported) {
     RuleMods out;
     size_t at = 0;
@@ -49,60 +39,7 @@ inline RuleMods ReadRuleMods(std::string_view reported) {
         const std::string_view n = reported.substr(at, end - at);
         out.hse = out.hse || n == "HSEnhancer";
         out.wolverine = out.wolverine || n == "HalfWolverine";
-        if (!n.empty() && !IsSupportedUe4ssMod(n)) out.unsupported.emplace_back(n);
         at = end + 2;
-    }
-    return out;
-}
-
-// How strict a lobby is about mods. It's the host's choice, announced with the lobby, and it's what every guest goes by: a guest's own
-// settings only matter in lobbies they host, so editing them gets nothing past anyone else's lobby. Anything unreadable is the strict reading.
-struct LobbyBlock { bool hse = true, allLobbies = true; };
-inline std::string EncodeLobbyBlock(LobbyBlock b) { return std::string(b.hse ? "1" : "0") + (b.allLobbies ? "1" : "0"); }
-inline LobbyBlock DecodeLobbyBlock(std::string_view v) {
-    LobbyBlock b;
-    if (v.size() == 2) { b.hse = v[0] != '0'; b.allLobbies = v[1] != '0'; }
-    return b;
-}
-
-// Whether the supported-mods list keeps this player out of a lobby with this mod rule. Classes lobbies always use it, and mod_block=all
-// takes it to the rest, but not to `anything`: that host chose no limit, and the host's own gate still refuses cheats unless they're allowed.
-inline bool ModListKeepsOut(ModPreset preset, LobbyBlock rule) {
-    if (preset == ModPreset::Anything) return false;
-    return IsClassesPreset(preset) || rule.allLobbies;
-}
-
-// The block overlay: each thing in the way and how to take it out, plainly enough to follow with no idea what UE4SS is.
-struct ModBlockLine { std::string what, how, modsTxtName = {}, setAsideFile = {}; };   // modsTxtName: mods.txt can turn it off, under this name; setAsideFile: a DLL beside the exe that can be renamed for a game
-inline std::vector<ModBlockLine> ModBlockLines(const std::vector<std::string>& ue4ssMods, const std::vector<std::string>& dlls, bool hse, const std::vector<std::string>& outside = {}) {
-    std::vector<ModBlockLine> out;
-    if (hse) out.push_back({"HS Enhancer", "Its menu can change anything. You can still join a lobby whose host allows it. To join the others: in ue4ss\\Mods, open mods.txt and set HSEnhancer : 0. Set it back to 1 to turn it on again.", "HSEnhancer"});
-    for (const std::string& m : ue4ssMods)
-        out.push_back({m, "In ue4ss\\Mods, open mods.txt and set " + m + " : 0, adding the line if it isn't there. Set it back to 1 to turn it on again.", m});
-    for (const std::string& d : dlls) {
-        const bool named = d.size() > 4 && (d.rfind(".dll") == d.size() - 4 || d.rfind(".asi") == d.size() - 4);
-        const bool changed = d.size() > 10 && d.compare(d.size() - 10, 10, " (changed)") == 0;
-        const bool unchecked = d.find(" not checked)") != std::string::npos || d.find(" (too many") != std::string::npos;
-        if (unchecked) { out.push_back({d, "The game would load this, but it can't be checked. Rename it with a short plain name, or remove it."}); continue; }
-        const bool moved = d.size() > 13 && d.compare(d.size() - 13, 13, " (mods moved)") == 0;
-        if (moved) out.push_back({d, "It sends UE4SS to another mods folder. In ue4ss\\UE4SS-settings.ini, clear ModsFolderPath, ModsFolderPaths and ControllingModsTxt."});
-        else if (changed) {
-            const std::string low = DllPathLower(d);
-            if (low.rfind("ue4ss.dll", 0) == 0) out.push_back({d, "This isn't a UE4SS version this mod accepts. Delete ue4ss\\UE4SS.dll and start the game: the mod puts its own back."});
-            else if (low.rfind("dxgi.dll", 0) == 0) out.push_back({d, "This isn't ReShade, and it's where a cheat would go. Move it out of the game's folders, or replace it with a ReShade install."});
-            else out.push_back({d, "This game file has been changed. In Steam: right-click Half Sword, Properties, Installed Files, Verify integrity of game files."});
-        }
-        else if (d.size() > 9 && d.compare(d.size() - 9, 9, " (hidden)") == 0) out.push_back({d, "Something hid this DLL from the game. Remove whatever put it there."});
-        else out.push_back({d, "Move " + (named ? d : d + ".dll") + " out of the game's folders.", "", named ? d : d + ".dll"});
-    }
-    // Named once each, with where it is: without the folder nobody can tell which program it belongs to.
-    std::vector<std::string> seen;
-    for (const std::string& p : outside) {
-        const size_t slash = p.find_last_of("\\/");
-        const std::string file = slash == std::string::npos ? p : p.substr(slash + 1);
-        if (std::find(seen.begin(), seen.end(), file) != seen.end()) continue;
-        seen.push_back(file);
-        out.push_back({file, "Loaded from outside the game" + (slash == std::string::npos ? std::string() : ", from " + p.substr(0, slash)) + ". Close the program that added it, or delete it."});
     }
     return out;
 }
@@ -139,16 +76,10 @@ inline std::string ModsTxtWithOff(std::string text, const std::vector<std::strin
     return text;
 }
 
-// The overlay's first line. HS Enhancer alone doesn't keep you out of everything, because a host can allow it.
-inline std::string ModBlockIntro(const std::vector<ModBlockLine>& lines, bool allLobbies) {
-    if (lines.size() == 1 && lines[0].what == "HS Enhancer") return "HS Enhancer keeps you out of lobbies that don't allow it. You can still join one whose host allows it, or play alone.";
-    return allLobbies ? "These would get you refused online, so online play stays off until they're gone. You can still play alone."
-                      : "These would get you refused in Classes lobbies, so those stay off until they're gone. Everything else still works.";
-}
 // The check that a fighter's base stats are the game's. HS Enhancer changes them, so it can't apply where the host allows HS Enhancer.
-inline bool BaseStatCheckApplies(bool classesLobby, LobbyBlock rule) { return classesLobby && rule.hse; }
+inline bool BaseStatCheckApplies(bool classesLobby, bool blockHse) { return classesLobby && blockHse; }
 
-// HSE's own loader, by what's inside it, so any HSE version or file name counts. A chainloader could copy this text.
+// HSE's own loader, by what's inside it, so any HSE version or file name counts. The launcher uses it to name HSE beside the exe.
 inline bool LooksLikeHseLoader(std::string_view fileBytes) { return fileBytes.find("HSE_Initialize") != std::string_view::npos; }
 
 // A value from INI text: [section] key = value. Nothing when the section or key is missing.
@@ -340,6 +271,150 @@ inline std::string IniWithValue(std::string_view text, std::string_view section,
     return out + nl + head + nl + add;
 }
 
+// ---- HS Enhancer locked for one game (session/hsm_mod_switch.h SwitchPlan::lockHse) -------------------------------------
+// A lobby that blocks HS Enhancer takes it locked: still loaded, with nothing it can do. HSE reads its settings file once,
+// when the game starts, and never again, so the file is locked before then (gameplay/mod_rules.cpp) and the player's own
+// file comes back when the game closes. From HSE's source (2026-11): a "key" line per hotkey (-1: none), an "enabled" line
+// per feature that remembers being on, the menu key [Keybinds] toggle_gui_key, the UE console [UE] console_enabled and
+// graphics commands at start [Graphics] apply_on_startup. A section with no key line takes HSE's default key, so those
+// sections get one. HSE's cosmetic asset overrides stay: they change how things look, not how anyone fights.
+
+namespace online_detail {
+inline std::string_view IniTrim(std::string_view s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+    return s;
+}
+}  // namespace online_detail
+
+// HSE's file with every "key" line at -1 and every "enabled" line false, each other byte kept; then the menu key, the
+// console, graphics at start and the default-key sections. A UTF-8 mark at the start goes: HSE (SimpleIni) reads the file
+// the same without it, and these lines read sections only without it.
+inline std::string LockedHseIni(std::string_view ini) {
+    if (ini.substr(0, 3) == "\xEF\xBB\xBF") ini.remove_prefix(3);
+    std::string out;
+    out.reserve(ini.size() + 256);
+    size_t at = 0;
+    while (at < ini.size()) {
+        size_t end = ini.find('\n', at);
+        const size_t next = end == std::string_view::npos ? ini.size() : end + 1;
+        if (end == std::string_view::npos) end = ini.size();
+        const std::string_view line = ini.substr(at, end - at), body = online_detail::IniTrim(line);
+        const size_t eq = line.find('=');
+        const bool setting = !body.empty() && body.front() != '[' && body.front() != ';' && body.front() != '#' && eq != std::string_view::npos;
+        const std::string_view key = setting ? online_detail::IniTrim(line.substr(0, eq)) : std::string_view();
+        if (key == "key" || key == "enabled") {
+            size_t from = at + eq + 1, to = end;
+            while (from < to && (ini[from] == ' ' || ini[from] == '\t')) ++from;
+            while (to > from && (ini[to - 1] == '\r' || ini[to - 1] == ' ' || ini[to - 1] == '\t')) --to;
+            out.append(ini.substr(at, from - at));
+            out += key == "key" ? "-1" : "false";
+            out.append(ini.substr(to, next - to));
+        } else {
+            out.append(ini.substr(at, next - at));
+        }
+        at = next;
+    }
+    out = IniWithValue(out, "Keybinds", "toggle_gui_key", kRuleLockedMenuKey);
+    out = IniWithValue(out, "UE", "console_enabled", "false");
+    out = IniWithValue(out, "Graphics", "apply_on_startup", "false");
+    for (const char* section : kHseDefaultKeySections) out = IniWithValue(out, section, "key", "-1");
+    return out;
+}
+
+// A file LockedHseIni wrote, locked still or changed since: its menu key is still the one no key sends, which a player's
+// own file never has. The next start puts the player's copy back over such a file, and leaves any other alone.
+inline bool HseIniFromLock(std::string_view ini) { return RuleIniValue(ini, "Keybinds", "toggle_gui_key") == kRuleLockedMenuKey; }
+
+// What keeps HSE's file from being locked; empty: it is. Stricter than HSE reads it: a value that isn't -1, 143 or
+// "false" counts as on.
+inline std::vector<std::string> HseLockProblems(std::string_view ini) {
+    std::vector<std::string> out;
+    if (RuleIniValue(ini, "Keybinds", "toggle_gui_key") != kRuleLockedMenuKey) out.push_back("its menu key is set");
+    if (RuleIniValue(ini, "UE", "console_enabled") != "false") out.push_back("the console may be on");
+    if (RuleIniValue(ini, "Graphics", "apply_on_startup") == "true") out.push_back("graphics commands run at start");
+    if (DefaultKeyLeft(ini)) out.push_back("a default hotkey is left");
+    bool bound = false;
+    std::string section;
+    size_t at = 0;
+    while (at < ini.size()) {
+        size_t end = ini.find('\n', at);
+        if (end == std::string_view::npos) end = ini.size();
+        const std::string_view line = online_detail::IniTrim(ini.substr(at, end - at));
+        at = end + 1;
+        if (!line.empty() && line.front() == '[') { section = std::string(line); continue; }
+        const size_t eq = line.find('=');
+        if (line.empty() || line.front() == ';' || line.front() == '#' || eq == std::string_view::npos) continue;
+        const std::string_view key = online_detail::IniTrim(line.substr(0, eq)), value = online_detail::IniTrim(line.substr(eq + 1));
+        if (key == "key" && value != "-1" && value != kRuleLockedMenuKey) bound = true;
+        if (key == "enabled" && value != "false") out.push_back(section + " is on");
+    }
+    if (bound) out.push_back("a hotkey is bound");
+    return out;
+}
+
+// ---- HS Enhancer off at the start of every game ---------------------------------------------------------------------
+// Every game starts with HSE's features off (gameplay/mod_rules.cpp writes this before HSE reads its file), so a lobby
+// that refuses HS Enhancer needs no restart: HSMMod holds HSE's keys back there (hse_hold.cpp), and nothing is on to begin
+// with. The keys stay as the player set them, for solo play and lobbies that allow it, where the player turns on what
+// they want again: nothing puts the features back by itself. From HSE's source (2026-11): "enabled" is false when missing, and so are [UE] console_enabled and
+// [Graphics] apply_on_startup, so the start adds nothing. [Discord] and [Notifications] keep theirs: they switch nothing.
+namespace online_detail {
+inline std::string_view WithoutBom(std::string_view ini) { return ini.substr(0, 3) == "\xEF\xBB\xBF" ? ini.substr(3) : ini; }
+// A setting the start turns off. `section` as its line reads, brackets and all.
+inline bool HseStartTurnsOff(std::string_view section, std::string_view key) {
+    if (key == "enabled") return section != "[Discord]" && section != "[Notifications]";
+    return (section == "[UE]" && key == "console_enabled") || (section == "[Graphics]" && key == "apply_on_startup");
+}
+// Each setting line of an INI, in order: its section line, key and value, trimmed, and where the value sits in the text.
+template <class F> void ForEachIniSetting(std::string_view ini, F&& f) {
+    std::string_view section;
+    size_t at = 0;
+    while (at < ini.size()) {
+        size_t end = ini.find('\n', at);
+        const size_t next = end == std::string_view::npos ? ini.size() : end + 1;
+        if (end == std::string_view::npos) end = ini.size();
+        const std::string_view line = ini.substr(at, end - at), body = IniTrim(line);
+        const size_t eq = line.find('=');
+        if (!body.empty() && body.front() == '[') section = body;
+        else if (eq != std::string_view::npos) {   // a comment line's key starts with ; or #, so it is no setting of HSE's
+            const std::string_view value = IniTrim(line.substr(eq + 1));
+            const size_t from = static_cast<size_t>(value.data() - ini.data());
+            f(section, IniTrim(line.substr(0, eq)), value, from, from + value.size());
+        }
+        at = next;
+    }
+}
+}  // namespace online_detail
+
+// HSE's file for the start of a game: each setting HseStartTurnsOff false, every other byte kept, a UTF-8 mark gone.
+inline std::string HseStartOffIni(std::string_view ini) {
+    ini = online_detail::WithoutBom(ini);
+    std::string out;
+    out.reserve(ini.size());
+    size_t copied = 0;
+    online_detail::ForEachIniSetting(ini, [&](std::string_view section, std::string_view key, std::string_view, size_t from, size_t to) {
+        if (!online_detail::HseStartTurnsOff(section, key)) return;
+        out.append(ini.substr(copied, from - copied));
+        out += "false";
+        copied = to;
+    });
+    out.append(ini.substr(copied));
+    return out;
+}
+
+// What is on in HSE's file that the start turns off; empty: nothing. Stricter than HSE reads it: anything but "false" is on.
+inline std::vector<std::string> HseStartOffProblems(std::string_view ini) {
+    std::vector<std::string> out;
+    online_detail::ForEachIniSetting(online_detail::WithoutBom(ini), [&](std::string_view section, std::string_view key, std::string_view value, size_t, size_t) {
+        if (!online_detail::HseStartTurnsOff(section, key) || value == "false") return;
+        if (key == "enabled") out.push_back(std::string(section) + " is on");
+        else if (key == "console_enabled") out.push_back("the console is on");
+        else out.push_back("graphics commands run at start");
+    });
+    return out;
+}
+
 // Half Wolverine's file with a class's parts in it. It reads the file once when the game starts, so this is written before then.
 inline std::string WolverineFileFor(std::string_view text, const ClassSheet& c) {
     const struct { const char* section; const char* key; const char* value; } set[] = {
@@ -419,20 +494,6 @@ inline std::vector<std::string> CheckRuleSheet(std::string_view sheet, std::stri
     if (!hse.empty()) for (std::string& p : HseRuleProblems(hse)) out.push_back(std::move(p));
     if (!wolverine.empty()) for (std::string& p : WolverineRuleProblems(wolverine)) out.push_back(std::move(p));
     if (ClassPoints(hse, wolverine) > kRuleMaxPoints + 1e-6) out.push_back("the class is too strong");
-    return out;
-}
-
-// The mods on another player's card that this copy of the rules doesn't allow.
-inline std::vector<std::string> UnsupportedOnCard(std::string_view mods) {
-    std::vector<std::string> out;
-    size_t at = 0;
-    while (at <= mods.size()) {
-        size_t end = mods.find(", ", at);
-        if (end == std::string_view::npos) end = mods.size();
-        std::string_view n = mods.substr(at, end - at);
-        if (!n.empty() && n.find(" more") == std::string_view::npos && !IsSupportedUe4ssMod(n) && !IsExpectedExeDll(n)) out.emplace_back(n);
-        at = end + 2;
-    }
     return out;
 }
 

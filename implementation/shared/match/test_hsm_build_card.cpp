@@ -1,5 +1,6 @@
 // Unit tests for the build card (hsm_build_card.h). Run via implementation/shared/run_tests.sh test_hsm_build_card.
 #include "match/hsm_build_card.h"
+#include "match/hsm_online_rules.h"
 #include <cstdio>
 
 static int g_fail = 0;
@@ -11,6 +12,14 @@ int main() {
     CHECK(CardModsFrom("BPModLoaderMod, HSEnhancer, Keybinds, HalfWolverine") == "HSEnhancer, HalfWolverine");
     CHECK(CardModsFrom("").empty());
     CHECK(CardModsFrom("Keybinds").empty());
+    // A locked HS Enhancer: named locked, once, last; never "HSEnhancer", which a Classes host would refuse
+    CHECK(CardModsHseLocked("HSEnhancer, HalfWolverine", false) == "HalfWolverine, HS Enhancer (locked)");
+    CHECK(CardModsHseLocked("HalfWolverine, hsenhancer", false) == "HalfWolverine, HS Enhancer (locked)");
+    CHECK(CardModsHseLocked("", true) == "HS Enhancer (locked)" && CardModsHseLocked("HSEnhancer", true) == "HS Enhancer (locked)");
+    CHECK(CardModsHseLocked("HalfWolverine", false) == "HalfWolverine" && CardModsHseLocked("", false).empty());
+    CHECK(CardModsHseLocked("A, HSEnhancer, B", true) == "A, B, HS Enhancer (locked)");
+    CHECK(CardModsHseLocked("HSEnhancerPlus", false) == "HSEnhancerPlus");   // another mod: kept as it is
+    CHECK(CheckClassValue(EncodeClass(ClassSheet{}), CardModsHseLocked("HSEnhancer", true)).empty());
 
     // Round trip, and '_' from a command line reads as a space.
     BuildCard c = DecodeCard("Bob", EncodeCard("Glass_Cannon", "HSEnhancer, HalfWolverine"));

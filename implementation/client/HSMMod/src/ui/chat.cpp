@@ -1,5 +1,6 @@
 #include "ui/chat.h"
 #include "ui/umg.h"
+#include "ui/skin.h"
 #include "match/hsm_hud_style.h"
 #include "hsm_chat.h"
 #include "log.h"
@@ -17,7 +18,6 @@ constexpr uint32_t kRepeatDelayMs = 400, kRepeatEveryMs = 60;
 constexpr uint32_t kPendingMs = 5000;                          // how long ChatOpenWith waits for the chat to be openable
 constexpr int kZOrder = 60;
 constexpr float kWidth = 620;                                  // the panel's width: longer lines wrap
-constexpr Rgba kInputBack{0.02f, 0.017f, 0.014f, 0.92f};
 
 struct LogRow { Box row; Text name, text; };
 
@@ -57,7 +57,7 @@ struct Data {
 
 uint32_t NowMs() { return uint32_t(GetTickCount64()); }   // wrap-safe for elapsed-time math
 
-// Chat text: the game's font, a dark outline, never taking clicks.
+// Chat text: the game's font, a dark outline, never taking clicks (the idle hint, straight on the fight).
 Text MakeText(float size, Rgba color) {
     Text t = w.kit.MakeText();
     if (!t) return t;
@@ -67,14 +67,26 @@ Text MakeText(float size, Rgba color) {
     return t;
 }
 
-// A box of the chat's width holding a padded panel.
-Panel MakeBand(Fixed& box, Rgba color, Margin padding) {
+// Text on the chat's parchment: ink in the game's typeface (classic look: light text with the dark outline, on smoke).
+// Scene colours go through OnParchment.
+Text MakeInk(float size, Rgba color) {
+    Text t = w.kit.MakeText();
+    if (!t) return t;
+    if (style::ClassicMenus()) t.Font(size, 1, {0, 0, 0, 0.9f}); else t.Font(size);
+    skin::Font(t, skin::Face::Body);
+    t.Color(style::OnParchment(color));
+    t.Align(Justify::Left);
+    return t;
+}
+
+// A box of the chat's width holding a panel of the game's art, `padding` inside its edges.
+Panel MakeBand(Fixed& box, skin::Art art, Margin padding) {
     box = w.kit.MakeFixed();
     box.Width(kWidth);
     w.column.Add(box).Align(HAlign::Left, VAlign::Bottom).Padding({0, 0, 0, 4});
     Panel p = w.kit.MakePanel();
-    p.Color(color);
-    p.Padding(padding);
+    skin::Paint(p, art);
+    skin::Pad(p, art, padding);
     box.Content(p).Align(HAlign::Fill, VAlign::Fill);
     return p;
 }
@@ -88,28 +100,29 @@ bool Build() {
     // Bottom-left, growing upwards: the log panel, the input row under it, the idle hint at the bottom.
     w.column = w.kit.MakeColumn();
     root.Add(w.column).Anchor({{0.012, 0.965}, {0.012, 0.965}}, {0, 1}).AutoSize().Z(kZOrder);
-    w.logPanel = MakeBand(w.logBox, style::kSmoke, {12, 6, 12, 6});
+    w.logPanel = MakeBand(w.logBox, skin::Art::Sheet, {28, 10, 22, 8});
     Box lines = w.kit.MakeColumn();
     w.logPanel.Content(lines).Align(HAlign::Fill, VAlign::Bottom);
     for (LogRow& r : w.rows) {
         r.row = w.kit.MakeRow();
         lines.Add(r.row).Align(HAlign::Fill, VAlign::Top).Padding({0, 1, 0, 1});
-        r.name = MakeText(20, style::kIron);
+        r.name = MakeInk(20, style::kMenuDim);
         r.row.Add(r.name).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
-        r.text = MakeText(20, style::kBone);
+        r.text = MakeInk(20, style::kMenuText);
         r.text.Wrap(true);
         r.row.Add(r.text).Fill().Align(HAlign::Fill, VAlign::Top);
     }
-    Panel input = MakeBand(w.inputBox, kInputBack, {12, 4, 12, 4});
+    Panel input = MakeBand(w.inputBox, skin::Art::Plate, {14, 5, 14, 5});
+    w.inputBox.MinHeight(46);   // at least a typed line's height (a wrapping text asks for less on its first layout)
     Box row = w.kit.MakeRow();
     input.Content(row).Align(HAlign::Fill, VAlign::Center);
-    w.prompt = MakeText(20, style::kBloodInk);
+    w.prompt = MakeInk(20, style::kMenuAccentInk);
     w.prompt.Set(">");
     row.Add(w.prompt).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
-    w.draft = MakeText(20, style::kBone);
+    w.draft = MakeInk(20, style::kMenuText);
     w.draft.Wrap(true);
     row.Add(w.draft).Fill().Align(HAlign::Fill, VAlign::Top);
-    w.hint = MakeText(14, style::kIron);
+    w.hint = MakeInk(14, style::kMenuDim);
     row.Add(w.hint).Align(HAlign::Right, VAlign::Center).Padding({12, 0, 0, 0});
     w.idle = MakeText(16, style::kIron);
     w.column.Add(w.idle).Align(HAlign::Left, VAlign::Bottom).Padding({2, 0, 0, 0});
@@ -285,20 +298,21 @@ void Draw(const ChatScene& s) {
     w.column.Show(s.visible);
     if (!s.visible) return;
     w.logBox.Show(s.panel > 0);
-    w.logPanel.Color({style::kSmoke.r, style::kSmoke.g, style::kSmoke.b, style::kSmoke.a * s.panel});
+    // The parchment fades with the lines on it (their strongest), so the ink is never left on the bare fight.
+    skin::Paint(w.logPanel, skin::Art::Sheet, {1, 1, 1, 0.95f * s.panel});
     for (size_t i = 0; i < w.rows.size(); ++i) {
         LogRow& r = w.rows[i];
         r.row.Show(i < s.lines.size());
         if (i >= s.lines.size()) continue;
         const ChatLineView& l = s.lines[i];
-        r.name.Set(l.name.text); r.name.Color(l.name.color);
-        r.text.Set(l.text.text); r.text.Color(l.text.color);
+        r.name.Set(l.name.text); r.name.Color(style::OnParchment(l.name.color));
+        r.text.Set(l.text.text); r.text.Color(style::OnParchment(l.text.color));
         r.row.Opacity(l.opacity);
     }
     w.inputBox.Show(s.input);
     if (s.input) {
         w.draft.Set(s.draft + (s.caret ? "_" : " "));
-        w.hint.Set(s.hint.text); w.hint.Color(s.hint.color);
+        w.hint.Set(s.hint.text); w.hint.Color(style::OnParchment(s.hint.color));
     }
     w.idle.Show(s.idle.visible);
     if (s.idle.visible) { w.idle.Set(s.idle.text); w.idle.Color(s.idle.color); w.idle.Opacity(s.idle.opacity); }

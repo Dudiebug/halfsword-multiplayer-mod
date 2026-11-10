@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 namespace hsm::game {
 namespace {
@@ -41,6 +42,8 @@ namespace {
 bool g_allowBuildMismatch = false;
 }  // namespace
 void SetAllowBuildMismatch(bool on) { g_allowBuildMismatch = on; }
+bool g_directP2P = false;
+void SetDirectP2P(bool on) { g_directP2P = on; }
 bool AllowBuildMismatch() { return g_allowBuildMismatch; }
 
 namespace {
@@ -56,15 +59,24 @@ void Lobby::SetStatus(const std::string& s) {
 void Lobby::Tick() {
     if (state_ == State::Offline) {
         if (!steam::Init()) return;
+        if (g_directP2P) HSM_LOG("lobby: direct_p2p=1: %s", steam::AllowDirectP2P(true) ? "direct paths allowed with every lobby member (addresses shared)"
+                                                                                  : "could not be set (no SetGlobalConfigValueInt32); the Steam default stays");
         steam::InitRelay();
         state_ = State::Idle;
         SetStatus("Not in a lobby");
     }
     steam::Tick();
-    if (!launchChecked_) {          // launched through a friend's "Join Game"
+    if (!launchChecked_) {          // launched through a friend's "Join Game", or restarted with some mods off for a lobby
         launchChecked_ = true;
         std::string id = steam::LaunchConnectLobby();
+        RejoinFile rejoin;
+        const bool rejoinWanted = modrules::TakeRejoin(rejoin);   // read and deleted either way
         if (!id.empty()) Join(std::strtoull(id.c_str(), nullptr, 10));
+        else if (rejoinWanted) {
+            rejoinLobby_ = steam::SteamId(rejoin.lobby);
+            HSM_LOG("lobby: back after the restart: joining lobby %llu again", (unsigned long long)rejoin.lobby);
+            Join(rejoinLobby_, rejoin.password);
+        }
     }
     steam::Event e;
     while (steam::Poll(e)) {
@@ -95,6 +107,12 @@ void Lobby::Tick() {
                 if (!e.ok) { state_ = State::Idle; SetStatus("Could not join lobby (full or closed)"); break; }
                 if (state_ != State::InLobby || lobby_ != e.lobby) {
                     LobbyListing l = Describe(e.lobby);
+                    if (l.switchable && (!l.pack.any() || modpack::Check(l.pack).verdict == PackVerdict::Ok)) {   // the rule refuses mods a restart can turn off: ask
+                        steam::LeaveLobby(e.lobby); state_ = State::Idle;
+                        SetStatus("This lobby needs some of your mods off: restart?");
+                        switchAsk_ = SwitchAsk{e.lobby, l.name, l.ruleText, l.plan, false};
+                        break;
+                    }
                     if (!l.compatible) { steam::LeaveLobby(e.lobby); state_ = State::Idle; SetStatus(l.modsText.empty() ? "Cannot join: " + l.reason : l.modsText); break; }
                     if (l.pack.any()) {   // the host's modpack: this machine must have exactly it (nothing is downloaded)
                         const PackCheck pc = modpack::Check(l.pack);
@@ -112,7 +130,7 @@ void Lobby::Tick() {
                 break;
             case steam::Event::LobbyMembersChanged:
             case steam::Event::LobbyDataChanged:
-                if (e.lobby == lobby_ && state_ == State::InLobby) RefreshMembers();
+                if (e.lobby == lobby_ && state_ == State::InLobby) { RefreshMembers(); if (e.kind == steam::Event::LobbyDataChanged) RuleTick(); }
                 break;
             case steam::Event::JoinRequested:
                 if (e.lobby && e.lobby != lobby_) { Leave(); Join(e.lobby); }   // Leave is a no-op unless in or joining a lobby
@@ -159,14 +177,19 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     l.locked = steam::LobbyData(lobby, "hsm_lock") == "1";
     l.pack = ReadLobbyPack(steam::LobbyData(lobby, "hsm_pack"), steam::LobbyData(lobby, "hsm_packv"), steam::LobbyData(lobby, "hsm_packh"));   // peer-written: validated
     if (!proto.empty()) {   // mod rules: the lobby's rule against this machine's own report (the host checks again after the join)
-        const ModRule rule = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyModCheatsKey),
+        const ModRule rule = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyBlockHseKey),
                                               steam::LobbyData(lobby, kLobbyModOfficialKey), steam::LobbyData(lobby, kLobbyModListKey)});   // peer-written: DecodeLobbyRule reads it strictly
-        const LobbyModView v = ViewLobbyRule(rule, modrules::Own(), modrules::OwnOfficial(), steam::LobbyData(lobby, kLobbyHostCheatKey));   // the host's cheats: peer-written, HostCheatNames filters them
-        l.mods = v.tag;
-        if (!DecodeLobbyBlock(steam::LobbyData(lobby, kLobbyBlockKey)).hse) l.mods += l.mods.empty() ? "HS Enhancer allowed" : ", HS Enhancer allowed";   // so nobody joins one by accident
+        const LobbyModView v = ViewLobbyRule(rule, modrules::OwnAsGuest(), modrules::OwnOfficial());
+        l.mods = v.tag;   // names "HS Enhancer ok" when the host allows it, so nobody joins one by accident
+        l.ruleText = RuleSummary(rule);
         if (modrules::Enabled() && !v.reason.empty()) {   // mod_rules=0: no pre-check here, the host still decides
             l.modsText = v.text;
-            if (l.reason.empty()) l.reason = v.reason;
+            const bool onlyMods = l.reason.empty();
+            if (onlyMods) l.reason = v.reason;
+            // What a restart with some mods off would fix (session/hsm_mod_switch.h). Not for the lobby this game restarted
+            // for already, and not where an unofficial build is the trouble: no restart helps there.
+            if (onlyMods && lobby != rejoinLobby_ && !(rule.officialOnly && modrules::OwnOfficial() == Official::No)) l.plan = PlanSwitch(rule, modrules::OwnAsGuest());
+            l.switchable = onlyMods && l.plan.Switchable();
         }
     }
     l.compatible = l.reason.empty();
@@ -174,7 +197,7 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
 }
 
 void Lobby::Host(steam::LobbyType type, bool server) {
-    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostPreset, hostBlock); !why.empty()) { SetStatus(why); return; }
+    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostPreset, modrules::HostRule(*this).blockHse); !why.empty()) { SetStatus(why); return; }
     if (state_ != State::Idle) return;
     password_.clear(); passwordLobby_ = 0; askLobby_ = 0; askNote_.clear();
     type_ = type; server_ = server; state_ = State::Creating; SetStatus("Creating lobby...");
@@ -185,7 +208,7 @@ ModRule Lobby::RoomRule(bool* named) const {
     const std::string rule = InLobby() ? steam::LobbyData(lobby_, kLobbyModRuleKey) : std::string();
     if (named) *named = !rule.empty();
     if (rule.empty()) return NoRule();
-    return DecodeLobbyRule({rule, steam::LobbyData(lobby_, kLobbyModCheatsKey), steam::LobbyData(lobby_, kLobbyModOfficialKey),
+    return DecodeLobbyRule({rule, steam::LobbyData(lobby_, kLobbyBlockHseKey), steam::LobbyData(lobby_, kLobbyModOfficialKey),
                             steam::LobbyData(lobby_, kLobbyModListKey)});   // peer-written: DecodeLobbyRule reads it strictly
 }
 
@@ -213,6 +236,41 @@ void Lobby::RememberPassword(const std::string& password) {
 
 void Lobby::AskPassword(steam::SteamId lobby, const std::string& note) { askLobby_ = lobby; askNote_ = note; }
 
+bool Lobby::ConfirmSwitch() {
+    const SwitchAsk ask = switchAsk_;
+    switchAsk_ = SwitchAsk{};
+    if (!ask.lobby) return false;
+    HSM_LOG("lobby: restarting with %s for %s (%s)", SwitchWords(ask.plan).c_str(), ask.name.empty() ? "a lobby" : ask.name.c_str(), ask.ruleText.c_str());
+    if (!modrules::TurnOffForNextGame(ask.plan.modsTxt, ask.plan.exeDlls, ask.plan.paks, ask.plan.lockHse)) { SetStatus("Could not turn the mods off (see HSMMod.log)"); return false; }
+    RejoinFile r;
+    r.lobby = ask.lobby;
+    r.until = uint64_t(std::time(nullptr)) + kRejoinWindowS;
+    if (passwordLobby_ == ask.lobby) r.password = password_;   // typed for this lobby, or remembered from its host
+    if (!modrules::WriteRejoin(r)) HSM_LOG("lobby: could not write the rejoin file: the lobby has to be joined by hand after the restart");
+    if (!restartGame || !restartGame()) { SetStatus("Could not restart the game: start it again yourself, then join"); return false; }
+    SetStatus("Restarting with " + SwitchWords(ask.plan) + "...");
+    return true;
+}
+
+// The host changed this lobby's mod rule while we are in it (lobby data): everyone hears, and a member whose mods no longer
+// fit is offered the restart, inside the host's grace (kModRuleGraceMs). The first rule named after Enter is the one we
+// joined under, not a change.
+void Lobby::RuleTick() {
+    bool named = false;
+    const ModRule rule = RoomRule(&named);
+    if (!named) return;
+    if (!lastRuleNamed_) { lastRuleNamed_ = true; lastRule_ = rule; return; }
+    if (rule == lastRule_) return;
+    lastRule_ = rule;
+    HSM_LOG("lobby: the host changed the mod rules: %s", RuleSummary(rule).c_str());
+    if (IsHost()) return;   // the host's own change: its chat line says so
+    if (onRuleChanged) onRuleChanged("Host changed mods: " + RuleSummary(rule));
+    if (!modrules::Enabled() || lobby_ == rejoinLobby_ || switchAsk_.lobby) return;
+    const SwitchPlan plan = PlanSwitch(rule, modrules::OwnAsGuest());
+    if (!plan.Switchable()) return;
+    switchAsk_ = SwitchAsk{lobby_, steam::LobbyData(lobby_, "name"), RuleSummary(rule), plan, true};
+}
+
 int Lobby::MaxPlayers() const { return InLobby() ? ParsePlayerLimit(steam::LobbyData(lobby_, "hsm_max")) : maxPlayers_; }
 
 void Lobby::SetMaxPlayers(int n) {
@@ -224,7 +282,13 @@ void Lobby::SetMaxPlayers(int n) {
 
 void Lobby::Join(steam::SteamId lobby, const std::string& password) {
     if (state_ != State::Idle || !lobby) return;
-    if (onlineBlock) if (const std::string why = onlineBlock(DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), "", "", ""}).preset, DecodeLobbyBlock(steam::LobbyData(lobby, kLobbyBlockKey))); !why.empty()) { SetStatus(why); return; }
+    if (onlineBlock) {
+        const ModRule r = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyBlockHseKey), "", ""});   // peer-written: read strictly
+        // A lobby that blocks HS Enhancer: once in, Describe offers the restart that locks it (LobbyEntered). Refused
+        // here only where none comes: the lobby this game restarted for already, or no pre-check (mod_rules=0).
+        const bool lockLater = modrules::Enabled() && lobby != rejoinLobby_;
+        if (const std::string why = onlineBlock(r.preset, r.blockHse && !lockLater); !why.empty()) { SetStatus(why); return; }
+    }
     password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby;
     askLobby_ = 0; askNote_.clear();
     joining_ = lobby; state_ = State::Joining; SetStatus("Joining lobby...");
@@ -240,6 +304,7 @@ void Lobby::Enter(steam::SteamId lobby) {
     if (myRuleSheet) steam::SetMemberData(lobby_, "hsm_sheet", myRuleSheet());
     officialSent_.clear();
     SetOfficial(modrules::OwnOfficial());   // mod rules: the update check's verdict on this DLL (LobbyTick updates it)
+    lastRule_ = RoomRule(&lastRuleNamed_);   // the rule we joined under; RuleTick tells of changes from here
     steam::SetRichPresence("connect", "+connect_lobby " + std::to_string(lobby_));
     steam::SetRichPresence("status", IsHost() ? "Hosting a Half Sword fight" : "In a Half Sword lobby");
     members_.clear();
@@ -254,6 +319,8 @@ void Lobby::Leave() {
     for (const LobbyMember& m : members_) if (m.id != steam::MySteamId() && onMemberLeft) onMemberLeft(m.id);
     members_.clear(); lobby_ = owner_ = joining_ = 0; state_ = State::Idle;
     password_.clear(); passwordLobby_ = 0;
+    lastRuleNamed_ = false;
+    if (switchAsk_.rejoin) switchAsk_ = SwitchAsk{};   // the question was about this lobby
     steam::SetRichPresence("connect", ""); steam::SetRichPresence("status", "");
     SetStatus("Left lobby");
     if (onLeft) onLeft();
@@ -324,7 +391,7 @@ void Lobby::SetPack(const LobbyPack& p) {
     steam::SetLobbyData(lobby_, "hsm_packv", p.version);
     steam::SetLobbyData(lobby_, "hsm_packh", p.hash);
 }
-void Lobby::SetModRule(const ModRule& rule, const std::string& hostCheats) {
+void Lobby::SetModRule(const ModRule& rule) {
     if (!IsHost()) return;
     const LobbyModData d = EncodeLobbyRule(rule);
     bool changed = false;
@@ -333,10 +400,8 @@ void Lobby::SetModRule(const ModRule& rule, const std::string& hostCheats) {
         steam::SetLobbyData(lobby_, key, v);
         changed = true;
     };
-    put(kLobbyModRuleKey, d.rule); put(kLobbyModCheatsKey, d.cheats); put(kLobbyModOfficialKey, d.official); put(kLobbyModListKey, d.list);
-    put(kLobbyHostCheatKey, hostCheats);
-    put(kLobbyBlockKey, EncodeLobbyBlock(hostBlock));
-    if (changed) HSM_LOG("lobby: mod rule announced: %s%s%s", RuleSummary(rule).c_str(), hostCheats.empty() ? "" : "; host runs ", hostCheats.c_str());
+    put(kLobbyModRuleKey, d.rule); put(kLobbyBlockHseKey, d.hse); put(kLobbyModOfficialKey, d.official); put(kLobbyModListKey, d.list);
+    if (changed) HSM_LOG("lobby: mod rule announced: %s", RuleSummary(rule).c_str());
 }
 
 void Lobby::SetOfficial(Official o) {
@@ -358,7 +423,7 @@ void Lobby::SetOverride(steam::SteamId member, int team) {
 
 void Lobby::ClearOverrides() { for (const LobbyMember& m : members_) SetOverride(m.id, -1); }
 
-LobbyBlock Lobby::CurrentBlock() const { return InLobby() ? DecodeLobbyBlock(steam::LobbyData(lobby_, kLobbyBlockKey)) : hostBlock; }
+bool Lobby::BlockHse() const { return InLobby() ? RoomRule().blockHse : modrules::Chosen().blockHse; }
 bool Lobby::InUnrestrictedLobby() const { return InLobby() && steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Unrestricted)); }
 bool Lobby::InClassesLobby() const { return InLobby() && (InUnrestrictedLobby() || steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Classes))); }
 

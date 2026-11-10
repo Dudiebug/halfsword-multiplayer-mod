@@ -144,6 +144,8 @@ public:
     double ActorYaw(ue::UObject* actor);
     double WorldSeconds();                                 // game seconds since this world began play, -1 unreadable
     void Teleport(ue::UObject* actor, const ue::FVector& to);
+    // Rev 42 (the twin's correction): moves an actor's root by delta without a teleport, so the bodies tied to it follow.
+    void NudgeActor(ue::UObject* actor, const ue::FVector& delta);
     ue::UObject* ControllerOf(ue::UObject* pawn);
 
     // Match support (Phase 3)
@@ -321,6 +323,8 @@ public:
     // Sync audit T3: what another machine's Blueprint wrote onto this fighter's stand-in, made on the real one.
     void Revive(ue::UObject* willie);                                    // Willie_BP Get_Up_Pal (W:4718)
     bool Push(ue::UObject* willie, const std::string& bone, const ue::FVector& impulse);   // a contact's impulse (kg cm/s) on one body
+    // Rev 42 Deflect: an impulse (kg cm/s) on the weapon the fighter holds in slot 0 ("Weapon R") or 1 ("Weapon L").
+    bool PushWeapon(ue::UObject* willie, int slot, const ue::FVector& impulse);
     void TriggerDeath(ue::UObject* willie);
     size_t BoneCount() const { return bones_.size(); }
     ue::UObject* GameInstance();

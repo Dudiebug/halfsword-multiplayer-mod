@@ -52,33 +52,17 @@ static void TestSignals() {
     EnhancerSignals f; f.fileName = true; CHECK(f.Matches());
 }
 
-static void TestLobbyRule() {
-    CHECK(LobbyAllowsEnhancer("1") && !LobbyAllowsEnhancer("0") && !LobbyAllowsEnhancer("") && !LobbyAllowsEnhancer("true"));
-    // Blocked lobby: the Enhancer player is refused; everyone else is fine.
-    CHECK(!EnhancerMayStay(false, true, false));
-    CHECK(EnhancerMayStay(false, false, false));
-    // Allowed lobby: everyone may stay.
-    CHECK(EnhancerMayStay(true, true, false) && EnhancerMayStay(true, false, false));
-    // The host never refuses itself; its lobby is allowed while it runs the Enhancer.
-    CHECK(EnhancerMayStay(false, true, true));
-    CHECK(HostAllowsEnhancer(false, true) && HostAllowsEnhancer(true, false) && !HostAllowsEnhancer(false, false));
-}
-
-static void TestMessagesSayWhat() {
-    const std::string join = kEnhancerJoinRefusal, left = kEnhancerBlockedLeave;
-    for (const std::string& m : {join, left}) {
-        CHECK(m.find("Half Sword Enhancer detected") == 0);
-        CHECK(m.find("HSEnhancer.dll") != std::string::npos && m.find("Binaries\\Win64") != std::string::npos);
-    }
-    CHECK(join.find("cannot join") != std::string::npos && left.find("you left") != std::string::npos);
+static void TestModName() {
+    // The report's name for it, any case; the DLL's file name and look-alikes are not it.
+    CHECK(IsEnhancerModName("HSEnhancer") && IsEnhancerModName("hsenhancer") && IsEnhancerModName(kEnhancerModName));
+    CHECK(!IsEnhancerModName("HSEnhancer.dll") && !IsEnhancerModName("HSEnhancerX") && !IsEnhancerModName("HS-Enhancer") && !IsEnhancerModName(""));
 }
 
 int main() {
     TestFileNames();
     TestVersionResource();
     TestSignals();
-    TestLobbyRule();
-    TestMessagesSayWhat();
+    TestModName();
     if (g_fail) { std::printf("test_hsm_enhancer: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_enhancer: ok\n");
     return 0;

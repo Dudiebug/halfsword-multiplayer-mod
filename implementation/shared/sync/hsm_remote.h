@@ -7,6 +7,9 @@
 //   Push       a contact's impulse on the target's bone (kg cm/s, world), gathered over kPushWindowMs and capped: the
 //              stand-in moved on the sender's screen, the real body never did (item 3).
 //   GrabBreak  the held fighter (from) broke free of the target's hand `bone` (0 R, 1 L): the grabber lets go (item 7).
+//   Deflect    rev 42: a blade clash on the sender's screen: the impulse its weapon gave the target's weapon `bone`
+//              (the pose weapon slot, 0 or 1), world. The target's owner gives its real weapon the same knock, so a parry
+//              that happened only on one screen reaches the other (competitive netcode, docs/PLAN_COMPETITIVE_NETCODE.md 6.5).
 #pragma once
 #include "hsm_protocol.h"
 #include "sync/hsm_pose.h"
@@ -18,14 +21,17 @@
 
 namespace hsm::sync {
 
-enum class RemoteKind : uint8_t { Revive = 1, Push = 2, GrabBreak = 3 };
-constexpr uint8_t kLastRemoteKind = 3;
+enum class RemoteKind : uint8_t { Revive = 1, Push = 2, GrabBreak = 3, Deflect = 4 };
+constexpr uint8_t kLastRemoteKind = 4;
 
 constexpr double kPushMinImpulse = 400.0;     // kg cm/s: a brush, not a shove (a 10 kg torso at 0.4 m/s)
 constexpr double kPushMaxImpulse = 15000.0;   // kg cm/s: a 75 kg body at 2 m/s, whatever the solver reported
 constexpr double kPushWindowMs = 50.0;        // one shove's contacts over a few frames add up to one push
 constexpr int kPushesPerSecond = 10;          // per target
 constexpr double kReviveEveryMs = 1000.0;     // per target: a hold re-taken in a struggle revives once
+constexpr double kDeflectMinImpulse = 200.0;   // kg cm/s: a blade brushing a blade is no clash
+constexpr double kDeflectMaxImpulse = 6000.0;  // kg cm/s: a 2 kg sword stopped from 30 m/s, whatever the solver reported
+constexpr double kDeflectEveryMs = 100.0;      // per (sender, target weapon): one clash's contacts are one knock
 
 struct RemoteWriteMsg {
     RemoteKind kind = RemoteKind::Revive;
@@ -57,6 +63,7 @@ inline bool Decode(const uint8_t* d, size_t n, RemoteWriteMsg& m) {
     switch (m.kind) {
     case RemoteKind::Push: return m.bone < kPoseBones && kPoseHasBody[m.bone] && RemoteLen(m.vec) <= kPushMaxImpulse * 1.001;
     case RemoteKind::GrabBreak: return m.bone < 2 && zero;
+    case RemoteKind::Deflect: return m.bone < kPoseWeapons && RemoteLen(m.vec) <= kDeflectMaxImpulse * 1.001;
     case RemoteKind::Revive: return m.bone == 0 && zero;
     }
     return false;
@@ -116,6 +123,30 @@ private:
     }
     std::map<uint16_t, Window> open_;
     std::array<std::array<double, kPushesPerSecond>, kMaxWillies + 1> recent_{};
+    uint16_t seq_ = 0;
+};
+
+// The sender's side of deflects: one knock per (target, weapon slot) per kDeflectEveryMs, the impulse capped; a contact
+// below kDeflectMinImpulse is none. Returns false when nothing should be sent.
+class DeflectGate {
+public:
+    bool Make(uint8_t from, uint8_t target, int slot, const V3& impulse, double nowMs, RemoteWriteMsg& out) {
+        if (from < 1 || from > kMaxWillies || target < 1 || target > kMaxWillies || from == target) return false;
+        if (slot < 0 || slot >= kPoseWeapons || !RemoteFinite(impulse) || !std::isfinite(nowMs)) return false;
+        const double len = RemoteLen(impulse);
+        if (len < kDeflectMinImpulse) return false;
+        double& last = last_[size_t(target)][size_t(slot)];
+        if (last > 0 && nowMs - last < kDeflectEveryMs && nowMs >= last) return false;
+        last = nowMs > 0 ? nowMs : 1e-9;
+        const double k = len > kDeflectMaxImpulse ? kDeflectMaxImpulse / len : 1.0;
+        out = RemoteWriteMsg{};
+        out.kind = RemoteKind::Deflect; out.from = from; out.target = target; out.bone = uint8_t(slot); out.seq = ++seq_;
+        out.vec = V3{ impulse.x * k, impulse.y * k, impulse.z * k };
+        return true;
+    }
+    void Clear() { last_ = {}; }
+private:
+    std::array<std::array<double, kPoseWeapons>, kMaxWillies + 1> last_{};
     uint16_t seq_ = 0;
 };
 

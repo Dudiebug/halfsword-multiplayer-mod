@@ -14,6 +14,7 @@
 #pragma once
 #include "gameplay/standin_slots.h"
 #include "sync/hsm_held.h"
+#include "sync/hsm_reconcile.h"
 #include "sync/hsm_standin.h"
 #include "sync/hsm_two_hand_pose.h"
 #include "sync/hsm_two_hand_update.h"
@@ -52,6 +53,10 @@ public:
     // driven this frame is held still. A flail head is driven whenever commanded and not pinned, also while a locked
     // hand carries its weapon: the chain between them is free.
     void Drive(const sync::FighterCommand& cmd);
+    // Rev 42 (sync/hsm_reconcile.h): adds each body's share of a correction to its velocity (bAddToCurrent), so a fighter
+    // that moves by its own muscles keeps that motion and only drifts back onto the truth. Bodies and held weapons only;
+    // grips and the slots are left as they are. Needs Bind, not Neutralise.
+    void Nudge(const sync::Reconciler::Nudge& n);
     // Weapon slots (bit w = slot w) another fighter holds with a stuck-blade joint (Severs::Hold): neither driven, held
     // still nor moved by Shift, so only the joint and the struck body move them. Set every frame before Shift and Drive.
     void SetPinnedWeapons(uint32_t slots) { pinned_ = slots; }

@@ -259,6 +259,22 @@ static void TestFastSwingTracksClosely() {
 // New: delay adapts to jitter and always stays within [kPlayDelayMinMs, kPlayDelayMaxMs], settling
 // near j95 + margin (the measured interval here is always < V2_EXTRAP_OK_MS, so the interval term
 // contributes ~0).
+// Rev 42: a lower jitter quantile and margin give a shorter playout delay on the same link.
+static void TestTuningShortensDelay() {
+    PosePlayer base, tuned;
+    tuned.SetTuning(0.80, 2.0);
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<double> jitter(-10.0, 10.0);
+    const double period = 1000.0 / 60.0, t0 = 10000.0;
+    for (int k = 0; k < 600; ++k) {
+        const double ts = t0 + k * period, rx = ts + 40.0 + jitter(rng);
+        base.Push(LinearFrame(static_cast<uint32_t>(std::llround(ts)), t0, V3{}, V3{}), static_cast<int64_t>(std::llround(rx)));
+        tuned.Push(LinearFrame(static_cast<uint32_t>(std::llround(ts)), t0, V3{}, V3{}), static_cast<int64_t>(std::llround(rx)));
+    }
+    CHECK(tuned.delayMs() < base.delayMs() - 3.0);
+    CHECK(tuned.delayMs() >= kPlayDelayMinMs - 1e-9);
+}
+
 static void TestDelayAdaptsToJitterWithinBounds() {
     PosePlayer pp;
     std::mt19937 rng(42);
@@ -712,6 +728,7 @@ int main() {
     TestConstantVelocityStreamReproducedExactly();
     TestFastSwingTracksClosely();
     TestDelayAdaptsToJitterWithinBounds();
+    TestTuningShortensDelay();
     TestExtrapolationFullVelocityThenDecaysToZero();
     TestExtrapolationDisplacementCapped();
     TestLossExtrapolatesThenHoldsThenStale();

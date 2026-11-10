@@ -77,6 +77,7 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
                 ++posesSent_;
                 o.pelvis = f.bones[sync::kBonePelvis].pos;
                 o.havePelvis = true;
+                o.history.Push(f);
             } else {
                 ++readFailed_;
                 o.havePelvis = false;
@@ -92,6 +93,11 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
     }
 }
 
+const combat::SelfPoseHistory* OwnerStreams::SelfHistory(uint8_t entity) const {
+    if (!ValidEntity(entity) || !owned_[entity] || owned_[entity]->history.Empty()) return nullptr;
+    return &owned_[entity]->history;
+}
+
 bool OwnerStreams::PelvisOf(uint8_t entity, V3& out) const {
     if (!ValidEntity(entity) || !owned_[entity] || !owned_[entity]->havePelvis) return false;
     out = owned_[entity]->pelvis;
@@ -103,7 +109,7 @@ bool OwnerStreams::PelvisOf(uint8_t entity, V3& out) const {
 void StandIns::OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double nowMs) {
     if (!ValidEntity(m.entity)) return;
     Slot& s = slots_[m.entity];
-    if (!s.feed) s.feed = std::make_unique<Feed>();
+    if (!s.feed) { s.feed = std::make_unique<Feed>(); s.feed->player.SetTuning(quantile_, marginMs_); }
     if (!s.feed->player.Push(frame, std::llround(nowMs))) { ++s.feed->rejected; return; }
     s.feed->root.Push(frame.tsMs, V3{m.rootX, m.rootY, m.rootZ}, m.yawDeg);
     ++s.feed->poses;
@@ -149,6 +155,7 @@ void StandIns::Attach(uint8_t entity, UObject* willie, bool replica) {
     s.actor->index = ObjectIndex(willie);
     s.actor->bindDeadlineMs = SteadyNowMs() + kBindGraceMs;
     if (replica_ || replica) s.actor->driver = sync::StandInDriver(sync::ReplicaServoParams());
+    else s.actor->driver.SetLeadMs(leadMs_);   // rev 42: an exact replica (host physics) is never led
     s.window = Window{};
     HSM_LOG("standins: entity %u -> %s%s", entity, ObjectName(willie).c_str(), replica_ || replica ? " (replica)" : "");
 }
@@ -237,6 +244,19 @@ bool StandIns::OwnerClockNow(uint8_t entity, double nowMs, int64_t& out) const {
 bool StandIns::ShownOwnerTs(uint8_t entity, uint32_t& out) const {
     if (!ValidEntity(entity) || !slots_[entity].actor || !slots_[entity].actor->haveShown) return false;
     out = slots_[entity].actor->shownTs;
+    return true;
+}
+
+sync::FighterNetStats* StandIns::NetStats(uint8_t entity) {
+    if (!ValidEntity(entity)) return nullptr;
+    Slot& s = slots_[entity];
+    if (!s.feed) { s.feed = std::make_unique<Feed>(); s.feed->player.SetTuning(quantile_, marginMs_); }
+    return &s.feed->stats;
+}
+
+bool StandIns::StreamOffset(uint8_t entity, double& offsetMs) const {
+    if (!ValidEntity(entity) || !slots_[entity].feed || !slots_[entity].feed->player.hasOffset()) return false;
+    offsetMs = slots_[entity].feed->player.offsetMs();
     return true;
 }
 
@@ -364,6 +384,11 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     sync::PoseFrame target;
     const sync::DriverStep st = a.driver.Step(s.feed->player, nowMs, now, dt, snapBlocked, target);
     if (st.have) a.lastPelvisErrUu = st.pelvisErrUu;
+    if (st.have) {   // rev 42: how far in the past the stand-in is shown, and how far off its target it is
+        const double rtt = rttOf_ ? rttOf_(entity) : 0.0;
+        s.feed->stats.staleness.Add(nowMs, sync::StalenessMs(st.info.delayMs, rtt, a.driver.LeadMs()));
+        if (st.pelvisErrUu >= 0.0 && !st.place) s.feed->stats.error.Add(nowMs, st.pelvisErrUu);
+    }
     if (grabHolds && st.have && !st.place && st.pelvisErrUu > a.driver.Params().snapErrUu) ++s.window.grabNoSnap;
     // Bones my fighter's grab holds, and bones my blade is stuck in: left to the grab and the lodged blade (0.8.0-pre7).
     const uint32_t held = grabbed | (stuckBones_ ? stuckBones_(entity) : 0u);
@@ -477,6 +502,7 @@ std::string StandIns::HealthLine() {
                     motion.sum[4] / count, motion.max[4], static_cast<unsigned long long>(motion.updates),
                     static_cast<unsigned long long>(motion.failures));
         }
+        if (s.feed) out += " | netcode " + sync::FighterLine(uint8_t(e), s.feed->stats, SteadyNowMs());
         s.window = Window{};
     }
     if (out.empty()) return out;

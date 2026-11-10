@@ -4,6 +4,7 @@
 // Game-independent, tested in test_hsm_global_bans.cpp.
 #pragma once
 #include "util/hsm_sha256.h"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -16,12 +17,10 @@ inline std::string GlobalBanHash(uint64_t steamId) {
     return Sha256Hex(Sha256Of(reinterpret_cast<const uint8_t*>(text.data()), text.size()));
 }
 
-inline constexpr std::string_view kGlobalBans[] = {
-    "4f7991c7bdad2a7f3b92ecfb1124a0794d263ff16aca175ef61370669ae5dad1",   // 2026-11
-};
+inline constexpr std::array<std::string_view, 0> kGlobalBans = {};   // nobody is on it
 
-template <size_t N>
-inline bool GloballyBannedIn(uint64_t steamId, const std::string_view (&list)[N]) {
+template <class List>
+inline bool GloballyBannedIn(uint64_t steamId, const List& list) {
     if (!steamId) return false;   // no Steam ID (a direct-IP player): nothing to match
     const std::string h = GlobalBanHash(steamId);
     for (std::string_view b : list) if (b == h) return true;

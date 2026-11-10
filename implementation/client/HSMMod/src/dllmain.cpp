@@ -16,6 +16,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         wsprintfW(name, L"Local\\HalfSwordMP-%lu", GetCurrentProcessId());
         HANDLE once = CreateMutexW(nullptr, FALSE, name);
         if (once && GetLastError() == ERROR_ALREADY_EXISTS) return TRUE;
+        hsm::game::modrules::ApplySwitchEarly();   // restarted for a lobby with some mods off: its paks go aside before the engine opens them
         if (HANDLE t = CreateThread(nullptr, 0, hsm::ModMain, nullptr, 0, nullptr)) CloseHandle(t);
     } else if (reason == DLL_PROCESS_DETACH && reserved) {
         hsm::game::modrules::RestoreModsTxt();   // a game with mods turned off for it: the player's mods.txt comes back

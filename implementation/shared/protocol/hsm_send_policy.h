@@ -3,7 +3,8 @@
 // (combat/hsm_claim.h kClaimsPerSecond) and late hits are what players feel. Other reliable traffic comes in bursts (a
 // joiner's ~200 BlobChunks and its lease grants, PaintFx at up to 180/s) and keeps Steam's batching: flushing each of
 // those would send a packet per message, and it still leaves within 5 ms or with the next stream message. Unreliable
-// streams go now, one message per frame per fighter.
+// streams go now, one message per frame per fighter. A RemoteWrite goes now too: a blade clash's knock (rev 42 Deflect),
+// a shove or a hold broken free is felt as late as it arrives, and they are rare (sync/hsm_remote.h PushGather, DeflectGate).
 #pragma once
 #include "hsm_protocol.h"
 #include <cstddef>
@@ -17,6 +18,7 @@ inline bool SendFlushes(const uint8_t* d, size_t n, bool reliable) {
     if (!PeekType(d, n, t)) return false;
     switch (t) {
         case MsgType::HitClaim: case MsgType::HitFx: case MsgType::SeverClaim: case MsgType::SeverNotice: case MsgType::StuckBlade:
+        case MsgType::RemoteWrite:
             return true;
         default: return false;
     }

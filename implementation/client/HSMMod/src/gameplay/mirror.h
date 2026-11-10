@@ -33,6 +33,9 @@ public:
     void Tick(Adapter& adapter, float dt);   // every game-mode tick, before the physics step
     void OnLevel();                          // the stand-in went with the old level
     bool Active() const { return active_; }
+    // Rev 42: the playout settings (HSMMod.ini playout_quantile, playout_margin_ms, standin_lead_ms) the bench's stand-in
+    // uses, as the session's stand-ins do; kept across "mirror on".
+    void SetPlayout(double quantile, double marginMs, double leadMs) { quantile_ = quantile; marginMs_ = marginMs; leadMs_ = leadMs; }
     // The stand-in the Willie tick block applies to (nullptr when none, or while "keeptick").
     ue::UObject* TickBlocked() const { return keepTick_ ? nullptr : standIn_; }
     bool IsStandIn(const ue::UObject* willie) const { return willie && willie == standIn_; }
@@ -73,6 +76,7 @@ private:
     std::deque<Truth> truth_;                // the player's hands as streamed, unshifted
     Window window_, total_;
     uint64_t guardBlocked_ = 0;
+    double quantile_ = sync::kPlayJitterQuantile, marginMs_ = sync::kPlayDelayMarginMs, leadMs_ = 0.0;
 };
 
 }  // namespace hsm::game

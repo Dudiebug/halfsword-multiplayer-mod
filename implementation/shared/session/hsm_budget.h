@@ -25,6 +25,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
     switch (t) {
         case MsgType::Input: case MsgType::Snapshot: case MsgType::RelayInput:
         case MsgType::OwnerState: case MsgType::Pose: case MsgType::Vitals:
+        case MsgType::InputBatch:   // rev 42: at the input rate (60/s) beside Pose and Vitals
             return BudgetClass::Stream;
         case MsgType::BodyState: return BudgetClass::Prop;
         case MsgType::PropLease: case MsgType::ObjectAnnounce: case MsgType::ObjectEvent: return BudgetClass::Lease;

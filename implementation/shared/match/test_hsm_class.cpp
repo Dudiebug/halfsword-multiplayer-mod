@@ -154,9 +154,6 @@ int main() {
     CHECK(!CheckClassValue(EncodeClass(FindClassNamed("Glitch")->sheet), "", false).empty());
     CHECK(!CheckClassValue(EncodeClass(ClassSheet{}), "HSEnhancer", true).empty() && !CheckClassValue(EncodeClass(ClassSheet{}), "HSEnhancer", false).empty());
     CHECK(CheckClassValue(EncodeClass(ClassSheet{}), "HSEnhancer", false, false).empty());
-    // A lobby's strictness comes from its host, and a value that doesn't read is strict.
-    CHECK(DecodeLobbyBlock(EncodeLobbyBlock({false, false})).hse == false && DecodeLobbyBlock(EncodeLobbyBlock({false, false})).allLobbies == false);
-    CHECK(DecodeLobbyBlock(EncodeLobbyBlock({})).hse && DecodeLobbyBlock("").hse && DecodeLobbyBlock("").allLobbies && DecodeLobbyBlock("xyz").hse);
     // Half Wolverine on or off decides which classes are offered, and where the screen opens.
     CHECK(ClassHomeTab(true) == kClassTabWolverine && ClassHomeTab(false) == kClassTabPlain);
     CHECK(!ClassTabUsable(kClassTabPlain, true) && ClassTabUsable(kClassTabPlain, false) && ClassTabUsable(kClassTabWolverine, true) && !ClassTabUsable(kClassTabWolverine, false));
@@ -169,10 +166,8 @@ int main() {
     CHECK(ClassFallback(kPlainClass, true, false) == std::optional<std::string>(ClassHomeClass(true)));
     CHECK(!ClassFallback("Wulf", true, false) && !ClassFallback(kPlainClass, false, false) && !ClassFallback("Custom 1", false, false));
     CHECK(!ClassFallback("Wulf", false, true));
-    // A lobby that allows HS Enhancer doesn't then throw you out for using it, and the overlay doesn't say online is closed to you.
-    CHECK(BaseStatCheckApplies(true, {}) && !BaseStatCheckApplies(true, {false, true}) && !BaseStatCheckApplies(false, {}));
-    CHECK(ModBlockIntro(ModBlockLines({}, {}, true), true).find("allows it") != std::string::npos);
-    CHECK(ModBlockIntro(ModBlockLines({"Cheat"}, {}, true), true).find("stays off") != std::string::npos);
+    // A lobby that allows HS Enhancer doesn't then throw you out for using it, and outside Classes lobbies the base stats aren't checked.
+    CHECK(BaseStatCheckApplies(true, true) && !BaseStatCheckApplies(true, false) && !BaseStatCheckApplies(false, true) && !BaseStatCheckApplies(false, false));
     // What a fighter's really running: the fighter's own values win over what the class or a file says, and anything past Unrestricted's limits stands out.
     ClassSheet declared; declared.run = 1.2;
     const ClassSheet liveOne = LiveSheet(declared, "", kGameRunRate * 3, kGameMusclePower * 2);
@@ -214,10 +209,6 @@ int main() {
     // The glitched bars: in range, moving, and repeatable.
     for (uint32_t f = 0; f < 500; ++f) { const float v = GlitchedBar(0.5f, f); CHECK(v >= 0.f && v <= 1.f && v == GlitchedBar(0.5f, f)); }
     CHECK(GlitchedBar(0.5f, 0) != GlitchedBar(0.5f, 4) || GlitchedBar(0.5f, 4) != GlitchedBar(0.5f, 8));
-    // The overlay names everything, with what to do about it.
-    const std::vector<ModBlockLine> block = ModBlockLines({"CheatMod"}, {"Multiplayer.dll", "version"}, true);
-    CHECK(block.size() == 4 && block[0].what == "HS Enhancer" && block[1].how.find("CheatMod : 0") != std::string::npos && block[1].modsTxtName == "CheatMod" && block[1].how.find("delete") == std::string::npos && block[2].modsTxtName.empty() && block[0].modsTxtName == "HSEnhancer" && block[2].how.find("Move Multiplayer.dll") != std::string::npos && block[3].how.find("Move version.dll") != std::string::npos && block[3].setAsideFile == "version.dll" && block[2].setAsideFile == "Multiplayer.dll" && block[1].setAsideFile.empty());
-    CHECK(ModBlockLines({}, {}, false).empty());
     // Turning mods off in mods.txt: their lines change, one it lacks is added, comments and everything else stay, and it reads back as off.
     const std::string modsBefore = "; a comment : 1\r\nCheat : 1\r\nKeep : 1\r\n";
     const std::string modsAfter = ModsTxtWithOff(modsBefore, {"cheat", "Other"});
@@ -225,13 +216,6 @@ int main() {
     CHECK(ModsTxtWithOff("", {"A"}) == "A : 0\n" && ModsTxtWithOff("B : 1", {"A"}) == "B : 1\nA : 0\n");
     const std::vector<std::string> stillOn = ue4ss::EnabledMods(ue4ss::ParseModsTxt(modsAfter), {"Other", "Keep", "cheat"});
     CHECK(stillOn.size() == 1 && stillOn[0] == "Keep");
-    // Each changed file gets the fix that works for it. Steam only restores the game's own.
-    const std::vector<ModBlockLine> changedLines = ModBlockLines({}, {"UE4SS.dll (changed)", "dxgi.dll (changed)", "tbb.dll (changed)"}, false);
-    CHECK(changedLines.size() == 3 && changedLines[0].how.find("the mod puts its own back") != std::string::npos && changedLines[0].how.find("Steam") == std::string::npos);
-    CHECK(changedLines[1].how.find("ReShade") != std::string::npos && changedLines[1].how.find("Steam") == std::string::npos && changedLines[2].how.find("Verify") != std::string::npos);
-    // Three copies of one temporary DLL are one line, and it says where.
-    const std::vector<ModBlockLine> outsideLines = ModBlockLines({}, {}, false, {"C:\\Temp\\a\\190_E658703.dll", "C:\\Temp\\b\\190_E658703.dll", "C:\\Temp\\c.dll"});
-    CHECK(outsideLines.size() == 2 && outsideLines[0].what == "190_E658703.dll" && outsideLines[0].how.find("C:\\Temp\\a") != std::string::npos && outsideLines[1].what == "c.dll");
 
     // The Forge's rows move and stop at the limits, and don't drift.
     ClassSheet forge;

@@ -35,6 +35,19 @@ std::string Narrow(const std::wstring& w) {
     return s;
 }
 std::string LowerPath(std::wstring w) { std::string s = Narrow(w); for (char& c : s) { if (c == '\\') c = '/'; if (c >= 'A' && c <= 'Z') c = char(c + 32); } return s; }
+std::string Utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(n > 0 ? n : 0), ' ');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), int(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+// A found pak's path under root, forward slashes: "~mods/Skins.pak" (session/hsm_mod_switch.h PakRelOk takes it).
+std::string RelPath(const std::wstring& root, const std::wstring& path) {
+    std::string rel = Utf8(path.size() > root.size() && path.compare(0, root.size(), root) == 0 ? path.substr(root.size()) : path);
+    for (char& c : rel) if (c == '\\') c = '/';
+    return rel;
+}
 std::string Short(const Sha256Digest& d) { return Sha256Hex(d).substr(0, 12); }
 
 // ---- worker state ------------------------------------------------------------------------------------------------
@@ -45,6 +58,7 @@ struct Shared {
     std::vector<PakMaps> pakMaps;
     std::vector<LocalPack> packs;             // the manifests under Paks/~mods/<pack>/ (session/hsm_modpack.h)
     std::vector<ModKind> kinds;               // per paks[i]: a map pak or another content pak (ContentPak until its index is read)
+    std::vector<std::string> rels;            // per paks[i]: its path under Content/Paks, forward slashes (PakRelPath)
     bool listed = false, allHashed = false, running = false;
     uint32_t version = 0;                     // bumps on every change; the game thread copies when it differs
 };
@@ -91,14 +105,8 @@ PakParse ReadPakMaps(const std::wstring& path, uint64_t size, std::vector<std::s
 
 struct FoundPak { std::wstring path; std::string name; uint64_t size = 0, mtime = 0; };
 
-// What a scan couldn't vouch for. The online check refuses these: a mod the list can't name mustn't be a way off the list.
-std::mutex g_uncheckedMu;
-std::vector<std::string> g_unchecked;
-void NoteUnchecked(const std::string& what) {
-    std::lock_guard<std::mutex> lock(g_uncheckedMu);
-    if (g_unchecked.size() < 16 && std::find(g_unchecked.begin(), g_unchecked.end(), what) == g_unchecked.end()) g_unchecked.push_back(what);
-    HSM_LOG("maps: not checked: %s", what.c_str());
-}
+// What a scan couldn't read. The game loads it anyway; the host's rule sees the paks that were listed, nothing judges the rest.
+void NoteUnchecked(const std::string& what) { HSM_LOG("maps: not checked: %s", what.c_str()); }
 
 void ListPaks(const std::wstring& root, const std::wstring& dir, int depth, std::vector<FoundPak>& out, size_t& seen) {
     WIN32_FIND_DATAW fd;
@@ -192,15 +200,14 @@ std::vector<LocalPack> ScanPacks(const std::wstring& root) {
     return out;
 }
 
-void Publish(const std::vector<ModPak>& paks, const std::vector<PakMaps>& pakMaps, const std::vector<LocalPack>& packs, const std::vector<ModKind>& kinds,
-             bool listed, bool allHashed) {
+void Publish(const std::vector<ModPak>& paks, const std::vector<std::string>& rels, const std::vector<PakMaps>& pakMaps, const std::vector<LocalPack>& packs,
+             const std::vector<ModKind>& kinds, bool listed, bool allHashed) {
     std::lock_guard<std::mutex> lock(g_shared.mu);
-    g_shared.paks = paks; g_shared.pakMaps = pakMaps; g_shared.packs = packs; g_shared.kinds = kinds; g_shared.listed = listed; g_shared.allHashed = allHashed;
+    g_shared.paks = paks; g_shared.rels = rels; g_shared.pakMaps = pakMaps; g_shared.packs = packs; g_shared.kinds = kinds; g_shared.listed = listed; g_shared.allHashed = allHashed;
     ++g_shared.version;
 }
 
 void ScanOnce() {
-    { std::lock_guard<std::mutex> lock(g_uncheckedMu); g_unchecked.clear(); }
     const ULONGLONG t0 = GetTickCount64();
     const std::wstring root = PaksRoot();
     std::vector<FoundPak> found;
@@ -213,11 +220,12 @@ void ScanOnce() {
         found.resize(kMaxModPaks);
     }
     std::vector<ModPak> paks;
-    for (const FoundPak& f : found) { ModPak p; p.name = f.name; p.size = f.size; paks.push_back(p); }
+    std::vector<std::string> rels;
+    for (const FoundPak& f : found) { ModPak p; p.name = f.name; p.size = f.size; paks.push_back(p); rels.push_back(RelPath(root, f.path)); }
     std::vector<PakMaps> pakMaps;
     std::vector<ModKind> kinds(paks.size(), ModKind::ContentPak);
     const std::vector<LocalPack> packs = ScanPacks(root);
-    Publish(paks, pakMaps, packs, kinds, true, paks.empty());     // listed: the client can already say "no such pak" for names that are absent
+    Publish(paks, rels, pakMaps, packs, kinds, true, paks.empty());     // listed: the client can already say "no such pak" for names that are absent
 
     HashCache cache;
     cache.Parse(ReadWholeFile(CachePath()));
@@ -243,15 +251,15 @@ void ScanOnce() {
                 judged.why.empty() ? "" : (" (" + judged.why + ")").c_str());
         if (r == PakParse::Ok && assets.badMaps) HSM_LOG("maps: mod pak %s: %zu map(s) can't go on the map list, first %s", f.name.c_str(), assets.badMaps, assets.badMapName.c_str());
         if (r == PakParse::Ok && !maps.empty()) pakMaps.push_back({i, maps});
-        Publish(paks, pakMaps, packs, kinds, true, false);
+        Publish(paks, rels, pakMaps, packs, kinds, true, false);
     }
     // A pak that could not be read is dropped from the list so nothing waits on its hash.
-    std::vector<ModPak> kept; std::vector<PakMaps> keptMaps; std::vector<ModKind> keptKinds;
+    std::vector<ModPak> kept; std::vector<std::string> keptRels; std::vector<PakMaps> keptMaps; std::vector<ModKind> keptKinds;
     std::vector<size_t> remap(paks.size(), size_t(-1));
-    for (size_t i = 0; i < paks.size(); ++i) if (paks[i].hashed) { remap[i] = kept.size(); kept.push_back(paks[i]); keptKinds.push_back(kinds[i]); }
+    for (size_t i = 0; i < paks.size(); ++i) if (paks[i].hashed) { remap[i] = kept.size(); kept.push_back(paks[i]); keptRels.push_back(rels[i]); keptKinds.push_back(kinds[i]); }
     for (PakMaps pm : pakMaps) { pm.pak = remap[pm.pak]; keptMaps.push_back(pm); }
     if (cacheDirty) WriteWholeFile(CachePath(), cache.Serialize());
-    Publish(kept, keptMaps, packs, keptKinds, true, true);
+    Publish(kept, keptRels, keptMaps, packs, keptKinds, true, true);
     HSM_LOG("maps: scanned %zu mod pak(s) under %s in %llu ms", kept.size(), Narrow(root).c_str(), (unsigned long long)(GetTickCount64() - t0));
 }
 
@@ -280,6 +288,7 @@ struct Local {
     std::vector<PakMaps> pakMaps;
     std::vector<LocalPack> packs;
     std::vector<ModKind> kinds;
+    std::vector<std::string> rels;
     bool listed = false, allHashed = false;
     std::vector<std::string> registryMaps;
     bool registryDone = false, registryTried = false;
@@ -373,7 +382,7 @@ void Tick() {
         std::lock_guard<std::mutex> lock(g_shared.mu);
         if (g_shared.version != g.seenVersion) {
             g.seenVersion = g_shared.version;
-            g.paks = g_shared.paks; g.pakMaps = g_shared.pakMaps; g.packs = g_shared.packs; g.kinds = g_shared.kinds;
+            g.paks = g_shared.paks; g.rels = g_shared.rels; g.pakMaps = g_shared.pakMaps; g.packs = g_shared.packs; g.kinds = g_shared.kinds;
             g.listed = g_shared.listed; g.allHashed = g_shared.allHashed;
             g.dirty = true;
         }
@@ -397,8 +406,12 @@ void Rescan() {
 }
 
 const std::vector<ModMapEntry>& Maps() { return g.maps; }
-std::vector<std::string> Unchecked() { std::lock_guard<std::mutex> lock(g_uncheckedMu); return g_unchecked; }
 const std::vector<ModPak>& Paks() { return g.paks; }
+std::string PakRelPath(const std::string& name) {
+    for (size_t i = 0; i < g.paks.size() && i < g.rels.size(); ++i)
+        if (g.paks[i].name == name || SanitizeModItemName(g.paks[i].name) == name) return g.rels[i];
+    return {};
+}
 const std::vector<LocalPack>& Packs() { return g.packs; }
 const std::vector<ModKind>& PakKinds() { return g.kinds; }
 uint32_t ScanVersion() { return g.seenVersion; }

@@ -192,6 +192,9 @@ public:
     bool HasOffset() const { return offset_.has_value(); }
     double Offset() const { return offset_.value_or(0.0); }
     double J95() const { return j95_; }
+    // Rev 42 (competitive netcode Phase 2): the lateness quantile the playout delay covers; kPlayJitterQuantile unless set.
+    // Lower: a shorter buffer (the opponent less in the past), more late frames left to extrapolation.
+    void SetQuantile(double q) { if (std::isfinite(q)) quantile_ = std::clamp(q, 0.5, 0.99); }
 
     // poseplay.rs Clock::observe(), poseplay.rs:264-283.
     void Observe(double rx, double ts) {
@@ -205,7 +208,7 @@ public:
         const size_t n = late_.Size();
         std::array<double, kJitterCap> tmp{};
         for (size_t i = 0; i < n; ++i) tmp[i] = std::max(0.0, late_.At(i).second);
-        size_t k = static_cast<size_t>(std::ceil(static_cast<double>(n) * kPlayJitterQuantile));
+        size_t k = static_cast<size_t>(std::ceil(static_cast<double>(n) * quantile_));
         k = std::clamp<size_t>(k, 1, n) - 1;
         std::nth_element(tmp.begin(), tmp.begin() + static_cast<long>(k), tmp.begin() + static_cast<long>(n));
         j95_ = tmp[k];
@@ -216,6 +219,7 @@ private:
     Ring<std::pair<double, double>, kJitterCap> late_;  // (rx, lateness above the offset at that moment)
     std::optional<double> offset_;
     double j95_ = 0.0;
+    double quantile_ = kPlayJitterQuantile;
 };
 
 enum class Mode { Interp, Extrap, Hold, Stale };
@@ -481,19 +485,25 @@ public:
     }
 
     double delayMs() const { return delay_; }
+    // Rev 42 (competitive netcode Phase 2, [net] playout_quantile / playout_margin_ms): how much jitter the buffer covers.
+    void SetTuning(double jitterQuantile, double marginMs) {
+        clock_.SetQuantile(jitterQuantile);
+        if (std::isfinite(marginMs)) margin_ = std::clamp(marginMs, 0.0, 50.0);
+    }
     double j95Ms() const { return clock_.J95(); }
     bool hasOffset() const { return clock_.HasOffset(); }
     double offsetMs() const { return clock_.Offset(); }
     size_t size() const { return frames_.Size(); }
 
 private:
+    double margin_ = kPlayDelayMarginMs;
     using FrameRing = ppdetail::Ring<PoseFrame, kPlayKeepFrames>;
 
     // poseplay.rs Playback::update_delay(), poseplay.rs:373-403, v2 branch only (every bone here
     // always has a velocity). No relay interval hint (skipped): Interval() always measures.
     void UpdateDelay() {
         const double iv = Interval();
-        const double base = clock_.J95() + kPlayDelayMarginMs;
+        const double base = clock_.J95() + margin_;
         double extra = std::max(0.0, iv - kPlayV2ExtrapOkMs);
         if (iv <= kPlaySenderFpsMaxIvMs) extra = std::min(extra, std::max(0.0, kPlayIntervalDelayCapMs - base));
         const double target = std::clamp(base + extra, kPlayDelayMinMs, kPlayDelayMaxMs);

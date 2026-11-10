@@ -1,4 +1,5 @@
 #include "ui/mp_widgets.h"
+#include "ui/skin.h"
 #include "gameplay/session.h"
 #include "match/hsm_hud_style.h"
 #include "log.h"
@@ -23,13 +24,14 @@ Text Maker::NewText(const std::string& text, float size, Rgba color) {
     if (!t) return t;
     t.Set(text);
     t.Font(size);
+    skin::Font(t, size >= 26 ? skin::Face::Heading : skin::Face::Body);
     t.Color(color);
     return t;
 }
 
 Text Maker::Section(Box& column, const std::string& text, float padTop) {
-    Text t = NewText(text, 18, style::kBloodInk);
-    if (t) AddV(column, t, padTop);
+    Text t = NewText(skin::Title(text), 23, style::kMenuAccentInk);   // a rubric, as on the game's scrolls
+    if (t) { skin::Font(t, skin::Face::Heading); AddV(column, t, padTop); }
     return t;
 }
 
@@ -39,8 +41,8 @@ Card Maker::MakeCard(const Widget& body, Margin pad) {
     if (!c || !body) { HSM_LOG("ui: card widgets could not be made"); return Card{}; }
     c.button.Background(kClear);
     c.button.Content(c.frame).Padding({0, 0, 0, 0}).Align(HAlign::Fill, VAlign::Fill);
-    c.frame.Padding({2, 2, 2, 2});
     c.frame.Content(c.face);
+    c.face.Color(kNone);
     c.face.Padding(pad);
     c.face.Content(body);
     return c;
@@ -48,8 +50,26 @@ Card Maker::MakeCard(const Widget& body, Margin pad) {
 
 Flat Maker::MakeFlat(const std::string& text, float size, Margin pad) {
     Flat f;
-    f.label = NewText(text, size, style::kBone);
+    f.label = NewText(text, size, style::kMenuText);
     f.card = MakeCard(f.label, pad);
+    return f;
+}
+
+Flat Maker::MakeArrow(bool next, float size) {
+    // points left, as the game's Options book draws "previous"; the classic look keeps its text arrows
+    ue::UObject* art = style::ClassicMenus() ? nullptr : GameTexture("Arrow_001");
+    if (!art || !kit_) return MakeFlat(next ? ">" : "<", size, {14, 2, 14, 2});
+    Flat f;
+    Box stack = kit_->MakeStack();
+    Icon arrow = kit_->MakeIcon();
+    f.label = NewText("", size, style::kMenuText);
+    if (!stack || !arrow || !f.label) return MakeFlat(next ? ">" : "<", size, {14, 2, 14, 2});
+    arrow.Texture(Look{art, {}, {}, false, next});
+    arrow.Size({size * 2.2, size * 1.7});
+    stack.Add(arrow).Align(HAlign::Center, VAlign::Center);
+    stack.Add(f.label).Align(HAlign::Center, VAlign::Center);
+    f.card = MakeCard(stack, {2, 0, 2, 0});
+    if (f.card) f.card.arrow = true;
     return f;
 }
 
@@ -60,6 +80,22 @@ void Paint(Card& c) {
     const bool hover = c.live && c.button.Hovered();
     c.glow += ((hover ? 1.f : 0.f) - c.glow) * kGlowStep;
     if (c.glow < 0.01f) c.glow = 0; else if (c.glow > 0.99f) c.glow = 1;
+    if (c.arrow) {                              // a bare arrow: no card behind it, a little larger under the mouse
+        c.frame.Padding({0, 0, 0, 0});
+        c.frame.Color(kNone);
+        c.face.Color(kNone);
+        c.button.Scale(1 + 0.12f * c.glow);
+        return;
+    }
+    // The game's parchment button, brighter under the mouse; the chosen one is its amber pressed button. Without the
+    // art: the plain card colours, the chosen one framed in the rubric.
+    if (skin::Loaded(skin::Art::Card)) {
+        skin::Pad(c.frame, skin::Art::Card, {6, 6, 6, 6});   // inside the gilt frame and its corner studs
+        skin::Paint(c.frame, c.selected ? skin::Art::CardPicked : skin::Art::Card, c.selected ? Rgba{1, 1, 1, 1} : skin::CardTint(c.glow));
+        return;
+    }
+    c.frame.Padding({2, 2, 2, 2});
+    c.frame.Texture(Look{});
     c.frame.Color(c.selected ? style::kMenuAccent : Mix(style::kMenuFrame, style::kMenuFrameHover, c.glow));
     c.face.Color(Mix(style::kMenuCard, style::kMenuCardHover, c.glow));
 }
@@ -94,8 +130,8 @@ bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
         v.box = kit.MakeColumn();
         Box row = kit.MakeRow();
         Fixed valueBox = kit.MakeFixed();
-        v.label = m.NewText("", 17, style::kBone); v.value = m.NewText("", 17, style::kBone); v.hint = m.NewText("", 13, style::kIron);
-        v.prev = m.MakeFlat("<", 17, {14, 2, 14, 2}); v.next = m.MakeFlat(">", 17, {14, 2, 14, 2});
+        v.label = m.NewText("", 17, style::kMenuText); v.value = m.NewText("", 17, style::kMenuText); v.hint = m.NewText("", 13, style::kMenuDim);
+        v.prev = m.MakeArrow(false, 17); v.next = m.MakeArrow(true, 17);
         v.bind = m.MakeFlat("CHANGE", 15, {12, 3, 12, 3});
         if (!v.box || !row || !valueBox || !v.label || !v.value || !v.hint || !v.prev.card || !v.next.card || !v.bind.card) { v = RowView{}; continue; }
         v.value.Align(Justify::Center);
@@ -116,7 +152,7 @@ bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
     Box stack = kit.MakeStack();
     meter_ = kit.MakeBar();
     mark_ = kit.MakeIcon();
-    meterText_ = m.NewText("", 14, style::kIron);
+    meterText_ = m.NewText("", 14, style::kMenuDim);
     if (meterRow && meterBox && stack && meter_ && mark_ && meterText_) {
         meterBox.Width(kMeterWidth);
         meterBox.Height(14);
@@ -125,14 +161,14 @@ bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
         markSlot_ = stack.Add(mark_);
         markSlot_.Align(HAlign::Left, VAlign::Fill);
         mark_.Size({3, 14});
-        mark_.Color(style::kBone);
+        mark_.Color(style::kMenuText);
         AddH(meterRow, meterBox, 0, 12).Align(HAlign::Left, VAlign::Center);
         AddH(meterRow, meterText_, 1, 0).Align(HAlign::Fill, VAlign::Center);
         AddV(root_, meterRow, 12);
     } else {
         meter_ = Bar{};
     }
-    note_ = m.NewText("", 14, style::kBloodInk);
+    note_ = m.NewText("", 14, style::kMenuAccentInk);
     if (note_) { note_.Wrap(true); AddV(root_, note_, 8); }
     return true;
 }
@@ -177,9 +213,9 @@ void VoiceBlock::Tick(Session& session) {
         if (!row) continue;
         const bool key = row->id == VoiceRow::Key;
         r.label.Set(row->label);
-        r.label.Color(row->enabled ? style::kBone : style::kIron);
+        r.label.Color(row->enabled ? style::kMenuText : style::kMenuDim);
         r.value.Set(row->value);
-        r.value.Color(key && binding_ ? style::kBloodInk : style::kBone);
+        r.value.Color(key && binding_ ? style::kMenuAccentInk : style::kMenuText);
         r.hint.Set(row->hint);
         r.hint.Show(!row->hint.empty());
         r.prev.card.button.Show(!key);
@@ -204,7 +240,7 @@ void VoiceBlock::Tick(Session& session) {
     }
     if (meter_) {
         meter_.Percent(sc.meter);
-        meter_.FillColor(sc.meterHot ? style::kOk : style::kIron);
+        meter_.FillColor(sc.meterHot ? style::kMenuOk : style::kMenuFrame);
         mark_.Visibility(sc.showThreshold ? Vis::HitTestInvisible : Vis::Hidden);
         const float at = std::clamp(sc.threshold, 0.f, 1.f) * (kMeterWidth - 3);
         if (markSlot_ && std::abs(at - markAt_) > 0.5f) { markAt_ = at; markSlot_.Padding({at, 0, 0, 0}); }
@@ -218,30 +254,35 @@ void VoiceBlock::Tick(Session& session) {
 bool EscPanel::Build(Kit& kit, Canvas root) {
     m_ = Maker(&kit);
     panel_ = kit.MakePanel();
+    Panel sheet = kit.MakePanel();
     Box page = kit.MakeColumn(), header = kit.MakeRow(), tabs = kit.MakeRow(), body = kit.MakeScroll(), footer = kit.MakeRow();
     Fixed rule = kit.MakeFixed();
     Panel ruleLine = kit.MakePanel();
     for (Box& p : pages_) p = kit.MakeColumn();
     bool pagesOk = true;
     for (Box& p : pages_) pagesOk = pagesOk && bool(p);
-    if (!root || !panel_ || !page || !header || !tabs || !body || !footer || !rule || !ruleLine || !pagesOk) {
+    if (!root || !panel_ || !sheet || !page || !header || !tabs || !body || !footer || !rule || !ruleLine || !pagesOk) {
         HSM_LOG("ui: Esc menu widgets could not be made");
         panel_ = Panel{};
         return false;
     }
     root.Add(panel_).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(1000);
-    panel_.Color({style::kSmoke.r, style::kSmoke.g, style::kSmoke.b, 0.97f});
-    panel_.Padding({72, 44, 72, 36});
-    panel_.Content(page);
+    // The fight dimmed behind the game's old paper, as its own pause scroll sits over it.
+    panel_.Color({0, 0, 0, 0.72f});
+    panel_.Padding({56, 32, 56, 28});
+    panel_.Content(sheet).Align(HAlign::Fill, VAlign::Fill);
+    skin::Paint(sheet, skin::Art::Sheet);
+    skin::Pad(sheet, skin::Art::Sheet, {40, 22, 40, 20});
+    sheet.Content(page).Align(HAlign::Fill, VAlign::Fill);
 
     AddV(page, header, 0);
-    title_ = m_.NewText("MULTIPLAYER", 40, style::kBone);
-    sub_ = m_.NewText("", 17, style::kIron);
-    if (title_) { title_.Font(40, 1, {0, 0, 0, 0.85f}); AddH(header, title_, 0, 28).Align(HAlign::Left, VAlign::Center); }
+    title_ = m_.NewText(skin::Title("Multiplayer"), 44, style::kMenuAccentInk);
+    sub_ = m_.NewText("", 17, style::kMenuDim);
+    if (title_) AddH(header, title_, 0, 28).Align(HAlign::Left, VAlign::Center);
     if (sub_) AddH(header, sub_, 1, 0).Align(HAlign::Left, VAlign::Center);
     rule.Height(3);
     rule.Content(ruleLine);
-    ruleLine.Color(style::kBlood);
+    ruleLine.Color(style::kMenuAccent);
     AddV(page, rule, 12);
 
     AddV(page, tabs, 14);
@@ -257,12 +298,12 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
     Box& players = pages_[0];
     voteBar_ = kit.MakePanel();
     Box vrow = kit.MakeRow();
-    voteText_ = m_.NewText("", 18, style::kBone);
+    voteText_ = m_.NewText("", 18, style::kMenuText);
     voteYes_ = m_.MakeFlat("YES", 17);
     voteNo_ = m_.MakeFlat("NO", 17);
     if (voteBar_ && vrow && voteText_ && voteYes_.card && voteNo_.card) {
         voteText_.Wrap(true);
-        voteBar_.Color({style::kBlood.r, style::kBlood.g, style::kBlood.b, 0.35f});
+        voteBar_.Color({style::kMenuAccent.r, style::kMenuAccent.g, style::kMenuAccent.b, 0.18f});
         voteBar_.Padding({14, 8, 14, 8});
         voteBar_.Content(vrow);
         AddH(vrow, voteText_, 1, 12).Align(HAlign::Fill, VAlign::Center);
@@ -278,7 +319,7 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
         Box names = kit.MakeColumn();
         Fixed volBox = kit.MakeFixed();
         r.talk = kit.MakeIcon();
-        r.name = m_.NewText("", 18, style::kBone); r.detail = m_.NewText("", 14, style::kIron); r.volume = m_.NewText("", 15, style::kBone);
+        r.name = m_.NewText("", 18, style::kMenuText); r.detail = m_.NewText("", 14, style::kMenuDim); r.volume = m_.NewText("", 15, style::kMenuText);
         const Margin small{12, 4, 12, 4};
         r.mute = m_.MakeFlat("MUTE", 15, small); r.down = m_.MakeFlat("-", 15, small); r.up = m_.MakeFlat("+", 15, small);
         r.kick = m_.MakeFlat("KICK", 15, small); r.ban = m_.MakeFlat("BAN", 15, small); r.vote = m_.MakeFlat("VOTE KICK", 15, small);
@@ -303,7 +344,7 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
         AddV(players, r.row, 8);
         r.row.Show(false);
     }
-    alone_ = m_.NewText("Nobody else is here yet.", 16, style::kIron);
+    alone_ = m_.NewText("Nobody else is here yet.", 16, style::kMenuDim);
     if (alone_) AddV(players, alone_, 12);
 
     // VOICE: the same block as the multiplayer page.
@@ -311,11 +352,11 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
 
     // NETWORK: read-only lines.
     for (Text& t : netLines_) {
-        t = m_.NewText("", 17, style::kBone);
+        t = m_.NewText("", 17, style::kMenuText);
         if (t) { AddV(pages_[2], t, 6); t.Show(false); }
     }
 
-    loadoutNote_ = m_.NewText("", 16, style::kIron);
+    loadoutNote_ = m_.NewText("", 16, style::kMenuDim);
     if (loadoutNote_) { loadoutNote_.Wrap(true); AddV(page, loadoutNote_, 12); loadoutNote_.Show(false); }
     AddV(page, footer, 16);
     resume_ = m_.MakeFlat("RESUME", 18);
@@ -353,10 +394,10 @@ void EscPanel::Refresh(Session& session) {
         if (i >= rows.size()) continue;
         const PlayerRowView& v = rows[i];
         r.name.Set(v.name);
-        r.name.Color(v.voteTarget ? style::kBloodInk : style::kBone);
+        r.name.Color(v.voteTarget ? style::kMenuAccentInk : style::kMenuText);
         r.detail.Set(v.detail);
         r.detail.Show(!v.detail.empty());
-        r.talk.Color(v.talking ? style::kOk : kNone);
+        r.talk.Color(v.talking ? style::kMenuOk : kNone);
         r.mute.card.button.Show(v.showMute);
         r.mute.label.Set(v.muteLabel);
         r.mute.card.selected = v.muteLabel == "UNMUTE";
@@ -424,10 +465,10 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     const uint32_t now = GetTickCount();
     for (size_t i = 0; i < tabs_.size(); ++i) {
         if (!tabs_[i].card) continue;
-        Paint(tabs_[i].card);
         if (Clicked(tabs_[i].card)) { tab_ = int(i); nextData_ = 0; }
         tabs_[i].card.selected = tab_ == int(i);
-        tabs_[i].label.Color(tab_ == int(i) ? style::kBloodInk : style::kBone);
+        Paint(tabs_[i].card);                   // after the click: the chosen tab's art is its highlight
+        tabs_[i].label.Color(tab_ == int(i) ? style::kMenuText : style::kMenuDim);
         pages_[i].Show(tab_ == int(i));
     }
     if (tab_ != 1) voice_.StopBinding();
@@ -454,7 +495,7 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
         const bool help = session.HelpImprove();
         help_.card.button.Show(reportOn);
         help_.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
-        help_.label.Color(help ? style::kOk : style::kBone);
+        help_.label.Color(help ? style::kMenuOk : style::kMenuText);
         help_.card.selected = help;
         if (reportOn && Clicked(help_.card)) { session.SetHelpImprove(!help); nextData_ = 0; }
     }

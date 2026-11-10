@@ -14,7 +14,8 @@ static bool Flushes(MsgType t, bool reliable) {
 }
 
 static void TestBlowsFlush() {
-    for (MsgType t : {MsgType::HitClaim, MsgType::HitFx, MsgType::SeverClaim, MsgType::SeverNotice, MsgType::StuckBlade})
+    for (MsgType t : {MsgType::HitClaim, MsgType::HitFx, MsgType::SeverClaim, MsgType::SeverNotice, MsgType::StuckBlade,
+                      MsgType::RemoteWrite})
         CHECK(Flushes(t, true));
 }
 
@@ -25,7 +26,7 @@ static void TestOtherReliableBatches() {
 }
 
 static void TestStreamsFlush() {
-    for (MsgType t : {MsgType::Pose, MsgType::Vitals, MsgType::BodyState, MsgType::Input, MsgType::Ping})
+    for (MsgType t : {MsgType::Pose, MsgType::Vitals, MsgType::BodyState, MsgType::Input, MsgType::InputBatch, MsgType::Ping})
         CHECK(Flushes(t, false));
 }
 

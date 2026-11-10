@@ -11,6 +11,7 @@
 #include "session/hsm_lease.h"
 #include "sync/hsm_pose.h"
 #include "util/hsm_names.h"
+#include <algorithm>
 #include <bitset>
 #include <cmath>
 #include <cstdint>
@@ -121,6 +122,10 @@ struct HitClaim {
     V3 propVelocity;                    // Prop: its velocity at the contact, in the hit bone's frame; zero for a fighter
     uint8_t victimLife = 0;             // rev 19: the Spawn.life of the victim body the attacker saw (0 = unknown); a stale one is dropped
     double rawDamage = 0;               // rev 25: Stuck only: Get Damage's Raw Damage; 0 for every other claim
+    // rev 42, lag compensation (combat/hsm_claimcheck.h): the victim's own pose-clock time of the stand-in pose the
+    // attacker's screen showed at the blow (0 = unknown: the victim cannot check it), and the contact point there, world.
+    uint32_t victimViewTsMs = 0;
+    V3 worldLocation;
 };
 
 constexpr double kMaxStuckRawDamage = 1e7;      // Stuck claims: Raw Damage above this is not a stuck blade's (Bone Mass * 1000 is ~1e5)
@@ -353,6 +358,26 @@ inline bool ReplayBoneOk(const std::string& bone, int32_t boneIndex) {
     return bone == "None" || (!bone.empty() && boneIndex >= 0);
 }
 
+// Rev 42 (combat_copies): a blow sent both reliably and unreliably reaches the host twice. The second copy of the same
+// (attacker, claimId) within kCopyWindowMs is a copy; ids restart with a new body, which only ever comes later than that.
+constexpr double kCopyWindowMs = 2000.0;
+constexpr size_t kCopyKeep = 64;   // per attacker: far more than kClaimsPerSecond blows in the window
+class ClaimCopyFilter {
+public:
+    // True the first time (attacker, claimId) is seen within the window; false for a copy.
+    bool First(uint8_t attacker, uint32_t claimId, double nowMs) {
+        std::deque<std::pair<uint32_t, double>>& q = seen_[attacker];
+        while (!q.empty() && (nowMs - q.front().second > kCopyWindowMs || nowMs < q.front().second)) q.pop_front();
+        for (const auto& [id, at] : q) if (id == claimId) return false;
+        q.push_back({claimId, nowMs});
+        if (q.size() > kCopyKeep) q.pop_front();
+        return true;
+    }
+    void Forget(uint8_t attacker) { seen_.erase(attacker); }
+private:
+    std::map<uint8_t, std::deque<std::pair<uint32_t, double>>> seen_;
+};
+
 // Age rule: claims older than kClaimMaxAgeMs (receiver-estimated) are dropped.
 inline bool ClaimFresh(int64_t ageMs) { return ageMs < kClaimMaxAgeMs; }
 
@@ -360,8 +385,27 @@ inline bool ClaimFresh(int64_t ageMs) { return ageMs < kClaimMaxAgeMs; }
 // claim struck with that same weapon if the clash's attacker-clock timestamp falls within
 // [claim.attackerTsMs - kParryBeforeMs, claim.attackerTsMs + kParryAfterMs]. The attacker's other weapon and its body
 // (a kick, a punch) are not parried by it (test 4: in a bind, nothing else the attacker did landed).
+// Rev 42: the window can follow the measured link instead of the fixed kParryBeforeMs / kParryAfterMs (ParryWindowFor).
+struct ParryWindowMs { int32_t before = kParryBeforeMs, after = kParryAfterMs; };
+// A blade I parried at the attacker's time t keeps going on the attacker's screen until the parry reaches it: for as long
+// as I see the attacker late (my playout delay plus their one-way latency to me) and my news takes to get back (my
+// one-way latency to them). Blows the attacker lands in that time against my stale stand-in are the parried blade's.
+// After the claim, one frame plus the margin: a blow that landed before my parry stays a hit.
+constexpr int32_t kParryBeforeMinMs = 60, kParryBeforeMaxMs = 250, kParryMarginMs = 20, kParryFrameMs = 17;
+inline ParryWindowMs ParryWindowFor(double viewDelayMs, double oneWayToAttackerMs, double jitterMs) {
+    ParryWindowMs w;
+    if (!std::isfinite(viewDelayMs) || !std::isfinite(oneWayToAttackerMs) || !std::isfinite(jitterMs)) return w;
+    const double before = viewDelayMs + oneWayToAttackerMs + kParryMarginMs;
+    w.before = int32_t(std::lround(std::clamp(before, double(kParryBeforeMinMs), double(kParryBeforeMaxMs))));
+    w.after = int32_t(std::lround(std::clamp(kParryFrameMs + std::max(0.0, jitterMs) * 0.5, double(kParryFrameMs), 50.0)));
+    return w;
+}
+
 class ParryWindow {
 public:
+    // Rev 42: per attacker; an attacker without one uses the fixed kParryBeforeMs / kParryAfterMs.
+    void SetWindow(uint8_t attacker, ParryWindowMs w) { windows_[attacker] = w; }
+    ParryWindowMs WindowOf(uint8_t attacker) const { auto it = windows_.find(attacker); return it == windows_.end() ? ParryWindowMs{} : it->second; }
     void NoteClash(uint8_t attacker, StrikeSource weapon, uint32_t attackerTsMsEstimate) {
         auto& q = clashes_[attacker];
         q.push_back(Clash{attackerTsMsEstimate, weapon});
@@ -374,10 +418,11 @@ public:
         if (it == clashes_.end()) return false;
         bool cancels = false;
         int32_t nearest = 0;
+        const ParryWindowMs win = WindowOf(c.attacker);
         for (const Clash& k : it->second) {
             if (k.weapon != c.source) continue;
             int32_t delta = int32_t(k.tsMs - c.attackerTsMs);   // clash ts minus claim ts, wrap-aware
-            if (delta < -kParryBeforeMs || delta > kParryAfterMs) continue;
+            if (delta < -win.before || delta > win.after) continue;
             const int32_t d = delta < 0 ? -delta : delta, n = nearest < 0 ? -nearest : nearest;
             if (!cancels || d < n || (d == n && delta < nearest)) nearest = delta;
             cancels = true;
@@ -385,12 +430,13 @@ public:
         if (cancels && clashMinusClaimMs) *clashMinusClaimMs = nearest;
         return cancels;
     }
-    void Forget(uint8_t attacker) { clashes_.erase(attacker); }   // its id goes to the next fighter
+    void Forget(uint8_t attacker) { clashes_.erase(attacker); windows_.erase(attacker); }   // its id goes to the next fighter
 
 private:
     struct Clash { uint32_t tsMs; StrikeSource weapon; };
     static constexpr size_t kMaxClashHistory = 64;   // bounds memory; clashes are reported at most every 100ms per weapon
     std::map<uint8_t, std::deque<Clash>> clashes_;
+    std::map<uint8_t, ParryWindowMs> windows_;
 };
 
 // ---------------------------------------------------------------- one blow, many contacts (attacker side)
@@ -624,6 +670,8 @@ inline void PutClaim(hsm::Writer& w, const HitClaim& m) {
     PutV3(w, m.propVelocity);
     w.u8(m.victimLife);
     PutF64(w, m.rawDamage);
+    w.u32(m.victimViewTsMs);
+    PutV3(w, m.worldLocation);
 }
 
 inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
@@ -657,6 +705,8 @@ inline bool GetClaim(hsm::Reader& r, HitClaim& m) {
     numOk &= GetV3(r, m.propVelocity);
     m.victimLife = r.u8();
     numOk &= GetF64(r, m.rawDamage);
+    m.victimViewTsMs = r.u32();
+    numOk &= GetV3(r, m.worldLocation);
 
     if (!r.done() || !numOk) return false;
     if (lt > 1 || dpb > 1 || ehv > 1 || hasBox > 1) return false;

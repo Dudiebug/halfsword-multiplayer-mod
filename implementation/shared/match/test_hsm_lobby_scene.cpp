@@ -294,6 +294,24 @@ static void TestBrowserPack() {
         CHECK(m.browser[0].detail == "Yard " + kDot + " pack ArenaPack " + kDot + " mods: Vanilla" && m.browser[0].joinable);
         CHECK(!m.browser[1].joinable && m.browser[1].note.text == "Blocks HSEnhancer");
     }
+    // A lobby whose rule refuses mods this machine can turn off: joinable, and the note says a restart comes first.
+    LobbyFound sw; sw.name = "F"; sw.players = 1; sw.compatible = false; sw.reason = "Vanilla: remove HalfWolverine"; sw.switchable = true; sw.switchTag = "Restart: 1 mod off";
+    LobbyFound swFull = sw; swFull.name = "G"; swFull.players = 8;
+    LobbyFound swBare = sw; swBare.name = "H"; swBare.switchTag.clear();
+    l.found = {sw, swFull, swBare, blocked};
+    const LobbyScene w = BuildLobbyScene(l);
+    CHECK(w.browser.size() == 4);
+    if (w.browser.size() == 4) {
+        CHECK(w.browser[0].joinable && w.browser[0].restart && w.browser[0].note.text == "Restart: 1 mod off");
+        CHECK(!w.browser[1].joinable && !w.browser[1].restart && w.browser[1].note.text == "Vanilla: remove HalfWolverine");   // full: the restart would be for nothing
+        CHECK(w.browser[2].joinable && w.browser[2].restart && w.browser[2].note.text == "Restart");
+        CHECK(!w.browser[3].joinable && !w.browser[3].restart);
+    }
+    l.filter.compatibleOnly = true;   // the chip keeps a lobby that is a restart away
+    const LobbyScene c = BuildLobbyScene(l);
+    CHECK(c.browser.size() == 3);
+    if (c.browser.size() == 3) CHECK(c.browser[0].name == "F" && c.browser[1].name == "G" && c.browser[2].name == "H");
+    l.filter = {};
 }
 
 // Locked lobbies: the row says so in plain text and can be hidden with the No password chip.

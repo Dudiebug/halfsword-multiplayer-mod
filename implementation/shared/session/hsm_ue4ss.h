@@ -89,6 +89,13 @@ inline bool IsConsoleMod(std::string_view name) {
     for (const char* m : kConsoleMods) if (detail::SameName(m, name)) return true;
     return false;
 }
+// The mod folders UE4SS ships enabled: its Blueprint mod loader (every lobby allows it: /Game/Mods paks run through it),
+// Keybinds, and the console mods above. A mod report lists them as ModKind::Ue4ssStock; the build card leaves them out.
+inline constexpr const char* kStockMods[] = {"BPModLoaderMod", "BPML_GenericFunctions", "Keybinds", "CheatManagerEnablerMod", "ConsoleEnablerMod", "ConsoleCommandsMod"};
+inline bool IsStockMod(std::string_view name) {
+    for (const char* m : kStockMods) if (detail::SameName(m, name)) return true;
+    return false;
+}
 inline Order ParseOrder(const std::string& s) { return detail::SameName(detail::Trim(s), "before") ? Order::Before : Order::After; }
 inline const char* OrderName(Order o) { return o == Order::Before ? "before" : "after"; }
 

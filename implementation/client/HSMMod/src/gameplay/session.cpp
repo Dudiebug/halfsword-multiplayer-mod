@@ -31,6 +31,7 @@
 #include "gameplay/gear.h"
 #include "gameplay/grab_sync.h"
 #include "gameplay/mirror.h"
+#include "gameplay/twin.h"
 #include "gameplay/mod_maps.h"
 #include "gameplay/mod_pack.h"
 #include "gameplay/owner_sync.h"
@@ -56,6 +57,7 @@
 #include "hsm_inputdelay.h"
 #include "session/hsm_map_reset.h"
 #include "session/hsm_global_bans.h"
+#include "sync/hsm_inputline.h"
 #include "sync/hsm_remote.h"
 #include "log.h"
 #include "ue4ss_load.h"
@@ -126,8 +128,6 @@
 #include "enhancer.h"
 #include <cstdio>
 #include <set>
-#include <tlhelp32.h>
-#include <psapi.h>
 #include "util/hsm_sha256.h"
 #include "ui/chat.h"
 #include "ui/hud.h"
@@ -138,8 +138,6 @@
 #include "ue/script_hook.h"
 #include <windows.h>
 #include <wincrypt.h>
-#include <wintrust.h>
-#include <softpub.h>
 #include <array>
 #include <chrono>
 #include <deque>
@@ -220,6 +218,7 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
     switch (t) {
         case MsgType::Hello: { Hello m; return Decode(d, n, m); }
         case MsgType::Input: { InputFrame m; return Decode(d, n, m); }
+        case MsgType::InputBatch: { InputBatch m; return Decode(d, n, m); }   // rev 42
         case MsgType::Ready: { Ready m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
         case MsgType::LoadoutChange: { LoadoutChangeMsg m; return Decode(d, n, m); }   // rev 36: the chunks of a new passport; the host's answer is client-bound
@@ -302,6 +301,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::HandOff: { sync::HandOffMsg m; return Decode(d, n, m); }
         case MsgType::HandOffAsk: { sync::HandOffAskMsg m; return Decode(d, n, m); }
         case MsgType::RelayInput: { RelayInput m; return Decode(d, n, m); }
+        case MsgType::InputBatch: { InputBatch m; return Decode(d, n, m); }   // rev 42: relayed by the host, or from a mesh peer
         case MsgType::ModeEvent: { ModeEventMsg m; return Decode(d, n, m); }   // Wave 3: host -> client only (never in ValidateForHost)
         case MsgType::ProgressionVote: { ProgVoteMsg m; return Decode(d, n, m) && m.kind != ProgVoteKind::Pick; }   // rev 36: the host's options, tally and result
         case MsgType::SessionMods: { SessionModsMsg m; return Decode(d, n, m); }       // rev 40: host -> client only
@@ -343,24 +343,14 @@ public:
         lobby_.onChat = [this](steam::SteamId from, const std::string& text) { OnLobbyChat(from, text); };
         lobby_.onEnterCard = [] { ui::BuildCardClear(); };
         lobby_.myCard = [this] { return MyBuildCard(); };
-        { ModPreset p = ModPreset::MapsOnly; lobby_.hostPreset = ParseModPreset(cfg_.modRule, p) ? p : ModPreset::MapsOnly; }
-        lobby_.hostBlock = LobbyBlock{cfg_.blockHse, cfg_.modBlockAll};
-        blockRule_ = lobby_.hostBlock;
-        lobby_.onlineBlock = [this](ModPreset preset, LobbyBlock rule) {
-            std::string why = OnlineBlockReason(preset, rule);
-            if (!why.empty()) { blockAttempt_ = true; blockRule_ = rule; }   // the overlay says what to do about it
-            return why;
-        };
+        { ModPreset p = ModChoice{}.preset; lobby_.hostPreset = ParseModPreset(cfg_.modRule, p) ? p : ModChoice{}.preset; }
+        lobby_.onlineBlock = [this](ModPreset preset, bool blockHse) { return OnlineBlockReason(preset, blockHse); };
+        lobby_.restartGame = [this] { return RestartGame(false); };
+        lobby_.onRuleChanged = [](const std::string& text) { ui::ShowLine("HSMMod", style::kBone, text); };
         lobby_.myRuleSheet = [this] { return MyRuleSheet(); };
         lobby_.onBuildCard = [this](const std::string& name, const std::string& card) {
             BuildCard decoded = DecodeCard(name, card);
             if (NameHasSlur(decoded.build)) decoded.build.clear();   // the launcher's build name, in other lobbies: typed by a peer as well
-            // Checked here too, by this player's copy of the rules, so a player's own edited setup can't vouch for itself.
-            if (const std::vector<std::string> bad = lobby_.InClassesLobby() ? UnsupportedOnCard(decoded.mods) : std::vector<std::string>{}; !bad.empty()) {
-                std::string list;
-                for (size_t i = 0; i < bad.size() && i < 3; ++i) list += (i ? ", " : "") + bad[i];
-                if (warnedMods_.insert(decoded.player + "|" + list).second) ui::ShowLine("HSMMod", style::kWarn, decoded.player + " is using unsupported mods: " + list);
-            }
             // What the class does, from the class this player reports: the name alone says nothing about a custom one.
             if (lobby_.InClassesLobby())
                 for (const game::LobbyMember& m : lobby_.members())
@@ -368,7 +358,7 @@ public:
                         if (const auto sheet = DecodeClass(MemberSheet(m.id)))
                             decoded.build = ClassNameFromPeer(decoded.build, *sheet) + ": " + ClassSummary(*sheet);
             // Where HS Enhancer is allowed the class doesn't say what someone's running, so the card says what they report instead.
-            if (lobby_.InClassesLobby() && !lobby_.CurrentBlock().hse)
+            if (lobby_.InClassesLobby() && !lobby_.BlockHse())
                 for (const game::LobbyMember& m : lobby_.members())
                     if (m.name == name)
                         if (const auto live = DecodeClass(steam::MemberData(lobby_.id(), m.id, kMemberLiveKey).substr(0, kMaxClassValue + 1))) {
@@ -621,6 +611,7 @@ public:
         // 2026-11-05 playtest. Each lap adds the time since the last one to its part (only while the health line samples).
         TickLaps laps(*this);
         if (steamMode()) { lobby_.Tick(); game::modpack::Tick(lobby_); game::modrules::LobbyTick(lobby_); }
+        game::modrules::HoldTick(lobby_);   // HS Enhancer's keys held while joining, or in, a lobby that blocks it
         if (steamMode()) LobbyPlayersTick();
         if (steamMode()) MigrationTick();
         if (SteamServer()) ServerLobbyTick();
@@ -632,6 +623,7 @@ public:
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
         if (levelChanged) { lastGameMode_ = gameMode; lastGameModeIndex_ = ObjectIndex(gameMode); OnLevelLoaded(); }
         inFight_ = InFightLevel();
+        if (inFight_ != delayFight_) { delayFight_ = inFight_; AdoptMatchDelay(); }   // rev 42: fixed for the whole fight
         if (hostPending_) { hostPending_ = false; if (!ScriptHookMissing()) BecomeHost(); }
         agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
         AutoRun();
@@ -657,6 +649,14 @@ public:
         ApplyHeldInput();
         if (mirror_.Active() && net_) mirror_.Command({"off"}, adapter_, true, InFightLevel());   // offline bench only
         mirror_.Tick(adapter_, dt);
+        TwinTick(dt);
+        if (net_ && FighterLevel() && frameFloor_.Push(double(dt) * 1000.0, game::SteadyNowMs())) {   // rev 42: min_fps
+            char b[160];
+            std::snprintf(b, sizeof b, "Your frame rate is %.0f FPS, under %d: the others see your fighter in bigger steps.",
+                          frameFloor_.LastFps(), frameFloor_.MinFps());
+            HSM_LOG("session: %s", b);
+            ui::ShowLine("HSMMod", style::kBone, b);
+        }
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
         game::TickPaintDefer();
@@ -682,7 +682,7 @@ public:
             scenarioLogAt_ = 0;
             if (adapter_.LogCombatEvents(currentLevel_) == 0) HSM_LOG("scenario: map %s: no combat event objects or classes found", currentLevel_.c_str());
         }
-        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && !EmojiCommandLine(*line) && !FightCommandLine(*line) && net_)
+        if (std::optional<std::string> line = ui::TakeOutgoing(); line && !ReportCommandLine(*line) && !EmojiCommandLine(*line) && !FightCommandLine(*line) && !NetCommandLine(*line) && net_)
             if (!IsHost() || !ModerationLine(*line, 0, false)) SendChat(*line);
         if (IsServer()) ConsoleTick();   // before the no-session return: bans can be listed and lifted while idle
         if (!net_) { if (localFighter_) VoiceIdleTick(); ui::HudTick({}, {}); ui::ChatDrop("session over"); return; }
@@ -972,6 +972,12 @@ public:
         }
         if (IsHost() && HostPhysics() && !hostDelay_.Off()) {
             std::snprintf(b, sizeof b, " | host input delay %d ms (target %d, clients %d)", hostDelay_.delayMs(), hostDelay_.targetMs(), hostDelay_.clients());
+            line += b;
+        }
+        if (!HostPhysics()) {   // rev 42
+            std::snprintf(b, sizeof b, " | match input delay %u ms | input batches tx %llu rx %llu | deflects tx %llu | late sends %llu", unsigned(matchDelayMs_),
+                          static_cast<unsigned long long>(inputBatchesTx_), static_cast<unsigned long long>(inputBatchesRx_),
+                          static_cast<unsigned long long>(deflectsTx_), static_cast<unsigned long long>(lateSends_));
             line += b;
         }
         tickMs_.clear();
@@ -1858,40 +1864,32 @@ public:
     // The rule of this machine's lobbies, the same setting as mod_rule=. mod_rules watches the file, so a lobby it's hosting changes too.
     void SetClassesUnrestricted(bool on) override {
         if (!CanSetUnrestricted()) return;
-        cfg_.modRule = ModPresetKey(on ? ModPreset::Unrestricted : ModPreset::Classes);
-        lobby_.hostPreset = on ? ModPreset::Unrestricted : ModPreset::Classes;
-        HSM_LOG("classes: my lobbies are now %s", ModPresetName(lobby_.hostPreset));
-        if (!SaveIniValues({{"mod_rule", cfg_.modRule}}, "mod")) HSM_LOG("classes: could not save mod_rule");
-        if (!on && AllowHse()) SetAllowHse(false);
+        ModChoice c = game::modrules::Chosen();
+        c.preset = on ? ModPreset::Unrestricted : ModPreset::Classes;
+        if (!on) c.blockHse = true;   // Classes holds everyone to the budget; HS Enhancer allowed is the true unrestricted
+        ChooseRule(c, "classes");
         if (!on && IsHackerClass(cfg_.className)) SetClassName(kPlainClass);   // its tab is hidden now, so it can't stay picked out of sight
     }
-    bool AllowHse() const override { return !lobby_.CurrentBlock().hse; }
+    bool AllowHse() const override { return !lobby_.BlockHse(); }
     // HS Enhancer is the true unrestricted: where it's allowed, someone using it has no class and no limits, only what HS Enhancer does.
-    bool ClassesOff() const override { return !lobby_.CurrentBlock().hse && (enhancer::Detected() || ReadRuleMods(ue4ss::ReportMods()).hse); }
+    bool ClassesOff() const override { return !lobby_.BlockHse() && !game::modrules::HseLocked() && (enhancer::Detected() || ReadRuleMods(ue4ss::ReportMods()).hse); }
+    // The MODS tab's one HS Enhancer switch ([mod] block_hse=), from the classes checkbox as well.
     void SetAllowHse(bool on) override {
         if (!CanSetUnrestricted()) return;
-        cfg_.blockHse = !on;
-        lobby_.hostBlock.hse = !on;
-        blockRule_.hse = !on;
-        HSM_LOG("classes: my lobbies %s HS Enhancer", on ? "allow" : "refuse");
-        if (on && !UnrestrictedHere()) SetClassesUnrestricted(true);   // the rest of the lobby isn't held to the budget against them
-        if (!SaveIniValues({{"block_hse", on ? "0" : "1"}})) HSM_LOG("classes: could not save block_hse");
+        ModChoice c = game::modrules::Chosen();
+        c.blockHse = !on;
+        if (on && IsClassesPreset(c.preset)) c.preset = ModPreset::Unrestricted;   // the rest of the lobby isn't held to the budget against them
+        ChooseRule(c, "hse");
+    }
+    // The rule of this machine's lobbies, through the MODS tab's choice (one INI write, no re-read; the lobby it's hosting changes too).
+    void ChooseRule(const ModChoice& c, const char* who) {
+        if (c == game::modrules::Chosen()) return;
+        cfg_.modRule = ModPresetKey(c.preset);
+        lobby_.hostPreset = c.preset;
+        const bool saved = game::modrules::SetChoice(c);
+        HSM_LOG("%s: my lobbies are now %s%s", who, RuleSummary(game::modrules::HostRule(lobby_)).c_str(), saved ? "" : " (could not save the mod rule)");
     }
     bool HasWolverine() const override { return ue4ss::ReportMods().find("HalfWolverine") != std::string::npos; }
-    std::vector<ModBlockLine> ModBlock() const override {
-        const RuleMods listed = ReadRuleMods(ue4ss::ReportMods());
-        const DllScan scan = ScanDlls();
-        std::vector<std::string> mods, dlls;
-        for (const std::string& n : listed.unsupported) mods.push_back(n);
-        for (const std::string& n : scan.game) {
-            const bool file = n.find(".dll") != std::string::npos || n.find(".asi") != std::string::npos || n.find(".ini") != std::string::npos || n.find(" (") != std::string::npos;
-            if (file) dlls.push_back(n);
-            else if (std::find(mods.begin(), mods.end(), n) == mods.end()) mods.push_back(n);
-        }
-        return ModBlockLines(mods, dlls, blockRule_.hse && (enhancer::Detected() || listed.hse || scan.hseLoader), scan.outsidePaths);
-    }
-    bool ModBlockAlways() const override { return blockRule_.allLobbies; }
-    bool TakeBlockAttempt() override { const bool was = blockAttempt_; blockAttempt_ = false; return was; }
     std::string ClassLabel(const std::string& name) const override { return hsm::ClassLabel(name, cfg_.classCustomName); }
     std::string ClassOwnName() const override {
         const int slot = CustomClassSlot(cfg_.className);
@@ -2185,226 +2183,6 @@ private:
                         : BlowsCount(Format(info_.format), MatchPhase(info_.phase), info_.winner, oneFight_);
     }
     std::string MyName() const { return steam::PersonaName(steam::MySteamId()); }
-    // Every DLL in the process from outside Windows, for the card. A DLL mapped by hand never appears here, and the game's
-    // own files, overlays and UE4SS C++ mods (listed by mod name already) are left out as noise.
-    // Every DLL in play: what's loaded, what's beside the exe whether it's loaded or not (a hidden proxy still has a file), and images in
-    // memory that the module list doesn't show. Hashes are kept until the file changes, because they're read from disk.
-    struct DllScan { std::vector<std::string> game, outside, outsidePaths; bool hseLoader = false; };
-    static std::string HashFile(const std::wstring& path) {
-        WIN32_FILE_ATTRIBUTE_DATA a{};
-        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return {};
-        const unsigned long long stamp = (static_cast<unsigned long long>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
-        static std::map<std::wstring, std::pair<unsigned long long, std::string>> cache;
-        auto it = cache.find(path);
-        if (it != cache.end() && it->second.first == stamp) return it->second.second;
-        std::string hex;
-        if (FILE* f = _wfopen(path.c_str(), L"rb")) {
-            Sha256 sha;
-            std::vector<uint8_t> buf(1 << 20);
-            for (size_t n; (n = std::fread(buf.data(), 1, buf.size(), f)) > 0;) sha.Update(buf.data(), n);
-            std::fclose(f);
-            for (uint8_t b : sha.Final()) { char x[3]; std::snprintf(x, sizeof x, "%02x", b); hex += x; }
-        }
-        cache[path] = {stamp, hex};
-        return hex;
-    }
-    // The publisher on a file's Authenticode signature when Windows says it's valid, else empty. wintrust and crypt32 are loaded when first
-    // needed (the mod's imports stay what a stock system has). No revocation check: that would go online. Kept until the file changes.
-    static std::string ValidSignerOf(const std::wstring& path) {
-        WIN32_FILE_ATTRIBUTE_DATA a{};
-        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return {};
-        const unsigned long long stamp = (static_cast<unsigned long long>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
-        static std::mutex lock;
-        static std::map<std::wstring, std::pair<unsigned long long, std::string>> cache;
-        {
-            std::lock_guard<std::mutex> hold(lock);
-            auto it = cache.find(path);
-            if (it != cache.end() && it->second.first == stamp) return it->second.second;
-        }
-        using VerifyFn = LONG(WINAPI*)(HWND, GUID*, LPVOID);
-        using ProvFn = void*(WINAPI*)(HANDLE);
-        using SignerFn = void*(WINAPI*)(void*, DWORD, BOOL, DWORD);
-        using NameFn = DWORD(WINAPI*)(const void*, DWORD, DWORD, void*, LPWSTR, DWORD);
-        static const HMODULE wt = LoadLibraryW(L"wintrust.dll");
-        static const HMODULE cr = LoadLibraryW(L"crypt32.dll");
-        static const auto verify = wt ? reinterpret_cast<VerifyFn>(GetProcAddress(wt, "WinVerifyTrust")) : nullptr;
-        static const auto provData = wt ? reinterpret_cast<ProvFn>(GetProcAddress(wt, "WTHelperProvDataFromStateData")) : nullptr;
-        static const auto provSigner = wt ? reinterpret_cast<SignerFn>(GetProcAddress(wt, "WTHelperGetProvSignerFromChain")) : nullptr;
-        static const auto certName = cr ? reinterpret_cast<NameFn>(GetProcAddress(cr, "CertGetNameStringW")) : nullptr;
-        std::string signer;
-        if (verify && provData && provSigner && certName) {
-            WINTRUST_FILE_INFO file{}; file.cbStruct = sizeof file; file.pcwszFilePath = path.c_str();
-            WINTRUST_DATA data{}; data.cbStruct = sizeof data; data.dwUIChoice = WTD_UI_NONE; data.fdwRevocationChecks = WTD_REVOKE_NONE;
-            data.dwUnionChoice = WTD_CHOICE_FILE; data.pFile = &file; data.dwStateAction = WTD_STATEACTION_VERIFY;
-            data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
-            GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            if (verify(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data) == 0) {
-                auto* prov = static_cast<CRYPT_PROVIDER_DATA*>(provData(data.hWVTStateData));
-                auto* sgnr = prov ? static_cast<CRYPT_PROVIDER_SGNR*>(provSigner(prov, 0, FALSE, 0)) : nullptr;
-                if (sgnr && sgnr->csCertChain && sgnr->pasCertChain && sgnr->pasCertChain[0].pCert) {
-                    wchar_t name[256] = {};
-                    certName(sgnr->pasCertChain[0].pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, name, 256);
-                    signer = Utf8Of(name);
-                }
-            }
-            data.dwStateAction = WTD_STATEACTION_CLOSE;
-            verify(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
-        }
-        std::lock_guard<std::mutex> hold(lock);
-        cache[path] = {stamp, signer};
-        return signer;
-    }
-    static std::string Utf8Of(const wchar_t* w) {
-        char out[MAX_PATH * 3] = {};
-        WideCharToMultiByte(CP_UTF8, 0, w, -1, out, sizeof out, nullptr, nullptr);
-        return out;
-    }
-    // Hashing what's loaded takes tens of milliseconds, so it runs off to the side: the game's thread takes the latest result, and never stops for it.
-    mutable std::mutex scanLock_;
-    mutable DllScan scanLatest_;
-    mutable bool scanHave_ = false;
-    mutable std::atomic<bool> scanBusy_{false};
-    mutable uint32_t scanNextAt_ = 0;
-    DllScan ScanDlls() const {
-        const uint32_t now = NowMs();
-        std::lock_guard<std::mutex> hold(scanLock_);
-        if (!scanHave_) { scanLatest_ = ScanDllsNow(); scanHave_ = true; scanNextAt_ = now + kDllScanMs; return scanLatest_; }
-        if (int32_t(now - scanNextAt_) >= 0 && !scanBusy_.exchange(true)) {
-            scanNextAt_ = now + kDllScanMs;
-            std::thread([this] {
-                const uint32_t began = NowMs();
-                DllScan fresh = ScanDllsNow();
-                { std::lock_guard<std::mutex> done(scanLock_); scanLatest_ = std::move(fresh); }
-                if (static bool logged = false; !logged) { logged = true; HSM_LOG("rules: a loaded-DLL check takes %u ms, off the game's thread", NowMs() - began); }
-                scanBusy_ = false;
-            }).detach();
-        }
-        return scanLatest_;
-    }
-    static constexpr uint32_t kDllScanMs = 5000;
-    DllScan ScanDllsNow() const {
-        DllScan scan;
-        const std::wstring exeDir = ModFilePath(L"");
-        std::wstring root = exeDir;   // from Win64 up to the game's own folder
-        for (int up = 0; up < 3 && !root.empty(); ++up) { root.pop_back(); root.resize(root.find_last_of(L"\\/") + 1); }
-        const std::string rootLower = DllPathLower(Utf8Of(root.c_str()));
-        wchar_t winDir[MAX_PATH] = {};
-        GetWindowsDirectoryW(winDir, MAX_PATH);
-        const std::string windowsLower = DllPathLower(Utf8Of(winDir)) + "\\";
-        const auto steamValue = [](const wchar_t* key, const wchar_t* name) {
-            wchar_t value[MAX_PATH] = {};
-            DWORD bytes = sizeof value;
-            return RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_SZ, nullptr, value, &bytes) == ERROR_SUCCESS ? Utf8Of(value) : std::string();
-        };
-        const std::string steamPath = steamValue(L"Software\\Valve\\Steam", L"SteamPath");
-        const std::string steamClient = steamValue(L"Software\\Valve\\Steam\\ActiveProcess", L"SteamClientDll64");
-        const std::string steamLower = DllFolderLower(steamPath), steamClientLower = DllFolderOfLower(steamClient);
-        if (static std::string logged; logged != steamClient + "|" + steamPath) {
-            logged = steamClient + "|" + steamPath;
-            HSM_LOG("rules: steam folder: client %s, SteamPath %s", steamClient.empty() ? "(none)" : steamClient.c_str(), steamPath.empty() ? "(none)" : steamPath.c_str());
-        }
-        std::set<std::string> seen;
-        const auto judge = [&](const std::wstring& path, bool loaded) {
-            const std::string lower = DllPathLower(Utf8Of(path.c_str()));
-            if (!seen.insert(lower).second) return;
-            const size_t slash = lower.find_last_of('\\');
-            const std::string file = Utf8Of(path.c_str() + (path.find_last_of(L"\\/") + 1));
-            if (lower.rfind(rootLower, 0) != 0) {
-                if (!OutsideDllFine(lower, windowsLower, steamLower, steamClientLower)) {
-                    if (std::find(scan.outside.begin(), scan.outside.end(), file) == scan.outside.end()) scan.outside.push_back(file);   // the card: no folder names go to others
-                    scan.outsidePaths.push_back(Utf8Of(path.c_str()));
-                    if (static std::set<std::string> logged; logged.insert(lower).second) HSM_LOG("rules: loaded from outside the game: %s", scan.outsidePaths.back().c_str());
-                }
-                return;
-            }
-            const std::string rel = lower.substr(rootLower.size());
-            bool found = false;
-            const bool dxgi = rel == std::string(kWin64Dir) + "dxgi.dll";
-            DllVerdict v = JudgeGameDll(rel, DllNeedsHash(rel) ? HashFile(path) : std::string(), dxgi && LooksLikeKnownDxgi(ReadWholeFile(path, found)));
-            if (v != DllVerdict::Fine) {
-                const std::string signer = ValidSignerOf(path);
-                v = WithSigner(v, signer);
-                if (static std::set<std::string> logged; logged.insert(lower).second)
-                    HSM_LOG("rules: %s is %s (signed by %s)", file.c_str(), v == DllVerdict::Fine ? "fine" : "not allowed", signer.empty() ? "nobody valid" : signer.c_str());
-            }
-            if (v == DllVerdict::Fine) return;
-            if (loaded && v == DllVerdict::Unknown && slash != std::string::npos) {   // a copy just lying there isn't HS Enhancer running
-                // HS Enhancer's loader, under any name. It counts as HS Enhancer, and earns nothing else: a chainloader could copy the text.
-                if (LooksLikeHseLoader(ReadWholeFile(path, found))) { scan.hseLoader = true; return; }
-            }
-            scan.game.push_back(v == DllVerdict::Changed ? file + " (changed)" : file);
-        };
-        std::set<const void*> listed;
-        if (HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId()); snap != INVALID_HANDLE_VALUE) {
-            MODULEENTRY32W m{}; m.dwSize = sizeof m;
-            for (BOOL ok = Module32FirstW(snap, &m); ok; ok = Module32NextW(snap, &m)) {
-                listed.insert(m.modBaseAddr);
-                if (reinterpret_cast<HMODULE>(m.modBaseAddr) != GetModuleHandleW(nullptr)) judge(m.szExePath, true);   // the game's exe is listed first
-            }
-            CloseHandle(snap);
-        }
-        // Beside the exe, loaded or not.
-        for (const wchar_t* pattern : {L"*.dll", L"*.asi"}) {
-            WIN32_FIND_DATAW fd{};
-            const HANDLE find = FindFirstFileW((exeDir + pattern).c_str(), &fd);
-            if (find == INVALID_HANDLE_VALUE) continue;
-            do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) judge(exeDir + fd.cFileName, false); } while (FindNextFileW(find, &fd));
-            FindClose(find);
-        }
-        // Mods can change while the game runs, and UE4SS can reload them, so what it reported at the start isn't enough. Its settings can
-        // also point it at a mods folder nobody else would look in.
-        bool foundSettings = false;
-        if (Ue4ssSettingsMoveMods(ReadWholeFile(exeDir + L"ue4ss\\UE4SS-settings.ini", foundSettings))) scan.game.push_back("UE4SS-settings.ini (mods moved)");
-        // Only the UE4SS running from that folder reads it. A mod switched on there while another UE4SS runs isn't running, and that UE4SS is refused anyway.
-        wchar_t ue4ssPath[MAX_PATH] = {};
-        const HMODULE ue4ssModule = GetModuleHandleW(L"UE4SS.dll");
-        const bool ue4ssHere = ue4ssModule && GetModuleFileNameW(ue4ssModule, ue4ssPath, MAX_PATH) && DllPathLower(Utf8Of(ue4ssPath)) == DllPathLower(Utf8Of((exeDir + L"ue4ss\\UE4SS.dll").c_str()));
-        if (ue4ssHere) for (const std::string& name : ue4ss::EnabledModNames(exeDir + L"ue4ss\\Mods\\")) {
-            if (name == "HSEnhancer") scan.hseLoader = true;
-            else if (!IsSupportedUe4ssMod(name) && std::find(scan.game.begin(), scan.game.end(), name) == scan.game.end()) scan.game.push_back(name);
-        }
-        for (const std::string& what : game::modmaps::Unchecked()) scan.game.push_back(what);
-        // The engine also mounts paks from these, and nothing legitimate puts one there.
-        const auto paksIn = [&](const std::wstring& dir) {
-            WIN32_FIND_DATAW fd{};
-            const HANDLE find = FindFirstFileW((dir + L"*.pak").c_str(), &fd);
-            if (find == INVALID_HANDLE_VALUE) return;
-            do { scan.game.push_back(SanitizePakName(Utf8Of(fd.cFileName)) + " (pak not checked)"); } while (FindNextFileW(find, &fd));
-            FindClose(find);
-        };
-        paksIn(root + L"Engine\\Content\\Paks\\");
-        paksIn(root + L"HalfswordUE5\\Saved\\Paks\\");
-        wchar_t localAppData[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH)) paksIn(std::wstring(localAppData) + L"\\HalfswordUE5\\Saved\\Paks\\");
-        // An image in memory the module list doesn't name was hidden from it. Windows maps some files this way for itself, so where it's from still counts.
-        // The mapped name is a device path (\Device\HarddiskVolume3\...): with its drive letter back, the overlays that hide themselves
-        // (Discord's) pass by the same rules as when they're listed.
-        std::vector<DriveDevice> drives;
-        for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
-            const wchar_t drive[3] = {letter, L':', 0};
-            wchar_t target[MAX_PATH] = {};
-            if (QueryDosDeviceW(drive, target, MAX_PATH)) drives.push_back({DllPathLower(Utf8Of(drive)), DllPathLower(Utf8Of(target))});
-        }
-        MEMORY_BASIC_INFORMATION mbi{};
-        for (const char* at = nullptr; VirtualQuery(at, &mbi, sizeof mbi) == sizeof mbi; at = static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize) {
-            if (mbi.Type != MEM_IMAGE || mbi.AllocationBase != mbi.BaseAddress || listed.count(mbi.BaseAddress)) continue;
-            wchar_t device[MAX_PATH * 2] = {};
-            if (!K32GetMappedFileNameW(GetCurrentProcess(), mbi.BaseAddress, device, MAX_PATH * 2)) continue;
-            const std::string lower = DllPathLower(Utf8Of(device));
-            if (lower.find("\\windows\\") != std::string::npos || lower.find("\\program files") != std::string::npos || lower.find("\\programdata\\microsoft\\") != std::string::npos) continue;
-            if (lower.find(".mui") != std::string::npos) continue;
-            const std::string dos = DosPathOfDeviceLower(lower, drives);
-            if (dos.rfind(rootLower, 0) != 0 && OutsideDllFine(dos, windowsLower, steamLower, steamClientLower)) {
-                if (static std::set<std::string> logged; logged.insert(dos).second) HSM_LOG("rules: a hidden module in memory, allowed by where it is: %s", dos.c_str());
-                continue;
-            }
-            const std::string name = Utf8Of(device + (std::wstring(device).find_last_of(L"\\/") + 1));
-            if (static std::set<std::string> logged; logged.insert(dos).second) HSM_LOG("rules: a hidden module in memory: %s (%s)", name.c_str(), dos.c_str());
-            scan.game.push_back(name + " (hidden)");
-        }
-        return scan;
-    }
-
     static std::string ReadWholeFile(const std::wstring& path, bool& found) {
         std::string text;
         found = false;
@@ -2431,8 +2209,6 @@ private:
 
     // The class picked in the menu; the plain fighter when nothing is picked.
     bool UnrestrictedHere() const { return lobby_.InLobby() ? lobby_.InUnrestrictedLobby() : cfg_.modRule == ModPresetKey(ModPreset::Unrestricted); }
-    bool blockAttempt_ = false;
-    LobbyBlock blockRule_{};                     // set from the settings at the start, then by the lobby that last refused
     ClassSheet MyClass() const { return ClassesOff() ? ClassSheet{} : ResolveClass(cfg_.className, cfg_.classCustom).value_or(ClassSheet{}); }
     // What this machine reports under mod_rule=classes.
     std::string MyRuleSheet() const {
@@ -2509,7 +2285,7 @@ private:
     void SelfRuleTick() {
         const uint32_t now = NowMs();
         // The host can allow HS Enhancer in its own lobby, and everyone in it should know.
-        if (!lobby_.InClassesLobby() || lobby_.CurrentBlock().hse) warnedHse_ = false;
+        if (!lobby_.InClassesLobby() || lobby_.BlockHse()) warnedHse_ = false;
         else if (!warnedHse_) { warnedHse_ = true; ui::ShowLine("HSMMod", style::kWarn, "This lobby's host allows HS Enhancer, which can change anything."); }
         if (!lobby_.InUnrestrictedLobby()) warnedUnrestricted_ = false;
         else if (!warnedUnrestricted_) {   // a guest never saw the checkbox's warning
@@ -2526,7 +2302,7 @@ private:
             if (steam::MemberData(lobby_.id(), steam::MySteamId(), kMemberLiveKey) != live) steam::SetMemberData(lobby_.id(), kMemberLiveKey, live);
         }
         lobby_.RepublishMyCard();   // the host and everyone else see an edit within seconds, not at the next minute
-        const std::string why = OnlineBlockReason(lobby_.InUnrestrictedLobby() ? ModPreset::Unrestricted : ModPreset::Classes, lobby_.CurrentBlock());
+        const std::string why = OnlineBlockReason(lobby_.InUnrestrictedLobby() ? ModPreset::Unrestricted : ModPreset::Classes, lobby_.BlockHse());
         if (why.empty()) {
             if (selfFailedAt_) { HSM_LOG("rules: my class fits the rules again"); ui::ShowLine("HSMMod", style::kBone, "Your class fits the lobby's rules again."); }
             selfFailedAt_ = 0;
@@ -2554,7 +2330,7 @@ private:
         nextHostCheck_ = now + 5000;
         for (const game::LobbyMember& m : lobby_.members()) {
             if (m.id != lobby_.owner()) continue;
-            std::vector<std::string> problems = CheckClassValue(MemberSheet(m.id), DecodeCard(m.name, m.card).mods, lobby_.InUnrestrictedLobby(), lobby_.CurrentBlock().hse);
+            std::vector<std::string> problems = CheckClassValue(MemberSheet(m.id), DecodeCard(m.name, m.card).mods, lobby_.InUnrestrictedLobby(), lobby_.BlockHse());
             if (problems.empty()) {
                 if (hostFailedAt_) ui::ShowLine("HSMMod", style::kBone, "The host's class fits the rules again.");
                 hostFailedAt_ = 0;
@@ -2585,7 +2361,7 @@ private:
             const BuildCard card = DecodeCard(m.name, m.card);
             std::vector<std::string> problems;   // the mods themselves are StepPlayerMods' to judge
             if (classes) {
-                for (std::string& p : CheckClassValue(MemberSheet(m.id), card.mods, lobby_.InUnrestrictedLobby(), lobby_.CurrentBlock().hse)) problems.push_back(std::move(p));
+                for (std::string& p : CheckClassValue(MemberSheet(m.id), card.mods, lobby_.InUnrestrictedLobby(), lobby_.BlockHse())) problems.push_back(std::move(p));
                 if (m.card.empty()) problems.push_back("no class card");
             }
             std::optional<uint32_t> peer;
@@ -2609,36 +2385,23 @@ private:
         }
     }
 
-    // Why this machine may not go online; empty: it may. The rules are in this DLL (match/hsm_online_rules.h), not the launcher.
-    // Every lobby needs the launcher; the class rules are for mod_rule=classes.
+    // Why this machine may not go online; empty: it may. Only what this DLL can name: a ban, HS Enhancer where the host
+    // blocks it (its own signature, or the UE4SS mod) and this game hasn't locked it, and the class rules for
+    // mod_rule=classes. Joining a lobby that blocks it asks blockHse only when no restart can lock it (Lobby::Join). The launcher is optional,
+    // and nothing outside the game folder is looked at: the host's mod rule judges the mods this machine reports.
     mutable std::string lastBlockLog_;
     void LogBlockOnce(const std::string& line) const { if (line != lastBlockLog_) { lastBlockLog_ = line; HSM_LOG("%s", line.c_str()); } }
-    std::string OnlineBlockReason(ModPreset preset, LobbyBlock rule) const {
+    std::string OnlineBlockReason(ModPreset preset, bool blockHse) const {
         if (GloballyBanned(steam::MySteamId())) { LogBlockOnce("rules: this account is banned from HalfSwordMP"); return "This Steam account is banned from HalfSwordMP online play. You can still play alone."; }
         const bool classes = IsClassesPreset(preset);
-        if (!classes && !rule.allLobbies) return {};
-        std::vector<std::string> names;
-        const std::string reported = ue4ss::ReportMods();
-        const RuleMods listed = ReadRuleMods(reported);
-        const DllScan scan = ScanDlls();
-        const bool hse = enhancer::Detected() || listed.hse || scan.hseLoader, wolverine = listed.wolverine;
-        names = scan.game;
-        for (const std::string& n : listed.unsupported) if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
-        names.insert(names.end(), scan.outside.begin(), scan.outside.end());
-        if (!names.empty() && !ModListKeepsOut(preset, rule)) LogBlockOnce("rules: the lobby's mod rule is anything: not checking " + names[0] + (names.size() > 1 ? " and the rest" : ""));
-        else if (!names.empty()) {
-            std::string list;
-            for (size_t i = 0; i < names.size() && i < 3; ++i) list += (i ? ", " : "") + names[i];
-            if (names.size() > 3) list += " and " + std::to_string(names.size() - 3) + " more";
-            LogBlockOnce("rules: online blocked: " + list);
-            return list + (names.size() == 1 ? " isn't" : " aren't") + " supported online. Remove " + (names.size() == 1 ? "it" : "them") + ", or play alone.";
-        }
-        std::vector<std::string> broken;
-        const ClassSheet mine = MyClass();
-        if (hse && rule.hse) { LogBlockOnce("rules: online blocked: HS Enhancer is on"); return "HS Enhancer can't be on in a Classes lobby: its menu can change anything. Turn it off and restart. Your class gives you its stats without it."; }
+        const RuleMods listed = ReadRuleMods(ue4ss::ReportMods());
+        const bool hse = (enhancer::Detected() || listed.hse) && !game::modrules::HseLocked(), wolverine = listed.wolverine;
+        // Blocked here and on: its keys are held from the join (modrules::HoldTick), unless they can't be this game.
+        if (hse && blockHse && !game::modrules::HseHoldable()) { LogBlockOnce("rules: online blocked: HS Enhancer is on and not locked"); return "This lobby blocks HS Enhancer, and HSMMod couldn't lock it for this game (see HSMMod.log)."; }
         if (!classes) return {};                     // the class rules are for lobbies that use classes
-        if (hse) return {};                          // allowed here, so classes are off for this player: there's nothing to check
-        broken = ClassProblems(mine, preset == ModPreset::Unrestricted);
+        if (hse && !blockHse) return {};             // allowed here, so classes are off for this player: there's nothing to check
+        const ClassSheet mine = MyClass();
+        std::vector<std::string> broken = ClassProblems(mine, preset == ModPreset::Unrestricted);
         if (ClassNeedsWolverine(mine) && !wolverine) broken.push_back("it needs Half Wolverine");
         if (wolverine && !WolverineFileMatches(ReadWolverineIni(), mine)) broken.push_back(ClassNeedsWolverine(mine) ? "Half Wolverine hasn't picked up this class yet, so restart the game" : "this class doesn't use Half Wolverine, so turn it off and restart, or give the class some of its options");
         if (!broken.empty()) {
@@ -2648,7 +2411,7 @@ private:
         return {};
     }
 
-    // Each minute: the card again, so a DLL loaded after the first look shows, and a word about any player who sends none.
+    // Each minute: the card again, so a mod enabled after the first look shows, and a word about any player who sends none.
     void CardCheckTick() {
         const uint32_t now = NowMs();
         if (!DueAt(now, nextCardCheck_)) return;
@@ -2659,18 +2422,15 @@ private:
                 ui::ShowLine("HSMMod", style::kWarn, (m.name.empty() ? std::string("A player") : m.name) + " isn't sending a class card.");
     }
     uint32_t nextCardCheck_ = 0;
-    std::set<std::string> warnedMods_;   // each player's unsupported mods are named once, not with every card
     std::set<steam::SteamId> cardlessWarned_;
 
     // What this machine's card says: the build a launcher named, and the mods read here rather than taken from a launcher,
-    // so a custom build lists them whatever it is called. HSE started outside UE4SS shows by its loaded DLL.
+    // so a custom build lists them whatever it is called. HSE started outside UE4SS shows by its own signature, and a
+    // locked one as locked.
     std::string MyBuildCard() const {
         std::string mods = CardModsFrom(ue4ss::ReportMods());
-        if (mods.find("HSEnhancer") == std::string::npos && enhancer::Detected()) mods += mods.empty() ? "HSEnhancer" : ", HSEnhancer";
-        const DllScan scan = ScanDlls();
-        if (scan.hseLoader && mods.find("HSEnhancer") == std::string::npos) mods += mods.empty() ? "HSEnhancer" : ", HSEnhancer";
-        for (const std::vector<std::string>* list : {&scan.game, &scan.outside})
-            for (const std::string& dll : *list) if (mods.find(dll) == std::string::npos) mods += (mods.empty() ? "" : ", ") + dll;
+        if (game::modrules::HseLocked()) mods = CardModsHseLocked(mods, enhancer::Detected());
+        else if (mods.find("HSEnhancer") == std::string::npos && enhancer::Detected()) mods += mods.empty() ? "HSEnhancer" : ", HSEnhancer";
         // A class is only in force in a Classes lobby. Elsewhere the card lists the mods and names no class.
         return EncodeCard(!lobby_.InClassesLobby() ? cfg_.buildName : ClassesOff() ? std::string(kHseClassName) : ClassLabel(ClassName()), mods);
     }
@@ -2750,6 +2510,7 @@ private:
         if (c.verb == "prof") return ue::prof::Command(c.args);
         if (c.verb == "vmhook") return agent::VmHookCommand(c.args, [this] { return InFightLevel() ? adapter_.PlayerWillie(0) : nullptr; });
         if (c.verb == "mirror") return mirror_.Command(c.args, adapter_, net_ != nullptr, InFightLevel());
+        if (c.verb == "twin") return twin_.Command(c.args, adapter_, net_ != nullptr, InFightLevel());   // rev 42 (gameplay/twin.h)
         if (c.verb == "rec" && !c.args.empty() && c.args[0] == "mark") {   // rec mark <text>: a Marker event in the recording
             std::string text;
             for (size_t i = 1; i < c.args.size(); ++i) text += (text.empty() ? "" : " ") + c.args[i];
@@ -2822,6 +2583,15 @@ private:
             autoLevel_ = CmdArg(cl, "hsmauto").value_or("");
             automated_ = !autoLevel_.empty() || CmdArg(cl, "hsmtest").has_value();
             quitAfterMs_ = uint32_t(CmdArgInt(cl, "hsmquit", 0, 10, 86400)) * 1000u;
+            if (std::string t = CmdArg(cl, "hsmtwin").value_or(""); !t.empty()) {   // rev 42: as -hsmmirror, for the twin bench
+                twinArgs_ = {"on"};
+                for (size_t at = 0; at <= t.size();) {
+                    size_t comma = std::min(t.find(',', at), t.size());
+                    twinArgs_.push_back(t.substr(at, comma - at));
+                    at = comma + 1;
+                }
+                HSM_LOG("session: -hsmtwin: the twin comes on in every offline fight level (%s)", t.c_str());
+            }
             std::string m = CmdArg(cl, "hsmmirror").value_or("");
             if (!m.empty()) {
                 mirrorArgs_ = {"on"};
@@ -2845,6 +2615,17 @@ private:
             HSM_LOG("session: -hsmauto opening %s", autoLevel_.c_str());
             adapter_.PrepareFreeModeFight();
             HostTravel(autoLevel_);
+        }
+        if (!twinArgs_.empty() && !twinDone_ && !net_ && InFightLevel() && !twin_.Active() && adapter_.PlayerWillie(0)) {
+            if (!twinSince_) twinSince_ = now;
+            if (now - twinSince_ >= 3000 && now >= nextTwin_) {
+                nextTwin_ = now + 10000;
+                std::string r = twin_.Command(twinArgs_, adapter_, false, true);
+                twinDone_ = twin_.Active();
+                HSM_LOG("session: -hsmtwin: %s", r.c_str());
+            }
+        } else if (!twin_.Active()) {
+            twinSince_ = 0;
         }
         if (mirrorArgs_.empty() || mirrorDone_ || net_ || !InFightLevel() || mirror_.Active() || !adapter_.PlayerWillie(0)) {
             mirrorSince_ = 0;
@@ -3050,6 +2831,7 @@ private:
         ui::ChatDrop("level change");   // the new level's controller starts with the game's input
         agent::VmHookFlush();
         mirror_.OnLevel();
+        twin_.OnLevel();
         mirrorDone_ = false; mirrorSince_ = 0;
         game::PaintDeferLevelChanged();
         if (ScriptHookActive()) ResolveScriptHooks();   // the level's Blueprint classes and overrides are loaded now
@@ -3312,6 +3094,12 @@ private:
     // Owner sync on this machine: a fresh stream clock, and the claims hooks with what they need to know of the session.
     void StartOwner() {
         streams_.Start(game::SteadyNowMs());
+        standIns_.SetPlayout(cfg_.playoutQuantile, cfg_.playoutMarginMs, cfg_.standinLeadMs);   // rev 42 (Phase 2)
+        frameFloor_ = sync::FrameFloor(cfg_.minFps);
+        standIns_.SetRttOf([this](uint8_t e) { return RttToOwner(e); });
+        claims_.SetClaimCheck(cfg_.claimCheck);
+        inputBatch_.Clear();
+        for (sync::InputTimeline& t : timelines_) t.Clear();
         streams_.SetEpochOf([this](uint8_t e) { return leases_.Epoch(e); });   // rev 32: hand-off leases
         GuardStockFlow();
         GuardFence();
@@ -3325,6 +3113,10 @@ private:
             else if (net_ && hostPeer_) {
                 net_->Send(hostPeer_, kChanReliable, Encode(HitClaimMsg{c}), true);
                 MeshCopy(MsgType::HitClaim, c.victim, Encode(HitClaimMsg{c}), true);   // to the victim's owner
+                if (cfg_.combatCopies) {   // rev 42: once more unreliably, so a lost packet waits for no resend (dropped by id)
+                    net_->Send(hostPeer_, kChanUnreliable, Encode(HitClaimMsg{c}), false);
+                    MeshCopy(MsgType::HitClaim, c.victim, Encode(HitClaimMsg{c}), false);
+                }
                 MeshCopy(MsgType::HitFx, c.victim, Encode(HitFxMsg{c}), true);         // to everyone else
             }
         };
@@ -3711,7 +3503,7 @@ private:
             HSM_LOG("classes: applied %s (the game's own: strength %.2f, run %.2f, bone snapping %.2f)", line.c_str(), classTracks_.strength.base, classTracks_.run.base, classTracks_.bones.base);
         }
         // Nothing in the game changes these two, so something else did. HS Enhancer is already refused here: this is for anything else.
-        if (BaseStatCheckApplies(lobby_.InClassesLobby(), lobby_.CurrentBlock()) && classTracks_.strength.seen && classTracks_.run.seen && !ClassBasesFair(classTracks_.strength.base, classTracks_.run.base)) {
+        if (BaseStatCheckApplies(lobby_.InClassesLobby(), lobby_.BlockHse()) && classTracks_.strength.seen && classTracks_.run.seen && !ClassBasesFair(classTracks_.strength.base, classTracks_.run.base)) {
             HSM_LOG("rules: leaving the lobby: fighter base stats changed (strength %.3f, run %.3f)", classTracks_.strength.base, classTracks_.run.base);
             const std::string line2 = "Your fighter's base stats aren't the game's, so you left the lobby. Something other than your class changed them.";
             const bool fight = InFightLevel();
@@ -4129,7 +3921,7 @@ private:
         for (const auto& [fn, b] : adapter_.Bindings()) {
             game::InputBinding bind = b;
             HookFunction(fn, [this, bind](UObject* obj, UFunction* f, void* params) {
-                if (!net_ || obj != myWillie_.load()) return false;
+                if ((!net_ && !twin_.Active()) || obj != myWillie_.load()) return false;   // rev 42: the twin bench reads it offline
                 if (bind.isAxis && IsLookAxis(Axis(bind.index)) && freecam::SwallowLook(spectating_ != 0, obj, spectateBody_.load())) {   // the dead body while watching: the game's camera input is ignored, the mouse turns our camera; a body that came back (round reset, CHANGE LOADOUT) keeps its look
                     const float v = game::Adapter::ReadAxisParam(f, params);
                     (Axis(bind.index) == Axis::TurnMouse ? spectateLookX_ : spectateLookY_) += v;
@@ -4144,11 +3936,11 @@ private:
                     const float value = game::Adapter::ReadAxisParam(f, params);
                     capture_.OnAxis(a, value);
                     // Host input delay: not the look axes (they turn the host's own camera as well as aim, Willie_BP.cpp:11410-11560).
-                    if (HostDelays() && !IsLookAxis(a)) { delayedIn_.PushAxis(NowMs(), uint8_t(bind.index), value); return true; }
+                    if (LocalDelays() && !IsLookAxis(a)) { delayedIn_.PushAxis(NowMs(), uint8_t(bind.index), value); return true; }
                     return hostPlays && !(a == Axis::TurnMouse || a == Axis::LookMouse || a == Axis::TurnGamepad || a == Axis::LookGamepad);
                 }
                 capture_.OnAction(Action(bind.index), bind.pressed);
-                if (HostDelays() && Action(bind.index) != Action::ToggleCameraLock && Action(bind.index) != Action::Talk) {
+                if (LocalDelays() && Action(bind.index) != Action::ToggleCameraLock && Action(bind.index) != Action::Talk) {
                     delayedIn_.PushAction(NowMs(), uint8_t(bind.index), bind.pressed);
                     return true;
                 }
@@ -4162,9 +3954,185 @@ private:
     // pawn's buttons and movement (not the look axes, the camera lock or the talk key) and this plays them again that
     // much later, through the same adapter calls DriveFighter uses. The delay follows the clients' median input lag.
     bool HostDelays() const { return IsHost() && HostPhysics() && hostDelay_.delayMs() > 0; }
+    // Rev 42 (owner sync): the match input delay holds back my own buttons and movement the same way, while I play my own
+    // fighter in a fight (not while another machine holds it: those go there as they are).
+    bool OwnerDelays() const { return !HostPhysics() && matchDelayMs_ > 0 && inFight_ && !MyFighterHanded(); }
+    bool LocalDelays() const { return HostDelays() || OwnerDelays(); }
+    // Owner sync: plays the held input matchDelayMs_ late (everything at once when the delay ends: nothing is lost).
+    void OwnerInputDelayTick(UObject* me) {
+        if (!me) { delayedIn_.Clear(); delayPawn_ = nullptr; return; }
+        if (me != delayPawn_) { delayedIn_.Clear(); delayPawn_ = me; }
+        const int delay = OwnerDelays() ? int(matchDelayMs_) : 0;
+        if (delay <= 0 && delayedIn_.Empty()) return;
+        ReplayDelayed(me, delayedIn_.Take(NowMs(), delay));
+        if (delay <= 0) delayedIn_.Clear();
+    }
+    // The match input delay (hsm_inputdelay.h): picked by the host when a match starts (input_delay in its HSMMod.ini),
+    // published as the lobby's hsm_delay, and taken by every machine when a fight level starts; 0 between fights.
+    void PickMatchDelay() {
+        std::vector<uint32_t> rtts;
+        if (net_) for (const auto& [peer, p] : peers_) rtts.push_back(net_->RoundTripMs(peer));
+        const int frames = HostPhysics() ? 0 : MatchDelayFrames(cfg_.inputDelay, rtts, kMatchDelayJitterMs);
+        nextMatchDelayMs_ = MatchDelayFramesToMs(frames);
+        if (steamMode()) steam::SetLobbyData(lobby_.id(), "hsm_delay", std::to_string(nextMatchDelayMs_));
+        HSM_LOG("host: match input delay %u ms (%d frame(s), input_delay=%s)", unsigned(nextMatchDelayMs_), frames,
+                cfg_.inputDelay.mode == MatchDelayMode::Auto ? "auto" : std::to_string(cfg_.inputDelay.frames).c_str());
+    }
+    void AdoptMatchDelay() {
+        uint16_t ms = 0;
+        if (inFight_ && !HostPhysics()) {
+            if (IsHost()) ms = nextMatchDelayMs_;
+            else if (steamMode()) {
+                const long v = std::strtol(steam::LobbyData(lobby_.id(), "hsm_delay").c_str(), nullptr, 10);
+                ms = uint16_t(std::clamp(v, 0L, long(MatchDelayFramesToMs(kMatchDelayMaxFrames))));
+            }
+        }
+        if (ms != matchDelayMs_ || ms > 0) HSM_LOG("session: match input delay %u ms for this %s", unsigned(ms), inFight_ ? "fight" : "menu");
+        matchDelayMs_ = ms;
+        if (!ms) delayedIn_.Clear();
+    }
+
+    // ---- rev 42: the input timelines (sync/hsm_inputline.h) ------------------------------------------------------------
+    // Each owned fighter's input frames go out with the times they execute, the newest few in every packet, to the host
+    // and every mesh peer (the host relays them like a Pose). Here they are measured, not played: how early each frame
+    // arrives against its execution time (input margin) and how often a frame would have had to be predicted. That is
+    // what input-driven stand-ins (docs/PLAN_COMPETITIVE_NETCODE.md Phase 4) would face; stand-ins are still driven by the pose stream.
+    void SendInputBatch(uint8_t entity, const InputFrame& f) {
+        if (HostPhysics() || !entity || !net_ || !streams_.Started()) return;
+        const InputBatch b = inputBatch_.Add(entity, f, streams_.ClockMs(game::SteadyNowMs()), matchDelayMs_);
+        const std::vector<uint8_t> bytes = Encode(b);
+        if (IsHost()) net_->Broadcast(kChanUnreliable, bytes, false);
+        else {
+            if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, bytes, false);
+            for (uint32_t p : meshSend_) net_->Send(p, kChanUnreliable, bytes, false);
+        }
+        ++inputBatchesTx_;
+    }
+    void OnInputBatch(const InputBatch& m, double arrivalMs) {
+        double offset = 0;
+        if (!ValidEntity(m.entity) || !standIns_.StreamOffset(m.entity, offset)) return;   // no pose yet: its clock is unknown
+        std::vector<double> margins;
+        timelines_[m.entity].Push(m, sync::OwnerClockAt(arrivalMs, offset, RttToOwner(m.entity)), &margins);
+        if (sync::FighterNetStats* st = standIns_.NetStats(m.entity)) for (double x : margins) st->margin.Add(game::SteadyNowMs(), x);
+        ++inputBatchesRx_;
+    }
+    void ShadowTimelines(double nowMs) {
+        const double cadence = 1000.0 / double(std::max(1, cfg_.inputHz));
+        for (uint8_t e = 1; e <= kMaxWillies; ++e) {
+            sync::InputTimeline& t = timelines_[e];
+            double offset = 0;
+            if (t.Buffered() == 0 && !standIns_.ActorOf(e)) continue;
+            if (!standIns_.StreamOffset(e, offset)) continue;
+            const sync::TimelineStep st = t.Step(sync::OwnerClockAt(nowMs, offset, RttToOwner(e)), cadence);
+            if (!st.have) continue;
+            if (sync::FighterNetStats* ns = standIns_.NetStats(e)) ns->predicted.Add(nowMs, st.mainPredicted ? 1.0 : 0.0);   // the delayed track
+        }
+    }
+    // A Deflect is applied once: the newest seq per sender (wrap-aware), so its unreliable copy is dropped.
+    bool DeflectFresh(const sync::RemoteWriteMsg& m) {
+        if (m.from > kMaxWillies) return false;
+        if (deflectSeen_[m.from] && int16_t(uint16_t(m.seq - deflectSeq_[m.from])) <= 0) return false;
+        deflectSeen_[m.from] = true;
+        deflectSeq_[m.from] = m.seq;
+        return true;
+    }
+
+    // ---- rev 42: late send (HSMMod.ini late_send) --------------------------------------------------------------------
+    // The game-mode tick runs before the physics step, so a pose read there is the previous step's and waits there for
+    // most of a frame. With late_send the owner streams are read and sent from the first widget tick of the frame, which
+    // runs after the world (and its physics) has ticked. A frame without a widget tick sends at the next game-mode tick.
+    struct LateOwned { uint8_t entity; UObject* obj; int32_t index; };
+    void StreamOwned(double now, float dt, const std::vector<std::pair<uint8_t, UObject*>>& owned) {
+        if (!cfg_.lateSend) { StreamNow(now, dt, owned); return; }
+        if (lateDue_) LateStreamTick();   // no widget ticked since the last frame: send what was due then
+        lateOwned_.clear();
+        for (const auto& [e, w] : owned) lateOwned_.push_back(LateOwned{e, w, ue::ObjectIndex(w)});
+        lateDt_ = dt;
+        lateDue_ = true;
+    }
+    void StreamNow(double now, float dt, const std::vector<std::pair<uint8_t, UObject*>>& owned) {
+        streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) {
+            if (IsHost()) { net_->Broadcast(kChanUnreliable, b, false); return; }
+            if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false);
+            for (uint32_t p : meshSend_) net_->Send(p, kChanUnreliable, b, false);   // Pose and Vitals also go straight to the other clients
+            DetourSend(b);                                                            // ...and through a relay where the host planned one
+        });
+    }
+public:
+    void ConfigureBenches() { mirror_.SetPlayout(cfg_.playoutQuantile, cfg_.playoutMarginMs, cfg_.standinLeadMs); }   // rev 42
+    void LateStreamTick() {
+        if (!lateDue_) return;
+        lateDue_ = false;
+        if (!net_ || !streams_.Started()) return;
+        std::vector<std::pair<uint8_t, UObject*>> owned;
+        for (const LateOwned& o : lateOwned_) if (adapter_.StillValid(o.obj, o.index)) owned.push_back({o.entity, o.obj});
+        ++lateSends_;
+        StreamNow(game::SteadyNowMs(), lateDt_, owned);
+    }
+private:
+
+    // ---- rev 42: the twin bench (gameplay/twin.h), offline: my input frames feed it, DriveFighter plays them ----------
+    void TwinTick(float dt) {
+        if (!twin_.Active()) return;
+        if (net_) { twin_.Command({"off"}, adapter_, true, InFightLevel()); return; }   // offline bench only
+        UObject* me = InFightLevel() ? adapter_.PlayerWillie(0) : nullptr;
+        SetMyWillie(me);   // the input hook captures my fighter's input while the twin runs
+        if (me && !hooksBound_ && adapter_.BindInputs(me)) BindClientInputHooks();
+        twinAccum_ += dt;
+        if (twinAccum_ >= 1.f / float(cfg_.inputHz)) { twinAccum_ = 0; twin_.Feed(TakeInputFrame()); }
+        twin_.Tick(adapter_, dt, [this](InputApplier& in, UObject* w, float d) { DriveFighter(in, w, d); });
+        if (!twin_.Active()) SetMyWillie(nullptr);
+    }
+
+    // ---- rev 42: chat /net, the connection panel (sync/hsm_netstats.h NetPanel) --------------------------------------
+    bool NetCommandLine(const std::string& line) {
+        if (line != "/net") return false;
+        std::vector<sync::PanelRow> rows;
+        const double now = game::SteadyNowMs();
+        for (uint8_t e = 1; e <= kMaxWillies; ++e) {
+            if (!standIns_.ActorOf(e)) continue;
+            sync::PanelRow r;
+            r.name = CtfNameOf(e);
+            r.rttMs = RttToOwner(e);
+            if (steamNet_) {
+                const uint8_t owner = OwnerSlotOf(e, leases_.holders());
+                uint32_t peer = 0;
+                if (IsHost()) { if (std::optional<uint32_t> p = PeerOfSlot(owner)) peer = *p; }
+                else peer = owner == kHostSlot ? hostPeer_ : meshPeers_.PeerOfSlot(owner);
+                steam::LinkInfo li;
+                if (peer && steam::Link(steamNet_->SteamOf(peer), li)) { r.relayed = li.relayed ? 1 : 0; if (li.quality >= 0) r.quality = li.quality; }
+            }
+            if (sync::FighterNetStats* st = standIns_.NetStats(e)) {
+                if (st->staleness.Count(now)) r.staleP50 = st->staleness.Quantile(now, 0.5);
+                if (st->margin.Count(now)) r.lateShare = st->margin.ShareBelow(now, 0.0);
+                if (st->predicted.Count(now)) r.predictedShare = 1.0 - st->predicted.ShareBelow(now, 0.5);
+            }
+            rows.push_back(r);
+        }
+        for (const std::string& l : sync::NetPanel(matchDelayMs_, cfg_.lateSend, rows)) { HSM_LOG("session: %s", l.c_str()); ui::ShowLine("HSMMod", style::kBone, l); }
+        return true;
+    }
+
+    // The round trip to the machine that owns entity e, ms (0 unknown or mine). A client reaches another client's fighter
+    // through the mesh when it has a direct link, else through the host (about two legs).
+    double RttToOwner(uint8_t e) {
+        if (!net_) return 0;
+        const uint8_t owner = OwnerSlotOf(e, leases_.holders());
+        if (owner == 0xFF) return 0;
+        if (IsHost()) {
+            if (owner == kHostSlot) return 0;
+            const std::optional<uint32_t> p = PeerOfSlot(owner);
+            return p ? double(net_->RoundTripMs(*p)) : 0.0;
+        }
+        if (owner == kHostSlot) return hostPeer_ ? double(net_->RoundTripMs(hostPeer_)) : 0.0;
+        if (const uint32_t p = meshPeers_.PeerOfSlot(owner))
+            if (const uint32_t r = net_->RoundTripMs(p)) return double(r);
+        return hostPeer_ ? 2.0 * double(net_->RoundTripMs(hostPeer_)) : 0.0;
+    }
     void ResetHostDelay() { delayedIn_.Clear(); hostDelay_.Suspend(); hostDelayLogged_ = false; delayPawn_ = nullptr; }
     void HostInputDelayTick(UObject* me) {
-        if (!HostPhysics() || hostDelay_.Off() || !me || !net_) {
+        if (!HostPhysics()) { OwnerInputDelayTick(me); return; }   // rev 42: owner sync's match delay
+        if (hostDelay_.Off() || !me || !net_) {
             if (me && !delayedIn_.Empty()) ReplayDelayed(me, delayedIn_.Take(NowMs(), 0));
             ResetHostDelay();
             return;
@@ -4200,6 +4168,7 @@ private:
     void SendInputs(float dt) {
         if (!inputCadence_.Due(dt, cfg_.inputHz) || !hostPeer_) return;
         const InputFrame frame = TakeInputFrame();   // always drain mouse deltas, including while no input is sent
+        SendInputBatch(ClientOwnEntity(), frame);   // rev 42: the other machines' timelines read it, sent or not
         const bool sending = !cfg_.inputOnDemand || InputStreamNeeded(HostPhysics(), cfg_.handOff, MyFighterHanded());
         if (!inputSending_ || *inputSending_ != sending) {
             HSM_LOG("input: stream %s (host_physics=%d hand_off=%d handed=%d input_on_demand=%d); capture drained",
@@ -4215,6 +4184,7 @@ private:
     void HostSendOwnInput(float dt) {
         if (!inputCadence_.Due(dt, cfg_.inputHz)) return;
         RelayInput r; r.entity = HostEntity(); r.frame = TakeInputFrame();   // taken always: no deltas pile up meanwhile
+        if (!ownLeased_ && MyWillieLive()) SendInputBatch(HostEntity(), r.frame);   // rev 42
         if (!MyFighterHanded() || !net_) return;
         if (std::optional<uint32_t> to = PeerOfSlot(leases_.Holder(r.entity))) { net_->Send(*to, kChanUnreliable, Encode(r), false); ++inputsTx_; }
     }
@@ -4393,11 +4363,10 @@ private:
                 if (UObject* me = MyWillieLive()) adapter_.KeepAudioListener(me);
             }
         }
-        Timed(kPumpStreams, [&] {
-            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) { net_->Broadcast(kChanUnreliable, b, false); });
-        });
+        Timed(kPumpStreams, [&] { StreamOwned(now, dt, owned); });   // rev 42: late_send moves it after the physics step
         Timed(kPumpServo, [&] {
             standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned));
+            ShadowTimelines(now);
             RecoverLostStandIns(now);
         });
         Timed(kPumpClaims, [&] { claims_.Tick(now); });
@@ -4619,6 +4588,10 @@ private:
             case sync::RemoteKind::GrabBreak:
                 grabs_.OnBreak(me, m.from, m.bone);
                 done = true;
+                break;
+            case sync::RemoteKind::Deflect:   // rev 42: a clash on the sender's screen knocks my real weapon too
+                if (!DeflectFresh(m)) break;   // combat_copies: the second copy of a knock
+                done = adapter_.PushWeapon(me, m.bone, FVector{ m.vec.x, m.vec.y, m.vec.z });
                 break;
         }
         if (done) ++remoteApplied_;
@@ -5135,8 +5108,16 @@ private:
             VoiceFromClient(ev, peer);
         } else if (t == MsgType::Pose || t == MsgType::Vitals) {
             HostOwnerStream(ev, peer, t);
+        } else if (t == MsgType::InputBatch) {   // rev 42
+            InputBatch m;
+            if (!Decode(d, n, m) || HostPhysics() || !MayStream(peer.slot, m.entity, leases_.holders())) { ++streamsDropped_; return; }
+            OnInputBatch(m, ArrivalMs(ev));
+            const std::vector<uint8_t> all = ConnectedSlots();
+            for (uint8_t slot : RelayTargets(peer.slot, all, meshMasks_))
+                if (std::optional<uint32_t> p = PeerOfSlot(slot)) net_->Send(*p, kChanUnreliable, ev.data, false);
         } else if (t == MsgType::HitClaim) {
             HitClaimMsg m; Decode(d, n, m);
+            if (!claimCopies_.First(m.claim.attacker, m.claim.claimId, game::SteadyNowMs())) return;   // rev 42: combat_copies' second copy
             RouteHostClaim(peer.slot, m.claim);
         } else if (t == MsgType::SeverClaim) {
             combat::SeverClaimMsg m; Decode(d, n, m);
@@ -5458,7 +5439,7 @@ private:
         // is gets looked up once per class, whom an actor belongs to once per frame.
         const HitKind selfKind = HitKindOf(obj), otherKind = HitKindOf(other);
         const bool selfWeapon = selfKind == HitKind::Weapon, otherWeapon = otherKind == HitKind::Weapon;
-        if (selfWeapon && otherWeapon) { NoteWeaponClash(obj, other); return false; }
+        if (selfWeapon && otherWeapon) { NoteWeaponClash(obj, other, fn, params); return false; }
         if (!selfWeapon && !otherWeapon) return false;
         UObject* weapon = selfWeapon ? obj : other;
         UObject* victim = selfWeapon ? (otherKind == HitKind::Willie ? other : FighterOfThisFrame(other)) : obj;
@@ -5515,12 +5496,35 @@ private:
         else recorder_.Hit(obj, other, fa, fb, a == HitKind::Weapon, impulse);
     }
 
-    void NoteWeaponClash(UObject* a, UObject* b) {
+    void NoteWeaponClash(UObject* a, UObject* b, UFunction* fn, void* params) {
         UObject* fa = FighterOfThisFrame(a);
         UObject* fb = FighterOfThisFrame(b);
         const uint8_t sa = standIns_.EntityOf(fa), sb = standIns_.EntityOf(fb);
-        if (sa && !sb && OwnedEntityOf(fb)) claims_.NoteClash(sa, a);
-        else if (sb && !sa && OwnedEntityOf(fa)) claims_.NoteClash(sb, b);
+        if (sa && !sb && OwnedEntityOf(fb)) { claims_.NoteClash(sa, a); SendDeflect(OwnedEntityOf(fb), sa, a, fn, params, 1.0); }
+        else if (sb && !sa && OwnedEntityOf(fa)) { claims_.NoteClash(sb, b); SendDeflect(OwnedEntityOf(fa), sb, b, fn, params, -1.0); }
+    }
+    // Rev 42 (deflect=1): my weapon met theirWeapon, held by defender's stand-in. Its owner never saw the clash if my
+    // fighter was elsewhere on its screen, so the knock its weapon took here goes to it (sync/hsm_remote.h Deflect). The
+    // hit event's Normal Impulse is the one on the event's own component: sign +1 when that is their weapon, -1 when mine.
+    void SendDeflect(uint8_t from, uint8_t defender, UObject* theirWeapon, UFunction* fn, void* params, double sign) {
+        if (!cfg_.deflect || HostPhysics() || !from || !params) return;
+        const int32_t off = NormalImpulseOffset(fn);
+        UObject* standIn = standIns_.ActorOf(defender);
+        if (off < 0 || !standIn) return;
+        int slot = -1;
+        if (UObject** r = Field<UObject*>(standIn, "Weapon R"); r && *r == theirWeapon) slot = 0;
+        else if (UObject** l = Field<UObject*>(standIn, "Weapon L"); l && *l == theirWeapon) slot = 1;
+        if (slot < 0) return;
+        FVector imp{};
+        std::memcpy(&imp, static_cast<uint8_t*>(params) + off, sizeof imp);
+        sync::RemoteWriteMsg m;
+        if (!deflects_.Make(from, defender, slot, sync::V3{imp.x * sign, imp.y * sign, imp.z * sign}, game::SteadyNowMs(), m)) return;
+        SendRemote(m);
+        if (cfg_.combatCopies && net_) {   // rev 42: the knock's unreliable copy (the owner keeps the first: DeflectFresh)
+            if (IsHost()) { if (std::optional<uint32_t> to = PeerOfSlot(OwnerSlotOf(m.target, leases_.holders()))) net_->Send(*to, kChanUnreliable, Encode(m), false); }
+            else if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, Encode(m), false);
+        }
+        ++deflectsTx_;
     }
 
     // What a contact's actor is, per class: hit events fire thousands of times a frame. Not remembered while the
@@ -5714,6 +5718,7 @@ private:
     }
 
     void StartMatch() {
+        PickMatchDelay();   // rev 42
         MatchConfig cfg = StartConfig();
         bool progression = !adapter_.FreeModeActive();
         std::vector<TeamRequest> req;
@@ -7975,6 +7980,7 @@ private:
         OwnHandOffTick(me, mine);
         if (me && ownLeased_) adapter_.TickLookSensitivity(me, dt);   // a replica while held elsewhere: its tick is blocked
         if (me && !hooksBound_ && adapter_.BindInputs(me)) BindClientInputHooks();
+        OwnerInputDelayTick(me);   // rev 42: the match input delay
         SendInputs(dt);   // warm for hand-off when enabled; otherwise only host physics or an active lease needs input
         Timed(kPumpHandOff, [&] { HandOffTick(now); });
         std::vector<std::pair<uint8_t, UObject*>> owned;
@@ -7988,14 +7994,10 @@ private:
             if (me) adapter_.KeepAudioListener(me);
         }
         Timed(kPumpStreams, [&] {
-            streams_.Tick(adapter_, now, dt, owned, [this](const std::vector<uint8_t>& b) {
-                if (hostPeer_) net_->Send(hostPeer_, kChanUnreliable, b, false);
-                for (uint32_t p : meshSend_) net_->Send(p, kChanUnreliable, b, false);   // Pose and Vitals also go straight to the other clients
-                DetourSend(b);                                                            // ...and through a relay where the host planned one
-            });
+            StreamOwned(now, dt, owned);   // rev 42: late_send moves it after the physics step
             if (!ownLeased_) ReportOwnDeath(me, now);   // held elsewhere: its holder reports the death
         });
-        Timed(kPumpServo, [&] { standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned)); });
+        Timed(kPumpServo, [&] { standIns_.Tick(adapter_, now, dt, OwnedPelvises(owned)); ShadowTimelines(now); });
         Timed(kPumpClaims, [&] { claims_.Tick(now); });
         Timed(kPumpSevers, [&] { severs_.Tick(now, owned); });
         Timed(kPumpGore, [&] { gore_.Tick(now); });
@@ -8157,7 +8159,7 @@ private:
         MsgType t;
         if (slot >= kMaxFighters || !PeekType(d, n, t)) { ++meshDropped_; return; }
         if (t == MsgType::Ping || t == MsgType::Pong) { if (peerPingOn_) MeshPing(ev.peer, slot, d, n); else ++meshDropped_; return; }
-        if (!meshOn_ || (t != MsgType::Pose && t != MsgType::Vitals && t != MsgType::Forward && !MeshDirectType(t))) { ++meshDropped_; return; }
+        if (!meshOn_ || (t != MsgType::Pose && t != MsgType::Vitals && t != MsgType::InputBatch && t != MsgType::Forward && !MeshDirectType(t))) { ++meshDropped_; return; }
         if (!meshBudget_[slot].Allow(t, NowMs())) { BudgetDropped(meshBudget_[slot], t, "client: mesh", slot); return; }
         if (t == MsgType::Forward) { DetourEvent(ev, slot); return; }
         if (MeshDirectType(t)) {
@@ -8182,6 +8184,12 @@ private:
             gore_.OnVitals(v.entity, v.severed, v.dislocated, game::SteadyNowMs());
             severs_.OnVitals(v, game::SteadyNowMs());
             VoiceVitals(v);
+        } else if (t == MsgType::InputBatch) {   // rev 42
+            InputBatch m;
+            if (!Decode(d, n, m) || !MayStream(fromSlot, m.entity, leases_.holders())) return false;
+            OnInputBatch(m, arrivalMs);
+            ++meshRx_;
+            return true;   // not a stream the host relays: the mesh hearing mask stays as Pose and Vitals make it
         } else {
             return false;
         }
@@ -8599,6 +8607,11 @@ private:
                 if (DecodePoseFrame(d, n, m, frame) && m.entity != ClientOwnEntity() && ClientStreamGate(m.entity, m.epoch)) standIns_.OnPose(m, frame, ArrivalMs(ev));
                 break;
             }
+            case MsgType::InputBatch: {   // rev 42
+                InputBatch m;
+                if (Decode(d, n, m) && m.entity != ClientOwnEntity()) OnInputBatch(m, ArrivalMs(ev));
+                break;
+            }
             case MsgType::Vitals: {
                 VitalsMsg v;
                 if (Decode(d, n, v) && v.entity != ClientOwnEntity() && ClientStreamGate(v.entity, v.epoch)) {
@@ -8761,6 +8774,27 @@ private:
     HostDelayGovernor hostDelay_;
     DelayedInput delayedIn_;
     bool replayingDelayed_ = false, hostDelayLogged_ = false;
+    // Rev 42, competitive netcode (docs/PLAN_COMPETITIVE_NETCODE.md): the match input delay, the input timelines, deflects.
+    static constexpr double kMatchDelayJitterMs = 5.0;   // auto: jitter allowance on top of the slowest one-way trip
+    uint16_t matchDelayMs_ = 0, nextMatchDelayMs_ = 0;   // in force this fight / the host's pick for the next
+    bool delayFight_ = false;                            // inFight_ as of the last AdoptMatchDelay
+    sync::InputBatchSender inputBatch_;
+    std::array<sync::InputTimeline, kMaxWillies + 1> timelines_{};
+    sync::DeflectGate deflects_;
+    uint64_t inputBatchesTx_ = 0, inputBatchesRx_ = 0, deflectsTx_ = 0;
+    combat::ClaimCopyFilter claimCopies_;                // host: combat_copies' second copy of a client's blow
+    std::array<uint16_t, kMaxWillies + 1> deflectSeq_{};
+    std::array<bool, kMaxWillies + 1> deflectSeen_{};
+    std::vector<LateOwned> lateOwned_;                   // late_send: what the next widget tick streams
+    float lateDt_ = 0;
+    bool lateDue_ = false;
+    uint64_t lateSends_ = 0;
+    sync::FrameFloor frameFloor_;
+    game::Twin twin_;
+    std::vector<std::string> twinArgs_;                  // -hsmtwin as a "twin on ..." command; empty when not given
+    bool twinDone_ = false;
+    uint32_t twinSince_ = 0, nextTwin_ = 0;
+    float twinAccum_ = 0;
     UObject* delayPawn_ = nullptr;
     bool migrateReplica_ = false;           // a migration left a host-physics level: my fighter there was a replica, the map opens again               // the input hooks are per function and stay; they act only on myWillie_ under host physics
     RespawnRetry ownRespawn_;
@@ -9051,16 +9085,19 @@ bool StartMod(const Config& cfg) {
     game::SetFighterBoxFix(cfg.standInBoxFix);
     game::SetAllowBuildMismatch(cfg.allowBuildMismatch);
     game::modrules::Configure(cfg);
+    game::SetDirectP2P(cfg.directP2P);
     report::Configure(cfg.reports, cfg.reportUrl);
     game::modpack::SetConfigured(cfg.modPack);
     update::Start(cfg.updateCheck, cfg.reportUrl);   // a worker thread; the menu page and UpdateNoticeTick show the result
     g_session = new SessionImpl(cfg);
+    g_session->ConfigureBenches();
     if (!g_session->Start()) return false;
     if (int port = CmdArgInt(CommandLineUtf8(), "hsmbridge", 0, 1024, 65535)) agent::Start(uint16_t(port));
     // Pump the session from the GameMode's Blueprint tick (game thread, every frame, menus included).
     // Widgets keep ticking while the game is paused: let them pump the agent bridge too, and lift a match's pause.
     HookFunctionsMatching([](const std::string& n) { return n == "Tick"; }, [](UObject*, UFunction*, void*) {
         g_session->LiftPauseFromWidgetTick();
+        g_session->LateStreamTick();   // rev 42: late_send, the first widget tick of the frame (after the physics step)
         g_session->PauseReportTick();
         g_session->PumpAgentEarly();
         return false;

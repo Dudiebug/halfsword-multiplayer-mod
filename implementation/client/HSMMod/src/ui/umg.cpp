@@ -1,6 +1,8 @@
 #include "ui/umg.h"
+#include "match/hsm_hud_style.h"
 #include "util/hsm_names.h"
 #include "log.h"
+#include <windows.h>
 #include <algorithm>
 #include <cstdio>
 #include <limits>
@@ -44,7 +46,7 @@ UClass* WidgetClass(const char* name) {
 
 // Where FSlateFontInfo keeps the size and the outline, from the runtime reflection of its script structs (never
 // hard-coded). Resolved once, logged once.
-struct FontLayout { bool ok = false; size_t size = 0, outlineSize = 0, outlineColor = 0, end = 0; };
+struct FontLayout { bool ok = false, face = false; size_t size = 0, outlineSize = 0, outlineColor = 0, end = 0, fontObject = 0, typeface = 0; };
 
 const FontLayout& Fonts() {
     static FontLayout layout;
@@ -64,6 +66,13 @@ const FontLayout& Fonts() {
         layout.outlineSize = size_t(PropertyOffset(settings) + PropertyOffset(outlineSize));
         layout.outlineColor = size_t(PropertyOffset(settings) + PropertyOffset(outlineColor));
         layout.end = std::max({layout.size + 4, layout.outlineSize + 4, layout.outlineColor + sizeof(Rgba)});
+        FProperty* object = StructMember(fontInfo, "FontObject");
+        FProperty* typeface = StructMember(fontInfo, "TypefaceFontName");
+        if (object && typeface && PropertySize(object) == int32_t(sizeof(UObject*)) && PropertySize(typeface) == int32_t(sizeof(FName))) {
+            layout.face = true;
+            layout.fontObject = size_t(PropertyOffset(object));
+            layout.typeface = size_t(PropertyOffset(typeface));
+        }
         HSM_LOG("umg: font layout: Size +0x%zx, OutlineSettings.OutlineSize +0x%zx, OutlineSettings.OutlineColor +0x%zx",
                 layout.size, layout.outlineSize, layout.outlineColor);
     } else {
@@ -166,6 +175,58 @@ std::string DescribeBrush(const uint8_t* style, const char* member) {
         out += " res=" + (r ? ObjectName(r) : std::string("none"));
     }
     return out;
+}
+
+// Where FSlateBrush keeps what a Look sets, from the runtime reflection of the struct. Resolved once, logged once.
+struct BrushLayout { bool ok = false; size_t resource = 0, drawAs = 0, tiling = 0, margin = 0, size = 0; int32_t sizeBytes = 0; size_t mirroring = 0; bool mirror = false; };
+
+const BrushLayout& Brushes() {
+    static BrushLayout layout;
+    static bool tried = false;
+    if (tried) return layout;
+    tried = true;
+    UObject* brush = FindStruct("SlateBrush");
+    FProperty* res = StructMember(brush, "ResourceObject");
+    FProperty* draw = StructMember(brush, "DrawAs");
+    FProperty* tiling = StructMember(brush, "Tiling");
+    FProperty* margin = StructMember(brush, "Margin");
+    FProperty* size = StructMember(brush, "ImageSize");
+    if (res && draw && tiling && margin && size && PropertySize(res) == int32_t(sizeof(UObject*)) && PropertySize(draw) == 1 &&
+        PropertySize(tiling) == 1 && PropertySize(margin) == int32_t(sizeof(Margin)) && (PropertySize(size) == 8 || PropertySize(size) == 16)) {
+        layout = {true, size_t(PropertyOffset(res)), size_t(PropertyOffset(draw)), size_t(PropertyOffset(tiling)), size_t(PropertyOffset(margin)),
+                  size_t(PropertyOffset(size)), PropertySize(size)};
+        if (FProperty* m = StructMember(brush, "Mirroring"); m && PropertySize(m) == 1) { layout.mirror = true; layout.mirroring = size_t(PropertyOffset(m)); }
+        HSM_LOG("umg: brush layout: ResourceObject +0x%zx, DrawAs +0x%zx, Tiling +0x%zx, Margin +0x%zx, ImageSize +0x%zx (%d B)",
+                layout.resource, layout.drawAs, layout.tiling, layout.margin, layout.size, layout.sizeBytes);
+    } else {
+        HSM_LOG("umg: brush layout not resolved; panels keep plain colours");
+    }
+    return layout;
+}
+
+// Sends `look` through the widget's SetBrush, starting from its current brush (the property `field`). The engine copies it.
+void SendLook(UObject* w, const char* field, const Look& look) {
+    const BrushLayout& l = Brushes();
+    if (!w || !l.ok) return;
+    Call c(w, "SetBrush");
+    FProperty* p = c.function() ? FindProperty(c.function(), "InBrush") : nullptr;
+    const void* cur = FieldPtr(w, field);
+    FProperty* f = FindProperty(ClassOf(w), field);
+    if (!p || !cur || !f || PropertySize(p) != PropertySize(f) || size_t(PropertySize(p)) < l.size + size_t(l.sizeBytes)) return;
+    auto* b = static_cast<uint8_t*>(c.paramPtr("InBrush"));
+    std::memcpy(b, cur, size_t(PropertySize(p)));
+    UObject* tex = look.texture;
+    std::memcpy(b + l.resource, &tex, sizeof tex);
+    const bool sliced = look.slice.left > 0 || look.slice.top > 0 || look.slice.right > 0 || look.slice.bottom > 0;
+    b[l.drawAs] = !tex || sliced ? 1 : 3;     // ESlateBrushDrawType: Box (a plain fill when there is no texture), Image
+    b[l.tiling] = tex && look.tile ? 1 : 0;   // ESlateBrushTileType: NoTile, Both
+    if (l.mirror) b[l.mirroring] = look.mirror ? 1 : 0;   // ESlateBrushMirrorType: NoMirror, Horizontal
+    std::memcpy(b + l.margin, &look.slice, sizeof look.slice);
+    if (look.size.x > 0 && look.size.y > 0) {
+        if (l.sizeBytes == 16) std::memcpy(b + l.size, &look.size, 16);
+        else { const float xy[2] = {float(look.size.x), float(look.size.y)}; std::memcpy(b + l.size, xy, 8); }
+    }
+    c.invoke();
 }
 
 }  // namespace
@@ -279,6 +340,21 @@ bool Text::StyleFrom(UObject* textBlock) {
     return true;
 }
 
+void Text::Face(UObject* font) {
+    const FontLayout& l = Fonts();
+    if (!w_ || !font || !l.face || std::max(l.fontObject + sizeof(UObject*), l.typeface + sizeof(FName)) > font_.size()) return;
+    UObject* now = nullptr;
+    std::memcpy(&now, font_.data() + l.fontObject, sizeof now);
+    if (now == font) return;
+    std::memcpy(font_.data() + l.fontObject, &font, sizeof font);
+    const FName none{};                        // the font's own default typeface
+    std::memcpy(font_.data() + l.typeface, &none, sizeof none);
+    const FontKey last = fontSent_.v;
+    const bool sent = fontSent_.known;
+    fontSent_ = Sent<FontKey>{};
+    if (sent) Font(last.size, last.outline, last.color); else Font(0);
+}
+
 void Text::Shadow(Vec2 offset, Rgba color) {
     if (!w_) return;
     if (shadow_.Changed(offset)) Call(w_, "SetShadowOffset").set("InShadowOffset", offset).invoke();
@@ -301,6 +377,11 @@ Slot Panel::Content(const Widget& child) {
 }
 void Panel::Color(Rgba c) { if (w_ && color_.Changed(c)) Call(w_, "SetBrushColor").set("InBrushColor", c).invoke(); }
 void Panel::Padding(Margin m) { if (w_ && padding_.Changed(m)) Call(w_, "SetPadding").set("InPadding", m).invoke(); }
+void Panel::Texture(const Look& look) {
+    if (!w_ || (lookKnown_ && look_ == look)) return;
+    look_ = look; lookKnown_ = true;
+    SendLook(w_, "Background", look);
+}
 void Panel::ContentAlign(HAlign h, VAlign v) {
     Call(w_, "SetHorizontalAlignment").set<uint8_t>("InHorizontalAlignment", uint8_t(h)).invoke();
     Call(w_, "SetVerticalAlignment").set<uint8_t>("InVerticalAlignment", uint8_t(v)).invoke();
@@ -333,6 +414,7 @@ Slot Fixed::Content(const Widget& child) {
 void Fixed::Width(float w) { if (w_ && width_.Changed(w)) Call(w_, "SetWidthOverride").set<float>("InWidthOverride", w).invoke(); }
 void Fixed::Height(float h) { if (w_ && height_.Changed(h)) Call(w_, "SetHeightOverride").set<float>("InHeightOverride", h).invoke(); }
 void Fixed::MinWidth(float w) { if (w_ && minWidth_.Changed(w)) Call(w_, "SetMinDesiredWidth").set<float>("InMinDesiredWidth", w).invoke(); }
+void Fixed::MinHeight(float h) { if (w_ && minHeight_.Changed(h)) Call(w_, "SetMinDesiredHeight").set<float>("InMinDesiredHeight", h).invoke(); }
 
 Slot Shrink::Content(const Widget& child) {
     Call c(w_, "SetContent"); c.set<UObject*>("Content", child.get()).invoke();
@@ -360,6 +442,13 @@ void Icon::Size(Vec2 s) { if (w_ && size_.Changed(s)) Call(w_, "SetDesiredSizeOv
 void Icon::Texture(UObject* texture) {
     if (!w_ || !texture || !texture_.Changed(texture)) return;
     Call(w_, "SetBrushFromTexture").set<UObject*>("Texture", texture).set<bool>("bMatchSize", false).invoke();
+}
+
+void Icon::Texture(const Look& look) {
+    if (!w_ || (lookKnown_ && look_ == look)) return;
+    look_ = look; lookKnown_ = true;
+    texture_ = Sent<UObject*>{};
+    SendLook(w_, "Brush", look);
 }
 
 Slot Button::Content(const Widget& child) {
@@ -462,8 +551,9 @@ Grid Kit::MakeGrid() { return Made<Grid>(Spawn(WidgetClass(kUniformGridPanelClas
 Bar Kit::MakeBar() { return Made<Bar>(Spawn(WidgetClass(kProgressBarClass))); }
 Icon Kit::MakeIcon() { return Made<Icon>(Spawn(WidgetClass(kImageClass))); }
 Button Kit::MakeButton() { return Made<Button>(Spawn(WidgetClass(kButtonClass))); }
-// The stock EditableTextBox is a light grey field with grey hint text, hard to read on the dark menu: its WidgetStyle
-// gets a near-black field and bone text (the hint is drawn from the same colour, faded). It
+// The stock EditableTextBox is a light grey field with grey hint text: its WidgetStyle gets a parchment field and ink
+// text, as the rest of the page (classic look: a near-black field and light text; the hint is drawn from the same
+// colour, faded). It
 // is written before the Slate widget exists (the box is in no tree yet), so the first build already uses it.
 EditBox Kit::MakeEditBox() {
     EditBox e = Made<EditBox>(Spawn(WidgetClass(kEditBoxClass)));
@@ -481,12 +571,28 @@ EditBox Kit::MakeEditBox() {
         ws[at + sc.rule] = 0;                                  // ESlateColorStylingMode::UseColor_Specified
         ++painted;
     };
-    const Rgba field{0.016f, 0.014f, 0.012f, 1}, ink{0.93f, 0.89f, 0.80f, 1};   // style::kBone
+    const bool classic = style::ClassicMenus();
+    const Rgba field = classic ? Rgba{0.016f, 0.014f, 0.012f, 1} : Rgba{0.86f, 0.80f, 0.66f, 1};   // dark, or parchment
+    const Rgba ink = style::kMenuText;
     for (FProperty* p : {StructMember(boxStyle, "BackgroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, field);
     for (FProperty* p : {StructMember(boxStyle, "ForegroundColor"), StructMember(boxStyle, "FocusedForegroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, ink);
     if (FProperty* ts = StructMember(boxStyle, "TextStyle")) {
         const size_t base = size_t(PropertyOffset(ts));
         if (FProperty* c = StructMember(textStyle, "ColorAndOpacity")) paint(base + size_t(PropertyOffset(c)), c, ink);
+        // The page's body size, in the game's own typeface when it is loaded (the stock box is a large engine font).
+        const FontLayout& fl = Fonts();
+        FProperty* f = StructMember(textStyle, "Font");
+        if (f && fl.ok && size_t(PropertySize(f)) >= fl.end) {
+            uint8_t* font = ws + base + size_t(PropertyOffset(f));
+            const float size = 17;
+            std::memcpy(font + fl.size, &size, sizeof size);
+            const bool roomForFace = size_t(PropertySize(f)) >= std::max(fl.fontObject + sizeof(UObject*), fl.typeface + sizeof(FName));
+            if (UObject* face = fl.face && roomForFace && !classic ? GameFont("Willies_Way_02_Font") : nullptr) {
+                std::memcpy(font + fl.fontObject, &face, sizeof face);
+                const FName none{};
+                std::memcpy(font + fl.typeface, &none, sizeof none);
+            }
+        }
     }
     if (!logged) { logged = true; HSM_LOG("umg: text box restyled (%d colour(s) set)", painted); }
     return e;
@@ -572,6 +678,41 @@ UObject* FindTextBlock(UObject* root, int depth) {
         if (UObject* found = FindTextBlock(child, depth - 1)) return found;
     return nullptr;
 }
+
+namespace {
+// A name found once is checked by its object slot after, and looked up again when the engine has unloaded it (a level
+// change). A missing one is looked for again at most every 2 s: each look is an object array scan.
+UObject* GameAsset(const char* name, const char* cls) {
+    struct Entry { UObject* o = nullptr; int32_t index = -1; ULONGLONG next = 0; };
+    static std::unordered_map<std::string, Entry> cache;
+    Entry& e = cache[std::string(cls) + "/" + name];
+    if (e.o && ObjectAt(e.index) == e.o) return e.o;
+    const ULONGLONG now = GetTickCount64();
+    if (now < e.next) return nullptr;
+    e.o = FindObject(name, cls);
+    e.index = e.o ? ObjectIndex(e.o) : -1;
+    if (!e.o) e.next = now + 2000;
+    return e.o;
+}
+}  // namespace
+
+UObject* GameTexture(const char* name) { return GameAsset(name, "Texture2D"); }
+
+Vec2 TextureSize(UObject* texture) {
+    static UObject* lib = nullptr;
+    if (!lib) if (UObject* cls = FindObject("WidgetBlueprintLibrary", "Class")) lib = DefaultObject(reinterpret_cast<UClass*>(cls));
+    const BrushLayout& l = Brushes();
+    if (!lib || !texture || !l.ok) return {};
+    Call c(lib, "MakeBrushFromTexture");
+    c.set<UObject*>("Texture", texture).set<int32_t>("Width", 0).set<int32_t>("Height", 0);
+    if (!c.invoke()) return {};
+    const auto* b = static_cast<const uint8_t*>(c.paramPtr("ReturnValue"));
+    if (!b) return {};
+    if (l.sizeBytes == 16) { Vec2 v; std::memcpy(&v, b + l.size, sizeof v); return v; }
+    float xy[2]; std::memcpy(xy, b + l.size, sizeof xy);
+    return {double(xy[0]), double(xy[1])};
+}
+UObject* GameFont(const char* name) { return GameAsset(name, "Font"); }
 
 std::string Describe(UObject* widget) {
     if (!widget) return "(null)";

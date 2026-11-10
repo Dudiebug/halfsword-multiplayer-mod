@@ -44,7 +44,7 @@ inline int CmdArgInt(const std::string& cl, const std::string& name, int fallbac
     return end && *end == 0 && n >= lo && n <= hi ? int(n) : fallback;
 }
 
-// The arguments for a new copy of the game when the mod restarts it: "play alone, mod off", or after turning unsupported mods off.
+// The arguments for a new copy of the game when the mod restarts it: "play alone, mod off", or after turning refused mods off for a lobby.
 // This game's own arguments go along (its exe is started by path, so not that), except an earlier -hsmrole, -hsmwaitfor or a Steam
 // join. The new game waits for this one (pid) to close. -hsmrole=off only lives on that launch, so the next ordinary start has the
 // mod again and nothing has to be put back.

@@ -1,6 +1,7 @@
 // HSMMod.ini next to the game exe. Missing file or role=off keeps the game fully vanilla.
 #pragma once
 #include "match/hsm_class.h"
+#include "combat/hsm_claimcheck.h"
 #include "hsm_chat.h"
 #include "hsm_inputdelay.h"
 #include "session/hsm_structure.h"
@@ -183,8 +184,6 @@ struct Config {
     bool classWolverine = true;   // class_wolverine=0: don't write a class's parts into Half Wolverine's settings at start
     std::string classCustom[kCustomClassSlots];   // class_custom1=..: the Forge's slots (match/hsm_class.h)
     bool wolverineRefresh = true;   // wolverine_refresh=: when a class changes Half Wolverine's settings, reload UE4SS's mods in place. 0: restart instead
-    bool blockHse = true;     // block_hse=: in lobbies you host, HS Enhancer is refused. Guests go by the host
-    bool modBlockAll = true;  // mod_block=: in lobbies you host. all: unsupported mods are refused everywhere; classes: only with classes
     std::string classCustomName[kCustomClassSlots];   // class_custom1_name=..: what the player called it; checked wherever it's read
     int classBiteKey = 'B';   // class_bite_key=: bites, for a class with Bite. A letter or F1 to F12
     bool clawMirror = true;   // claw_mirror=0: don't draw Half Wolverine's claws on other players' fighters, or tell them about yours
@@ -204,6 +203,9 @@ struct Config {
     // help_improve_asked=1: the one-time HELP IMPROVE THE MOD question (the first MULTIPLAYER click, 0.8.0-pre7) was
     // answered, or the toggle was used. It never turns help_improve on by itself.
     bool helpImproveAsked = false;
+    // ui_style=classic: the mod's menus and HUD in their earlier dark look; game (the default): in the game's own art and
+    // typefaces (ui/skin.h). Read at start (the widgets are built once); the SETTINGS page writes it (SaveUiStyle).
+    bool uiClassic = false;
     std::string reportUrl = "https://reports.dudiebug.net";
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
@@ -226,6 +228,37 @@ struct Config {
     bool ue4ss = true;
     bool ue4ssBefore = false;
     std::string ue4ssKeep;   // ue4ss_keep: the hash of a UE4SS.dll the player chose to keep over the bundled build
+    // ---- competitive netcode (protocol rev 42; docs/PLAN_COMPETITIVE_NETCODE.md). On by default: competitive=0 goes back to the old behaviour. ----
+    // competitive=1: the competitive preset. Every netcode key below takes its competitive default (playout 0.85 / 4 ms,
+    // input_delay auto, deflect 1, late_send 1, combat_copies 1, min_fps 60) unless the key itself is in the file.
+    bool competitive = true;
+    // late_send=1: an owned fighter's pose is read and sent right after the physics step (from the first widget tick of the
+    // frame) instead of at the next frame's start, about a frame sooner; a frame with no widget tick sends at the next.
+    bool lateSend = false;
+    // combat_copies=1: every blow (HitClaim) and blade knock also goes once unreliably, beside the reliable copy: a lost
+    // packet then costs nothing instead of a resend round trip. Duplicates are dropped by claim id. Sender's setting.
+    bool combatCopies = false;
+    // min_fps (0 off, else 20..240): warn in the chat when this machine's frame rate stays under it (its pose stream thins).
+    int minFps = 0;
+    // direct_p2p=1: share this machine's addresses with lobby members (Steam ICE), so players who are not Steam friends
+    // can get a direct path instead of the relay when it is faster. Per machine (both ends need it for a direct path).
+    bool directP2P = true;
+    // The stand-ins' playout buffer: the share of late poses it waits for (playout_quantile, 0.5-0.99; lower = the
+    // opponent shown less in the past, more frames extrapolated) and the margin on top (playout_margin_ms, 0-50). Per machine.
+    double playoutQuantile = 0.95;
+    double playoutMarginMs = 6.0;
+    // standin_lead_ms (0-120): sample the stand-ins this far toward the present (extrapolated, capped). Per machine.
+    double standinLeadMs = 0.0;
+    // input_delay = 0 (off) | auto | 1..4 frames: owner sync, every player's own buttons and movement wait this long
+    // (never the look axes), so their inputs reach the other machines before they execute (sync/hsm_inputline.h).
+    // Fixed for the match and the same for everyone: the host's value rules (lobby key hsm_delay). Read on the host.
+    MatchDelaySetting inputDelay;
+    // claim_check = off | log (default) | on: the victim checks each blow against where its fighter really was when the
+    // attacker's screen showed it (combat/hsm_claimcheck.h): log counts and logs, on also drops a far one. Victim's.
+    combat::ClaimCheckMode claimCheck = combat::ClaimCheckMode::Log;
+    // deflect=1: a blade clash on my screen is sent to the other weapon's owner, who gives its real weapon the knock
+    // (sync/hsm_remote.h Deflect). Sender's setting; the receiver applies what comes.
+    bool deflect = false;
     // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
     bool record = false;
     // [mod] pack=<name>: the modpack in Paks/~mods/<name>/ (HSMPack.ini) a host announces in its lobby; off: none; empty: the only
@@ -233,23 +266,24 @@ struct Config {
     std::string modPack;
     // [mod] mod rules (gameplay/mod_rules.h, session/hsm_mod_rules.h). modRules=0 (mod_rules=0): no mod report, no lobby
     // rule, no host check, no HSMMod build gate. modChallenge=0: the host sends no code challenges. The host's rule:
-    // mod_rule= vanilla | maps (default) | bundle | custom | anything | classes, mod_cheats=block (default) | allow,
+    // mod_rule= vanilla (default) | maps | bundle | custom | anything | classes, block_hse=1 (default; HS Enhancer refused) | 0,
     // mod_official=1 (official builds only), mod_allow= the Custom list ("A, B*1a2b3c4d, +Required"; empty: what the
     // host runs).
     bool modRules = true;
     bool modChallenge = true;
-    std::string modRule = "maps";
-    bool modBlockCheats = true;
+    std::string modRule = "vanilla";
+    bool blockHse = true;     // in lobbies you host, HS Enhancer is refused. Guests go by the host
     bool modOfficialOnly = false;
     std::string modAllow;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists
-// Re-reads only the lobby mod rule keys ([mod] mod_rule, mod_cheats, mod_official, mod_allow) into c: the host may edit
+// Re-reads only the lobby mod rule keys ([mod] mod_rule, block_hse, mod_official, mod_allow) into c: the host may edit
 // them while the game runs (gameplay/mod_rules.cpp).
 void ReadModRuleKeys(Config& c);
 const char* RoleName(Role r);
 bool SaveHelpImprove(bool on);   // writes help_improve= (and help_improve_asked=1) under [net] in HSMMod.ini, the rest untouched; false: could not
+bool SaveUiStyle(bool classic);  // writes ui_style= under [net] in HSMMod.ini (used from the next start); false: could not
 // Writes these keys under [section] (default [net]) in HSMMod.ini in one replace, the rest of the file untouched; false: could not.
 bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys, const char* section = "net");
 }  // namespace hsm

@@ -3,6 +3,7 @@
 #include <tlhelp32.h>
 #include <cstdint>
 #include <string>
+#include "hse_hold.h"
 #include "log.h"
 #include "session/hsm_enhancer.h"
 
@@ -10,6 +11,7 @@ namespace hsm::enhancer {
 namespace {
 constexpr uint64_t kScanEveryMs = 5000;
 bool g_detected = false;
+void* g_module = nullptr;   // the module exporting HSE_Initialize: HSE itself, not its loader (hse_hold.cpp patches it)
 uint64_t g_nextScan = 0;
 
 std::string Utf8(const wchar_t* w) {
@@ -43,20 +45,24 @@ void Scan() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (snap == INVALID_HANDLE_VALUE) return;   // ERROR_BAD_LENGTH while modules load: the next poll tries again
     MODULEENTRY32W me{}; me.dwSize = sizeof me;
-    for (BOOL ok = Module32FirstW(snap, &me); ok && !g_detected; ok = Module32NextW(snap, &me)) {
+    for (BOOL ok = Module32FirstW(snap, &me); ok && !g_module; ok = Module32NextW(snap, &me)) {
         const EnhancerSignals s = Check(me);   // every module each time: a few hundred resource lookups, every 5 s
         if (!s.Matches()) continue;
-        g_detected = true;
-        HSM_LOG("enhancer: Half Sword Enhancer detected: %s (name=%d export=%d version=%d); lobbies that block it refuse this player",
-                Utf8(me.szExePath).c_str(), s.fileName ? 1 : 0, s.exportName ? 1 : 0, s.version ? 1 : 0);
+        if (!g_detected) {
+            g_detected = true;
+            HSM_LOG("enhancer: Half Sword Enhancer detected: %s (name=%d export=%d version=%d)", Utf8(me.szExePath).c_str(),
+                    s.fileName ? 1 : 0, s.exportName ? 1 : 0, s.version ? 1 : 0);
+        }
+        if (s.exportName) { g_module = me.hModule; hold::Attach(me.hModule); }
     }
     CloseHandle(snap);
 }
 }  // namespace
 
 void Poll() {
+    hold::Tick();
     const uint64_t nowMs = GetTickCount64();
-    if (g_detected || nowMs < g_nextScan) return;
+    if (g_module || nowMs < g_nextScan) return;   // found by its loader: scanned on until HSE's own module is in
     g_nextScan = nowMs + kScanEveryMs;
     Scan();
 }

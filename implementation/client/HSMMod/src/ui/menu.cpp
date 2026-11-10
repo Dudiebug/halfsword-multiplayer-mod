@@ -1,7 +1,9 @@
 #include "ui/menu.h"
+#include "config.h"
 #include "ui/chat.h"
 #include "ui/umg.h"
 #include "ui/mp_widgets.h"
+#include "ui/skin.h"
 #include "util/hsm_names.h"
 #include "gameplay/damage_pin.h"
 #include "gameplay/mod_maps.h"
@@ -18,6 +20,7 @@
 #include "match/hsm_lobby_mods.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
+#include "session/hsm_mod_switch.h"
 #include "session/hsm_password.h"
 #include "util/hsm_bmp.h"
 #include "paths.h"
@@ -111,22 +114,13 @@ struct State {
     Box classTabList;
     bool classTabOpen = false, classDeleteArmed = false, warnOpen = false;
     Panel warn;                               // the Unrestricted disclaimer
-    Flat classUnrestricted, classAllowHse;
+    Flat classUnrestricted;
     Text warnTitle, warnBody, warnMods;
-    bool warnIsHse = false;                   // the warning panel is asking about HS Enhancer, not Unrestricted
+    enum class WarnKind { Unrestricted, Hse, Switch };   // what the warning panel asks about: Switch is the restart with mods off (Lobby::SwitchAsk)
+    WarnKind warnKind = WarnKind::Unrestricted;
     Text classWhere, classTabNote;
     int classTab = kClassTabPlain;
     uint32_t classFrame = 0;
-    Panel block;                              // the unsupported mods overlay
-    Box blockList;
-    Text blockIntro;
-    std::vector<Text> blockLines;
-    Flat blockFolder, blockClose, blockTurnOff;
-    Text blockDone;
-    std::vector<std::string> blockModsTxt, blockDlls;    // what the button can turn off, and set aside
-    bool blockOpen = false, blockShownOnce = false;
-    ULONGLONG blockNextCheck = 0;
-    int blockChecks = 0;
     Box classNameRow;
     EditBox classNameBox;
     Flat classNameSave;
@@ -166,6 +160,9 @@ struct State {
     uint32_t reportSeen = 0;   // Session::ReportStatusSeq last shown in reportNote
     bool reportOpenNow = false;
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF (SETTINGS)
+    Flat lookToggle;                         // MENU LOOK: GAME ART / CLASSIC (SETTINGS); ui_style, used from the next start
+    Text lookNote;
+    bool lookClassic = false, lookSaved = true;   // what HSMMod.ini will say at the next start; written
     mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
@@ -229,10 +226,10 @@ Slot AddToHorizontalBox(Box& box, const Widget& child, float fill, float padRigh
 
 Text NewText(const std::string& text, float size, Rgba color) { return g.maker.NewText(text, size, color); }
 
-// A small section label in the accent's ink (MATCH, PUBLIC LOBBIES, CHAT).
+// A section label: a rubric in the game's blackletter (MATCH, PUBLIC LOBBIES, CHAT).
 Text Section(Box& column, const std::string& text, float padTop) {
-    Text t = NewText(text, 15, style::kMenuAccentInk);
-    if (t) AddToVerticalBox(column, t, padTop);
+    Text t = NewText(skin::Title(text), 23, style::kMenuAccentInk);
+    if (t) { skin::Font(t, skin::Face::Heading); t.Wrap(true); AddToVerticalBox(column, t, padTop); }   // a narrow column wraps it
     return t;
 }
 
@@ -354,12 +351,15 @@ bool InjectOpenButton(UObject* anchor, bool startup) {
             Call size(fs, "GetSize"); size.invoke(); Vec2 s = size.get<Vec2>("ReturnValue");
             Call anc(fs, "GetAnchors"); anc.invoke(); Anchors a = anc.get<Anchors>("ReturnValue");
             Call al(fs, "GetAlignment"); al.invoke(); Vec2 alignment = al.get<Vec2>("ReturnValue");
-            slot.Anchor(a, alignment).Size(s).Position(Vec2{p.x, p.y + s.y * 1.15});
+            // The ribbon is copied from Quit's, sized for four letters: ours is drawn wider and a little taller, about
+            // the same centre, so "Multiplayer" reads at the size of the entries above it.
+            const Vec2 big = g.openButton.plain ? Vec2{s.x * 1.7, s.y * 1.2} : s;
+            slot.Anchor(a, alignment).Size(big).Position(Vec2{p.x + (alignment.x - 0.5) * (big.x - s.x), p.y + s.y * 1.15 + alignment.y * (big.y - s.y)});
             // Our own card has no ribbon art to set the type size: the label is a share of the entry's height.
             if (g.openButton.card && s.y > 0) g.openButton.label.Font(float(std::clamp(s.y * 0.45, 14.0, 40.0)));
             // The ribbon's curled ends and its shadow take the edges: the label keeps to the flat middle.
             if (g.openButton.inner && s.x > 0 && s.y > 0)
-                g.openButton.inner.Padding({float(s.x * 0.18), float(s.y * 0.18), float(s.x * 0.18), float(s.y * 0.22)});
+                g.openButton.inner.Padding({float(big.x * 0.17), float(big.y * 0.16), float(big.x * 0.17), float(big.y * 0.22)});
         }
     } else {
         // UPanelWidget::InsertChildAt is C++-only in this engine build (tools/check_reflection.py); AddChild is the
@@ -389,9 +389,9 @@ void BuildChat(Box& left) {
     Section(g.chatBox, "CHAT", 0);
     frame.Height(kChatHeight);
     border.Color(style::kMenuFrame);
-    border.Padding({2, 2, 2, 2});
+    border.Padding({1, 1, 1, 1});
     border.Content(panel);
-    panel.Color(style::kMenuBg);
+    panel.Color(style::kMenuCard);
     panel.Padding({10, 6, 10, 6});
     panel.Content(g.chatScroll);
     frame.Content(border).Align(HAlign::Fill, VAlign::Fill);
@@ -435,7 +435,8 @@ void BuildIdleRight() {
     Box head = g.kit.MakeRow(), chips = g.kit.MakeRow(), list = g.kit.MakeScroll();
     if (!head || !chips || !list) { HSM_LOG("ui: the lobby browser could not be made"); return; }
     AddToVerticalBox(col, head, 0);
-    Text title = NewText("PUBLIC LOBBIES", 15, style::kMenuAccentInk);
+    Text title = NewText(skin::Title("Public Lobbies"), 23, style::kMenuAccentInk);
+    skin::Font(title, skin::Face::Heading);
     if (title) AddToHorizontalBox(head, title, 0, 16).Align(HAlign::Left, VAlign::Center);
     g.browserCount = NewText("", 14, style::kMenuDim);
     if (g.browserCount) AddToHorizontalBox(head, g.browserCount, 1, 12).Align(HAlign::Left, VAlign::Center);
@@ -547,7 +548,7 @@ void BuildAsk(Canvas& root) {
     Fixed width = g.kit.MakeFixed();
     Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
     Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    Text title = NewText("HELP IMPROVE THE MOD?", 30, style::kMenuText);
+    Text title = NewText(skin::Title("Help Improve the Mod?"), 30, style::kMenuAccentInk);
     Text body = NewText("When someone in your lobby files a bug report, or your game crashes, your HSMMod log is sent to the "
                         "maintainers so the bug can be found and fixed.", 17, style::kMenuText);
     Text privacy = NewText("Steam IDs, IP addresses and your Windows user name are removed first. Player names stay. "
@@ -566,13 +567,13 @@ void BuildAsk(Canvas& root) {
     g.ask.Content(width);
     width.Width(760);
     width.Content(frame);
-    frame.Color(style::kMenuAccent);
-    frame.Padding({2, 2, 2, 2});
+    skin::Paint(frame, skin::Art::Note);
+    skin::Pad(frame, skin::Art::Note, {10, 6, 10, 6});
     frame.Content(face);
-    face.Color(style::kMenuPanel);
+    face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(30, 1, {0, 0, 0, 0.85f});
+    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     privacy.Wrap(true); AddToVerticalBox(column, privacy, 10);
@@ -580,69 +581,6 @@ void BuildAsk(Canvas& root) {
     AddToHorizontalBox(buttons, g.askYes.card.button, 0, 14);
     AddToHorizontalBox(buttons, g.askNo.card.button, 0, 0);
     g.ask.Show(false);
-}
-
-// The password question (a locked lobby: clicked in the browser, an invite, or a wrong password): the same modal as the
-// help-improve question, with a text box. JOIN (or Enter) tries the password, CANCEL (or Esc) drops the join.
-// What keeps this machine out of online play, and how to take it out. Made to read like the launcher, which does the same job for those who use it.
-constexpr size_t kBlockLinesShown = 8;
-void BuildBlock(Canvas& root) {
-    g.block = g.kit.MakePanel();
-    Fixed width = g.kit.MakeFixed();
-    Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
-    Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    g.blockList = g.kit.MakeColumn();
-    Text title = NewText("UNSUPPORTED MODS", 30, style::kMenuAccentInk);
-    g.blockIntro = NewText("", 17, style::kMenuText);
-    Text easy = NewText("THE EASY WAY: open the Half Sword launcher and press I. It sets them aside for you, and can put them back. Restart the game afterwards.", 17, style::kMenuWarn);
-    Text manual = NewText("BY HAND: do what each line says, in the folder below, then restart the game.", 16, style::kMenuDim);
-    Text folder = NewText("", 14, style::kMenuDim);
-    g.blockFolder = MakeFlat("OPEN THE FOLDER", 18);
-    g.blockClose = MakeFlat("PLAY ALONE", 18);
-    g.blockTurnOff = MakeFlat("TURN THEM OFF AND RESTART", 18);
-    g.blockDone = NewText("", 16, style::kMenuOk);
-    if (!g.block || !width || !frame || !face || !column || !buttons || !g.blockList || !title || !g.blockIntro || !easy || !manual || !folder || !g.blockFolder.card || !g.blockClose.card) {
-        HSM_LOG("ui: the unsupported mods overlay could not be made; the lobby's status line still says why");
-        g.block = Panel{};
-        return;
-    }
-    root.Add(g.block).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(112);
-    g.block.Color({0, 0, 0, 0.85f});
-    g.block.ContentAlign(HAlign::Center, VAlign::Center);
-    g.block.Content(width);
-    width.Width(860);
-    width.Content(frame);
-    frame.Color(style::kMenuAccent);
-    frame.Padding({2, 2, 2, 2});
-    frame.Content(face);
-    face.Color(style::kMenuPanel);
-    face.Padding({36, 28, 36, 28});
-    face.Content(column);
-    title.Font(30, 1, {0, 0, 0, 0.85f});
-    AddToVerticalBox(column, title, 0);
-    g.blockIntro.Wrap(true); AddToVerticalBox(column, g.blockIntro, 12);
-    easy.Wrap(true); AddToVerticalBox(column, easy, 12);
-    manual.Wrap(true); AddToVerticalBox(column, manual, 12);
-    folder.Wrap(true); {
-        const std::wstring path = ModFilePath(L"");
-        char text[1024] = {};
-        WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, text, sizeof text - 1, nullptr, nullptr);
-        folder.Set(text);
-    } AddToVerticalBox(column, folder, 4);
-    AddToVerticalBox(column, g.blockList, 8);
-    for (size_t i = 0; i < kBlockLinesShown + 1; ++i) {
-        Text t = NewText("", 15, style::kMenuText);
-        if (!t) continue;
-        t.Wrap(true);
-        AddToVerticalBox(g.blockList, t, 6);
-        g.blockLines.push_back(t);
-    }
-    AddToVerticalBox(column, buttons, 20);
-    if (g.blockDone) { g.blockDone.Wrap(true); AddToVerticalBox(column, g.blockDone, 10); }
-    if (g.blockTurnOff.card) AddToHorizontalBox(buttons, g.blockTurnOff.card.button, 0, 14);
-    AddToHorizontalBox(buttons, g.blockFolder.card.button, 0, 14);
-    AddToHorizontalBox(buttons, g.blockClose.card.button, 0, 0);
-    g.block.Show(false);
 }
 
 constexpr const char* kUnrestrictedWarning = "This turns off class balance in the lobbies you host. Fighters can go far past what the game was built for: up to five times most stats. Expect broken fights, "
@@ -670,13 +608,13 @@ void BuildWarn(Canvas& root) {
     g.warn.Content(width);
     width.Width(720);
     width.Content(frame);
-    frame.Color(style::kMenuAccent);
-    frame.Padding({2, 2, 2, 2});
+    skin::Paint(frame, skin::Art::Note);
+    skin::Pad(frame, skin::Art::Note, {10, 6, 10, 6});
     frame.Content(face);
-    face.Color(style::kMenuPanel);
+    face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(30, 1, {0, 0, 0, 0.85f});
+    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     mods.Wrap(true); AddToVerticalBox(column, mods, 10);
@@ -686,77 +624,37 @@ void BuildWarn(Canvas& root) {
     g.warn.Show(false);
 }
 
-// While it's open it's all that takes clicks. true: it is.
-bool HandleBlock(Session& session) {
-    if (g.warnOpen) {
-        const bool on = Clicked(g.warnOn.card), cancel = Clicked(g.warnCancel.card) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-        Paint(g.warnOn.card); Paint(g.warnCancel.card);
-        if (on) { if (g.warnIsHse) session.SetAllowHse(true); else session.SetClassesUnrestricted(true); }
-        if (on || cancel) { g.warnOpen = false; g.warn.Show(false); }
-        return g.warnOpen;
-    }
-    if (!g.block) return false;
-    if (g.blockOpen) {
-        const bool close = Clicked(g.blockClose.card) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-        if (Clicked(g.blockFolder.card)) {
-            // Explorer by process: this DLL loads too early in the game's start to import the shell.
-            std::wstring line = L"explorer.exe \"" + ModFilePath(L"") + L"\"";
-            STARTUPINFOW si{}; si.cb = sizeof si;
-            PROCESS_INFORMATION pi{};
-            if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+// While the warning is open it's all that takes clicks. true: it is.
+bool HandleWarn(Session& session) {
+    game::Lobby& lobby = session.lobby();
+    if (g.warnOpen && g.warnKind == State::WarnKind::Switch && !lobby.SwitchAskPending().lobby) { g.warnOpen = false; g.warn.Show(false); }   // the lobby went away
+    if (!g.warnOpen) return false;
+    const bool on = Clicked(g.warnOn.card), cancelClick = Clicked(g.warnCancel.card), esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    const bool cancel = cancelClick || esc;
+    Paint(g.warnOn.card); Paint(g.warnCancel.card);
+    if (on) {
+        switch (g.warnKind) {
+            case State::WarnKind::Unrestricted: session.SetClassesUnrestricted(true); break;
+            case State::WarnKind::Hse: session.SetAllowHse(true); break;
+            case State::WarnKind::Switch: lobby.ConfirmSwitch(); break;
         }
-        if (g.blockTurnOff.card && !(g.blockModsTxt.empty() && g.blockDlls.empty()) && Clicked(g.blockTurnOff.card)) {
-            const bool ok = game::modrules::TurnOffForNextGame(g.blockModsTxt, g.blockDlls);
-            // The game restarts by itself; if it can't, the player restarts it. Everything comes back when that next game closes.
-            const bool restarting = ok && session.RestartGame(false);
-            g.blockDone.Set(!ok ? "That didn't work. Do it by hand: each line says how."
-                            : restarting ? "Restarting the game without them. They come back when that game closes, and no files were deleted."
-                                         : "Done, but the game couldn't restart itself: restart it to play online. Everything comes back when that game closes.");
-            if (ok) g.blockTurnOff.card.button.Show(false);
-        }
-        if (g.blockTurnOff.card) Paint(g.blockTurnOff.card);
-        Paint(g.blockFolder.card); Paint(g.blockClose.card);
-        if (close) { g.blockOpen = false; g.block.Show(false); }
-        return g.blockOpen;
+    } else if (cancel && g.warnKind == State::WarnKind::Switch) {
+        const bool leave = cancelClick && lobby.SwitchAskPending().rejoin;   // LEAVE LOBBY: out before the host's grace runs out. Esc only closes the question
+        lobby.CancelSwitchAsk();
+        if (leave) lobby.Leave();
     }
-    // At the menu, unless the settings say only a Classes lobby matters. The mod list can take a moment after the game starts.
-    bool ask = session.TakeBlockAttempt();
-    const ULONGLONG now = GetTickCount64();
-    if (!ask && session.ModBlockAlways() && !g.blockShownOnce && !session.lobby().InLobby() && g.blockChecks < 30 && now >= g.blockNextCheck) {
-        g.blockNextCheck = now + 2000;
-        ++g.blockChecks;
-        ask = true;
-    }
-    if (!ask) return false;
-    const std::vector<ModBlockLine> lines = session.ModBlock();
-    if (lines.empty()) return false;
-    g.blockShownOnce = true;
-    g.blockModsTxt.clear();
-    g.blockDlls.clear();
-    for (const ModBlockLine& l : lines) {
-        if (!l.modsTxtName.empty()) g.blockModsTxt.push_back(l.modsTxtName);
-        if (!l.setAsideFile.empty()) g.blockDlls.push_back(l.setAsideFile);
-    }
-    if (g.blockTurnOff.card) g.blockTurnOff.card.button.Show(!g.blockModsTxt.empty() || !g.blockDlls.empty());
-    if (g.blockDone) g.blockDone.Set("");
-    g.blockIntro.Set(ModBlockIntro(lines, session.ModBlockAlways()));
-    for (size_t i = 0; i < g.blockLines.size(); ++i) {
-        if (i < lines.size() && i < kBlockLinesShown) g.blockLines[i].Set(lines[i].what + ": " + lines[i].how);
-        else if (i == kBlockLinesShown && lines.size() > kBlockLinesShown) g.blockLines[i].Set("and " + std::to_string(lines.size() - kBlockLinesShown) + " more, the same way.");
-        else g.blockLines[i].Set("");
-    }
-    g.blockOpen = true;
-    g.block.Show(true);
-    HSM_LOG("ui: showing the unsupported mods overlay (%u items)", unsigned(lines.size()));
-    return true;
+    if (on || cancel) { g.warnOpen = false; g.warn.Show(false); }
+    return g.warnOpen;
 }
 
+// The password question (a locked lobby: clicked in the browser, an invite, or a wrong password): the same modal as the
+// help-improve question, with a text box. JOIN (or Enter) tries the password, CANCEL (or Esc) drops the join.
 void BuildPassword(Canvas& root) {
     g.pw = g.kit.MakePanel();
     Fixed width = g.kit.MakeFixed();
     Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
     Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    Text title = NewText("THIS LOBBY IS LOCKED", 30, style::kMenuText);
+    Text title = NewText(skin::Title("This Lobby Is Locked"), 30, style::kMenuAccentInk);
     Text body = NewText("Type the lobby's password to join. The host gave it to you.", 17, style::kMenuText);
     g.pwNote = NewText("", 17, style::kMenuWarn);
     g.pwText = g.kit.MakeEditBox();
@@ -773,13 +671,13 @@ void BuildPassword(Canvas& root) {
     g.pw.Content(width);
     width.Width(620);
     width.Content(frame);
-    frame.Color(style::kMenuAccent);
-    frame.Padding({2, 2, 2, 2});
+    skin::Paint(frame, skin::Art::Note);
+    skin::Pad(frame, skin::Art::Note, {10, 6, 10, 6});
     frame.Content(face);
-    face.Color(style::kMenuPanel);
+    face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(30, 1, {0, 0, 0, 0.85f});
+    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     g.pwText.Hint("Password");
@@ -843,7 +741,7 @@ StepperView MakeStepper(Fixed& valueBox) {
     Box text = g.kit.MakeColumn();
     valueBox = g.kit.MakeFixed();
     v.label = NewText("", 17, style::kMenuText); v.value = NewText("", 17, style::kMenuText); v.hint = NewText("", 13, style::kMenuDim);
-    v.prev = MakeFlat("<", 17, {12, 2, 12, 2}); v.next = MakeFlat(">", 17, {12, 2, 12, 2});
+    v.prev = g.maker.MakeArrow(false, 17); v.next = g.maker.MakeArrow(true, 17);
     if (!v.box || !text || !valueBox || !v.label || !v.value || !v.hint || !v.prev.card || !v.next.card) return StepperView{};
     v.value.Align(Justify::Center);
     v.hint.Wrap(true);
@@ -921,8 +819,6 @@ void BuildModsTab(Box& page) {
     for (Text* t : {&g.modSummary, &g.modStatus}) if (*t) { t->Wrap(true); AddToVerticalBox(page, *t, 8); }
     g.classUnrestricted = MakeFlat("[  ] UNRESTRICTED", 15, {10, 4, 10, 4});
     AddFlat(page, g.classUnrestricted, 12);
-    g.classAllowHse = MakeFlat("[  ] ALLOW HS ENHANCER", 15, {10, 4, 10, 4});
-    AddFlat(page, g.classAllowHse, 6);
     Section(page, "IN THIS LOBBY", 18);
     for (size_t i = 0; i < kModItemRows; ++i) {
         ModItemView v;
@@ -970,7 +866,8 @@ void BuildInRight() {
         TabView& t = g.tabs[i];
         Box body = g.kit.MakeColumn();
         Fixed lineBox = g.kit.MakeFixed();
-        t.label = NewText(kTabNames[i], 18, style::kMenuDim);
+        t.label = NewText(skin::Title(kTabNames[i]), 25, style::kMenuDim);
+        skin::Font(t.label, skin::Face::Heading);
         t.line = g.kit.MakePanel();
         if (!body || !lineBox || !t.label || !t.line) continue;
         AddToVerticalBox(body, t.label, 0);
@@ -1007,10 +904,10 @@ void BuildInRight() {
     g.hostOnly = NewText("", 14, style::kMenuDim);
     g.waiting = NewText("", 15, style::kMenuDim);
     for (Text* t : {&g.summary, &g.hostOnly, &g.waiting}) if (*t) { t->Wrap(true); AddToVerticalBox(footText, *t, 2); }
-    g.startLabel = NewText("START MATCH", 24, style::kMenuText);
+    g.startLabel = NewText("START MATCH", 28, style::kMenuLight);
     g.start = MakeCard(g.startLabel, {38, 12, 38, 12});
     if (g.start) {
-        g.startLabel.Font(24, 1, {0, 0, 0, 0.85f});
+        g.startLabel.Font(28, 1, {0, 0, 0, 0.6f});
         g.startLabel.Align(Justify::Center);
         AddToHorizontalBox(foot, g.start.button, 0, 0).Align(HAlign::Right, VAlign::Center);
     }
@@ -1100,7 +997,7 @@ void BuildClassView(Box& rowOf) {
         Fixed valueBox = g.kit.MakeFixed();
         v.value = NewText("", 15, style::kMenuText);
         v.name = MakeFlat(ClassField(ClassSheet{}, i).label, 14, {8, 2, 8, 2});
-        v.prev = MakeFlat("<", 15, {10, 1, 10, 1}); v.next = MakeFlat(">", 15, {10, 1, 10, 1});
+        v.prev = g.maker.MakeArrow(false, 15); v.next = g.maker.MakeArrow(true, 15);
         if (!v.box || !valueBox || !v.value || !v.name.card || !v.prev.card || !v.next.card) { g.classFields.push_back(ClassRow{}); continue; }
         v.value.Align(Justify::Center);
         valueBox.Width(120);
@@ -1134,6 +1031,13 @@ void BuildSettingsView(Box& col) {
                          "crashes. Steam IDs, IPs and your Windows user name are removed; player names stay. Off unless you turn it on.",
                          14, style::kMenuDim);
     if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(col, g.helpNote, 8); }
+    // MENU LOOK: the game's own art, or the earlier dark look. The widgets are built once, so it takes effect at the next start.
+    Section(col, "MENU LOOK", 28);
+    g.lookClassic = style::ClassicMenus();
+    g.lookToggle = MakeFlat("", 17);
+    AddFlat(col, g.lookToggle, 8);
+    g.lookNote = NewText("", 14, style::kMenuDim);
+    if (g.lookNote) { g.lookNote.Wrap(true); AddToVerticalBox(col, g.lookNote, 8); }
     // VOICE CHAT: the same block as the in-match Esc menu (ui/mp_widgets.h); shown with or without a lobby.
     g.voice.Build(g.maker, col, 28);
 }
@@ -1144,8 +1048,8 @@ Box AddColumn(Box& row, float fill, float padRight, bool scroll) {
     Box outer = scroll ? g.kit.MakeScroll() : g.kit.MakeColumn();
     Box inner = g.kit.MakeColumn();
     if (!p || !outer || !inner) return Box{};
-    p.Color(style::kMenuPanel);
-    p.Padding({24, 20, 24, 20});
+    skin::Paint(p, skin::Art::Scroll);
+    skin::Pad(p, skin::Art::Scroll, {22, 12, 22, 18});   // inside the scroll's rods and edges
     p.Content(outer);
     AddToHorizontalBox(row, p, fill, padRight).Align(HAlign::Fill, VAlign::Fill);
     if (scroll) { outer.Add(inner).Padding({0, 0, 12, 0}); return inner; }
@@ -1174,20 +1078,35 @@ bool BuildPanel() {
         return false;
     }
     root.Add(g.panel).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(100);
-    g.panel.Color(style::kMenuBg);
-    g.panel.Padding({64, 40, 64, 30});
+    skin::Paint(g.panel, skin::Art::Backdrop, style::kMenuBackdrop);
+    g.panel.Padding({48, 26, 48, 22});
     g.panel.Content(page);
+    // The header and the footer each sit on a band of the game's old paper (the page's text is ink throughout).
+    Panel headBand = g.kit.MakePanel(), footBand = g.kit.MakePanel();
+    Box head = g.kit.MakeColumn(), foot = g.kit.MakeColumn();
+    if (!headBand || !footBand || !head || !foot) {
+        HSM_LOG("ui: multiplayer page widgets could not be made; panel disabled");
+        g.panel = Panel{};
+        return false;
+    }
+    skin::Paint(headBand, skin::Art::Sheet);
+    skin::Pad(headBand, skin::Art::Sheet, {30, 4, 30, 4});
+    headBand.Content(head);
+    AddToVerticalBox(page, headBand, 0);
+    skin::Paint(footBand, skin::Art::Sheet);
+    skin::Pad(footBand, skin::Art::Sheet, {30, 2, 30, 2});
+    footBand.Content(foot);
 
     // Header: the title, our Steam name, the state pill (outlined) and the version badge; under it the accent rule and
     // the lobby's last message.
-    AddToVerticalBox(page, header, 0);
-    g.title = NewText("MULTIPLAYER", 40, style::kMenuText);
+    AddToVerticalBox(head, header, 0);
+    g.title = NewText(skin::Title("Multiplayer"), 50, style::kMenuAccentInk);
     g.me = NewText("", 17, style::kMenuDim);
     g.pillText = NewText("", 15, style::kMenuDim);
     g.badge = NewText("", 14, style::kMenuDim);
-    if (g.title) { g.title.Font(40, 1, {0, 0, 0, 0.85f}); AddToHorizontalBox(header, g.title, 0, 28).Align(HAlign::Left, VAlign::Center); }
+    if (g.title) AddToHorizontalBox(header, g.title, 0, 28).Align(HAlign::Left, VAlign::Center);
     if (g.me) AddToHorizontalBox(header, g.me, 1, 20).Align(HAlign::Left, VAlign::Center);
-    if (g.pillText) { g.pill.Padding({14, 4, 14, 4}); g.pill.Color(style::kMenuBg); g.pill.Content(g.pillText); }
+    if (g.pillText) { skin::Paint(g.pill, skin::Art::Card); skin::Pad(g.pill, skin::Art::Card, {10, 6, 10, 6}); g.pill.Content(g.pillText); }
     g.pillFrame.Padding({1, 1, 1, 1});
     g.pillFrame.Content(g.pill);
     AddToHorizontalBox(header, g.pillFrame, 0, 18).Align(HAlign::Left, VAlign::Center);
@@ -1195,11 +1114,11 @@ bool BuildPanel() {
     rule.Height(3);
     rule.Content(ruleLine);
     ruleLine.Color(style::kMenuAccent);
-    AddToVerticalBox(page, rule, 12);
+    AddToVerticalBox(head, rule, 10);
     g.status = NewText("", 15, style::kMenuDim);
-    if (g.status) AddToVerticalBox(page, g.status, 8);
+    if (g.status) AddToVerticalBox(head, g.status, 6);
     g.notice = NewText("", 20, style::kMenuAccentInk);   // Session::TakeNotice: kicked, banned, refused; until the page closes
-    if (g.notice) { g.notice.Wrap(true); g.notice.Show(false); AddToVerticalBox(page, g.notice, 8); }
+    if (g.notice) { g.notice.Wrap(true); g.notice.Show(false); AddToVerticalBox(head, g.notice, 8); }
     g.updateNote = NewText("", 15, style::kMenuOk);   // net/update_check.h: only when a newer release exists
     g.updateRow = g.kit.MakeRow();
     g.updateNow = MakeFlat("UPDATE NOW", 15, {14, 5, 14, 5});
@@ -1208,10 +1127,10 @@ bool BuildPanel() {
         AddToHorizontalBox(g.updateRow, g.updateNote, 1, 14).Align(HAlign::Fill, VAlign::Center);
         AddToHorizontalBox(g.updateRow, g.updateNow.card.button, 0, 0).Align(HAlign::Left, VAlign::Center);
         g.updateRow.Show(false);
-        AddToVerticalBox(page, g.updateRow, 6);
+        AddToVerticalBox(head, g.updateRow, 6);
     } else if (g.updateNote) {
         g.updateNote.Show(false);
-        AddToVerticalBox(page, g.updateNote, 6);
+        AddToVerticalBox(head, g.updateNote, 6);
     }
 
     FillVerticalBox(page, body, 16);
@@ -1239,7 +1158,6 @@ bool BuildPanel() {
     g.settingsView.Show(false);
     BuildAsk(root);
     BuildPassword(root);
-    BuildBlock(root);
     BuildWarn(root);
 
     // REPORT A BUG opens a text box over the footer: SEND and CANCEL; the text becomes a public GitHub issue
@@ -1253,12 +1171,13 @@ bool BuildPanel() {
         g.reportText.Hint("What went wrong? One line is enough");
         AddToHorizontalBox(g.reportBox, g.reportText, 1, 8).Align(HAlign::Fill, VAlign::Center);
         AddFlatH(g.reportBox, g.reportSend, 8); AddFlatH(g.reportBox, g.reportCancel, 0);
-        AddToVerticalBox(page, g.reportBox, 12);
+        AddToVerticalBox(foot, g.reportBox, 0);
         g.reportBox.Show(false);
     }
-    if (g.reportNote) { g.reportNote.Wrap(true); AddToVerticalBox(page, g.reportNote, 6); }
+    if (g.reportNote) { g.reportNote.Wrap(true); AddToVerticalBox(foot, g.reportNote, 4); }
 
-    AddToVerticalBox(page, footer, 14);
+    AddToVerticalBox(foot, footer, 8);
+    AddToVerticalBox(page, footBand, 14);
     g.close = MakeFlat("BACK", 16);
     g.settingsOpen = MakeFlat("SETTINGS", 16);
     g.classOpen = MakeFlat("YOUR CLASS", 16);
@@ -1339,10 +1258,12 @@ LobbyLocal Local(game::Lobby& lobby) {
         LobbyFound o;
         o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
         o.mods = f.mods;
+        o.switchable = f.switchable;
+        if (f.switchable) o.switchTag = SwitchTag(f.plan);
         if (f.pack.any()) {   // the host's modpack, against this machine's files now (the hashes may still be running)
             const PackVerdict v = game::modpack::Check(f.pack).verdict;
             o.pack = PackRowText(f.pack, v);
-            if (o.compatible && v != PackVerdict::Ok) { o.compatible = false; o.reason = PackRowReason(v); }
+            if (v != PackVerdict::Ok) { o.switchable = false; if (o.compatible) { o.compatible = false; o.reason = PackRowReason(v); } }   // no restart fixes a missing pack
         }
         l.found.push_back(o);
     }
@@ -1380,8 +1301,9 @@ void Draw(const LobbyScene& s) {
     if (s.in) g.classShown = false;
     else if (g.tab == kClassesTab) g.tab = 0;
     g.pillText.Set(s.pill.text);
-    g.pillText.Color(s.pill.color);
-    g.pillFrame.Color(style::Faded(s.pill.color, 0.7f));
+    g.pillText.Color(style::OnParchment(s.pill.color));
+    // On the game's button art the ink says the state; the plain pill keeps its coloured outline.
+    g.pillFrame.Color(skin::Loaded(skin::Art::Card) ? kClear : style::Faded(style::OnParchment(s.pill.color), 0.7f));
     g.me.Set(s.me);
     g.badge.Set(s.badge);
     g.status.Set(s.status);
@@ -1426,12 +1348,12 @@ void Draw(const LobbyScene& s) {
         v.detail.Set(r.detail);
         v.detail.Show(!r.detail.empty());
         v.players.Set(r.players);
-        v.note.Set(r.joinable ? "JOIN" : r.note.text);
-        v.note.Color(r.joinable ? style::kMenuOk : style::kMenuWarn);
+        v.note.Set(r.joinable && !r.restart ? "JOIN" : r.note.text);   // a restart row keeps its "Restart: 2 mods off"
+        v.note.Color(r.joinable && !r.restart ? style::kMenuOk : style::kMenuWarn);
         Live(v.card, r.joinable, 0.55f);        // incompatible and full lobbies stay readable, dimmed, with the reason
     }
 
-    g.playersTitle.Set(s.playersTitle.empty() ? "PLAYERS" : s.playersTitle);
+    g.playersTitle.Set(skin::Title(s.playersTitle.empty() ? "PLAYERS" : s.playersTitle));
     for (size_t i = 0; i < g.members.size(); ++i) {
         MemberView& v = g.members[i];
         bool show = i < s.roster.size();
@@ -1569,7 +1491,7 @@ void DrawChat(bool in) {
         if (!show) continue;
         const ChatEntry& e = history[first + i];
         r.name.Set(e.name);
-        r.name.Color(e.ink);
+        r.name.Color(style::OnParchment(e.ink));
         r.text.Set(e.text);
     }
     if (ChatLinesAdded() != g.chatSeen) { g.chatSeen = ChatLinesAdded(); g.chatScroll.ScrollToEnd(); }
@@ -1586,10 +1508,10 @@ LobbyModsLocal ModsLocal(Session& session, game::Lobby& lobby) {
         l.chosen = game::modrules::Chosen();
     } else {
         l.rule = lobby.RoomRule(&l.hostHasRule);
-        // A host with mod_rules=0 announces Anything with cheats allowed (modrules::LobbyTick) and sends no SessionMods.
+        // A host with mod_rules=0 announces Anything with HS Enhancer allowed (modrules::LobbyTick) and sends no SessionMods.
         // Until a list comes, that rule means it checks nothing: say so rather than wait. A host that chose the same rule
         // sends the list on admission, and from then on the tab shows it like any other.
-        const ModRule open = [] { ModRule r = NoRule(); r.blockCheats = false; return r; }();
+        const ModRule open = [] { ModRule r = NoRule(); r.blockHse = false; return r; }();
         if (l.rule == open && !l.haveList) l.hostHasRule = false;
     }
     return l;
@@ -1707,7 +1629,7 @@ void UpdateOpenLabel(Session& session) {
     game::Lobby& lobby = session.lobby();
     std::string label = "MULTIPLAYER";
     if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(lobby.MaxPlayers());
-    g.openButton.label.Set(label);
+    g.openButton.label.Set(g.openButton.plain ? skin::Title(label) : label);   // the game's ribbons are titled, not shouted
 }
 
 // The lobby chat box: SEND, or Enter while the box has the keyboard (or lost it to that Enter this very frame, since the
@@ -1826,11 +1748,17 @@ void HandlePassword(Session& session, bool host) {
     }
 }
 
-// START: the accent face, a little toward its ink under the mouse.
+// START: the game's red button, brighter under the mouse (without the art: the accent face, a little toward its ink).
 void PaintStart() {
     if (!g.start) return;
     const bool hover = g.start.button.Hovered();
     g.start.glow += ((hover ? 1.f : 0.f) - g.start.glow) * 0.18f;
+    if (skin::Loaded(skin::Art::CardRed)) {
+        skin::Paint(g.start.frame, skin::Art::CardRed, mp::Mix({0.85f, 0.85f, 0.85f, 1}, {1, 1, 1, 1}, g.start.glow));
+        g.start.face.Color(kClear);
+        return;
+    }
+    g.start.frame.Texture(Look{});
     g.start.frame.Color(mp::Mix(style::kMenuAccent, style::kMenuAccentInk, g.start.glow));
     g.start.face.Color(mp::Mix(style::kMenuAccent, style::kMenuAccentInk, g.start.glow * kStartGlow));
 }
@@ -1895,6 +1823,23 @@ void HandleClicks(Session& session) {
         g.nextText = 0;
         return;
     }
+    // The switch-off question: a lobby's rule refuses mods this machine can turn off for a restart (gameplay/lobby.cpp
+    // SwitchAsk), at a join or when the host changed the rule under us. HandleWarn takes the answer.
+    if (!g.warnOpen && g.warn) if (const game::Lobby::SwitchAsk& ask = lobby.SwitchAskPending(); ask.lobby) {
+        g.warnKind = State::WarnKind::Switch;
+        g.warnTitle.Set(ask.rejoin ? "THIS LOBBY'S MODS CHANGED" : ask.name.empty() ? "JOINING THE LOBBY" : "JOINING " + ask.name);
+        std::string body = "Host allows: " + ask.ruleText + ". These turn off until the game closes:";
+        for (const std::string& line : SwitchSummary(ask.plan, 6)) body += "\n   " + line;
+        g.warnBody.Set(body);
+        g.warnMods.Set(ask.rejoin ? "The game restarts and comes back to this lobby. LEAVE LOBBY keeps everything on; the host removes players who no longer fit after a minute. Nothing is deleted."
+                                  : "The game restarts and joins the lobby on its own. Your mods are back the next time you start the game. Nothing is deleted.");
+        g.warnOn.label.Set(ask.rejoin ? "RESTART AND REJOIN" : "RESTART AND JOIN");
+        g.warnCancel.label.Set(ask.rejoin ? "LEAVE LOBBY" : "CANCEL");
+        g.warnOpen = true; g.warn.Show(true);
+        HSM_LOG("ui: asking about a restart with %s for %s", SwitchWords(ask.plan).c_str(), ask.rejoin ? "this lobby's new rule" : "the lobby");
+        if (!g.panelOpen) openPage();                  // an invite arrived on the bare main menu
+        return;
+    }
     if (openClicked && !g.panelOpen && !session.HelpImproveAsked() && g.ask) {
         g.askOpen = true; g.ask.Show(true);
         g.escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
@@ -1952,6 +1897,19 @@ void HandleClicks(Session& session) {
     g.helpToggle.card.selected = help;
     if (act(Clicked(g.updateNow.card), update::CanInstall())) update::StartInstall();
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
+    if (g.lookToggle.card) {
+        if (act(Clicked(g.lookToggle.card), g.settingsShown)) {
+            g.lookClassic = !g.lookClassic;
+            g.lookSaved = SaveUiStyle(g.lookClassic);
+            HSM_LOG("ui: menu look set to %s for the next start%s", g.lookClassic ? "classic" : "game", g.lookSaved ? "" : " (HSMMod.ini could not be written)");
+        }
+        g.lookToggle.label.Set(g.lookClassic ? "MENU LOOK: CLASSIC" : "MENU LOOK: GAME ART");
+        const bool pending = g.lookClassic != style::ClassicMenus();
+        g.lookNote.Set(!g.lookSaved ? "HSMMod.ini could not be written, so this will not stick. Set ui_style in it by hand."
+                       : pending ? "Restart the game to see it."
+                                 : "Game art: the game's own parchment, buttons and lettering. Classic: the earlier dark look.");
+        g.lookNote.Color(!g.lookSaved || pending ? style::kMenuWarn : style::kMenuDim);
+    }
     // MODS: the checkboxes for this machine's lobbies, while that tab is what's on screen.
     if (s.in && g.tab == kModsTab && !g.settingsShown) {
         const bool unrestricted = session.ClassesUnrestricted();
@@ -1961,30 +1919,14 @@ void HandleClicks(Session& session) {
         g.classUnrestricted.label.Color(canSet ? style::kMenuText : style::kMenuDim);
         if (act(Clicked(g.classUnrestricted.card), canSet)) {
             if (unrestricted) session.SetClassesUnrestricted(false);
-            else if (g.warn) {   // it says what this is first. HandleBlock takes the answer
-                g.warnIsHse = false;
-                g.warnTitle.Set("UNRESTRICTED CLASSES");
+            else if (g.warn) {   // it says what this is first. HandleWarn takes the answer
+                g.warnKind = State::WarnKind::Unrestricted;
+                g.warnOn.label.Set("TURN IT ON"); g.warnCancel.label.Set("CANCEL");
+                g.warnTitle.Set(skin::Title("UNRESTRICTED CLASSES"));
                 g.warnBody.Set(kUnrestrictedWarning);
-                g.warnMods.Set("Outside mods and HS Enhancer stay blocked unless you allow it. The Half Wolverine options still need Half Wolverine.");
+                g.warnMods.Set("HS Enhancer stays blocked unless the rule above allows it. The Half Wolverine options still need Half Wolverine.");
                 g.warnOpen = true; g.warn.Show(true);
             }
-        }
-        const bool allowHse = session.AllowHse();
-        if (g.classAllowHse.card) {
-            g.classAllowHse.label.Set(std::string(allowHse ? "[X]" : "[  ]") + " ALLOW HS ENHANCER");
-            g.classAllowHse.label.Color(canSet ? style::kMenuText : style::kMenuDim);
-            if (act(Clicked(g.classAllowHse.card), canSet)) {
-                if (allowHse) session.SetAllowHse(false);
-                else if (g.warn) {
-                    g.warnIsHse = true;
-                    g.warnTitle.Set("ALLOW HS ENHANCER");
-                    g.warnBody.Set("The true unrestricted. Players with HS Enhancer can use all of it in the lobbies you host: any value, and spawning things. Classes are off for them, and no limits hold them. "
-                                   "Everyone else plays Unrestricted Classes. Expect crashes, and only do this with people you trust.");
-                    g.warnMods.Set("This also turns on Unrestricted. Everyone who joins is told, and the K card shows what each player reports running. Other mods stay blocked.");
-                    g.warnOpen = true; g.warn.Show(true);
-                }
-            }
-            Paint(g.classAllowHse.card);
         }
         Paint(g.classUnrestricted.card);
     }
@@ -2174,7 +2116,18 @@ void HandleClicks(Session& session) {
         if (Clicked(v.next.card)) dir = 1;
         const ModRuleView& row = g.modsScene.rules[i];
         if (!act(dir != 0, g.tab == kModsTab && s.in && row.enabled && lobby.IsHost())) continue;
-        game::modrules::SetChoice(StepModRule(game::modrules::Chosen(), row.id, dir));
+        const ModChoice next = StepModRule(game::modrules::Chosen(), row.id, dir);
+        if (row.id != ModRuleRow::Hse) { game::modrules::SetChoice(next); continue; }
+        // Allowing HS Enhancer where classes hold is the true unrestricted: the warning says so first, HandleWarn takes the answer.
+        if (!next.blockHse && IsClassesPreset(next.preset) && g.warn && session.CanSetUnrestricted()) {
+            g.warnKind = State::WarnKind::Hse;
+            g.warnOn.label.Set("TURN IT ON"); g.warnCancel.label.Set("CANCEL");
+            g.warnTitle.Set(skin::Title("ALLOW HS ENHANCER"));
+            g.warnBody.Set("The true unrestricted. Players with HS Enhancer can use all of it in the lobbies you host: any value, and spawning things. Classes are off for them, and no limits hold them. "
+                           "Everyone else plays Unrestricted Classes. Expect crashes, and only do this with people you trust.");
+            g.warnMods.Set("This also turns on Unrestricted. Everyone who joins is told, and the K card shows what each player reports running.");
+            g.warnOpen = true; g.warn.Show(true);
+        } else session.SetAllowHse(!next.blockHse);
     }
     for (size_t i = 0; i < g.maps.size(); ++i)
         if (act(Clicked(g.maps[i].card), g.tab == 2 && i < s.maps.size() && s.maps[i].enabled))
@@ -2192,7 +2145,7 @@ void HandleClicks(Session& session) {
 
     // Paint after the polls (a card's Hovered() is the one its Clicked() just saw).
     for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.settingsOpen, &g.alone, &g.reportOpen,
-                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.updateNow}) Paint(f->card);
+                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.lookToggle, &g.updateNow}) Paint(f->card);
     for (Flat& f : g.chips) Paint(f.card);
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Paint(h->card);
     for (BrowserView& v : g.rows) Paint(v.card);
@@ -2239,7 +2192,7 @@ void Tick(Session& session, UObject* worldContext) {
         g.notice.Set(why); g.notice.Show(true);
         g.panelOpen = true; g.panel.Show(true); g.nextText = 0;
     }
-    if (!HandleBlock(session)) HandleClicks(session);
+    if (!HandleWarn(session)) HandleClicks(session);
     if (now >= g.nextText) {
         g.nextText = now + 250;
         if (g.panelOpen || session.lobby().InLobby()) FixClassPick(session);

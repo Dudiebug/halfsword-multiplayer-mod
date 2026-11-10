@@ -60,7 +60,7 @@ void FuzzPak(const uint8_t* d, size_t n) {
 }
 
 void TryAll(const uint8_t* d, size_t n) {
-    Try<Hello>(d, n); Try<Welcome>(d, n); Try<Reject>(d, n); Try<InputFrame>(d, n); Try<Snapshot>(d, n);
+    Try<Hello>(d, n); Try<Welcome>(d, n); Try<Reject>(d, n); Try<InputFrame>(d, n); Try<InputBatch>(d, n); Try<Snapshot>(d, n);
     Try<Event>(d, n); Try<Travel>(d, n); Try<Ready>(d, n); Try<Spawn>(d, n); Try<Despawn>(d, n); Try<BlobChunk>(d, n);
     Try<MatchInfo>(d, n); Try<Kill>(d, n);
     Try<PoseMsg>(d, n); Try<VitalsMsg>(d, n); Try<HitClaimMsg>(d, n); Try<HitFxMsg>(d, n);
@@ -103,7 +103,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     Welcome w; w.map = "/Game/Maps/Arenas/Map_Arena_Yard"; w.modBuild = "0.6.4"; w.flags = kWelcomeMesh; s.push_back(Encode(w));
     Reject r; r.reason = RejectReason::Full; s.push_back(Encode(r));
     r.reason = RejectReason::Banned; s.push_back(Encode(r));
-    r.reason = RejectReason::ModsNotAllowed; r.detail = "This lobby blocks cheats: remove HSEnhancer."; s.push_back(Encode(r));
+    r.reason = RejectReason::ModsNotAllowed; r.detail = "This lobby blocks HS Enhancer unless HSMMod can lock it: remove it, or join a lobby that allows it."; s.push_back(Encode(r));
     {   // rev 40: mod rules and challenge-response
         ModListMsg ml; ml.official = Official::Yes; ml.report.ue4ss = true; ml.report.complete = true;
         ModItem a; a.kind = ModKind::MapPak; a.name = "Tavern.pak"; a.hashed = true; a.sha[0] = 1; ml.report.items.push_back(a);
@@ -116,6 +116,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
         ma.status = AnswerStatus::Unable; s.push_back(Encode(ma));
     }
     InputFrame f; f.seq = 7; f.axes[0] = 1; f.buttons = 5; s.push_back(Encode(f));
+    { InputBatch b; b.entity = 2; b.delayMs = 33; b.frames.push_back({1000, f}); InputFrame g = f; g.seq = 8; b.frames.push_back({1017, g}); s.push_back(Encode(b)); }
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
     Event e; e.kind = EventKind::Died; e.a = 2; s.push_back(Encode(e));
     Travel t; t.level = "/Game/Maps/Map_Hub_Tavern_Frank"; t.settings.push_back({"Free Mode Activated", {1}}); s.push_back(Encode(t));

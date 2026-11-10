@@ -1,8 +1,8 @@
 // The lobby's MODS tab (docs/PLAN_MOD_RULES.md 5), as data: the lobby's mod rule (three rows the host steps: preset,
-// block cheats, official builds only), then one row per mod anyone in the session runs, from the host's SessionMods
-// (session/hsm_mod_rules.h): its kind, what the known-mods table says about it, who runs it, and why this lobby's rule
-// refuses it. The host also sees who it is still checking and who must fix their mods. ui/menu.cpp fills a
-// LobbyModsLocal and draws the scene; the stepper arithmetic is here too.
+// block HS Enhancer, official builds only), then one row per mod anyone in the session runs, from the host's SessionMods
+// (session/hsm_mod_rules.h): its kind, who runs it, and why this lobby's rule refuses it. No mod is judged good or bad
+// here: HS Enhancer is named, the rest are the player's mods. The host also sees who it is still checking and who must
+// fix their mods. ui/menu.cpp fills a LobbyModsLocal and draws the scene; the stepper arithmetic is here too.
 #pragma once
 #include "session/hsm_mod_rules.h"
 #include <algorithm>
@@ -39,7 +39,7 @@ struct LobbyModsLocal {
     std::vector<ModPending> pending;            // host only
 };
 
-enum class ModRuleRow : uint8_t { Preset, Cheats, Official };
+enum class ModRuleRow : uint8_t { Preset, Hse, Official };
 inline constexpr size_t kModRuleRows = 3;
 enum class ModTone : uint8_t { Ok, Dim, Warn, Bad };   // the page: green, dim, amber, the accent's red
 
@@ -52,7 +52,7 @@ struct ModRowView {
 
 struct LobbyModsScene {
     std::array<ModRuleView, kModRuleRows> rules{};
-    std::string summary;                 // "In force: Maps only, cheats blocked"
+    std::string summary;                 // "In force: Maps only, HS Enhancer blocked."
     std::string status;                  // why there is no list or no rule; empty when all is well
     std::vector<ModRowView> items;       // refused first, then by kind and name, then required mods nobody runs; UE4SS's stock mods left out unless refused
     std::string empty;                   // a list came and nobody runs a mod
@@ -61,25 +61,20 @@ struct LobbyModsScene {
     std::string privacy;
 };
 
-// The verdict column: what the known-mods table says, or what the kind says when it says nothing.
-inline const char* ModVerdictText(KnownVerdict v, ModKind k) {
-    switch (v) {
-        case KnownVerdict::Cheat: return "CHEAT";
-        case KnownVerdict::Gameplay: return "gameplay";
-        case KnownVerdict::Suspect: return "suspect";
-        case KnownVerdict::Cosmetic: return "cosmetic";
-        case KnownVerdict::Stock: return "stock";
-        case KnownVerdict::Unknown: break;
-    }
+// The verdict column: HS Enhancer by name, otherwise what the kind says. `hse`: IsHseItem. A locked HS Enhancer says so.
+inline const char* ModVerdictText(bool hse, ModKind k) {
+    if (hse) return "HS ENHANCER";
+    if (k == ModKind::HseLocked) return "HS Enhancer, locked";
     if (k == ModKind::MapPak) return "map";
     if (k == ModKind::Proxy) return "overlay or loader";
-    return "unknown";
+    return "mod";
 }
 
-inline ModTone ModToneOf(KnownVerdict v, ModKind k, bool refused) {
-    if (refused || v == KnownVerdict::Cheat) return ModTone::Bad;
-    if (v == KnownVerdict::Gameplay || v == KnownVerdict::Suspect) return ModTone::Warn;
-    if (v == KnownVerdict::Cosmetic || v == KnownVerdict::Stock || k == ModKind::MapPak) return ModTone::Ok;
+// Refused: red. HS Enhancer where it is allowed: amber, so everyone sees who runs it. A map: green. The rest: dim.
+inline ModTone ModToneOf(bool hse, ModKind k, bool refused) {
+    if (refused) return ModTone::Bad;
+    if (hse) return ModTone::Warn;
+    if (k == ModKind::MapPak) return ModTone::Ok;
     return ModTone::Dim;
 }
 
@@ -116,7 +111,7 @@ inline std::string ModHolders(const LobbyModsLocal& l, uint16_t mask) {
 
 inline std::string ModRefusedNote(RuleFail f, ModPreset p) {
     switch (f) {
-        case RuleFail::Cheat: return "refused: a known cheat";
+        case RuleFail::Hse: return "refused: HS Enhancer is blocked here";
         case RuleFail::NoMods: return "refused: Vanilla takes no mods";
         case RuleFail::NotAllowed: return std::string("refused: not allowed (") + ModPresetName(p) + ")";
         default: return {};
@@ -133,7 +128,7 @@ inline std::string ModPendingLine(const ModPending& p) {
     if (p.graceSeconds == 0) return {};
     std::string why;
     switch (p.result.fail) {
-        case RuleFail::Cheat: case RuleFail::NoMods: case RuleFail::NotAllowed: why = "runs " + p.result.mod; break;
+        case RuleFail::Hse: case RuleFail::NoMods: case RuleFail::NotAllowed: why = "runs " + p.result.mod; break;
         case RuleFail::Missing: why = "lacks " + p.result.mod; break;
         case RuleFail::TooMany: why = "runs too many mods"; break;
         default: why = "does not fit"; break;
@@ -143,12 +138,12 @@ inline std::string ModPendingLine(const ModPending& p) {
 
 inline const char* ModPresetHint(ModPreset p, bool host) {
     switch (p) {
-        case ModPreset::Vanilla: return "No mods: no map paks, no UE4SS mods.";
-        case ModPreset::MapsOnly: return "Map paks and known cosmetic mods.";
+        case ModPreset::Vanilla: return "No mods: no paks, no UE4SS mods, no proxy DLLs.";
+        case ModPreset::MapsOnly: return "Map paks only.";
         case ModPreset::Bundle: return "Exactly the lobby's modpack.";
-        case ModPreset::Custom: return host ? "Your own mods (or the list in mod_allow in HSMMod.ini)." : "The mods the host listed.";
+        case ModPreset::Custom: return host ? "Same as host: the mods you run (or the list in mod_allow in HSMMod.ini)." : "The host's own mods (or the list it set).";
         case ModPreset::Anything: return "Any mods.";
-        case ModPreset::Classes: return "Native classes. Map paks, content paks and supported UE4SS mods.";
+        case ModPreset::Classes: return "Native classes. Any mods.";
         case ModPreset::Unrestricted: return "Native classes without the power budget. Set with UNRESTRICTED below.";
     }
     return "";
@@ -166,10 +161,10 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
     preset.hint = ModPresetHint(shown.preset, l.host);
     if (l.host && l.rulesOn && shown.preset == ModPreset::Bundle && l.rule.preset == ModPreset::MapsOnly)
         preset.hint += " No modpack is announced, so Maps only applies.";
-    ModRuleView& cheats = s.rules[1];
-    cheats.id = ModRuleRow::Cheats; cheats.label = "Block cheats"; cheats.value = onOff(shown.blockCheats);
-    cheats.hint = "Refuses known cheat mods such as HS Enhancer.";
-    if (l.host && l.rulesOn && shown.blockCheats && !l.rule.blockCheats) cheats.hint = "You run a cheat yourself, so this lobby allows them.";
+    ModRuleView& hse = s.rules[1];
+    hse.id = ModRuleRow::Hse; hse.label = "Block HS Enhancer"; hse.value = onOff(shown.blockHse);
+    hse.hint = "Refuses players who run Half Sword Enhancer.";
+    if (l.host && l.rulesOn && shown.blockHse && !l.rule.blockHse) hse.hint = "You run HS Enhancer yourself, so this lobby allows it.";
     ModRuleView& official = s.rules[2];
     official.id = ModRuleRow::Official; official.label = "Official builds only"; official.value = onOff(shown.officialOnly);
     official.hint = "Only the release HSMMod from GitHub may join.";
@@ -183,17 +178,17 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
 
     if (l.haveList) {
         for (const SessionModEntry& e : l.mods.entries) {
-            const KnownVerdict v = VerdictOf(e.item);
+            const bool hse = IsHseItem(e.item);
             const RuleFail f = live ? ItemRefused(l.rule, e.item) : RuleFail::None;
             if (e.item.kind == ModKind::Ue4ssStock && f == RuleFail::None) continue;
             ModRowView r;
             r.name = e.item.name;
             r.kind = ModKindName(e.item.kind);
-            r.verdict = ModVerdictText(v, e.item.kind);
+            r.verdict = ModVerdictText(hse, e.item.kind);
             r.holders = ModHolders(l, e.slots);
             r.note = ModRefusedNote(f, l.rule.preset);
             r.refused = !r.note.empty();
-            r.tone = ModToneOf(v, e.item.kind, r.refused);
+            r.tone = ModToneOf(hse, e.item.kind, r.refused);
             if (!r.refused && live && (l.rule.preset == ModPreset::Bundle || l.rule.preset == ModPreset::Custom)) {
                 const uint16_t lacking = uint16_t(l.present & ~e.slots);
                 for (const ModAllow& a : l.rule.list)
@@ -233,7 +228,7 @@ inline ModChoice StepModRule(ModChoice c, ModRuleRow row, int dir) {
             c.preset = ModPreset(((int(c.preset) + (dir < 0 ? -1 : 1)) % n + n) % n);
             break;
         }
-        case ModRuleRow::Cheats: c.blockCheats = !c.blockCheats; break;
+        case ModRuleRow::Hse: c.blockHse = !c.blockHse; break;
         case ModRuleRow::Official: c.officialOnly = !c.officialOnly; break;
     }
     return c;

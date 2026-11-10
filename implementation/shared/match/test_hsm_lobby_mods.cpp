@@ -10,12 +10,12 @@ static int g_fail = 0;
 using namespace hsm;
 
 static ModItem Item(ModKind k, const char* name) { ModItem it; it.kind = k; it.name = name; return it; }
-static ModRule Rule(ModPreset p, bool cheats = true) { ModRule r; r.preset = p; r.blockCheats = cheats; r.officialOnly = false; return r; }
+static ModRule Rule(ModPreset p, bool blockHse = true) { ModRule r; r.preset = p; r.blockHse = blockHse; r.officialOnly = false; return r; }
 
 static LobbyModsLocal Lobby(bool host, ModRule rule = Rule(ModPreset::MapsOnly)) {
     LobbyModsLocal l;
     l.host = host; l.rulesOn = true; l.hostHasRule = true; l.haveList = true; l.rule = rule;
-    l.chosen = ModChoice{rule.preset, rule.blockCheats, rule.officialOnly};
+    l.chosen = ModChoice{rule.preset, rule.blockHse, rule.officialOnly};
     l.names[0] = "Ann"; l.names[1] = "Bob"; l.names[2] = "Cy";
     l.present = 0b111;
     l.mods.entries = {
@@ -54,52 +54,66 @@ static void StockHiddenAndOrder() {
     LobbyModsScene s = BuildLobbyMods(Lobby(false));
     CHECK(Row(s, "BPModLoaderMod") == nullptr);
     CHECK(s.items.size() == 3);
-    // Maps only refuses HSEnhancer (a cheat): first; the rest keep the canonical order.
-    CHECK(s.items.size() == 3 && s.items[0].name == "HSEnhancer" && s.items[1].name == "Arena.pak" && s.items[2].name == "WillieFace");
-    CHECK(s.items[0].refused && s.items[0].note == "refused: a known cheat");
-    CHECK(!s.items[1].refused && s.items[1].note.empty());
+    // Maps only refuses HSEnhancer (blocked) and WillieFace (not a map): first, in order; the map keeps its place after them.
+    CHECK(s.items.size() == 3 && s.items[0].name == "HSEnhancer" && s.items[1].name == "WillieFace" && s.items[2].name == "Arena.pak");
+    CHECK(s.items[0].refused && s.items[0].note == "refused: HS Enhancer is blocked here");
+    CHECK(s.items[1].refused && s.items[1].note == "refused: not allowed (Maps only)");
+    CHECK(!s.items[2].refused && s.items[2].note.empty());
     CHECK(s.empty.empty());
 }
 
 static void Tones() {
+    // HS Enhancer where it is allowed: amber and named, so the lobby sees who runs it. A map: green. Any other mod: dim, "mod".
     LobbyModsScene s = BuildLobbyMods(Lobby(false, Rule(ModPreset::Anything, false)));
-    CHECK(Row(s, "HSEnhancer")->tone == ModTone::Bad && Row(s, "HSEnhancer")->verdict == "CHEAT" && !Row(s, "HSEnhancer")->refused);
+    CHECK(Row(s, "HSEnhancer")->tone == ModTone::Warn && Row(s, "HSEnhancer")->verdict == "HS ENHANCER" && !Row(s, "HSEnhancer")->refused);
     CHECK(Row(s, "Arena.pak")->tone == ModTone::Ok && Row(s, "Arena.pak")->verdict == "map");
-    CHECK(Row(s, "WillieFace")->tone == ModTone::Ok && Row(s, "WillieFace")->verdict == "cosmetic");
-    CHECK(ModToneOf(KnownVerdict::Gameplay, ModKind::Ue4ssMod, false) == ModTone::Warn);
-    CHECK(ModToneOf(KnownVerdict::Suspect, ModKind::Ue4ssMod, false) == ModTone::Warn);
-    CHECK(ModToneOf(KnownVerdict::Unknown, ModKind::Ue4ssMod, false) == ModTone::Dim);
-    CHECK(ModToneOf(KnownVerdict::Unknown, ModKind::Ue4ssMod, true) == ModTone::Bad);
-    CHECK(std::string(ModVerdictText(KnownVerdict::Unknown, ModKind::Proxy)) == "overlay or loader");
-    CHECK(std::string(ModVerdictText(KnownVerdict::Unknown, ModKind::Ue4ssMod)) == "unknown");
-    CHECK(std::string(ModVerdictText(KnownVerdict::Gameplay, ModKind::Ue4ssMod)) == "gameplay");
+    CHECK(Row(s, "WillieFace")->tone == ModTone::Dim && Row(s, "WillieFace")->verdict == "mod");
+    // Blocked: red.
+    LobbyModsScene b = BuildLobbyMods(Lobby(false, Rule(ModPreset::Anything, true)));
+    CHECK(Row(b, "HSEnhancer")->tone == ModTone::Bad && Row(b, "HSEnhancer")->verdict == "HS ENHANCER" && Row(b, "HSEnhancer")->refused);
+    CHECK(ModToneOf(false, ModKind::Ue4ssMod, false) == ModTone::Dim && ModToneOf(false, ModKind::ContentPak, false) == ModTone::Dim);
+    CHECK(ModToneOf(false, ModKind::Proxy, false) == ModTone::Dim && ModToneOf(false, ModKind::MapPak, false) == ModTone::Ok);
+    CHECK(ModToneOf(true, ModKind::Module, false) == ModTone::Warn && ModToneOf(true, ModKind::Ue4ssMod, true) == ModTone::Bad);
+    CHECK(ModToneOf(false, ModKind::MapPak, true) == ModTone::Bad);
+    CHECK(std::string(ModVerdictText(false, ModKind::Proxy)) == "overlay or loader");
+    CHECK(std::string(ModVerdictText(false, ModKind::Ue4ssMod)) == "mod" && std::string(ModVerdictText(false, ModKind::ContentPak)) == "mod");
+    CHECK(std::string(ModVerdictText(true, ModKind::Module)) == "HS ENHANCER" && std::string(ModVerdictText(false, ModKind::MapPak)) == "map");
+    CHECK(std::string(ModVerdictText(false, ModKind::HseLocked)) == "HS Enhancer, locked" && ModToneOf(false, ModKind::HseLocked, false) == ModTone::Dim);
 }
 
 static void RefusedByPreset() {
-    // Anything with cheats allowed: nothing refused.
+    // Anything with HS Enhancer allowed: nothing refused. Classes judges mods the same way.
     LobbyModsScene any = BuildLobbyMods(Lobby(false, Rule(ModPreset::Anything, false)));
     for (const ModRowView& r : any.items) CHECK(!r.refused);
-    // Anything with cheats blocked: only the cheat.
+    LobbyModsScene cls = BuildLobbyMods(Lobby(false, Rule(ModPreset::Classes, false)));
+    CHECK(cls.items.size() == 3);
+    for (const ModRowView& r : cls.items) CHECK(!r.refused);
+    // HS Enhancer blocked: only it, whatever the preset.
     LobbyModsScene anyBlock = BuildLobbyMods(Lobby(false, Rule(ModPreset::Anything, true)));
-    CHECK(Row(anyBlock, "HSEnhancer")->refused && !Row(anyBlock, "Arena.pak")->refused);
+    CHECK(Row(anyBlock, "HSEnhancer")->refused && !Row(anyBlock, "Arena.pak")->refused && !Row(anyBlock, "WillieFace")->refused);
+    LobbyModsScene clsBlock = BuildLobbyMods(Lobby(false, Rule(ModPreset::Classes, true)));
+    CHECK(Row(clsBlock, "HSEnhancer")->refused && Row(clsBlock, "HSEnhancer")->note == "refused: HS Enhancer is blocked here" && !Row(clsBlock, "WillieFace")->refused);
     // Vanilla: every mod.
     LobbyModsScene van = BuildLobbyMods(Lobby(false, Rule(ModPreset::Vanilla, false)));
     CHECK(Row(van, "Arena.pak")->refused && Row(van, "Arena.pak")->note == "refused: Vanilla takes no mods");
-    CHECK(Row(van, "WillieFace")->refused);
-    // Maps only, cheats allowed: an unknown UE4SS mod is not allowed, the map and the cosmetic are.
+    CHECK(Row(van, "WillieFace")->refused && Row(van, "HSEnhancer")->refused && Row(van, "HSEnhancer")->note == "refused: Vanilla takes no mods");
+    // Maps only, HS Enhancer allowed: every UE4SS mod is not allowed (HSE included: not a map), the map is.
     LobbyModsLocal l = Lobby(false, Rule(ModPreset::MapsOnly, false));
     l.mods.entries.push_back({Item(ModKind::Ue4ssMod, "SomethingNew"), 0b100});
+    l.mods.entries.push_back({Item(ModKind::Proxy, "dxgi.dll"), 0b100});
     LobbyModsScene maps = BuildLobbyMods(l);
     CHECK(Row(maps, "SomethingNew")->refused && Row(maps, "SomethingNew")->note == "refused: not allowed (Maps only)");
-    CHECK(Row(maps, "HSEnhancer")->refused);   // not a map, not cosmetic
-    CHECK(!Row(maps, "Arena.pak")->refused && !Row(maps, "WillieFace")->refused);
-    // Custom: only the list (plus cosmetics); a required mod someone lacks says who.
+    CHECK(Row(maps, "HSEnhancer")->refused && Row(maps, "HSEnhancer")->note == "refused: not allowed (Maps only)");
+    CHECK(Row(maps, "WillieFace")->refused);
+    CHECK(!Row(maps, "Arena.pak")->refused && !Row(maps, "dxgi.dll")->refused);
+    // Custom: only the list; a required mod someone lacks says who.
     ModRule custom = Rule(ModPreset::Custom, false);
     ModAllow a; a.name = "Arena.pak"; a.required = true; custom.list.push_back(a);
     ModAllow b; b.name = "HSEnhancer"; b.required = true; custom.list.push_back(b);
     LobbyModsScene cs = BuildLobbyMods(Lobby(false, custom));
     CHECK(Row(cs, "Arena.pak")->note.empty());
     CHECK(Row(cs, "HSEnhancer")->note == "required: missing for Ann, Cy" && Row(cs, "HSEnhancer")->tone == ModTone::Warn && !Row(cs, "HSEnhancer")->refused);
+    CHECK(Row(cs, "WillieFace")->refused && Row(cs, "WillieFace")->note == "refused: not allowed (Custom)");   // off the list
     // A required mod nobody runs gets a row of its own.
     ModRule need = Rule(ModPreset::Custom, false);
     need.list = custom.list;
@@ -128,15 +142,19 @@ static void RuleRows() {
     LobbyModsScene host = BuildLobbyMods(Lobby(true));
     for (const ModRuleView& r : host.rules) CHECK(r.enabled);
     CHECK(host.rules[0].id == ModRuleRow::Preset && host.rules[0].value == "Maps only");
-    CHECK(host.rules[1].id == ModRuleRow::Cheats && host.rules[1].value == "On");
+    CHECK(host.rules[1].id == ModRuleRow::Hse && host.rules[1].label == "Block HS Enhancer" && host.rules[1].value == "On");
+    CHECK(host.rules[1].hint == "Refuses players who run Half Sword Enhancer.");
     CHECK(host.rules[2].id == ModRuleRow::Official && host.rules[2].value == "Off");
-    CHECK(host.summary == "In force: Maps only, cheats blocked.");
+    CHECK(host.summary == "In force: Maps only, HS Enhancer blocked.");
     CHECK(host.status.empty());
     LobbyModsScene member = BuildLobbyMods(Lobby(false));
     for (const ModRuleView& r : member.rules) CHECK(!r.enabled);
     CHECK(member.rules[0].value == "Maps only");
-    CHECK(std::string(ModPresetHint(ModPreset::Custom, false)) == "The mods the host listed.");
-    CHECK(std::string(ModPresetHint(ModPreset::Classes, true)).find("classes") != std::string::npos);
+    CHECK(std::string(ModPresetHint(ModPreset::Custom, false)) == "The host's own mods (or the list it set).");
+    CHECK(std::string(ModPresetHint(ModPreset::Custom, true)).find("Same as host") == 0);
+    CHECK(std::string(ModPresetHint(ModPreset::MapsOnly, true)) == "Map paks only.");
+    CHECK(std::string(ModPresetHint(ModPreset::Vanilla, true)).find("no proxy DLLs") != std::string::npos);
+    CHECK(std::string(ModPresetHint(ModPreset::Classes, true)) == "Native classes. Any mods.");
     CHECK(std::string(ModPresetHint(ModPreset::Unrestricted, false)).find("UNRESTRICTED") != std::string::npos);
     // Rules off: rows disabled, the status says so, nothing refused.
     LobbyModsLocal off = Lobby(true);
@@ -151,17 +169,17 @@ static void DiffersHints() {
     // The host chose Bundle with no pack announced: Maps only is in force.
     LobbyModsLocal l = Lobby(true);
     l.chosen = ModChoice{ModPreset::Bundle, true, true};
-    l.rule = Rule(ModPreset::MapsOnly, false);   // it runs a cheat itself; not an official build
+    l.rule = Rule(ModPreset::MapsOnly, false);   // it runs HS Enhancer itself; not an official build
     LobbyModsScene s = BuildLobbyMods(l);
     CHECK(s.rules[0].value == "Bundle" && s.rules[0].hint.find("Maps only applies") != std::string::npos);
-    CHECK(s.rules[1].value == "On" && s.rules[1].hint.find("cheat yourself") != std::string::npos);
+    CHECK(s.rules[1].value == "On" && s.rules[1].hint == "You run HS Enhancer yourself, so this lobby allows it.");
     CHECK(s.rules[2].value == "On" && s.rules[2].hint.find("not an official release") != std::string::npos);
-    CHECK(s.summary == "In force: Maps only, cheats allowed.");
+    CHECK(s.summary == "In force: Maps only, HS Enhancer allowed.");
     // A member sees the rule in force, no host hints.
     LobbyModsLocal m = l; m.host = false;
     LobbyModsScene ms = BuildLobbyMods(m);
     CHECK(ms.rules[0].value == "Maps only" && ms.rules[1].value == "Off" && ms.rules[2].value == "Off");
-    CHECK(ms.rules[1].hint.find("cheat yourself") == std::string::npos);
+    CHECK(ms.rules[1].hint.find("yourself") == std::string::npos);
 }
 
 static void StatusAndFooters() {
@@ -185,7 +203,7 @@ static void Pending() {
     wait.result.fail = RuleFail::None;
     CHECK(ModPendingLine(wait) == "Bob: checking mods");
     ModPending leave; leave.name = "Ann"; leave.held = false; leave.graceSeconds = 42;
-    leave.result.fail = RuleFail::Cheat; leave.result.mod = "HSEnhancer";
+    leave.result.fail = RuleFail::Hse; leave.result.mod = "HSEnhancer";
     CHECK(ModPendingLine(leave) == "Ann: runs HSEnhancer, leaving in 42 s unless fixed");
     leave.result.fail = RuleFail::Missing; leave.result.mod = "Arena.pak";
     CHECK(ModPendingLine(leave) == "Ann: lacks Arena.pak, leaving in 42 s unless fixed");
@@ -208,11 +226,11 @@ static void Steppers() {
     c.preset = ModPreset::Anything;
     CHECK(StepModRule(c, ModRuleRow::Preset, 1).preset == ModPreset::Classes);   // Classes is a stop of its own
     CHECK(StepModRule(c, ModRuleRow::Preset, -1).preset == ModPreset::Custom);
-    ModChoice t = StepModRule(c, ModRuleRow::Cheats, 1);
-    CHECK(!t.blockCheats && t.preset == c.preset && !t.officialOnly);
+    ModChoice t = StepModRule(c, ModRuleRow::Hse, 1);
+    CHECK(!t.blockHse && t.preset == c.preset && !t.officialOnly);
     t = StepModRule(c, ModRuleRow::Official, -1);
-    CHECK(t.officialOnly && t.blockCheats);
-    CHECK(StepModRule(StepModRule(c, ModRuleRow::Cheats, 1), ModRuleRow::Cheats, -1) == c);
+    CHECK(t.officialOnly && t.blockHse);
+    CHECK(StepModRule(StepModRule(c, ModRuleRow::Hse, 1), ModRuleRow::Hse, -1) == c);
     // Unrestricted is never stepped into, and steps as Classes. From the default, one row gets to Classes.
     for (ModPreset p : {ModPreset::Classes, ModPreset::Unrestricted}) {
         ModChoice k = c; k.preset = p;

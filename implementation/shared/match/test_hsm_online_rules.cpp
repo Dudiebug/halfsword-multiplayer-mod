@@ -21,14 +21,104 @@ static const char* kGood =
 
 static std::string Swap(std::string s, const std::string& a, const std::string& b) { s.replace(s.find(a), a.size(), b); return s; }
 
-int main() {
-    // A host who chose `anything` with cheats allowed hosts with a cheat mod in: the supported list kept them out even of their own lobby.
-    CHECK(!ModListKeepsOut(ModPreset::Anything, {true, true}) && !ModListKeepsOut(ModPreset::Anything, {false, false}));
-    CHECK(ModListKeepsOut(ModPreset::MapsOnly, {true, true}) && !ModListKeepsOut(ModPreset::MapsOnly, {true, false}));
-    CHECK(ModListKeepsOut(ModPreset::Classes, {true, false}) && ModListKeepsOut(ModPreset::Unrestricted, {false, false}));
-    CHECK(IsSupportedUe4ssMod("HSEnhancer") && IsSupportedUe4ssMod("Keybinds") && !IsSupportedUe4ssMod("HulkMod") && !IsSupportedUe4ssMod("AbilityFrameworkMod"));
-    CHECK(IsExpectedExeDll("boost_regex-mt-x64.dll") && !IsExpectedExeDll("boost_cheat.dll") && !IsExpectedExeDll("tbbx.dll") && IsExpectedExeDll("DWMAPI.DLL") && !IsExpectedExeDll("xinput1_3.dll") && !IsExpectedExeDll("version.dll"));
+// HSE's file locked for one game: LockedHseIni writes it, HseLockProblems checks it.
+static void TestHseLock() {
+    const std::string real =
+        "[Keybinds]\r\ntoggle_gui_key = 45\r\nunbind_key = 8\r\n\r\n[InfiniteStamina]\r\nkey = 73\r\nenabled = true\r\n"
+        "[SpeedMultiplier]\r\nkey=80\r\nenabled=true  \r\nrun_speed_multiplier = 3.000000\r\n; key = 5\r\n"
+        "[UE]\r\nconsole_enabled = true\r\n[Graphics]\r\napply_on_startup = true\r\nfog = 0\r\n[Discord]\r\nenabled = true\r\n";
+    CHECK(!HseLockProblems(real).empty());
+    const std::string locked = LockedHseIni(real);
+    CHECK(HseLockProblems(locked).empty());
+    // Every other byte kept: the params, the unbind key, the comment, the spaces after a value, CRLF line ends.
+    CHECK(locked.find("unbind_key = 8\r\n") != std::string::npos && locked.find("run_speed_multiplier = 3.000000\r\n") != std::string::npos);
+    CHECK(locked.find("; key = 5\r\n") != std::string::npos && locked.find("fog = 0\r\n") != std::string::npos);
+    CHECK(locked.find("[InfiniteStamina]\r\nkey = -1\r\nenabled = false\r\n") != std::string::npos);
+    CHECK(locked.find("[SpeedMultiplier]\r\nkey=-1\r\nenabled=false  \r\n") != std::string::npos);
+    CHECK(locked.find("toggle_gui_key = 143\r\n") != std::string::npos && locked.find("console_enabled = false\r\n") != std::string::npos);
+    CHECK(locked.find("apply_on_startup = false\r\n") != std::string::npos && locked.find("[Discord]\r\nenabled = false\r\n") != std::string::npos);
+    CHECK(locked.rfind(real.substr(0, 10), 0) == 0);   // the file starts as it did
+    for (const char* section : kHseDefaultKeySections) CHECK(RuleIniValue(locked, section, "key") == "-1");
+    for (size_t i = 0; i < locked.size(); ++i) if (locked[i] == '\n') CHECK(i > 0 && locked[i - 1] == '\r');
+    CHECK(LockedHseIni(locked) == locked);   // locking twice changes nothing
+    CHECK(LockedHseIni("[A]\r\nkey =\r\n").find("[A]\r\nkey =-1\r\n") == 0);   // a key with no value gets one
+    // A UTF-8 mark at the start: dropped, and the file locked as without it
+    CHECK(LockedHseIni("\xEF\xBB\xBF" + real) == locked && HseLockProblems(LockedHseIni("\xEF\xBB\xBF" + real)).empty());
+    CHECK(LockedHseIni("\xEF\xBB").rfind("\xEF\xBB", 0) == 0);   // not the whole mark: kept
+    // No file at all: a whole locked one, LF like the empty text.
+    const std::string fresh = LockedHseIni("");
+    CHECK(HseLockProblems(fresh).empty() && fresh.find('\r') == std::string::npos);
+    CHECK(!HseLockProblems("").empty());
 
+    // Each thing that unlocks it, named.
+    const auto one = [](const std::string& text, const char* problem) {
+        const std::vector<std::string> v = HseLockProblems(text);
+        return v.size() == 1 && v[0] == problem;
+    };
+    CHECK(one(Swap(locked, "toggle_gui_key = 143", "toggle_gui_key = 45"), "its menu key is set"));
+    CHECK(one(Swap(locked, "console_enabled = false", "console_enabled = true"), "the console may be on"));
+    CHECK(one(Swap(locked, "console_enabled = false", "console_enabled = 1"), "the console may be on"));   // HSE reads 1 as on
+    CHECK(one(Swap(locked, "apply_on_startup = false", "apply_on_startup = true"), "graphics commands run at start"));
+    CHECK(one(Swap(locked, "[InfiniteStamina]\r\nkey = -1", "[InfiniteStamina]\r\nkey = 73"), "a hotkey is bound"));
+    CHECK(one(Swap(locked, "[InfiniteStamina]\r\nkey = -1", "[InfiniteStamina]\r\nkey = "), "a hotkey is bound"));   // HSE would take its default
+    CHECK(one(Swap(locked, "[SpeedMultiplier]\r\nkey=-1\r\nenabled=false", "[SpeedMultiplier]\r\nkey=-1\r\nenabled=true"), "[SpeedMultiplier] is on"));
+    CHECK(one(Swap(locked, "[InfiniteStamina]\r\nkey = -1\r\nenabled = false", "[InfiniteStamina]\r\nkey = -1\r\nenabled = yes"), "[InfiniteStamina] is on"));
+    CHECK(one(Swap(locked, "[Jump]\r\nkey = -1\r\n", ""), "a default hotkey is left"));
+    // Two bound keys: one problem. A key on 143, which no key sends, is as good as none. Comments don't count.
+    CHECK(one(Swap(Swap(locked, "[InfiniteStamina]\r\nkey = -1", "[InfiniteStamina]\r\nkey = 73"), "key=-1", "key=80"), "a hotkey is bound"));
+    CHECK(HseLockProblems(Swap(locked, "[InfiniteStamina]\r\nkey = -1", "[InfiniteStamina]\r\nkey = 143")).empty());
+    CHECK(HseLockProblems(locked + "; enabled = true\r\n# key = 5\r\n").empty());
+    // Graphics at start is off when the file doesn't say; the console must say off.
+    CHECK(HseLockProblems(Swap(locked, "apply_on_startup = false\r\n", "")).empty());
+    CHECK(one(Swap(locked, "console_enabled = false\r\n", ""), "the console may be on"));
+
+    // HseIniFromLock: the menu key alone tells a file the lock wrote, changed since or not
+    CHECK(HseIniFromLock(locked) && HseIniFromLock(fresh) && HseIniFromLock(Swap(locked, "[SpeedMultiplier]\r\nkey=-1", "[SpeedMultiplier]\r\nkey=80")));
+    CHECK(!HseIniFromLock(real) && !HseIniFromLock("") && !HseIniFromLock(Swap(locked, "toggle_gui_key = 143", "toggle_gui_key = 45")));
+    CHECK(!HseIniFromLock("[Other]\r\ntoggle_gui_key = 143\r\n"));
+}
+
+// HSE off at the start of every game: HseStartOffIni writes it, HseStartOffProblems checks it.
+static void TestHseStartOff() {
+    const std::string real =
+        "[Keybinds]\r\ntoggle_gui_key = 45\r\nunbind_key = 8\r\n\r\n[InfiniteStamina]\r\nkey = 73\r\nenabled = true\r\n"
+        "[SpeedMultiplier]\r\nkey=80\r\nenabled=true  \r\nrun_speed_multiplier = 3.000000\r\n; enabled = true\r\n"
+        "[UE]\r\nconsole_enabled = true\r\n[Graphics]\r\napply_on_startup = true\r\nfog = 0\r\n[Discord]\r\nenabled = true\r\n"
+        "[Notifications]\r\nenabled = true\r\n[Jump]\r\nenabled = false\r\n";
+    CHECK(HseStartOffProblems(real).size() == 4);
+    const std::string off = HseStartOffIni(real);
+    CHECK(HseStartOffProblems(off).empty());
+    // Only the features, the console and graphics at start: keys, the menu key, params, comments, CRLF all as they were
+    CHECK(off == Swap(Swap(Swap(Swap(real, "key = 73\r\nenabled = true", "key = 73\r\nenabled = false"), "enabled=true  ", "enabled=false  "),
+                           "console_enabled = true", "console_enabled = false"), "apply_on_startup = true", "apply_on_startup = false"));
+    CHECK(RuleIniValue(off, "Keybinds", "toggle_gui_key") == "45" && RuleIniValue(off, "InfiniteStamina", "key") == "73");
+    CHECK(RuleIniValue(off, "Discord", "enabled") == "true" && RuleIniValue(off, "Notifications", "enabled") == "true");
+    CHECK(off.find("; enabled = true\r\n") != std::string::npos);
+    CHECK(HseStartOffIni(off) == off && HseStartOffIni("") == "");   // twice: the same; no file: nothing added
+    CHECK(HseStartOffIni("\xEF\xBB\xBF" + real) == off);   // a UTF-8 mark goes
+    CHECK(HseStartOffIni("[A]\nenabled =\n") == "[A]\nenabled =false\n");   // no value: one
+    CHECK(HseStartOffIni("enabled = true\n") == "enabled = false\n");   // before any section: off too
+    CHECK(HseStartOffIni("[UE]\nconsole_enabled = true\n[Other]\nconsole_enabled = true\napply_on_startup = true\n") ==
+          "[UE]\nconsole_enabled = false\n[Other]\nconsole_enabled = true\napply_on_startup = true\n");   // those two only where HSE reads them
+
+    // Each thing still on, named; anything but "false" is on (HSE reads 1, yes and on as true)
+    const auto one = [](const std::string& text, const char* problem) {
+        const std::vector<std::string> v = HseStartOffProblems(text);
+        return v.size() == 1 && v[0] == problem;
+    };
+    CHECK(one(Swap(off, "key = 73\r\nenabled = false", "key = 73\r\nenabled = 1"), "[InfiniteStamina] is on"));
+    CHECK(one(Swap(off, "enabled=false  ", "enabled=yes"), "[SpeedMultiplier] is on"));
+    CHECK(one(Swap(off, "console_enabled = false", "console_enabled = on"), "the console is on"));
+    CHECK(one(Swap(off, "apply_on_startup = false", "apply_on_startup = true"), "graphics commands run at start"));
+    CHECK(HseStartOffProblems("\xEF\xBB\xBF[Discord]\r\nenabled = true\r\n").empty());   // Discord first, after a mark: still Discord
+    CHECK(HseStartOffProblems("").empty() && HseStartOffProblems("[A]\r\nkey = 73\r\n").empty());   // keys are held, not checked
+
+    CHECK(HseStartOffIni("[A]\nenabled =  \r\n") == "[A]\nenabled =false  \r\n");   // only spaces: the value goes after the =
+}
+
+int main() {
+    TestHseLock();
+    TestHseStartOff();
     CHECK(HseRuleProblems(kGood).empty());
     const std::string good = kGood;
     CHECK(!HseRuleProblems(Swap(good, "key = -1\r\nenabled = false", "key = 73\r\nenabled = false")).empty());     // hotkey bound: not locked
@@ -51,9 +141,6 @@ int main() {
     CHECK(ClassPoints("", Swap(clawed, "Skeleton = Bone", "Skeleton = Adamantium")) > ClassPoints("", clawed) + 0.9);
     CHECK(!CheckRuleSheet(BuildRuleSheet("", clawed), "HalfWolverine").empty());
 
-    const auto bad = UnsupportedOnCard("HSEnhancer, HulkMod, version.dll, HalfWolverine");
-    CHECK(bad.size() == 2 && bad[0] == "HulkMod" && bad[1] == "version.dll");
-    CHECK(UnsupportedOnCard("").empty());
     // The sheet: a good class passes, and each kind of cheat fails on the other player's machine.
     const std::string fullHse = good + "[Dash]\r\nkey = -1\r\n";
     CHECK(CheckRuleSheet(BuildRuleSheet(HseSheetFrom(fullHse + LockedDefaults()), WolverineSheetFrom(Swap(wolv, "Mode = Logan", "Mode = Off"))), "HSEnhancer, HalfWolverine").empty());
@@ -130,8 +217,11 @@ int main() {
     CHECK(DefaultKeyLeft("[Jump]\nforce = 5000.000000\n"));
     CHECK(HseSheetFrom("[Jump]\nforce = 5000.000000\n[Keybinds]\ntoggle_gui_key = 143\n").find("key = 1\n") != std::string::npos);
     CHECK(HseSheetFrom(allKeys).find("key = -1\n") != std::string::npos);
+    // Any other mod on the list is the player's business: only the two class mods are read from it.
     const RuleMods listed = ReadRuleMods("Keybinds, HSEnhancer, HulkMod, HalfWolverine");
-    CHECK(listed.hse && listed.wolverine && listed.unsupported.size() == 1 && listed.unsupported[0] == "HulkMod");
+    CHECK(listed.hse && listed.wolverine);
+    CHECK(!ReadRuleMods("Keybinds, HulkMod").hse && !ReadRuleMods("Keybinds, HulkMod").wolverine && !ReadRuleMods("").hse);
+    CHECK(!ReadRuleMods("HSEnhancerX, XHalfWolverine").hse && !ReadRuleMods("HSEnhancerX, XHalfWolverine").wolverine);   // whole names only
     CHECK(LooksLikeHseLoader("xx HSE_Initialize yy") && !LooksLikeHseLoader("a chainloader"));
     // Sheathed claws leave the hands free; unseen claws don't.
     CHECK(ClawsDropWeapons(true, true, true) && !ClawsDropWeapons(true, true, false) && ClawsDropWeapons(true, false, false));

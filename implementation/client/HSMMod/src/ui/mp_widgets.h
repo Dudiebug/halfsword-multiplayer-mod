@@ -18,6 +18,7 @@ struct Card {
     Button button;
     Panel frame, face;
     bool selected = false, live = true;
+    bool arrow = false;                       // MakeArrow: the game's arrow art, no card behind it
     float glow = 0;                           // the hover fade, 0..1 (Paint)
     explicit operator bool() const { return bool(button) && bool(frame) && bool(face); }
 };
@@ -34,6 +35,9 @@ public:
     Text Section(Box& column, const std::string& text, float padTop);
     Card MakeCard(const Widget& body, Margin pad);
     Flat MakeFlat(const std::string& text, float size, Margin pad = {16, 7, 16, 7});
+    // A stepper's < or > (next: >): the game's ornate arrow on a bare button, or the text on a card when the art is not
+    // loaded. Its label stays in the tree (empty beside the arrow) so callers treat it as any Flat.
+    Flat MakeArrow(bool next, float size);
 private:
     Kit* kit_ = nullptr;
 };

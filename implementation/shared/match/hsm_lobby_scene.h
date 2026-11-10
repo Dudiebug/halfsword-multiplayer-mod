@@ -46,7 +46,9 @@ struct LobbyFound {                     // a public lobby from Find
     bool compatible = false;
     std::string reason;                 // why not, when !compatible
     std::string pack;                   // "pack ArenaPack" (session/hsm_modpack.h PackRowText), with a mark when this machine lacks it; empty: no pack
-    std::string mods;                   // the lobby's mod rule when not the default, "mods: Vanilla" (session/hsm_mod_rules.h LobbyRuleTag)
+    std::string mods;                   // the lobby's mod rule when not the default, "mods: Maps only" (session/hsm_mod_rules.h LobbyRuleTag)
+    bool switchable = false;            // !compatible only because of mods this machine can turn off for a restart (session/hsm_mod_switch.h)
+    std::string switchTag;              // then its note, "Restart: 2 mods off" (SwitchTag)
 };
 
 struct LobbyModMap { std::string path, display, pak; };   // a custom map from a mod pak (session/hsm_modmaps.h); pak empty when unknown
@@ -85,7 +87,14 @@ struct ModeCard { Format format = Format::FreeForAll; std::string name, descript
                   ModeGroup group = ModeGroup::Versus; std::string hint; };   // progression: the extra last card; brawl: free-for-all with gear = Fists; hint: why a card is disabled for the player count (ModeAvailable)
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
                  bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
-struct BrowserRow { std::string name, players, detail; Span note; bool joinable = false; bool locked = false; size_t source = 0; };   // source: its index in LobbyLocal::found
+struct BrowserRow {
+    std::string name, players, detail;
+    Span note;
+    bool joinable = false;
+    bool restart = false;               // joinable, but only after a restart with some mods off: the note says so instead of JOIN
+    bool locked = false;
+    size_t source = 0;                  // its index in LobbyLocal::found
+};
 struct RosterRow {
     std::string name, team;             // team: the formats with teams only
     Rgba swatch;                        // a == 0: none
@@ -147,7 +156,7 @@ inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f) {
     const auto& modes = BrowserModes();
     if (f.mode != 0 && f.mode < modes.size() && !ModeMatches(l.mode, modes[f.mode])) return false;
     if (f.hasRoom && LobbyIsFull(l.players, l.maxPlayers)) return false;   // each lobby's own limit
-    if (f.compatibleOnly && !l.compatible) return false;
+    if (f.compatibleOnly && !l.compatible && !l.switchable) return false;   // a restart away still counts
     if (f.noPassword && l.locked) return false;
     return true;
 }
@@ -652,7 +661,8 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
             if (!f.mode.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mode;
             if (!f.pack.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.pack;
             if (!f.mods.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mods;
-            if (!f.compatible) r.note = {f.reason.empty() ? std::string("Incompatible") : f.reason, style::kWarn};
+            if (!f.compatible && f.switchable && !LobbyIsFull(f.players, f.maxPlayers)) { r.note = {f.switchTag.empty() ? std::string("Restart") : f.switchTag, style::kWarn}; r.joinable = r.restart = true; }
+            else if (!f.compatible) r.note = {f.reason.empty() ? std::string("Incompatible") : f.reason, style::kWarn};
             else if (LobbyIsFull(f.players, f.maxPlayers)) r.note = {"Full", style::kWarn};
             else { r.note = {"Join", style::kOk}; r.joinable = true; }
             s.browser.push_back(r);

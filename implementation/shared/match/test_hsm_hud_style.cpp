@@ -61,16 +61,56 @@ static void TestTeamInk() {
 }
 
 static void TestMenuPalette() {
-    // Every menu text colour reads on every face it can sit on; START's label reads on the accent.
+    // Every menu text colour reads on every parchment face it can sit on; the light text reads on the backdrop and on START.
+    for (Rgba face : {kMenuPanel, kMenuCard, kMenuCardHover})
+        for (Rgba c : {kMenuText, kMenuDim, kMenuAccentInk, kMenuOk, kMenuWarn}) CHECK(Contrast(c, face) >= 4.5);
+    for (int t = -1; t < 4; ++t) CHECK(Contrast(OnParchment(TeamInk(t)), kMenuPanel) >= 4.5);
+    CHECK(Contrast(kMenuLight, kMenuAccent) >= 4.5);
+    CHECK(Contrast(kMenuLight, Over(kMenuBg, {0, 0, 0, 1})) >= 4.5);
+    CHECK(Contrast(kMenuLight, Over(kMenuBg, kMenuBackdrop)) >= 4.5);
+    // Hover shows: brighter parchment; frames and rules are darker than any face.
+    CHECK(Luminance(kMenuCard) > Luminance(kMenuPanel) && Luminance(kMenuCardHover) > Luminance(kMenuCard));
+    CHECK(Luminance(kMenuFrameHover) > Luminance(kMenuFrame) && Luminance(kMenuFrameHover) < Luminance(kMenuPanel));
+    CHECK(kMenuAccent.r > 10 * kMenuAccent.g && kMenuAccentInk.r > 10 * kMenuAccentInk.g);   // rubric red, not orange
+}
+
+// The classic look: every menu text colour reads on every dark face, START's label on the accent; light ink stays.
+static void TestClassicMenus() {
+    UseMenuLook(true);
+    CHECK(ClassicMenus());
     for (Rgba face : {kMenuBg, kMenuPanel, kMenuCard, kMenuCardHover, Over(kMenuBg, {0, 0, 0, 1})})
         for (Rgba c : {kMenuText, kMenuDim, kMenuAccentInk, kMenuOk, kMenuWarn}) CHECK(Contrast(c, face) >= 4.5);
-    for (int t = -1; t < 4; ++t) CHECK(Contrast(TeamInk(t), kMenuCard) >= 4.5);
-    CHECK(Contrast(kMenuText, kMenuAccent) >= 4.5);
-    // Hover and selection show: each step is brighter than the last.
+    for (int t = -1; t < 4; ++t) CHECK(Contrast(OnParchment(TeamInk(t)), kMenuCard) >= 4.5);
+    CHECK(Contrast(kMenuLight, kMenuAccent) >= 4.5);
     CHECK(Luminance(kMenuCard) > Luminance(kMenuPanel) && Luminance(kMenuCardHover) > Luminance(kMenuCard));
-    CHECK(Luminance(kMenuFrameHover) > Luminance(kMenuFrame) && Luminance(kMenuFrame) > Luminance(kMenuCardHover));
-    CHECK(kMenuAccent.r > 10 * kMenuAccent.g && kMenuAccentInk.r > kMenuAccentInk.g);   // blood red, not orange
-    CHECK(Contrast(kMenuAccent, kMenuCard) < 4.5);   // the accent is for frames and START; text takes kMenuAccentInk
+    CHECK(Same(OnParchment(TeamInk(1)), TeamInk(1)));   // classic faces are dark: light inks stay
+    UseMenuLook(false);
+    CHECK(!ClassicMenus() && Same(kMenuText, kGameMenus.text) && Same(kMenuPanel, kGameMenus.panel));
+}
+
+// Headings: title case in the game look, capitals in the classic one. HS Enhancer keeps its name in both.
+static void TestMenuTitle() {
+    CHECK(MenuTitle("HOST A LOBBY") == "Host A Lobby" && MenuTitle("CO-OP") == "Co-Op" && MenuTitle("PLAYERS 3/8") == "Players 3/8");
+    CHECK(MenuTitle("PLAYER'S CLASS") == "Player's Class");            // no new word after the apostrophe
+    CHECK(MenuTitle("Help Improve the Mod?") == "Help Improve the Mod?" && MenuTitle("report a bug") == "report a bug");
+    CHECK(MenuTitle("ALLOW HS ENHANCER") == "Allow HS Enhancer" && MenuTitle("HS ENHANCER") == "HS Enhancer");
+    CHECK(MenuTitle("BLOCK HS") == "Block HS" && MenuTitle("HS") == "HS" && MenuTitle("(HS)") == "(HS)");
+    CHECK(MenuTitle("HSM MOD") == "Hsm Mod" && MenuTitle("DASHS") == "Dashs" && MenuTitle("H S") == "H S");   // only the whole word
+    CHECK(MenuTitle("").empty() && MenuTitle("UNRESTRICTED CLASSES") == "Unrestricted Classes");
+    UseMenuLook(true);
+    CHECK(MenuTitle("Allow HS Enhancer") == "ALLOW HS ENHANCER" && MenuTitle("Help Improve the Mod?") == "HELP IMPROVE THE MOD?");
+    CHECK(MenuTitle("PLAYERS 3/8") == "PLAYERS 3/8");
+    UseMenuLook(false);
+}
+
+static void TestOnParchment() {
+    for (int t = 0; t < 4; ++t) {                  // each team keeps its hue
+        const Rgba a = TeamInk(t), b = OnParchment(a);
+        CHECK(Luminance(b) <= 0.0601 && Near(b.a, a.a));
+        CHECK(Near(a.r * b.g, a.g * b.r, 1e-5) && Near(a.g * b.b, a.b * b.g, 1e-5));
+    }
+    CHECK(Same(OnParchment(kMenuText), kMenuText));   // ink stays ink
+    CHECK(Same(OnParchment({0, 0, 0, 0.5f}), {0, 0, 0, 0.5f}));
 }
 
 int main() {
@@ -79,6 +119,9 @@ int main() {
     TestTextIsReadable();
     TestTeamInk();
     TestMenuPalette();
+    TestOnParchment();
+    TestClassicMenus();
+    TestMenuTitle();
     if (g_fail) { std::printf("%d hud style checks failed\n", g_fail); return 1; }
     std::printf("all hud style tests passed\n");
     return 0;

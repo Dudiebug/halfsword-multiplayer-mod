@@ -1,6 +1,7 @@
 #include "ui/pause.h"
 #include "ui/umg.h"
 #include "ui/mp_widgets.h"
+#include "ui/skin.h"
 #include "match/hsm_hud_style.h"
 #include "log.h"
 #include <windows.h>
@@ -129,8 +130,8 @@ bool Build(UObject* menu) {
     s.label = s.kit.MakeText();
     if (!s.button || !s.label) { HSM_LOG("ui: pause menu report button: widget spawn failed"); return false; }
     s.button.Content(s.label);
-    s.label.Set(s.esc ? "MULTIPLAYER MENU" : "REPORT A BUG");
-    s.label.Color(style::kBone);
+    s.label.Set(skin::Title(s.esc ? "Multiplayer Menu" : "Report a Bug"));   // as the stock entries read: "Continue", "Settings"
+    s.label.Color(style::kMenuText);                             // their ink on the game's pause scroll
     s.label.Align(Justify::Center);
     if (last && stockLabel) {   // a text button: its look and typeface. A picture button keeps the default look.
         s.button.StyleFrom(last->button);
@@ -216,7 +217,7 @@ PauseAction PauseMenuTick(UObject* menu, Session* session, bool reportButton) {
             if (!Build(menu)) { if (s.button) s.button.Show(false); s.button = Button{}; }   // not tried again in this instance
         }
         if (s.button) {
-            s.label.Set(esc ? "MULTIPLAYER MENU" : "REPORT A BUG");
+            s.label.Set(skin::Title(esc ? "Multiplayer Menu" : "Report a Bug"));
             s.button.Show(!(esc && s.esc.Shown()));
             if (s.button.Clicked()) {
                 if (esc) s.esc.Show(true);

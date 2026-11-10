@@ -63,6 +63,28 @@ constexpr char kDefaultIni[] =
     "paint_defer=1\n"
     "; the Juggernaut's body size (1.0 = the biggest stock fighter, up to 1.6). Every player needs the same value.\n"
     "juggernaut_scale=1.35\n"
+    "; competitive netcode (on by default). competitive=1 sets every key below to its competitive value; a key you\n"
+    ";   uncomment still wins. competitive=0 goes back to the netcode before protocol rev 42.\n"
+    "competitive=1\n"
+    "; 1: share your address with lobby members so a direct path can beat the Steam relay (players who are not friends)\n"
+    "direct_p2p=1\n"
+    "; 1: send your fighter's pose right after the physics step, about a frame sooner\n"
+    ";late_send=1\n"
+    "; 1: every blow also goes once unreliably beside the reliable copy (a lost packet costs nothing)\n"
+    ";combat_copies=1\n"
+    "; warn in the chat when your frame rate stays under this (0: never)\n"
+    ";min_fps=60\n"
+    "; the other fighters' playout buffer: the share of late poses it waits for (0.5-0.99) and its margin in ms (0-50)\n"
+    ";playout_quantile=0.85\n"
+    ";playout_margin_ms=4\n"
+    "; show the other fighters this many ms nearer the present, extrapolated (0-120)\n"
+    ";standin_lead_ms=0\n"
+    "; host: a fixed input delay for every player's buttons and movement, so inputs arrive in time: 0, auto or 1-4 frames\n"
+    ";input_delay=auto\n"
+    "; check each blow against where your fighter really was: off, log (count only) or on (drop a blow that missed)\n"
+    "claim_check=log\n"
+    "; 1: a blade clash on your screen knocks the other player's real weapon too\n"
+    ";deflect=1\n"
     "; in-game bug reports: type /bug <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
     "; (Steam IDs, IP addresses and your Windows user name are removed first). Nothing is sent unless you type it.\n"
     "reports=on\n"
@@ -72,6 +94,9 @@ constexpr char kDefaultIni[] =
     "; the same switch. 0: off (default). help_improve_asked=1: the one-time question on the multiplayer page was answered.\n"
     "help_improve=0\n"
     "help_improve_asked=0\n"
+    "; the look of the mod's menus and HUD: game (the game's own art and typefaces) or classic (the earlier dark look).\n"
+    "; The SETTINGS page on the multiplayer page switches it; it is used from the next start of the game.\n"
+    "ui_style=game\n"
     "; voice chat (the multiplayer page and the Esc menu in a match change these). voice=1 turns it on for you (0, the\n"
     "; default: you neither talk nor hear); voice_reach=proximity fades voices with distance (full volume within\n"
     "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one; between two\n"
@@ -121,11 +146,11 @@ constexpr char kDefaultIni[] =
     "; next to HSMMod.log (tools/hsmrec.py reads it; for mod development, about 40 MB a minute). Off by default.\n"
     "record=0\n"
     "; pack=<name>: the modpack (Content/Paks/~mods/<name>/ with its HSMPack.ini) your lobbies announce; every player needs the same files.\n"
-    "; Empty: the only valid pack installed. off: none. See docs/MODPACK.md.\n"
+    "; Empty: the only valid pack installed. off: none. See docs/MODPACK.md. Set mod_rule=bundle with it: vanilla refuses every pak.\n"
     "pack=\n"
-    "; Mod rules for the lobbies you host: mod_rule=vanilla (no mods; UE4SS alone is fine), maps (custom map paks and cosmetic mods;\n"
-    "; the default), bundle (exactly the pack= above), custom (mod_allow=, or what you run), anything, classes (balanced HSE and Half Wolverine classes). mod_cheats=block\n"
-    "; refuses players running a known cheat mod (allow: let them in). mod_official=1 takes official HSMMod releases only.\n"
+    "; Mod rules for the lobbies you host: mod_rule=vanilla (no mods; UE4SS alone is fine; the default), maps (map\n"
+    "; paks only), bundle (exactly the pack= above), custom (mod_allow=, or what you run), anything, classes (balanced HSE and Half Wolverine classes).\n"
+    "; block_hse=1 refuses players running HS Enhancer (0: allow). mod_official=1 takes official HSMMod releases only.\n"
     "; mod_allow=A, B*1a2b3c4d, +Needed: the custom list (*: the first 8 hex of its SHA-256, +: required).\n"
     "; mod_rules=0 turns all of it off (and the HSMMod build check); mod_challenge=0 stops the host's code checks.\n"
     "; mod_rule=unrestricted: Unrestricted Classes, with no class budget (the MODS tab's UNRESTRICTED checkbox sets this).\n"
@@ -134,10 +159,10 @@ constexpr char kDefaultIni[] =
     #ifdef HSM_TESTBENCH
     "mod_rule=classes\n"
 #else
-    "mod_rule=maps\n"
+    "mod_rule=vanilla\n"
 #endif
 
-    "mod_cheats=block\n"
+    "block_hse=1\n"
     "mod_official=0\n"
     "mod_allow=\n";
 
@@ -204,15 +229,20 @@ bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys,
 }
 
 bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" : "0"}, {"help_improve_asked", "1"}}); }
+bool SaveUiStyle(bool classic) { return SaveIniValues({{"ui_style", classic ? "classic" : "game"}}); }
 
 void ReadModRuleKeys(Config& c) {
     const std::wstring ini = ModFilePath(L"HSMMod.ini");
     #ifdef HSM_TESTBENCH
     c.modRule = ReadModString(ini, L"mod_rule", "classes");
 #else
-    c.modRule = ReadModString(ini, L"mod_rule", "maps");
+    c.modRule = ReadModString(ini, L"mod_rule", "vanilla");
 #endif
-    c.modBlockCheats = ReadModString(ini, L"mod_cheats", "block") != "allow";
+    // The one HS Enhancer switch. Older builds wrote block_hse under [net] (the classes checkbox) or mod_cheats under [mod].
+    std::string hse = ReadModString(ini, L"block_hse", "");
+    if (hse.empty()) hse = ReadString(ini, L"block_hse", "");
+    if (hse.empty()) hse = ReadModString(ini, L"mod_cheats", "") == "allow" ? "0" : "1";
+    c.blockHse = hse != "0";
     c.modOfficialOnly = ReadModString(ini, L"mod_official", "0") == "1";
     c.modAllow = ReadModLong(ini, L"mod_allow");
 }
@@ -261,6 +291,24 @@ Config LoadConfig() {
     c.stuckArmorGate = ReadString(ini, L"stuck_armor_gate", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
+    c.competitive = ReadString(ini, L"competitive", "1") != "0";
+    const bool cp = c.competitive;   // the competitive preset only changes defaults: a key in the file still wins
+    c.lateSend = ReadString(ini, L"late_send", cp ? "1" : "0") == "1";
+    c.combatCopies = ReadString(ini, L"combat_copies", cp ? "1" : "0") == "1";
+    c.minFps = std::atoi(ReadString(ini, L"min_fps", cp ? "60" : "0").c_str());
+    if (c.minFps != 0) c.minFps = Clamp(c.minFps, 20, 240);
+    c.directP2P = ReadString(ini, L"direct_p2p", "1") != "0";
+    c.playoutQuantile = std::clamp(std::atof(ReadString(ini, L"playout_quantile", cp ? "0.85" : "0.95").c_str()), 0.5, 0.99);
+    c.playoutMarginMs = std::clamp(std::atof(ReadString(ini, L"playout_margin_ms", cp ? "4" : "6").c_str()), 0.0, 50.0);
+    c.standinLeadMs = std::clamp(std::atof(ReadString(ini, L"standin_lead_ms", "0").c_str()), 0.0, 120.0);
+    {
+        const std::string d = ReadString(ini, L"input_delay", cp ? "auto" : "0");
+        c.inputDelay = ParseMatchInputDelay(d);
+        if (!c.inputDelay.valid) { HSM_LOG("config: input_delay=%s is not 0, auto or 1-4; off", d.c_str()); c.inputDelay = MatchDelaySetting{}; }
+        const std::string cc = ReadString(ini, L"claim_check", "log");
+        if (!combat::ParseClaimCheckMode(cc, c.claimCheck)) HSM_LOG("config: claim_check=%s is not off, log or on; log", cc.c_str());
+    }
+    c.deflect = ReadString(ini, L"deflect", cp ? "1" : "0") == "1";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
     c.mapReset = ReadString(ini, L"map_reset", "1") != "0";
     c.progressionVote = ReadString(ini, L"progression_vote", "1") != "0";
@@ -303,9 +351,7 @@ Config LoadConfig() {
     c.clawMirror = ReadString(ini, L"claw_mirror", "1") != "0";
     c.className = ReadString(ini, L"class", "");
     c.classWolverine = ReadString(ini, L"class_wolverine", "1") != "0";
-    c.blockHse = ReadString(ini, L"block_hse", "1") != "0";
     c.wolverineRefresh = ReadString(ini, L"wolverine_refresh", "1") != "0";
-    c.modBlockAll = ReadString(ini, L"mod_block", "all") != "classes";
     if (c.className == "Launcher") c.className = "Custom 4";   // what test kits before named classes called that slot
     for (int i = 0; i < kCustomClassSlots; ++i) {
         c.classCustom[i] = ReadString(ini, (L"class_custom" + std::to_wstring(i + 1)).c_str(), "");
@@ -338,6 +384,12 @@ Config LoadConfig() {
     if (c.reportUrl == "https://reports.dutybug.net") c.reportUrl = "https://reports.dudiebug.net";   // a misspelt default written by 0.7.0-pre1/pre2
     c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
     c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";
+    {
+        const std::string look = ReadString(ini, L"ui_style", "game");
+        c.uiClassic = look == "classic";
+        if (look != "game" && look != "classic") HSM_LOG("config: ui_style=%s is not game or classic; using game", look.c_str());
+        HSM_LOG("config: ui_style=%s", c.uiClassic ? "classic" : "game");
+    }
 #ifdef HSM_TESTBENCH
     c.reports = false; c.helpImprove = false; c.helpImproveAsked = true;   // a test build sends nothing to the mod's report server
 #endif   // already on: nothing to ask
@@ -389,6 +441,12 @@ Config LoadConfig() {
     HSM_LOG("config: drive_lean=%d host_input_delay=%s host_lock_on=%d scabbard_fix=%d force_strength=%d stuck_armor_gate=%d standin_parts_off=%d standin_box_fix=%d", c.driveLean ? 1 : 0,
             c.hostInputDelay.mode == HostDelayMode::Auto ? "auto" : c.hostInputDelay.mode == HostDelayMode::Off ? "0" : std::to_string(c.hostInputDelay.fixedMs).c_str(),
             c.hostLockOn ? 1 : 0, c.scabbardFix ? 1 : 0, c.forceStrength ? 1 : 0, c.stuckArmorGate ? 1 : 0, c.standInPartsOff ? 1 : 0, c.standInBoxFix ? 1 : 0);
+    HSM_LOG("config: netcode competitive=%d late_send=%d combat_copies=%d min_fps=%d", c.competitive ? 1 : 0, c.lateSend ? 1 : 0,
+            c.combatCopies ? 1 : 0, c.minFps);
+    HSM_LOG("config: netcode direct_p2p=%d playout_quantile=%.2f playout_margin_ms=%.0f standin_lead_ms=%.0f input_delay=%s claim_check=%s deflect=%d",
+            c.directP2P ? 1 : 0, c.playoutQuantile, c.playoutMarginMs, c.standinLeadMs,
+            c.inputDelay.mode == MatchDelayMode::Auto ? "auto" : std::to_string(c.inputDelay.frames).c_str(),
+            combat::ClaimCheckModeName(c.claimCheck), c.deflect ? 1 : 0);
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)

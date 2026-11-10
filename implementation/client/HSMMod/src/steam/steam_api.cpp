@@ -69,6 +69,7 @@ struct Api {
     FLAT(int, GetSessionConnectionInfo, void*, const NetIdentity*, NetConnectionInfo*, NetStatus*)
     FLAT(void, InitRelayNetworkAccess, void*)
     FLAT(int64_t, GetLocalTimestamp, void*)
+    FLAT(bool, SetGlobalConfigValueInt32, void*, int, int32_t)
     FLAT(void, ReleaseMessage, void*)
     FLAT(void, StartVoiceRecording, void*)
     FLAT(void, StopVoiceRecording, void*)
@@ -235,6 +236,8 @@ bool Init() {
     // session stamps arrivals when it polls them.
     g.GetLocalTimestamp = Fn<Api::GetLocalTimestamp_t>("SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp");
     if (!g.GetLocalTimestamp) HSM_LOG("steam: no SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp; arrival times are the poll time");
+    // Optional: [net] direct_p2p (AllowDirectP2P); without it the route stays the player's Steam client default.
+    g.SetGlobalConfigValueInt32 = Fn<Api::SetGlobalConfigValueInt32_t>("SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32");
     // Optional: the lobby's player limit (Steam enforces it at join). Without them the limit stays at its creation value
     // and the host's own check in the session still turns the extra player away.
     g.SetLobbyMemberLimit = Fn<Api::SetLobbyMemberLimit_t>("SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit");
@@ -426,6 +429,30 @@ void InviteOverlay(SteamId lobby) { if (g_ready) g.ActivateGameOverlayInviteDial
 void SetRichPresence(const std::string& k, const std::string& v) { if (g_ready) g.SetRichPresence(g_friends, k.c_str(), v.c_str()); }
 
 void InitRelay() { if (g_ready) g.InitRelayNetworkAccess(g_netUtils); }
+bool AllowDirectP2P(bool on) {
+    // k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable (104): Private | Public (6) shares this machine's addresses with
+    // the peer so a direct path can win over the relay; -1 is the Steam client's own default (direct only with friends,
+    // unless the player changed it). Only sessions opened after the call use it.
+    // k_ESteamNetworkingConfig_P2P_Transport_ICE_Penalty (105): route scores are milliseconds of ping plus a penalty; with
+    // direct paths allowed, a direct one is judged on its ping alone, so it wins whenever it is quicker than the relay.
+    constexpr int kIceEnable = 104, kIcePenalty = 105, kIcePrivatePublic = 2 | 4, kIceDefault = -1;
+    if (!g_ready || !g.SetGlobalConfigValueInt32) return false;
+    const bool ok = g.SetGlobalConfigValueInt32(g_netUtils, kIceEnable, on ? kIcePrivatePublic : kIceDefault);
+    if (ok && on) g.SetGlobalConfigValueInt32(g_netUtils, kIcePenalty, 0);
+    return ok;
+}
+bool Link(SteamId user, LinkInfo& out) {
+    if (!g_ready) return false;
+    NetIdentity id = Identity(user);
+    NetConnectionInfo info{};
+    NetStatus status{};
+    if (g.GetSessionConnectionInfo(g_msgs, &id, &info, &status) != 3) return false;   // k_ESteamNetworkingConnectionState_Connected
+    constexpr int32_t kFlagRelayed = 16;   // k_nSteamNetworkConnectionInfoFlags_Relayed
+    out.pingMs = status.ping;
+    out.quality = status.qualityLocal;
+    out.relayed = (info.flags & kFlagRelayed) != 0;
+    return true;
+}
 bool Send(SteamId to, int channel, const void* data, uint32_t size, int flags) {
     if (!g_ready) return false;
     NetIdentity id = Identity(to);
