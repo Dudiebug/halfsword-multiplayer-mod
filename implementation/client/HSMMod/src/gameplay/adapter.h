@@ -78,6 +78,10 @@ public:
     bool ContinueFromPauseMenu();
     // Game-and-UI input with the mouse cursor shown, so the pause menu can be clicked (the game's own menus do the same).
     void ShowPauseCursor();
+    // GameplayStatics.PlaySound2D of a sound asset the game has loaded (by object name), as a UI sound. False: not loaded.
+    bool PlayUiSound(const char* name);
+    // The player controller's cursor is hidden (something set game-only input under the open pause menu).
+    bool PauseCursorLost();
     // A menu level loaded after the mod took the cursor: game-and-UI input, cursor shown, as ShowPauseCursor. Leaving a
     // session skips the stock flow that gives the menus their input (#19, #23). Does nothing when the mod never touched it.
     bool MenuInputBack();
@@ -257,24 +261,6 @@ public:
     // no loaded asset references it. Used to seat a bolt on a stand-in's crossbow (fx_sync's crossbow replay).
     ue::UClass* CrossbowBoltClass();
     ue::FRotator ActorRotation(ue::UObject* actor);
-    // Capture the flag (match/hsm_ctf.h): each machine spawns its own two flag actors and moves them to what MatchInfo says.
-    // The actor class is the first loaded one of a preference list (a long tool: Rake, Pitchfork, Shovel, Scythe, the lantern);
-    // null (logged once per level) when none is loaded, and the flags are markers only. The actor is tinted in the team's colour
-    // and frozen (no physics, no collision) until a fighter takes it in hand.
-    ue::UObject* SpawnFlagActor(int team, const ue::FVector& at, std::string* className = nullptr);
-    void FlagLevelChanged() { flagClass_ = nullptr; flagClassName_.clear(); flagBodies_.clear(); modActors_.clear(); }
-    // An actor the mod spawned and keeps (the flags): the ground clears (DestroyDroppedWeapons) and the map reset's level-weapon
-    // record (LevelWeapons) leave it alone. Checked by object index, so a recycled address is not mistaken for it.
-    bool IsModActor(ue::UObject* a);
-    // Lets go of the flag (a hand or the back), then puts it, frozen, at `at`.
-    void FlagPlace(ue::UObject* flag, ue::UObject* carrier, const ue::FVector& at, double yawDeg);
-    // The fighter takes the flag in a free hand (the game's own pick-up: "Set Up Right/Left Hand Weapon"); never lets go of a
-    // weapon for it. False when both hands are full or the pick-up did not take: the caller carries it on the back.
-    bool FlagHold(ue::UObject* willie, ue::UObject* flag);
-    bool FlagHeld(ue::UObject* willie, ue::UObject* flag);
-    // Hangs the flag, frozen, on the fighter's back sheath socket (Sheath_Slot_Back). True when it is attached to that fighter.
-    bool FlagCarryOnBack(ue::UObject* carrier, ue::UObject* flag);
-    bool FlagAttachedTo(ue::UObject* carrier, ue::UObject* flag);
     // Armour pieces lying loose (no attach parent): what a strip, a pick-up swap or a fallen bot's loot left. Worn and
     // carried pieces are attached. One pass over the object array.
     std::vector<ue::UObject*> LooseArmor();
@@ -376,15 +362,8 @@ private:
     bool buildOn_ = false;
     int buildTier_ = 0;
     bool bare_ = false;
-    struct FlagBody { ue::UObject* comp = nullptr; uint8_t collision = 3; bool simulating = false; };
-    ue::UClass* flagClass_ = nullptr;
     ue::UClass* boltClass_ = nullptr;               // CrossbowBoltClass
     int32_t boltClassIndex_ = -1;
-    std::string flagClassName_;
-    std::unordered_map<ue::UObject*, std::vector<FlagBody>> flagBodies_;   // per flag actor: each primitive as it was before it was frozen
-    std::vector<std::pair<ue::UObject*, int32_t>> modActors_;                // the flags: actor and object index (IsModActor)
-    void FlagFreeze(ue::UObject* flag, bool frozen);
-    int TintFlag(ue::UObject* flag, int team);
     struct ScenarioSaved { bool saved = false, carnage = false, brawling = false, hasLose = false; uint8_t lose = 0; } scenarioSaved_;   // the GI values ApplyScenario replaced
     bool ResolveBones(ue::UObject* mesh);
     std::string TempSlot();
@@ -409,7 +388,7 @@ private:
     ue::UObject* gi_ = nullptr;            // GameInstance(), found once
     int32_t giIndex_ = -1;
     ue::UClass* giClass_ = nullptr;
-    bool pauseOpen_ = false, pauseLogged_ = false;
+    bool pauseOpen_ = false, pauseLogged_ = false, pauseIsMenu_ = false;   // pauseIsMenu_: the widget found is the menu, not a settings screen
     ue::UObject* pauseWidget_ = nullptr;           // with its object-array slot: the widget PauseMenuOpen last found on screen
     int32_t pauseWidgetIndex_ = -1;
     uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)

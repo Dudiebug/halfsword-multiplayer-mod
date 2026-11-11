@@ -150,6 +150,8 @@ static void TestNetStats() {
     CHECK(FighterLine(4, f, 10).find("predicted 25%") != std::string::npos);
     ClaimNetStats c; c.ok = 3; c.dist.Add(10, 12);
     CHECK(ClaimLine(c, 10).find("ok 3") != std::string::npos);
+    CHECK(ClaimLine(c, 10).find("dist p50 12") != std::string::npos);
+    ClaimNetStats none; CHECK(ClaimLine(none, 10).find("nan") == std::string::npos);
 }
 
 static void TestPanelAndFloor() {

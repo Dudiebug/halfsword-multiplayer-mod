@@ -367,11 +367,11 @@ MatchConfig Lobby::config() const {
     c.fuseS = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_fuse"), kFuseDefaultS), int(kFuseMinS), int(kFuseMaxS)));   // none: 30 s (Tag)
     c.scenario = ScenarioFromKey(steam::LobbyData(lobby_, "hsm_scen"));                              // none: Standard
     c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
+    c.deadWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));     // none: 20%
+    c.weaponWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));   // none: 20%
     c.waveBreakS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wbrk"), 0), 0, 600));      // 0: the format's own
     c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
     c.freeCam = steam::LobbyData(lobby_, "hsm_fcam") != "0";                                       // none: on
-    c.ctfCaptures = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_ctfcap"), kCtfDefaultCaptures), kCtfMinCaptures, kCtfMaxCaptures));   // none: 3
-    c.flagReturnS = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_ctfret"), kFlagReturnDefaultS), kFlagReturnMinS, kFlagReturnMaxS));   // none: 20 s
     c.hostPhysics = steam::LobbyData(lobby_, "hsm_sync") == "host";                                  // none: per player
     return Sanitize(c);
 }
@@ -393,11 +393,11 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_fuse", std::to_string(c.fuseS));
     steam::SetLobbyData(lobby_, "hsm_scen", std::to_string(c.scenario));
     steam::SetLobbyData(lobby_, "hsm_dmg", std::to_string(c.damagePct));
+    steam::SetLobbyData(lobby_, "hsm_dwt", std::to_string(c.deadWeightPct));
+    steam::SetLobbyData(lobby_, "hsm_wwt", std::to_string(c.weaponWeightPct));
     steam::SetLobbyData(lobby_, "hsm_wbrk", std::to_string(c.waveBreakS));
     steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(c.clearGroundMin));
     steam::SetLobbyData(lobby_, "hsm_fcam", c.freeCam ? "1" : "0");
-    steam::SetLobbyData(lobby_, "hsm_ctfcap", std::to_string(int(c.ctfCaptures)));
-    steam::SetLobbyData(lobby_, "hsm_ctfret", std::to_string(int(c.flagReturnS)));
     steam::SetLobbyData(lobby_, "hsm_sync", c.hostPhysics ? "host" : "owner");
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }

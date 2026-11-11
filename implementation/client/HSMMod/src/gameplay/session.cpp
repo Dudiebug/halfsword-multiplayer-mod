@@ -63,7 +63,6 @@
 #include "log.h"
 #include "ue4ss_load.h"
 #include "ue/profiler.h"
-#include "match/hsm_ctf.h"
 #include "match/hsm_draw.h"
 #include "match/hsm_emoji.h"
 #include "match/hsm_fighter_class.h"
@@ -272,7 +271,6 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
         case MsgType::LoadoutChange: { LoadoutChangeResult m; return Decode(d, n, m); }   // rev 36: the host's verdict on a change
         case MsgType::MatchInfo: { MatchInfo m; return Decode(d, n, m); }
-        case MsgType::CtfEvent: { CtfEventMsg m; return Decode(d, n, m); }   // rev 37: a flag was taken, dropped, returned or captured
         case MsgType::Kill: { Kill m; return Decode(d, n, m); }
         case MsgType::Chat: { ChatLine m; return Decode(d, n, m); }
         case MsgType::CombatEvent: { CombatEvent m; return Decode(d, n, m); }
@@ -320,15 +318,6 @@ struct ActorRef {
     void Clear() { obj = nullptr; index = -1; }
 };
 
-// Capture the flag: one machine's copy of a flag (CtfVisualTick): its actor, and what was last done with it.
-struct FlagVis {
-    ActorRef actor;
-    bool applied = false, inHand = false, noHand = false;
-    ObjectiveState state = ObjectiveState::Home; uint8_t carrier = 0;
-    UObject* carrierObj = nullptr; int32_t carrierIndex = -1;
-    double x = 0, y = 0;
-    uint32_t nextCheck = 0, nextSpawn = 0; int spawnFails = 0;
-};
 
 class SessionImpl final : public Session {
 public:
@@ -371,7 +360,10 @@ public:
                         }
             if (cfg_.buildCards) ui::BuildCardPush(std::move(decoded));
         };
-        lobby_.onPresence = [](const std::string& name, bool joined) { ui::ShowLine("HSMMod", style::kBone, (name.empty() ? "?" : name) + (joined ? " joined" : " left")); };
+        lobby_.onPresence = [this](const std::string& name, bool joined) {
+            ui::ShowLine("HSMMod", style::kBone, (name.empty() ? "?" : name) + (joined ? " joined" : " left"));
+            if (joined && cfg_.joinSound) adapter_.PlayUiSound("ButtonSound");   // HSMBot 1977: heard with the game in the background too
+        };
         ui::ChatSetup(cfg_.chatKey, [this](bool on) {   // in a menu level the chat closing gives the menu its cursor back
                 adapter_.CaptureInput(on); if (!on && !InFightLevel()) adapter_.ShowPauseCursor(); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
     }
@@ -598,17 +590,10 @@ public:
             if (!selfTestOk_) { HSM_LOG("session: self-test failed; disabling multiplayer for this run"); ResetNetwork("self-test failed"); return; }
             InstallClientSuppression();
             game::InstallTravelHook([this](const std::string& l, bool a, const std::string& o) { return OnOpenLevel(l, a, o); });
-            // Blueprint-to-Blueprint calls (hits, damage) never reach ProcessEvent; this hooks the VM's executor.
-            // Fails closed: on an unverified build the hooks stay inert and the log says why.
-            const bool vmHook = InstallScriptHook();
-            HSM_LOG("session: script VM hook %s", vmHook ? "installed" : "unavailable");
-            // Swapped-out armour outlives the paint tasks that read it (T5), in single player too; paint_defer=0 turns it off.
-            if (vmHook && cfg_.paintDefer) game::InstallPaintDefer();
-            else if (!cfg_.paintDefer) HSM_LOG("session: armour paint guard off (paint_defer=0)");
-            // The map's Blueprint random numbers agree across a session (the seed comes with each travel); inert until one is set.
-            game::shareddice::Install();
+            vmHookAskedAt_ = NowMs();
         }
         if (!selfTestOk_) return;
+        InstallVmHook(false);
         // Fetch (dsound.dll) on the link page: what this mod is doing, in the menus and solo play too, and whether Fetch's
         // menu has the keyboard, before any of the mod's keys are read below (gameplay/fetch_link.h).
         {
@@ -673,7 +658,7 @@ public:
         adapter_.TickDeferredDestroys();
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
-        game::TickPhysicsPin(joined && !IsHost() ? info_.physics : kUnpinnedPhysics);   // and its gore and bodies
+        game::TickPhysicsPin(!joined ? kUnpinnedPhysics : IsHost() ? HostWeights() : info_.physics);   // and its gore, bodies and weights
         adapter_.SetDestroyAware(net_ != nullptr);
         adapter_.SetSubclassWeapons(true);   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel();
@@ -717,6 +702,15 @@ public:
                 case InputMode::Leave: break;
             }
             if (!typing) pauseMenuWas_ = menu;
+            // A join or a spectate change under the open menu could leave game-only input (no cursor, nothing clickable,
+            // HSMBot 2240): put the menu's cursor back, at most twice a second.
+            if (menu && !typing && NowMs() - pauseCursorAt_ >= 500) {
+                pauseCursorAt_ = NowMs();
+                if (adapter_.PauseCursorLost()) {
+                    adapter_.ShowPauseCursor();
+                    if (++pauseCursorFixes_ <= 5) HSM_LOG("session: pause menu open with the cursor hidden; cursor shown again");
+                }
+            }
         }
         if (net_) { BenchedBodyTick(); SpectateTick(); }
         laps.Lap(TickPart::Voice);
@@ -734,13 +728,12 @@ public:
         GiveUpTick();
         DropsTick();
         MapResetTick();
-        CtfVisualTick();
         HudScene hud = BuildHud();
-        ui::HudTick(hud, NameTags(hud), Format(info_.format), CtfMarkers(hud));
+        ui::HudTick(hud, NameTags(hud), Format(info_.format));
         HudScene chatHud = hud;   // the chat runs in any session fight, a match or not (match/hsm_chat_scene.h ChatRuns)
         chatHud.visible = ChatRuns({hud.visible, net_ != nullptr, MatchLevel(), localFighter_});
         ui::ChatTick(chatHud);
-        if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && !ui::Typing() && !game::fetchlink::KeysHeld() && cfg_.buildCards) ui::BuildCardToggle();
+        if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && GameKeysAllowed() && cfg_.buildCards) ui::BuildCardToggle();
         ui::BuildCardTick(hud.visible);
         laps.Lap(TickPart::Hud);
         CardCheckTick();
@@ -1935,7 +1928,6 @@ public:
             if (ue4ss::ReportMods().find("HalfWolverine") == std::string::npos) note += " Needs Half Wolverine, which isn't on.";
             else if (!WolverineFileMatches(ReadWolverineIni(), sheet)) note += " Restart the game to put on its Half Wolverine parts.";
         }
-        if (sheet.bite) note += " Bite is on your bite key.";
         return note;
     }
     bool HelpImprove() const override { return cfg_.helpImprove; }
@@ -2072,7 +2064,22 @@ public:
             return;
         }
         if (!report::Enabled() || report::Busy()) { HSM_LOG("report: the last session crashed; reports are off or busy, not sent"); return; }
+        // The same crash at every start is sent once a day (session/hsm_report.h CrashReportDue).
+        const std::wstring sentPath = InstanceFilePath(L"HSMMod", L".crashsent");
+        const std::string sig = CrashSignature(line);
+        const int64_t now = int64_t(std::time(nullptr));
+        {
+            long long lastAt = 0; std::string lastSig;
+            if (FILE* f = _wfopen(sentPath.c_str(), L"rb")) {
+                char buf[512] = {};
+                if (std::fscanf(f, "%lld", &lastAt) == 1 && std::fgetc(f) != EOF && std::fgets(buf, sizeof buf, f)) lastSig = buf;
+                while (!lastSig.empty() && (lastSig.back() == '\n' || lastSig.back() == '\r')) lastSig.pop_back();
+                std::fclose(f);
+            }
+            if (!CrashReportDue(lastSig, int64_t(lastAt), sig, now)) { HSM_LOG("report: the last session crashed the same way as the one reported today; not sent again: %s", line.c_str()); return; }
+        }
         if (!report::Submit(CrashReportText(line), ReportFactsNow(), ReportJob::Crash)) { HSM_LOG("report: the crash report could not be started"); return; }
+        if (FILE* f = _wfopen(sentPath.c_str(), L"wb")) { std::fprintf(f, "%lld\n%s\n", static_cast<long long>(now), sig.c_str()); std::fclose(f); }
         HSM_LOG("report: the last session crashed; sending a crash report (help_improve is on): %s", line.c_str());
     }
 
@@ -2904,9 +2911,8 @@ private:
         reloadPending_ = false;
         bots_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
         tints_.clear();
-        ctfOn_ = false; flagVisActive_ = false; for (FlagVis& v : flagVis_) v = FlagVis{}; adapter_.FlagLevelChanged();   // the old level's flag actors went with it
         if (currentLevel_.find("Ambush") != std::string::npos)
-            HSM_LOG("ctf: the Forest map (%s) loaded; Capture the flag there is experimental (the bases come from its spawn points)", currentLevel_.c_str());
+            HSM_LOG("maps: the Forest arena (%s) loaded", currentLevel_.c_str());
         ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset(); ownDiedAt_ = 0; mirrorBlob_.clear(); roleOf_.clear(); rolesDirty_ = false; ownBlob_ = 0;
         // Client side: puppets died with the level; the host re-announces them after Ready.
         world_.OnLevel(); puppets_.clear();
@@ -3097,10 +3103,44 @@ private:
         StartOwner();
     }
 
+    // The script VM hook: Blueprint-to-Blueprint calls (hits, damage) never reach ProcessEvent; this hooks the VM's executor.
+    // UE4SS hooks the same function and patches it with the game running, so while UE4SS is on its way this hook waits
+    // for UE4SS's (session/hsm_hook_order.h: hooked first, HSMMod crashed 0.7 to 0.9 s after a late UE4SS loaded). A
+    // session that starts gets the hook at once (`now`). Fails closed: on an unverified build the hooks stay inert and the
+    // log says why.
+    void InstallVmHook(bool now) {
+        if (vmHookDone_ || !selfTestOk_) return;
+        uint64_t since = 0;
+        VmHookWait w;
+        w.phase = ue4ss::LoadPhase(&since);
+        w.foreignHook = ScriptExecutorForeignHooked();
+        w.waitedMs = NowMs() - vmHookAskedAt_;
+        w.sinceLoadedMs = uint32_t(std::min<uint64_t>(since, 0xFFFFFFFFull));
+        if (!now && !VmHookMayInstall(w)) {
+            if (!vmHookWaitLogged_) {
+                vmHookWaitLogged_ = true;
+                HSM_LOG("session: script VM hook waits for UE4SS's own (UE4SS %s)", w.phase == Ue4ssPhase::Pending ? "is not loaded yet" : "has not hooked yet");
+            }
+            return;
+        }
+        vmHookDone_ = true;
+        if (vmHookWaitLogged_)
+            HSM_LOG("session: script VM hook goes in after %u ms: %s", w.waitedMs,
+                    w.foreignHook ? "UE4SS's hook is in" : now ? "a session is starting" : "UE4SS did not hook in time");
+        const bool vmHook = InstallScriptHook();
+        HSM_LOG("session: script VM hook %s", vmHook ? "installed" : "unavailable");
+        // Swapped-out armour outlives the paint tasks that read it (T5), in single player too; paint_defer=0 turns it off.
+        if (vmHook && cfg_.paintDefer) game::InstallPaintDefer();
+        else if (!cfg_.paintDefer) HSM_LOG("session: armour paint guard off (paint_defer=0)");
+        // The map's Blueprint random numbers agree across a session (the seed comes with each travel); inert until one is set.
+        game::shareddice::Install();
+    }
+    bool VmHookReady() { InstallVmHook(true); return ScriptHookActive(); }
+
     // Owner sync is the only sync mode and it needs the script VM hook (claims, the stock flow guard). Without it no
     // session starts: the host leaves its lobby / closes the transport, a joiner leaves the host's.
     bool ScriptHookMissing() {
-        if (ScriptHookActive()) return false;
+        if (VmHookReady()) return false;
         HSM_LOG("session: the script VM hook is unavailable; multiplayer needs it (host sync was removed in 0.8.0), leaving the session");
         const char* msg = "Multiplayer cannot start: this game build is not supported by HSMMod (script VM hook unavailable). Update HSMMod.";
         ui::ShowLine("HSMMod", style::kBone, msg);
@@ -3115,6 +3155,7 @@ private:
 
     // Owner sync on this machine: a fresh stream clock, and the claims hooks with what they need to know of the session.
     void StartOwner() {
+        InstallVmHook(true);   // the parts below ask once whether the hook is in
         streams_.Start(game::SteadyNowMs());
         standIns_.SetPlayout(cfg_.playoutQuantile, cfg_.playoutMarginMs, cfg_.standinLeadMs);   // rev 42 (Phase 2)
         frameFloor_ = sync::FrameFloor(cfg_.minFps);
@@ -3511,7 +3552,7 @@ private:
                 warnedClassReplica_ = true;
                 HSM_LOG("classes: my fighter is simulated elsewhere (host physics or held): the host applies my class's stats, and they aren't checked here");
                 const std::optional<ClassSheet> mine = ResolveClass(cfg_.className, cfg_.classCustom);
-                if (lobby_.InClassesLobby() && HostPhysics() && mine && ClassLosesPartsOnGuest(*mine)) ui::ShowLine("HSMMod", style::kWarn, "This lobby is on Host Physics: the host runs your class's stats, but Half Wolverine's parts and Bite don't work here. Use Owner Sync for them.");
+                if (lobby_.InClassesLobby() && HostPhysics() && mine && ClassLosesPartsOnGuest(*mine)) ui::ShowLine("HSMMod", style::kWarn, "This lobby is on Host Physics: the host runs your class's stats, but Half Wolverine's parts don't work here. Use Owner Sync for them.");
             }
             return;
         }
@@ -3521,11 +3562,6 @@ private:
         UObject* const me = adapter_.PlayerWillie(0);
         if (applies && picked->noPain) adapter_.ClearPain(me);
         if (applies && picked->noDislocation) adapter_.HoldNoDislocation(me);
-        // The game's own bite: one press starts it and the next ends it (Willie_BP Bite Event).
-        if (const SHORT key = GetAsyncKeyState(cfg_.classBiteKey); (key & 1) && applies && picked->bite && me && !ui::Typing() && !game::fetchlink::KeysHeld()) {
-            Call(me, "Bite Event").invoke();
-            HSM_LOG("classes: bite");
-        }
         if (!DueAt(now, nextClassStats_)) return;
         nextClassStats_ = now + 100;
         if (!applies && !classTracks_.who) return;                   // nothing was ever changed: the game's fighter, untouched
@@ -4131,7 +4167,7 @@ private:
         for (uint8_t e = 1; e <= kMaxWillies; ++e) {
             if (!standIns_.ActorOf(e)) continue;
             sync::PanelRow r;
-            r.name = CtfNameOf(e);
+            r.name = RosterNameOf(e);
             r.rttMs = RttToOwner(e);
             if (steamNet_) {
                 const uint8_t owner = OwnerSlotOf(e, leases_.holders());
@@ -5446,7 +5482,6 @@ private:
         std::erase(respawnQueue_, e);
         if (match_.Alive(e)) HandleDeath(e, 0, NowMs());
         match_.Leave(e, NowMs());
-        if (ctfOn_) for (const CtfEvent& ev : ctf_.Remove(e, NowMs())) CtfHandle(ev, NowMs());   // the carrier who leaves drops the flag where it stood
     }
 
     void RemoveMember(uint8_t slot, uint64_t key) {
@@ -5770,6 +5805,17 @@ private:
         return IsHost() ? kDamageStock : info_.damagePct;
     }
 
+    // The Dead weight and Weapon weight rows as the game's Dead Weight Scale and Weapon Weight Scale, for everyone and the
+    // host too: the host's lobby (a server and a direct connection: the 20% default). Gore Rate and Bone Snapping stay
+    // the host's own (-1: not pinned on the host; the clients get its own values in MatchInfo).
+    std::array<float, kPinnedPhysics> HostWeights() const {
+        const MatchConfig c = IsServer() ? ServerMatchConfig() : steamMode() && lobby_.InLobby() ? lobby_.config() : MatchConfig{};
+        std::array<float, kPinnedPhysics> p = kUnpinnedPhysics;
+        p[kPinnedDeadWeight] = WeightScale(c.deadWeightPct);
+        p[kPinnedWeaponWeight] = WeightScale(c.weaponWeightPct);
+        return p;
+    }
+
     // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
     MatchConfig StartConfig() {
         MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? AdjustForPlayers(lobby_.config(), int(roster_.size())) : MatchConfig{};   // a Duel with a third player is Last Man Standing
@@ -5832,7 +5878,6 @@ private:
         LogPairing("match start");
         BroadcastInfo(NowMs());                          // the clients know the match's gear before their Spawns arrive
         RespawnAll();   // team sides / generated loadouts take effect; F2: and everyone starts alive in the arena's start spots, own gear too
-        CtfStart();     // Capture the flag: the bases from the team sides RespawnAll just built
     }
 
     // A Progression co-op fight's end (session/hsm_career.h). The host decides it: won (the human side won), the purse (its
@@ -6042,7 +6087,6 @@ private:
         if (ev.roundReset) { HSM_LOG("host: duel round reset"); LogPairing("round reset"); }
         if (ev.live || ev.roundReset || ev.rematch) draw_.Reset(now);
         CheckDraw(now);
-        CtfHostTick(now, ev);
         if (dropWatch_.Observe(match_.config().format, uint8_t(match_.phase()), uint16_t(match_.round()))) {
             ClearDroppedWeapons();
             // Pit Bridge Duels: a broken bridge cannot be put back in place, so each new round reloads the map (pre24 tester
@@ -6418,7 +6462,7 @@ private:
     // ---------------------------------------------------------------- map reload that keeps the match (session/hsm_map_reset.h)
     ReloadVerdict ReloadAllowed() const {
         const Format f = match_.config().format;
-        return MidMatchReload(MatchLevel() && net_ != nullptr, match_.phase() != MatchPhase::Idle, IsBotFormat(f) || IsCtf(f) || progression_,
+        return MidMatchReload(MatchLevel() && net_ != nullptr, match_.phase() != MatchPhase::Idle, IsBotFormat(f) || progression_,
                               reloadPending_ || keptMatch_.has_value());
     }
 
@@ -6445,12 +6489,13 @@ private:
     void RestoreKeptMatch(uint32_t now) {
         match_ = std::move(*keptMatch_); keptMatch_.reset();
         roleOf_ = std::move(keptRoles_); keptRoles_.clear(); rolesDirty_ = true;
-        respawnQueue_.clear();
+        respawnQueue_.clear(); batchPlaced_.clear();
         for (const RosterMember& m : roster_.members()) {
             if (!match_.Has(m.entity)) continue;   // joined during the load: the usual joiner path
             if (IsQueueFormat(match_.config().format) && match_.Benched(m.entity)) BenchEntity(m.entity, "map reload");
-            else RespawnEntity(m.entity);
+            else { respawnBatch_ = true; RespawnEntity(m.entity); batchPlaced_.push_back(m.entity); }
         }
+        respawnBatch_ = false; batchPlaced_.clear();
         draw_.Reset(now); sidesValid_ = false; infoDirty_ = true;
         HSM_LOG("reset: reload done, match kept (round %d)", int(match_.round()));
     }
@@ -6609,13 +6654,16 @@ private:
         return Grounded({p.x, p.y, p.z}, ignore);
     }
 
-    FVector SidePoint(int8_t team, uint8_t entity, double& yawDeg, int pitSide = -1) {
+    FVector SidePoint(int8_t team, uint8_t entity, double& yawDeg, int pitSide = -1, bool nearMates = false) {
         const std::vector<UObject*>& ignore = SpawnIgnore();
         EnsureSides(ignore);
-        std::vector<Point3> enemies;
+        std::vector<Point3> enemies, mates;
         for (const RosterMember& m : roster_.members()) AddEnemy(enemies, m.entity, team, entity);
         for (auto& [e, ref] : bots_) AddEnemy(enemies, e, team, entity);
-        const Point3& p = sidePoints_[PickRespawn(sidePoints_, sides_, pitSide >= 0 ? int8_t(pitSide) : team, enemies)];
+        if (nearMates && pitSide < 0 && team != kNoTeam)
+            for (const RosterMember& m : roster_.members()) AddMate(mates, m.entity, team, entity);
+        const Point3& p = sidePoints_[pitSide >= 0 ? PickRespawn(sidePoints_, sides_, int8_t(pitSide), enemies)
+                                                   : PickRespawnNearTeam(sidePoints_, sides_, team, enemies, mates)];
         const Point3 spot = pitEnds_ ? p : StandableNear(p, entity, entity, sidesArea_, ignore);   // a bridge end is stood on as it is: a spread slot lands in the Pit
         FVector at = Grounded({spot.x, spot.y, spot.z}, ignore);
         double cx = 0, cy = 0;
@@ -6726,6 +6774,14 @@ private:
         if (UObject* w = EntityActor(e)) { FVector v = adapter_.ActorLocation(w); out.push_back({v.x, v.y, v.z}); }
     }
 
+    // A teammate whose body is where it fights now: alive, not waiting in the respawn queue, and in a batch respawn
+    // (RespawnAll) only one already placed by it (the others still stand where the last round left them).
+    void AddMate(std::vector<Point3>& out, uint8_t e, int8_t team, uint8_t self) {
+        if (e == self || !match_.Alive(e) || match_.TeamOf(e) != team || RespawnQueued(e)) return;
+        if (respawnBatch_ && std::find(batchPlaced_.begin(), batchPlaced_.end(), e) == batchPlaced_.end()) return;
+        if (UObject* w = EntityActor(e)) { FVector v = adapter_.ActorLocation(w); out.push_back({v.x, v.y, v.z}); }
+    }
+
     void RespawnEntity(uint8_t e) {
         if (e < 1 || e > kMaxFighters) return;            // bots come back as waves, not respawns
         uint8_t slot = uint8_t(e - 1);
@@ -6734,7 +6790,7 @@ private:
         int8_t team = match_.TeamOf(e);
         double yaw = 0;
         const int pitSide = match_.config().format == Format::PitBridgeDuel ? PitSideOf(e == match_.PairA() ? 0 : 1) : -1;   // a side of the bridge, not a team
-        FVector at = progression_ && coopStart_ ? CoopStartPoint(e, yaw) : SidePoint(team, e, yaw, pitSide);
+        FVector at = progression_ && coopStart_ ? CoopStartPoint(e, yaw) : SidePoint(team, e, yaw, pitSide, true);   // next to the team (2263)
         FlushRoles();
         game::Adapter::SpawnOptions o; o.at = at; o.yawDeg = yaw; o.teamInt = slot == 0 ? 1 : TeamIntFor(team, e);
         o.fighterClass = FighterClassFor(match_.config().format == Format::Zombies, slot != 0 && team == kBotTeam,
@@ -6756,14 +6812,16 @@ private:
         }
         Spawn sp; sp.entity = e; sp.ownerSlot = slot; sp.kind = EntityKind::Fighter; sp.team = team; sp.blobId = o.blob ? id : 0; sp.life = lifeBook_.Bump(e);
         sp.x = float(at.x); sp.y = float(at.y); sp.z = float(at.z); sp.yaw = float(yaw);
-        sp.flags = xbowHolders_.count(e) || CrossbowForEveryone(match_.config().format, xbowChecked_ && xbowUsable_) ? kSpawnCrossbow : 0;   // rev 36: the Crossbows row's draw; Crossbow TDM: everybody, a late joiner too
-        if (IsZombieClass(o.fighterClass)) sp.flags |= kSpawnZombie;   // rev 38: every machine builds it as the zombie Willie
+        // rev 36: the Crossbows row's draw; Crossbow TDM: everybody, a late joiner too. rev 38: kSpawnZombie, every machine
+        // builds it as the zombie Willie; an infected holder comes back without the crossbow (match/hsm_crossbow.h).
+        sp.flags = SpawnBodyFlags(xbowHolders_.count(e) || CrossbowForEveryone(match_.config().format, xbowChecked_ && xbowUsable_),
+                                  IsZombieClass(o.fighterClass));
         director_.MarkSpawned(sp);
         Despawn dp; dp.entity = e;
         net_->Broadcast(kChanReliable, Encode(dp), true);
         net_->Broadcast(kChanReliable, Encode(sp), true);
         match_.MarkRespawned(e); kills_.Forget(e);
-        if (w && sp.flags && (slot == 0 || HostPhysics())) QueueCrossbow(w, e);   // a body this machine plays or drives; an owner's stand-in gets its owner's
+        if (w && (sp.flags & kSpawnCrossbow) && (slot == 0 || HostPhysics())) QueueCrossbow(w, e);   // a body this machine plays or drives; an owner's stand-in gets its owner's
         if (w) QueueTint(w, team); else HSM_LOG("host: respawn of entity %u failed", e);
     }
 
@@ -6814,10 +6872,12 @@ private:
     void RespawnAll() {
         respawnQueue_.clear();
         DrawCrossbows(match_.phase() == MatchPhase::Countdown || match_.phase() == MatchPhase::Idle ? "match start" : "rematch");
+        respawnBatch_ = true; batchPlaced_.clear();
         for (const RosterMember& m : roster_.members()) {
             if (IsQueueFormat(match_.config().format) && match_.Benched(m.entity)) BenchEntity(m.entity, "match start / rematch");
-            else RespawnEntity(m.entity);
+            else { RespawnEntity(m.entity); batchPlaced_.push_back(m.entity); }
         }
+        respawnBatch_ = false;
         ClearBots();
         wave_ = 0;
     }
@@ -7013,13 +7073,17 @@ private:
         m.gear = uint8_t(c.gear); m.tier = c.tier;
         m.freeCam = c.freeCam ? 1 : 0;                   // rev 36: the dead may fly a free camera
         m.crossbows = c.crossbows;                       // rev 36: the Crossbows row
-        if (ctfOn_ && IsCtf(c.format)) m.objectives = ctf_.Objectives(now);   // rev 37: Capture the flag's two flags
         m.forceStrength = cfg_.forceStrength ? 1 : 0;    // rev 34: every machine builds its players the way the host does
         m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
         m.damagePct = SessionDamage();
         m.teamKit = uint8_t(c.teamKit);
         if (IsTag(c.format) && tag_.active()) { m.tagIt = tag_.it(); m.fuseLeftMs = uint16_t(std::min<uint32_t>(tag_.FuseLeftMs(now), kFuseMaxS * 1000u)); }   // Wave 3: "it" and its fuse
         m.physics = game::OwnPhysics();   // rev 31: the host's Gore Rate, Bone Snapping and Dead Weight Scale; rev 44: and Weapon Weight Scale
+        {   // the two weights are the lobby's rows, not the host's own sliders
+            const std::array<float, kPinnedPhysics> w = HostWeights();
+            m.physics[kPinnedDeadWeight] = w[kPinnedDeadWeight];
+            m.physics[kPinnedWeaponWeight] = w[kPinnedWeaponWeight];
+        }
         m.waveBreakS = c.waveBreakS; m.clearGroundMin = c.clearGroundMin; m.clearCount = clearCount_;
         m.syncMode = uint8_t(nextSync_);   // rev 29: the mode the next map runs
         if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
@@ -7174,187 +7238,10 @@ private:
         return out;
     }
 
-    // ------------------------------------------------------------------ capture the flag (match/hsm_ctf.h)
-    // The host decides every take, drop and capture (ctf_, from the fighters' places and states it already has) and says so in
-    // MatchInfo.objectives plus a reliable CtfEvent for the feed. Every machine, the host's included, then spawns its own two
-    // flag actors and moves them to what MatchInfo says (CtfVisualTick): at the base, lying where it fell, or carried. The
-    // carrier's own machine puts the flag in a free hand through the game's pick-up (ctf_carry=hand, the default) and falls back
-    // to the back sheath socket; every other machine hangs it on the carrier's back. Without a loadable flag class the flags are
-    // HUD markers only.
-    static constexpr uint32_t kCtfTickMs = 50, kCtfHandCheckMs = 2000, kCtfSpawnRetryMs = 3000;
-    static constexpr int kCtfSpawnTries = 3;
-
-    std::string CtfNameOf(uint8_t entity) const {
+    // A fighter's name for the logs and the /net panel: the roster's, else MatchInfo's.
+    std::string RosterNameOf(uint8_t entity) const {
         for (const RosterMember& m : roster_.members()) if (m.entity == entity && !m.name.empty()) return m.name;
         return NameOf(info_, entity);
-    }
-
-    // Host, at the match start: the bases from the team spawn arcs, both flags home.
-    void CtfStart() {
-        ctfOn_ = IsCtf(match_.config().format);
-        ctfLastPos_.clear(); ctfDown_.clear(); ctfNextTick_ = ctfNextSample_ = 0;
-        if (!ctfOn_) return;
-        const std::vector<UObject*>& ignore = SpawnIgnore();
-        EnsureSides(ignore);
-        FVector origin = hostWillie_ ? adapter_.ActorLocation(hostWillie_) : FVector{};
-        const CtfBases b = DeriveBases(sidePoints_, sides_, {origin.x, origin.y, origin.z});
-        const FVector a = Grounded({b.at[0].x, b.at[0].y, b.at[0].z}, ignore), c = Grounded({b.at[1].x, b.at[1].y, b.at[1].z}, ignore);
-        ctf_.Start(uint32_t(match_.config().flagReturnS) * 1000u, {a.x, a.y, a.z}, {c.x, c.y, c.z});
-        HSM_LOG("ctf: bases in %s from %zu spawn point(s): RED (%.0f, %.0f, %.0f), BLUE (%.0f, %.0f, %.0f), %.0f cm apart%s", currentLevel_.c_str(), sidePoints_.size(),
-                a.x, a.y, a.z, c.x, c.y, c.z, b.apartCm, b.ok ? "" : " - TOO CLOSE or a team has no spawn point; the flags may be taken from the wrong place");
-        HSM_LOG("ctf: %d capture(s) to win, a dropped flag goes home after %u s, time limit %u s", int(match_.config().ctfCaptures), unsigned(match_.config().flagReturnS),
-                unsigned(match_.config().timeLimitS));
-        infoDirty_ = true;
-    }
-
-    // Host, every host tick: the rules, at 20 Hz, while a fight is on.
-    void CtfHostTick(uint32_t now, const Match::Events& ev) {
-        if (!ctfOn_ || !IsCtf(match_.config().format)) return;
-        if (ev.rematch) { ctf_.Reset(); ctfLastPos_.clear(); infoDirty_ = true; HSM_LOG("ctf: rematch: both flags home"); }
-        if (!CombatPhase(match_.phase()) || now < ctfNextTick_) return;
-        ctfNextTick_ = now + kCtfTickMs;
-        if (now >= ctfNextSample_) {                     // fallen or knocked out: the vitals' reading, four times a second
-            ctfNextSample_ = now + kDrawSampleMs;
-            for (const RosterMember& m : roster_.members()) {
-                DownSample d;
-                ctfDown_[m.entity] = SampleDown(m.entity, d) && (d.fallen || d.knockedOut);
-            }
-        }
-        std::vector<CtfFighter> fs;
-        for (const RosterMember& m : roster_.members()) {
-            const uint8_t e = m.entity;
-            if (!match_.Has(e) || match_.TeamOf(e) < 0) continue;
-            CtfFighter f; f.entity = e; f.team = match_.TeamOf(e);
-            UObject* w = EntityActor(e);
-            if (w) { const FVector v = adapter_.ActorLocation(w); f.at = {v.x, v.y, v.z}; ctfLastPos_[e] = f.at; }
-            else if (auto it = ctfLastPos_.find(e); it != ctfLastPos_.end()) f.at = it->second;
-            else continue;
-            f.alive = w && match_.Alive(e) && !RespawnQueued(e) && !match_.Gone(e);
-            auto d = ctfDown_.find(e);
-            f.down = d != ctfDown_.end() && d->second;
-            fs.push_back(f);
-        }
-        for (const CtfEvent& e : ctf_.Tick(now, fs)) CtfHandle(e, now);
-    }
-
-    // Host: one event decided. Tell everyone, score a capture, put a dropped flag on the floor.
-    void CtfHandle(const CtfEvent& e, uint32_t now) {
-        net_->Broadcast(kChanReliable, Encode(CtfEventMsg{e}), true);
-        HSM_LOG("ctf: %s", CtfEventLine(e, [this](uint8_t x) { return CtfNameOf(x); }).c_str());
-        if (e.kind == CtfEventKind::Dropped) {
-            const Objective o = ctf_.Objectives(now)[e.flag];
-            const FVector g = Grounded({o.x, o.y, o.z}, SpawnIgnore());
-            ctf_.MoveDropped(e.flag, {g.x, g.y, g.z});
-        }
-        if (e.kind == CtfEventKind::Captured) {
-            const int8_t team = match_.TeamOf(e.entity);
-            if (match_.AddCapture(team, now))
-                HSM_LOG("ctf: capture by team %d: RED %d, BLUE %d%s", int(team), match_.Score(0), match_.Score(1), match_.phase() == MatchPhase::Results ? " - match over" : "");
-        }
-        CtfAnnounce(e);
-        infoDirty_ = true;
-    }
-
-    // Every machine: the feed line, and a banner for a capture.
-    void CtfAnnounce(const CtfEvent& e) {
-        feed_.push_back({NowMs(), MakeCtfFeedRow(info_, e, MyEntity())});
-        while (feed_.size() > kFeedRows) feed_.pop_front();
-        if (e.kind == CtfEventKind::Captured) {
-            const int scorer = 1 - int(e.flag);
-            banner_.Fire(TeamName(scorer) + " SCORES", Upper(NameOf(info_, e.entity)) + " CAPTURED THE " + TeamName(e.flag) + " FLAG", style::TeamInk(scorer), NowMs());
-        }
-    }
-
-    // The fighter's actor on this machine: my own, or the one the entity has here (a stand-in, or the host's body).
-    UObject* CtfCarrierActor(uint8_t e) {
-        if (!e) return nullptr;
-        if (e == MyEntity()) return adapter_.PlayerWillie(0);
-        return AnyActor(e);
-    }
-    bool CtfHeadOf(uint8_t e, double& x, double& y, double& z) {
-        if (e == MyEntity()) return false;               // no marker over my own head
-        UObject* a = CtfCarrierActor(e);
-        FVector h;
-        if (!a || !adapter_.BoneLocation(a, "head", h)) return false;
-        x = h.x; y = h.y; z = h.z;
-        return true;
-    }
-    // The HUD's flag markers: carriers and flags in play (and the bases' home flags, dimmer).
-    std::vector<MarkerSrc> CtfMarkers(const HudScene& hud) {
-        if (!hud.visible || !MatchLevel() || !IsCtf(Format(info_.format)) || info_.phase == uint8_t(MatchPhase::Results)) return {};
-        const MatchInfo m = Extrapolate(info_, infoAt_, NowMs());
-        return MarkersFor(m.objectives, [this](uint8_t e, double& x, double& y, double& z) { return CtfHeadOf(e, x, y, z); });
-    }
-
-    // Where a flag actor stands for an objective: on the floor under its place.
-    FVector CtfFloorPlace(const Objective& o, UObject* flag) {
-        FVector p{o.x, o.y, o.z};
-        double fz;
-        if (adapter_.FloorZ(p, {flag}, fz)) p.z = fz + 5.0;
-        else p.z -= kStandDefaultCm;                       // no floor found: the height a standing fighter's root has over it
-        return p;
-    }
-
-    void CtfVisualsClear() {
-        for (FlagVis& v : flagVis_) {
-            if (v.actor.obj && adapter_.StillValid(v.actor.obj, v.actor.index)) adapter_.DestroyActor(v.actor.obj);
-            v = FlagVis{};
-        }
-        flagVisActive_ = false;
-    }
-
-    // Every frame on every machine, from MatchInfo: spawn the two flag actors and put them where the host says.
-    void CtfVisualTick() {
-        const bool want = net_ && InFightLevel() && IsCtf(Format(info_.format)) && info_.objectives.size() == 2 && info_.phase != uint8_t(MatchPhase::Idle);
-        if (!want) { if (flagVisActive_) CtfVisualsClear(); return; }
-        flagVisActive_ = true;
-        const uint32_t now = NowMs();
-        for (int f = 0; f < 2; ++f) {
-            FlagVis& v = flagVis_[f];
-            const Objective& o = info_.objectives[size_t(f)];
-            if (!v.actor.obj || !adapter_.StillValid(v.actor.obj, v.actor.index)) {
-                if (v.actor.obj) { HSM_LOG("ctf: the %s flag actor is gone (cleared by the game or a ground clear); spawning it again", TeamName(f).c_str()); v.actor.Clear(); v.applied = false; }
-                if (v.spawnFails >= kCtfSpawnTries || now < v.nextSpawn) continue;
-                v.nextSpawn = now + kCtfSpawnRetryMs;
-                UObject* a = adapter_.SpawnFlagActor(f, CtfFloorPlace(o, nullptr));
-                if (!a) { ++v.spawnFails; continue; }
-                v.actor.Set(a); v.applied = false;
-            }
-            CtfApplyFlag(f, v, o, now);
-        }
-    }
-
-    void CtfApplyFlag(int f, FlagVis& v, const Objective& o, uint32_t now) {
-        UObject* flag = v.actor.obj;
-        if (o.state == ObjectiveState::Carried) {
-            UObject* carrier = CtfCarrierActor(o.carrier);
-            if (!carrier) return;                          // its fighter is not on this machine (yet): the flag stays as it was
-            if (v.applied && v.state == ObjectiveState::Carried && v.carrier == o.carrier && v.carrierObj == carrier) {
-                if (now < v.nextCheck) return;             // already on it; look again now and then
-                v.nextCheck = now + kCtfHandCheckMs;
-                if (v.inHand ? adapter_.FlagHeld(carrier, flag) : adapter_.FlagAttachedTo(carrier, flag)) return;
-                if (v.inHand) HSM_LOG("ctf: the %s flag left %s's hand; it hangs on the back instead", TeamName(f).c_str(), CtfNameOf(o.carrier).c_str());
-                v.noHand = true;
-            }
-            if (v.inHand && v.carrierObj && v.carrierObj != carrier && adapter_.StillValid(v.carrierObj, v.carrierIndex))
-                adapter_.FlagPlace(flag, v.carrierObj, CtfFloorPlace(o, flag), 0);   // it changed hands: out of the old carrier's first
-            bool hand = o.carrier == MyEntity() && carrier == adapter_.PlayerWillie(0) && cfg_.ctfFlagInHand && !v.noHand && !HostPhysics() && !MyFighterHanded();
-            if (hand) hand = adapter_.FlagHold(carrier, flag);
-            const bool back = !hand && adapter_.FlagCarryOnBack(carrier, flag);
-            HSM_LOG("ctf: the %s flag is carried by %s (#%u): %s", TeamName(f).c_str(), CtfNameOf(o.carrier).c_str(), unsigned(o.carrier),
-                    hand ? "in a hand" : back ? "on the back" : "NOT ATTACHED (no hand free and the back socket did not take it)");
-            v.applied = hand || back; v.inHand = hand; v.state = ObjectiveState::Carried; v.carrier = o.carrier; v.carrierObj = carrier;
-            v.carrierIndex = ObjectIndex(carrier); v.nextCheck = now + kCtfHandCheckMs;
-            return;
-        }
-        const FVector p = CtfFloorPlace(o, flag);
-        const bool same = v.applied && v.state == o.state && std::fabs(v.x - p.x) < 5.0 && std::fabs(v.y - p.y) < 5.0;
-        if (same) return;
-        UObject* was = v.inHand && v.carrierObj && adapter_.StillValid(v.carrierObj, v.carrierIndex) ? v.carrierObj : nullptr;   // never a body the game destroyed
-        adapter_.FlagPlace(flag, was, p, 0);
-        if (!v.applied || v.state != o.state)
-            HSM_LOG("ctf: the %s flag is %s at (%.0f, %.0f, %.0f)", TeamName(f).c_str(), o.state == ObjectiveState::Home ? "home" : "lying", p.x, p.y, p.z);
-        v.applied = true; v.state = o.state; v.carrier = 0; v.carrierObj = nullptr; v.inHand = false; v.noHand = false; v.x = p.x; v.y = p.y;
     }
 
     // ------------------------------------------------------------------ voice chat (gameplay/voice.h, voice/hsm_voice.h)
@@ -7411,7 +7298,8 @@ private:
         return a && adapter_.BoneLocation(a, "head", out);
     }
     // The game window in front, nobody typing and Fetch's menu shut: push to talk may read its key.
-    static bool VoiceKeyAllowed() {
+    // The mod's own keys (push to talk, the build cards): only with the game window in front, not while typing.
+    static bool GameKeysAllowed() {
         DWORD pid = 0;
         if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
         return pid == GetCurrentProcessId() && !ui::Typing() && !game::fetchlink::KeysHeld();
@@ -7430,7 +7318,7 @@ private:
         const bool meter = VoiceMeterWanted(now);
         if (!meter && !voice_.Recording()) { if (voice_.Monitor()) voice_.SetMonitor(false); return; }
         if (meter && !steam::Ready() && !voiceSteamTried_) { voiceSteamTried_ = true; steam::Init(); }
-        voice_.Capture(false, VoiceKeyAllowed(), meter, now, voiceOut_);
+        voice_.Capture(false, GameKeysAllowed(), meter, now, voiceOut_);
         if (!meter) { voice_.Stop(); voice_.SetMonitor(false); }
     }
 
@@ -7452,7 +7340,7 @@ private:
         }
         // The dead talk (to the dead); the living only while conscious enough (or whatever, with voice_cut=0).
         const bool mayTalk = on && me && InFightLevel() && (!VoiceAlive(me) || VoiceAwake(me) || !cfg_.voiceCut);
-        voice_.Capture(mayTalk, VoiceKeyAllowed(), VoiceMeterWanted(now), now, voiceOut_);
+        voice_.Capture(mayTalk, GameKeysAllowed(), VoiceMeterWanted(now), now, voiceOut_);
         for (size_t i = 0; i < voiceOut_.chunks.size(); ++i) {
             if (voiceOut_.chunks[i].size() > kMaxVoiceBytes) { ++voiceDrops_.big; continue; }   // a long hitch: dropped, never cut
             VoiceMsg m; m.entity = me; m.seq = ++voiceSeq_;
@@ -8535,7 +8423,7 @@ private:
                 Welcome w; Decode(d, n, w);
                 welcomed_ = true; mySlot_ = w.slot; world_.SetMyEntity(w.entity);
                 clientNextSync_ = SyncMode(w.syncMode); SetSyncMode(clientNextSync_);   // the host's level runs it; a later one may differ (MatchInfo)
-                if (!ScriptHookActive()) { refuseNoHook_ = true; break; }   // handled after the pump (ScriptHookMissing / OnRejected)
+                if (!VmHookReady()) { refuseNoHook_ = true; break; }   // handled after the pump (ScriptHookMissing / OnRejected)
                 hostHasFighter_ = !(w.flags & kWelcomeNoHostFighter);
                 if (!hostHasFighter_) HSM_LOG("client: the host plays no fighter of its own (hosted server): nothing to watch, score or wait for from it");
                 HSM_LOG("client: joined session %u as slot %u (entity %u), %s", w.sessionId, w.slot, w.entity, SyncName(syncMode_));
@@ -8649,7 +8537,6 @@ private:
                 break;
             }
             case MsgType::Kill: { Kill k; Decode(d, n, k); PushFeed(k); break; }
-            case MsgType::CtfEvent: { CtfEventMsg m; if (Decode(d, n, m)) CtfAnnounce(m.e); break; }
             case MsgType::ModeEvent: { ModeEventMsg m; if (Decode(d, n, m)) ApplyModeEvent(m); break; }
             case MsgType::Chat: {
                 ChatLine c; Decode(d, n, c);
@@ -8726,6 +8613,8 @@ private:
     game::SaveGuard saveGuard_;                      // the player's GameProgress, kept out of the session
     game::Recorder recorder_{cfg_.record};           // [mod] record=1: HSMRec-*.hsmrec per fight level
     bool selfTested_ = false, selfTestOk_ = false;
+    bool vmHookDone_ = false, vmHookWaitLogged_ = false;   // InstallVmHook
+    uint32_t vmHookAskedAt_ = 0;
     UObject* lastGameMode_ = nullptr;
     int32_t lastGameModeIndex_ = -1;
     std::string currentLevel_;
@@ -8768,6 +8657,8 @@ private:
     std::optional<Travel> lastTravel_;
     std::vector<Setting> fightSettings_;            // the settings of the session travel into this level (re-asserted on load)
     bool picksValid_ = false;
+    bool respawnBatch_ = false;                 // RespawnAll / a kept match: AddMate counts only batchPlaced_
+    std::vector<uint8_t> batchPlaced_;
     bool pitEnds_ = false;               // Pit Bridge Duels: sidePoints_ are the bridge's two ends (stood on as they are)
     bool pitBridgeNoted_ = false;
     // Host: a reload that keeps the match (HostReloadKeepMatch): pending until the level loads, then held until all are in.
@@ -9018,13 +8909,6 @@ private:
     BlobAssembler clientAssembler_;
     std::vector<uint8_t> lastUpload_;
     struct XbowJob { UObject* w; int32_t index; uint8_t entity; uint32_t due; };
-    // Capture the flag. ctf_: the host's rules; ctfOn_: this match is one; flagVis_: each machine's two flag actors.
-    Ctf ctf_;
-    bool ctfOn_ = false, flagVisActive_ = false;
-    std::map<uint8_t, Point3> ctfLastPos_;   // host: each fighter's last place the rules saw
-    std::map<uint8_t, bool> ctfDown_;        // host: fallen or knocked out at the last look
-    uint32_t ctfNextTick_ = 0, ctfNextSample_ = 0;
-    FlagVis flagVis_[2];
     std::vector<XbowJob> xbowJobs_;          // crossbows waiting for a settled body (CrossbowTick)
     std::set<uint8_t> xbowHolders_;          // host: the fighters drawn to spawn with one (DrawCrossbows)
     bool xbowChecked_ = false, xbowUsable_ = false;
@@ -9072,6 +8956,7 @@ private:
     int savedFoes_ = -1;
     uint32_t probeSince_ = 0;   // InputProbeTick: when the fight level loaded, 0 once logged
     uint32_t levelLoadedAt_ = 0;
+    uint32_t pauseCursorAt_ = 0, pauseCursorFixes_ = 0;
     uint32_t inputFixAt_ = 0, nextHealth_ = 0, nextHello_ = 0, hellosSent_ = 0;
     uint32_t menuInputAt_ = 0;
     bool inputFixRepeat_ = false, pauseMenuWas_ = false, menuInputRepeat_ = false;

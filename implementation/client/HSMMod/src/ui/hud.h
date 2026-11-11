@@ -5,14 +5,12 @@
 #pragma once
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_nametag.h"
-#include "match/hsm_objective.h"
 #include <vector>
 
 namespace hsm::ui {
 
-// tags: name tags to draw over other fighters this frame (empty: none); format picks team ink. markers: objective markers
-// (match/hsm_objective.h: the flags of Capture the flag) projected the same way.
-void HudTick(const HudScene& scene, const std::vector<NameTagSrc>& tags = {}, Format format = Format::Duel, const std::vector<MarkerSrc>& markers = {});
+// tags: name tags to draw over other fighters this frame (empty: none); format picks team ink.
+void HudTick(const HudScene& scene, const std::vector<NameTagSrc>& tags = {}, Format format = Format::Duel);
 bool HudTabHeld();   // the scoreboard key (Tab), while the game window has focus
 
 }  // namespace hsm::ui

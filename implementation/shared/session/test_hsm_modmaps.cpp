@@ -92,6 +92,22 @@ static void TestCatalogue() {
     CHECK(FindModMap(list, "/game/maps/custom/arena_bog")->pak == 0);
     CHECK(FindModMap(list, "/Game/Maps/Custom/Arena_Bog.Arena_Bog") != nullptr);
     CHECK(FindModMap(list, "/Game/Maps/Arenas/Map_Arena_Yard") == nullptr && FindModMap(list, "") == nullptr);
+    for (const char* p : {"/Game/Mods/Test_Arena", "/Game/Mods/ArenaTest", "/Game/Mods/test01", "/Game/Mods/TEST", "/Game/Mods/TestArena",
+                          "/Game/Mods/Arena_Tests", "/Game/Mods/TestingRoom", "/Game/Mods/my-test", "/Game/Mods/Map_Test_Empty"})
+        CHECK(LooksLikeTestMap(p));
+    for (const char* p : {"/Game/Mods/Contest", "/Game/Mods/Greatest_Hall", "/Game/Mods/Arena", "/Game/Mods/Attestation", "/Game/Mods/Testudo",
+                          "/Game/Mods/Testament_Hall", "/Game/Mods/Protest", "/Game/Tests/Arena", "/Game/TestMod/Hall", "/Game/Mods/Latest"})
+        CHECK(!LooksLikeTestMap(p));
+    {
+        const auto all = BuildModMapList({{0, {"/Game/Mods/MapTest", "/Game/Mods/Hall", "/Game/Mods/Hall_Lighting"}}},
+                                         {"/Game/Mods/Test_Arena", "/Game/Mods/Contest", "/Game/Mods/Arena"});
+        CHECK(all.size() == 5);                       // the pak's layer is not a map; the test maps are maps like the others
+        const auto shown = WithoutTestMaps(all);
+        CHECK(shown.size() == 3);
+        for (const ModMapEntry& e : shown) CHECK(!LooksLikeTestMap(e.path) && e.path != "/Game/Mods/Hall_Lighting");
+        CHECK(shown[0].path == "/Game/Mods/Arena" && shown[0].pak == -1);   // entries as they were, in the same order
+        CHECK(shown[2].path == "/Game/Mods/Hall" && shown[2].pak == 0);
+    }
     CHECK(BuildModMapList({}, {}).empty());
     // The cap.
     std::vector<std::string> many;

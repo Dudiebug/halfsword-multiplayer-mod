@@ -13,7 +13,7 @@
 namespace hsm {
 
 // server_format -> Format ("teams" = two teams, "teams3" / "teams4" = three or four, "survival" = players vs bots, "lms" =
-// last man standing; "teamduel", "riot", "juggernaut", "ctf" (capture the flag), "tag", "infection", "crossbowtdm", "tournament"
+// last man standing; "teamduel", "riot", "juggernaut", "tag", "infection", "crossbowtdm", "tournament"
 // and "pitbridge" (pit bridge duels) name the other formats). *teams (when given) gets the team count: 2..4 for the teams words,
 // 2 otherwise. False for an unknown word.
 inline bool ParseServerFormat(std::string_view s, Format* out, int* teams = nullptr) {
@@ -22,7 +22,7 @@ inline bool ParseServerFormat(std::string_view s, Format* out, int* teams = null
                                {"teams", Format::TwoTeams, 2}, {"teams2", Format::TwoTeams, 2}, {"teams3", Format::TwoTeams, 3},
                                {"teams4", Format::TwoTeams, 4}, {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2},
                                {"teamduel", Format::TeamDuel, 2}, {"riot", Format::Riot, 2}, {"juggernaut", Format::Juggernaut, 2},
-                               {"ctf", Format::CaptureTheFlag, 2}, {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
+                               {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
                                {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2},
                                {"pitbridge", Format::PitBridgeDuel, 2}};
     for (const E& e : kF)

@@ -146,7 +146,7 @@ inline bool FetchMenuMustClose(bool offline, bool hsmLive, const HsmState& hsm) 
 // A key Fetch's recorder sees while HSMMod plays held-back keys again is not a new press. The flag is trusted only from a live
 // half, so a mod that died with it set cannot stop recording for good.
 inline bool FetchSkipsInput(bool hsmLive, const HsmState& hsm) { return hsmLive && hsm.replayingInput; }
-// HSMMod ignores its own keys (chat, bite, build card, voice, the rest) while Fetch's menu has the keyboard.
+// HSMMod ignores its own keys (chat, build card, voice, the rest) while Fetch's menu has the keyboard.
 inline bool HsmKeysBlocked(bool fetchLive, const FetchState& fetch) { return fetchLive && (fetch.menuOpen || fetch.typing); }
 
 }  // namespace hsm::interop

@@ -8,11 +8,9 @@ static int g_fail = 0;
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #x); ++g_fail; } } while (0)
 
 int main() {
-    // Bite: H, the old default, moves to B once; a key the player chose, or H after the move, stays.
-    CHECK(BiteKeyMovesToB("H", "") && BiteKeyMovesToB("h", "0") && !BiteKeyMovesToB("H", "1") && !BiteKeyMovesToB("G", "") && !BiteKeyMovesToB("F5", ""));
     // The built-ins keep the power the launcher's versions had, and all fit the rules.
     struct Want { const char* name; double power; };
-    for (const Want& w : {Want{"Man-at-Arms", 0}, {"Revenant", 12.75}, {"Barber-Surgeon", 5.5}, {"Crusader", -9.75}, {"Pugilist", -10.5}, {"Footpad", 12.25}, {"Knight", 11.5}, {"Flagellant", 7.0}, {"Wrestler", 11.0}, {"Pilgrim", 10.5}, {"Veteran", 13.0}, {"Verity", 15.0}, {"Wulf", 11.5}, {"Ironside", 5.75}, {"Old Scar", 5.0}}) {
+    for (const Want& w : {Want{"Man-at-Arms", 0}, {"Revenant", 12.75}, {"Barber-Surgeon", 5.5}, {"Crusader", -9.75}, {"Pugilist", -15.5}, {"Footpad", 12.25}, {"Knight", 11.5}, {"Flagellant", 7.0}, {"Wrestler", 11.0}, {"Pilgrim", 10.5}, {"Veteran", 13.0}, {"Verity", 15.0}, {"Wulf", 11.5}, {"Ironside", 5.75}, {"Old Scar", 5.0}}) {
         bool found = false;
         for (const NamedClass& c : BuiltInClasses()) if (std::string_view(c.name) == w.name) {
             found = true;
@@ -74,6 +72,21 @@ int main() {
     CHECK(ClassPickCount() == 28 && ClassPickName(0) == "Man-at-Arms" && ClassPickName(20) == "Custom 1" && ClassPickName(27) == "Custom 8");
     // The CLASSES tab: every row explains itself, and the bars sit in the middle for the plain fighter and follow the stats.
     for (int i = 0; i < kClassFieldCount; ++i) CHECK(std::string_view(ClassFieldInfo(i)).size() > 20);
+    // Bite is the game's own key now. The Forge has no row for it and no built-in has it; a class saved with it still
+    // reads, and comes back without it (it would only cost power). A built-in is as it is.
+    for (int i = 0; i < kClassFieldCount; ++i) CHECK(std::string_view(ClassField(ClassSheet{}, i).label) != "BITE");
+    for (const NamedClass& c : BuiltInClasses()) CHECK(!c.sheet.bite);
+    {
+        ClassSheet old; old.bite = true; old.walk = 0.9; old.quickKicks = true;
+        std::string saved[kCustomClassSlots]; saved[2] = EncodeClass(old);
+        const std::optional<ClassSheet> read = DecodeClass(saved[2]);
+        CHECK(read && read->bite);
+        ClassSheet want = old; want.bite = false;
+        const std::optional<ClassSheet> got = ResolveClass(CustomClassName(2), saved);
+        CHECK(got && *got == want && ClassPoints(*got) < ClassPoints(old));
+        CHECK(ResolveClass(CustomClassName(1), saved) == ClassSheet{} && !ResolveClass("Nobody", saved));
+        CHECK(ResolveClass("Pugilist", saved) == FindClassNamed("Pugilist")->sheet);
+    }
     const ClassBars plain = ClassBarsFor(ClassSheet{});
     CHECK(plain.attack == 0.5f && plain.speed == 0.5f && plain.toughness == 0.5f);
     ClassSheet fast; fast.run = 2; fast.walk = 2; fast.bones = 0.5; fast.mass = 0.5;
@@ -145,9 +158,9 @@ int main() {
     big = {}; big.kick = std::numeric_limits<double>::infinity(); CHECK(!ClassProblems(big, true).empty());
     big = {}; big.metalClaws = true; CHECK(!ClassProblems(big, true).empty());
     ClassSheet hack;
-    for (int i = 0; i < 40; ++i) { ClassFieldStep(hack, 10, 1, true); ClassFieldStep(hack, 17, 1, true); }
+    for (int i = 0; i < 40; ++i) { ClassFieldStep(hack, 9, 1, true); ClassFieldStep(hack, 16, 1, true); }
     CHECK(hack.strength == kHackerStatMax && hack.mass == kRuleMassMax && ClassProblems(hack, true).empty());
-    for (int i = 0; i < 40; ++i) ClassFieldStep(hack, 17, -1, true);
+    for (int i = 0; i < 40; ++i) ClassFieldStep(hack, 16, -1, true);
     CHECK(hack.mass == kRuleMassMin);
     // A peer in an Unrestricted lobby is judged by its limits, and HS Enhancer stays refused unless this player turned that off.
     CHECK(CheckClassValue(EncodeClass(FindClassNamed("Glitch")->sheet), "", true).empty());
@@ -185,10 +198,10 @@ int main() {
     CHECK(!ClassBudget(overBudget, true).over && ClassBudget(overBudget, true).text.find("no limit") != std::string::npos);
     // Weight is a real number in half steps, up and down, and goes to 5.0 without Unrestricted (the budget is what stops it).
     ClassSheet heavy;
-    CHECK(ClassField(heavy, 17).value == "1.0");
-    ClassFieldStep(heavy, 17, 1); CHECK(heavy.mass == 1.5 && ClassField(heavy, 17).value == "1.5");
-    for (int i = 0; i < 20; ++i) ClassFieldStep(heavy, 17, 1);
-    CHECK(heavy.mass == 5.0 && ClassField(heavy, 17).value == "5.0" && !ClassProblems(heavy).empty() && ClassProblems(heavy, true).empty());
+    CHECK(ClassField(heavy, 16).value == "1.0");
+    ClassFieldStep(heavy, 16, 1); CHECK(heavy.mass == 1.5 && ClassField(heavy, 16).value == "1.5");
+    for (int i = 0; i < 20; ++i) ClassFieldStep(heavy, 16, 1);
+    CHECK(heavy.mass == 5.0 && ClassField(heavy, 16).value == "5.0" && !ClassProblems(heavy).empty() && ClassProblems(heavy, true).empty());
     // Strength and Muscle are the game's Muscle Rate, on top of the lobby's fair build. Nobody gets more than they paid for.
     ClassSheet plainBuild, strongBuild, muscled; strongBuild.strength = 2.0; muscled.muscle = true;
     CHECK(ClassWeight(0.3, plainBuild) == 0.3 && std::abs(ClassWeight(0.3, strongBuild) - 1.3) < 1e-9 && ClassWeight(0.3, muscled) == kWolverineMuscleRate);
@@ -224,14 +237,14 @@ int main() {
 
     // The Forge's rows move and stop at the limits, and don't drift.
     ClassSheet forge;
-    for (int i = 0; i < 40; ++i) ClassFieldStep(forge, 8, 1);
-    CHECK(forge.run == kRuleStatMax && ClassField(forge, 8).value == "200%");
-    for (int i = 0; i < 60; ++i) ClassFieldStep(forge, 8, -1);
-    CHECK(forge.run == kRuleStatMin && ClassField(forge, 8).value == "10%");
-    for (int i = 0; i < 60; ++i) ClassFieldStep(forge, 17, -1);
+    for (int i = 0; i < 40; ++i) ClassFieldStep(forge, 7, 1);
+    CHECK(forge.run == kRuleStatMax && ClassField(forge, 7).value == "200%");
+    for (int i = 0; i < 60; ++i) ClassFieldStep(forge, 7, -1);
+    CHECK(forge.run == kRuleStatMin && ClassField(forge, 7).value == "10%");
+    for (int i = 0; i < 60; ++i) ClassFieldStep(forge, 16, -1);
     CHECK(forge.mass == kRuleMassMin);
-    ClassSheet drift; for (int i = 0; i < 7; ++i) ClassFieldStep(drift, 10, -1);
-    CHECK(drift.strength == 0.65 && ClassField(drift, 10).value == "65%");
+    ClassSheet drift; for (int i = 0; i < 7; ++i) ClassFieldStep(drift, 9, -1);
+    CHECK(drift.strength == 0.65 && ClassField(drift, 9).value == "65%");
     ClassSheet cycle; ClassFieldStep(cycle, 2, 1); CHECK(cycle.claws && !cycle.metalClaws && ClassField(cycle, 2).value == "Bone");
     ClassFieldStep(cycle, 2, 1); CHECK(cycle.claws && cycle.metalClaws); ClassFieldStep(cycle, 2, 1); CHECK(!cycle.claws && !cycle.metalClaws);
     ClassFieldStep(cycle, 2, -1); CHECK(cycle.metalClaws);
@@ -290,10 +303,10 @@ int main() {
         const std::string plainText = EncodeClass(ClassSheet{});
         CHECK(plainText.find(" p") == std::string::npos);   // a class with neither reads as it always has
         for (const char* bad : {" p00", " p2", " p1", " p111", " p12", " q10", " "}) CHECK(!DecodeClass(plainText + bad));
-        ClassSheet step; ClassFieldStep(step, 18, 1); CHECK(step.grappler && ClassField(step, 18).value == "On");
-        ClassFieldStep(step, 19, 1); CHECK(step.panicker && ClassField(step, 19).value == "On");
-        ClassFieldStep(step, 18, -1); CHECK(!step.grappler);
-        CHECK(ClassField(step, 17).value == "1.0" && ClassSummary(both).find("grappler") != std::string::npos && ClassSummary(both).find("panicker") != std::string::npos);
+        ClassSheet step; ClassFieldStep(step, 17, 1); CHECK(step.grappler && ClassField(step, 17).value == "On");
+        ClassFieldStep(step, 18, 1); CHECK(step.panicker && ClassField(step, 18).value == "On");
+        ClassFieldStep(step, 17, -1); CHECK(!step.grappler);
+        CHECK(ClassField(step, 16).value == "1.0" && ClassSummary(both).find("grappler") != std::string::npos && ClassSummary(both).find("panicker") != std::string::npos);
         // Only while holding, and never past the limit on Muscle Rate.
         CHECK(ClassHoldRate(1.0, g, false) == 1.0 && ClassHoldRate(1.0, g, true) == 1.5 && ClassHoldRate(0.2, g, true) == 1.5 && ClassHoldRate(2.2, g, true) == kMaxClassWeight);
         CHECK(ClassHoldRate(1.0, ClassSheet{}, true) == 1.0);
@@ -322,8 +335,9 @@ int main() {
         CHECK(GuestClassOnHost(EncodeClass(guest), true, false) == guest && !GuestClassOnHost(EncodeClass(guest), false, false) && !GuestClassOnHost("rubbish", true, false) && !GuestClassOnHost("", true, false));
         ClassSheet cheat; cheat.strength = 5.0;
         CHECK(!GuestClassOnHost(EncodeClass(cheat), true, false) && GuestClassOnHost(EncodeClass(cheat), true, true));
+        // Bite is the game's own key now: nothing of it runs in the mod, so a guest with it loses nothing.
         ClassSheet biter; biter.bite = true; ClassSheet clawed; clawed.claws = true;
-        CHECK(ClassLosesPartsOnGuest(biter) && ClassLosesPartsOnGuest(clawed) && !ClassLosesPartsOnGuest(guest));
+        CHECK(!ClassLosesPartsOnGuest(biter) && ClassLosesPartsOnGuest(clawed) && !ClassLosesPartsOnGuest(guest));
         // Other players can tell classes apart. The report: nobody could see at a glance who was strong and who was frail.
         ClassSheet strong; strong.strength = 1.2; ClassSheet weak; weak.strength = 0.8; ClassSheet maxed; maxed.strength = 5.0; ClassSheet feeble; feeble.strength = 0.1;
         ClassSheet muscled2; muscled2.muscle = true; muscled2.strength = 0.7;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <initializer_list>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
 
@@ -47,6 +48,8 @@ bool SerializePassport(Adapter& a, UObject* statics, UClass* sgClass, const void
 // The game's weapon-type filter: byte fields named like the Free Mode setting, wherever they turn out to live. The owner
 // class is not in the reflection index, so every plausible holder is searched: the game instance (where the Free Mode
 // settings are), the generator itself and the game manager. Set for one Generate Character call, then put back.
+// The generator reads the game instance's field, and only in Free Mode (BP_Generator_Characters_Random: "Free Mode
+// Activated && Free Mode Opponents Weapons Type != 0"); a lobby fight is one.
 constexpr const char* kFilterFields[] = {"Free Mode Opponents Weapons Type", "NPC Weapons Type"};
 constexpr const char* kGameManagerClass = "BP_GameManager_C";
 
@@ -113,10 +116,13 @@ std::vector<uint8_t> RandomPassportBlob(Adapter& a, int tier, WeaponFilter weapo
     make.set<UClass*>("Actor Class", willie).set<uint8_t>("Nationality", 0).set<uint8_t>("Faction", 1).set<uint8_t>("Tier", uint8_t(rank))
         .set<bool>("Is Mercenary", false).set<bool>("Ignore Budget", false);
     bool ok = false;
+    // The game's type for this loadout. Axes & maces is four of the game's types: each loadout takes the next one, from
+    // a random first.
+    static uint32_t typeRoll = std::random_device{}();
+    const uint8_t gameByte = GameWeaponTypeByte(weapons, weapons == WeaponFilter::AxesMaces ? typeRoll++ : 0);
     {
         // The Weapons row: Any leaves the game's fields alone; the others set them for this one call (put back at the
         // scope's end, even on failure).
-        const uint8_t gameByte = GameWeaponTypeByte(weapons);
         std::unique_ptr<WeaponFilterScope> scope;
         if (weapons != WeaponFilter::Any) {
             std::vector<UObject*> gms = FindInstances(kGameManagerClass);
@@ -129,7 +135,13 @@ std::vector<uint8_t> RandomPassportBlob(Adapter& a, int tier, WeaponFilter weapo
                 else HSM_LOG("gear: weapon filter: none of '%s' / '%s' found on the game instance, the generator or %s; the Weapons row has no effect",
                              kFilterFields[0], kFilterFields[1], kGameManagerClass);
             }
-            HSM_LOG("gear: weapon filter %s -> game byte %u on %zu field(s)", WeaponFilterName(weapons), unsigned(gameByte), scope->found());
+            HSM_LOG("gear: weapon filter %s -> game byte %u (%s) on %zu field(s)", WeaponFilterName(weapons), unsigned(gameByte),
+                    GameWeaponTypeName(gameByte), scope->found());
+            static bool freeModeLogged = false;
+            if (!freeModeLogged && !a.FreeModeActive()) {
+                freeModeLogged = true;
+                HSM_LOG("gear: weapon filter: Free Mode is off; the game's generator only uses the weapon type in Free Mode");
+            }
         }
         tSpawn = SteadyNowMs();
         ok = make.invoke();
@@ -146,8 +158,8 @@ std::vector<uint8_t> RandomPassportBlob(Adapter& a, int tier, WeaponFilter weapo
         if (weapons != WeaponFilter::Any) {            // what the filter produced: the asset names the passport carries
             std::string names;
             for (const std::string& n : BlobAssetNames(blob)) names += (names.empty() ? "" : " | ") + n;
-            HSM_LOG("gear: filter %s (game byte %u) rolled assets: %s", WeaponFilterName(weapons), unsigned(GameWeaponTypeByte(weapons)),
-                    names.empty() ? "(none found in the blob)" : names.c_str());
+            HSM_LOG("gear: filter %s (game byte %u, %s) rolled assets: %s", WeaponFilterName(weapons), unsigned(gameByte),
+                    GameWeaponTypeName(gameByte), names.empty() ? "(none found in the blob)" : names.c_str());
         }
     }
     return blob;

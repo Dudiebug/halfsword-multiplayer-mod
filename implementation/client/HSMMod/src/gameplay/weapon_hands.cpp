@@ -451,7 +451,6 @@ bool ObjectSync::HandTornOff(UObject* standIn, int h) {
 // copy the mod froze (a held prop, adapter.cpp's thaw) is switched on here first; "Don't Save" keeps the stand-in's own
 // passport out of it (:8714 / :9372).
 bool ObjectSync::TakeIntoHand(UObject* standIn, int h, UObject* weapon) {
-    if (adapter_->IsModActor(weapon)) return false;   // #612: the CTF flag is nobody's pickup, not even taken back
     if (HandTornOff(standIn, h)) return false;
     Call rc(weapon, "K2_GetRootComponent");
     EnableSimulation(rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr);
@@ -483,12 +482,8 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
     auto consider = [&](UObject* a, int32_t index, uint32_t cls) {
         if (!a || (cls && cls != pose.classHash) || std::find(actors.begin(), actors.end(), a) != actors.end()) return;
         if (!adapter_->StillValid(a, index) || (!cls && ClassHashOf(a) != pose.classHash) || ObjectField(a, 0)) return;
-        // #612: the mod's own spawned actor (the CTF flag, a frozen rake) is never a stand-in hand's pickup (modKept).
-        const bool modKept = adapter_->IsModActor(a);
-        if (modKept && ++n_.flagSkipped <= kLogFirst)
-            HSM_LOG("props: stand-in hand skip: the CTF flag is not a pickup");
         const FVector at = adapter_->ActorLocation(a);
-        loose.push_back(sync::LooseWeapon{sync::V3{at.x, at.y, at.z}, pose.classHash, modKept});
+        loose.push_back(sync::LooseWeapon{sync::V3{at.x, at.y, at.z}, pose.classHash});
         actors.push_back(a);
     };
     for (const Loose& l : loose_) consider(l.actor, l.index, 0);

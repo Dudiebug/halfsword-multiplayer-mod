@@ -47,7 +47,17 @@ static void TestTypingWins() {
     CHECK(ChooseInputMode(S(true, false, true, false, false)) == InputMode::Leave);        // closes after the typing ends
 }
 
+static void TestPauseScreens() {
+    CHECK(PauseScreenOf("UI_Pause_Eng_C") == PauseScreen::Menu && PauseScreenOf("UI_Pause_C") == PauseScreen::Menu);
+    for (const char* c : {"UI_DisplaySettings2_C", "UI_GameSettings_C", "UI_AudioSettings_C", "UI_CameraSettings_C",
+                          "UI_GoreSettings_C", "UI_LanguageSettings_C", "UI_Controls_C", "UI_KeyBinds_C"})
+        CHECK(PauseScreenOf(c) == PauseScreen::Settings);
+    CHECK(PauseScreenOf("UI_HUD_C") == PauseScreen::None && PauseScreenOf("WBP_Settings_C") == PauseScreen::None);
+    CHECK(PauseScreenOf("") == PauseScreen::None);
+}
+
 int main() {
+    TestPauseScreens();
     TestMenuOpens(); TestMenuBlocksRestores(); TestMenuCloses(); TestNormalRestores(); TestOffFightLevelLeaves(); TestTypingWins();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("hsm_input_mode ok");

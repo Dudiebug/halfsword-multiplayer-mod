@@ -91,7 +91,7 @@ private:
     struct Counters {
         uint64_t sent = 0, gated = 0, limited = 0, friendly = 0, coalesced = 0, zeroImpulse = 0, capped = 0, replayed = 0,
                  refused = 0, queued = 0, dropped = 0, dupes = 0, stale = 0, ageUnknown = 0, parried = 0, noVictim = 0, noBone = 0,
-                 noStriker = 0, failed = 0, blockedStandIn = 0, blockedOnMine = 0, blockedFlag = 0, getDamageBlocked = 0, effects = 0,
+                 noStriker = 0, failed = 0, blockedStandIn = 0, blockedOnMine = 0, getDamageBlocked = 0, effects = 0,
                  effectsSkipped = 0, clashes = 0, clashUnmatched = 0, classKicks = 0, armorPiece = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0, badBone = 0,
                  stuckSent = 0, stuckLimited = 0, stuckReplayed = 0, stuckHeld = 0, armorStopped = 0, boltSent = 0, boltNoShooter = 0;
     };

@@ -357,6 +357,12 @@ bool IsScriptFunction(const UFunction* f) { return g_build && FunctionNative(f) 
 // MinHook chains onto either; the other checks (Func pointer, the call site inside ProcessInternal) still pin the address.
 static bool ForeignHookJump(const uint8_t* p) { return p[0] == 0xE9 || (p[0] == 0xFF && p[1] == 0x25); }
 
+bool ScriptExecutorForeignHooked() {
+    if (!g_build) return false;
+    auto* exec = reinterpret_cast<const uint8_t*>(g_base + g_build->vm.executor);
+    return std::memcmp(exec, kExecutorPrologue, sizeof kExecutorPrologue) != 0 && ForeignHookJump(exec);
+}
+
 void* ScriptExecutorAddress() {
     if (!g_build) return nullptr;
     const ScriptVm& vm = g_build->vm;

@@ -1,6 +1,7 @@
 // HSMMod.ini next to the game exe. Missing file or role=off keeps the game fully vanilla.
 #pragma once
 #include "match/hsm_class.h"
+#include "match/hsm_hud_style.h"
 #include "combat/hsm_claimcheck.h"
 #include "hsm_chat.h"
 #include "hsm_inputdelay.h"
@@ -180,17 +181,16 @@ struct Config {
     // Build cards (match/hsm_build_card.h). buildCards: show other players' cards (build_cards=0 hides them; yours is still
     // published). buildName: the build named by a launcher with -hsmbuild=, shown on your card; empty: none.
     bool buildCards = true;
+    bool joinSound = true;    // join_sound: the game's menu click sound when a player joins
+    bool hideTestMaps = true; // hide_test_maps: leave maps named "test" out of the custom map list
     std::string className;    // class=: the class picked in the mods menu; empty or Fair: the game's own fighter
     bool classWolverine = true;   // class_wolverine=0: don't write a class's parts into Half Wolverine's settings at start
     std::string classCustom[kCustomClassSlots];   // class_custom1=..: the Forge's slots (match/hsm_class.h)
     bool wolverineRefresh = true;   // wolverine_refresh=: when a class changes Half Wolverine's settings, reload UE4SS's mods in place. 0: restart instead
     std::string classCustomName[kCustomClassSlots];   // class_custom1_name=..: what the player called it; checked wherever it's read
-    int classBiteKey = 'B';   // class_bite_key=: bites, for a class with Bite. A letter or F1 to F12
     bool clawMirror = true;   // claw_mirror=0: don't draw Half Wolverine's claws on other players' fighters, or tell them about yours
     int buildCardKey = 'K';   // build_card_key=: brings cards back, holds them, steps through them, sends them away. One letter, or F1 to F12.
     std::string buildName;
-    // Capture the flag: true (ctf_carry=hand, the default) the carrier's own machine puts the flag in a free hand; false (ctf_carry=back) it always hangs on the back.
-    bool ctfFlagInHand = true;
     // true: armour swapped out while paint tasks still read it is destroyed later (the T5 crash); paint_defer=0 turns it off.
     bool paintDefer = true;
     // The Juggernaut role's body scale (juggernaut_scale, 1.0..1.6, default 1.35), written as the passport Height the game
@@ -203,9 +203,12 @@ struct Config {
     // help_improve_asked=1: the one-time HELP IMPROVE THE MOD question (the first MULTIPLAYER click, 0.8.0-pre7) was
     // answered, or the toggle was used. It never turns help_improve on by itself.
     bool helpImproveAsked = false;
-    // ui_style=classic: the mod's menus and HUD in their earlier dark look; game (the default): in the game's own art and
-    // typefaces (ui/skin.h). Read at start (the widgets are built once); the SETTINGS page writes it (SaveUiStyle).
-    bool uiClassic = false;
+    // ui_style=game (the default): the game's own parchment art and typefaces (ui/skin.h); dark: that art shaded dark and
+    // almost opaque, light text; classic: the mod's earlier opaque dark look. Read at start (the widgets are built once);
+    // the SETTINGS page writes it (SaveUiStyle).
+    style::MenuLook uiLook = style::MenuLook::Game;
+    // hud_opacity: the match HUD, the chat and the fighter card drawn at this opacity, 0.3 to 1 (the default: 1).
+    double hudOpacity = 1.0;
     std::string reportUrl = "https://reports.dudiebug.net";
     // One request to api.github.com at startup, asking whether a newer HSMMod release exists (net/update_check.h).
     bool updateCheck = true;
@@ -284,7 +287,8 @@ Config LoadConfig();          // writes a commented default file if none exists
 void ReadModRuleKeys(Config& c);
 const char* RoleName(Role r);
 bool SaveHelpImprove(bool on);   // writes help_improve= (and help_improve_asked=1) under [net] in HSMMod.ini, the rest untouched; false: could not
-bool SaveUiStyle(bool classic);  // writes ui_style= under [net] in HSMMod.ini (used from the next start); false: could not
+const char* UiStyleName(style::MenuLook look);   // dark, game or classic: the ui_style value
+bool SaveUiStyle(style::MenuLook look);  // writes ui_style= under [net] in HSMMod.ini (used from the next start); false: could not
 // Writes these keys under [section] (default [net]) in HSMMod.ini in one replace, the rest of the file untouched; false: could not.
 bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys, const char* section = "net");
 }  // namespace hsm

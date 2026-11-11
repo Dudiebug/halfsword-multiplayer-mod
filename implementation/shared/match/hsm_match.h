@@ -27,8 +27,8 @@ namespace hsm {
 // (Sanitize turns it into TwoTeams with teams = 3), never produced. LastManStanding: Duel's rounds for any number of
 // fighters; Duel itself is for exactly 2. The team rounds (IsTeamRound) take Duel's rounds to teams: the last TEAM
 // standing takes the round, scores are per team. TeamDuel: MatchConfig::teams (2..4) teams, picked in the lobby. Riot and
-// Juggernaut: two fixed teams that the roles decide (match/hsm_roles.h). CaptureTheFlag: two fixed teams picked in the
-// lobby, scored in captures (match/hsm_ctf.h); kills score nothing. Wave 3 (match/hsm_modes.h): Tag (rounds, one fighter
+// Juggernaut: two fixed teams that the roles decide (match/hsm_roles.h). CaptureTheFlag (10) was removed in 0.8.0: like
+// ThreeTeams it is only an old value (Sanitize turns it into TwoTeams), never produced; the number is never reused. Wave 3 (match/hsm_modes.h): Tag (rounds, one fighter
 // is "it" and carries a fuse; no teams), Infection (survivors against the infected: two fixed teams, the infected respawn),
 // Crossbow TDM (Teams with a crossbow for everyone). Tournament (14): a 1v1 bracket over everybody, the pairing being fought
 // and the rest on the bench (match/hsm_bracket.h). PitBridgeDuel (15): the Pit's bridge, the winner stays and the loser goes
@@ -46,11 +46,28 @@ constexpr uint8_t kGearCount = 4, kGearRowCount = 3;
 // (GameWeaponTypeByte). Any leaves the game's fields alone.
 enum class WeaponFilter : uint8_t { Any = 0, Swords1H = 1, Swords2H = 2, Polearms = 3, AxesMaces = 4 };
 constexpr uint8_t kWeaponFilterCount = 5;
-// Our filter -> the byte the game's weapon-type fields take (GI "Free Mode Opponents Weapons Type", "NPC Weapons Type";
-// Enum_WeaponType). ASSUMPTION pending the in-game test: Enum_WeaponType runs 0 Any, 1 1H swords, 2 2H swords, 3 Polearms,
-// 4 Axes & maces. The enum's names are not known offline; this table is the one place to correct once they are.
-inline constexpr uint8_t kGameWeaponTypeByte[kWeaponFilterCount] = {0, 1, 2, 3, 4};
-inline uint8_t GameWeaponTypeByte(WeaponFilter w) { return kGameWeaponTypeByte[uint8_t(w) < kWeaponFilterCount ? uint8_t(w) : 0]; }
+// Our filter -> the value the game's weapon-type field takes (GI "Free Mode Opponents Weapons Type", an
+// Enum_WeaponType_Specific). The values are the game's own, from the switch in BP_Generator_Weapons_Random's Generate
+// Weapon that picks the type's data asset: 0 any, 1 swords 1H, 2 swords 2H, 3 maces 1H, 4 maces 2H, 5 hafted 1H (axes,
+// hammers), 6 hafted 2H, 7 polearms. The game has no one type for "Axes & maces": that filter is one of its four (maces
+// and hafted, one- and two-handed), by `roll`, one per generated loadout; four rolls in a row give all four.
+inline constexpr uint8_t kGameWeaponTypeCount = 8;
+inline constexpr uint8_t kAxesMacesTypes[4] = {3, 5, 4, 6};
+inline uint8_t GameWeaponTypeByte(WeaponFilter w, uint32_t roll = 0) {
+    switch (w) {
+        case WeaponFilter::Swords1H: return 1;
+        case WeaponFilter::Swords2H: return 2;
+        case WeaponFilter::Polearms: return 7;
+        case WeaponFilter::AxesMaces: return kAxesMacesTypes[roll % 4];
+        default: return 0;
+    }
+}
+// The game's type by its value, for the log.
+inline const char* GameWeaponTypeName(uint8_t gameByte) {
+    static constexpr const char* kNames[kGameWeaponTypeCount] = {"any",      "swords 1H", "swords 2H", "maces 1H",
+                                                                 "maces 2H", "hafted 1H", "hafted 2H", "polearms"};
+    return gameByte < kGameWeaponTypeCount ? kNames[gameByte] : "?";
+}
 inline const char* WeaponFilterName(WeaponFilter w) {
     switch (w) {
         case WeaponFilter::Swords1H: return "1H swords";
@@ -64,14 +81,30 @@ inline const char* WeaponFilterName(WeaponFilter w) {
 // Tabard: the tabard only. Full: clothes, tabard, plate (darkened), shield and grips; blades stay steel. Off: nothing.
 enum class TeamKit : uint8_t { Off = 0, Tabard = 1, Full = 2 };
 constexpr uint8_t kTeamKitCount = 3;
-// A team's name on the HUD (RED, BLUE, GREEN, GOLD; "-" for none). Here, not in hsm_hud_text.h, so the objective layer
-// (match/hsm_objective.h, which the wire format includes) can name teams too.
+// A team's name on the HUD (RED, BLUE, GREEN, GOLD; "-" for none).
 inline std::string TeamName(int team) {
     static const char* kNames[] = {"RED", "BLUE", "GREEN", "GOLD"};
     return team >= 0 && team < 4 ? kNames[team] : "-";
 }
 constexpr int8_t kNoTeam = -1;        // free-for-all: everyone on their own
 constexpr int8_t kHumanTeam = 0, kBotTeam = 1;   // players vs bots
+
+// The Dead weight and Weapon weight rows: the game's Dead Weight Scale and Weapon Weight Scale sliders (GI_Settings
+// doubles, 0..1; the game's own is 0.5), as a percent of 1.0. The host's are every machine's in a session, the host's own
+// too (gameplay/damage_pin.cpp); the player's own come back after it.
+inline constexpr uint8_t kWeightDefaultPct = 20, kWeightStockPct = 50, kWeightMaxPct = 100, kWeightStepPct = 5;
+inline float WeightScale(uint8_t pct) { return float(pct) / 100.f; }
+// A step of the row's arrows: to the next multiple of kWeightStepPct that way, within 0..kWeightMaxPct (no wrap).
+inline uint8_t StepWeight(uint8_t pct, int dir) {
+    const int v = std::min<int>(pct, kWeightMaxPct), st = kWeightStepPct;
+    return uint8_t(std::clamp(dir < 0 ? (v + st - 1) / st * st - st : (v / st + 1) * st, 0, int(kWeightMaxPct)));
+}
+// The row's slider position (0..100) as the nearest step; not a number: 0.
+inline uint8_t WeightFromSlider(float at) {
+    if (!(at >= 0.f)) return 0;
+    return uint8_t(std::min<int>(int(at / kWeightStepPct + 0.5f) * kWeightStepPct, kWeightMaxPct));
+}
+inline std::string WeightLabel(uint8_t pct) { return std::to_string(pct) + "%" + (pct == kWeightStockPct ? " (stock)" : ""); }
 
 struct MatchConfig {
     Format format = Format::FreeForAll;
@@ -87,11 +120,11 @@ struct MatchConfig {
     TeamKit teamKit = TeamKit::Full;  // team formats: what takes the team colour (lobby key hsm_kit, MatchInfo.teamKit); every machine tints its own copies
     uint8_t fuseS = 30;               // Tag: the fuse "it" carries, seconds (kFuseMinS..kFuseMaxS, lobby key hsm_fuse); host-side, never on the wire
     uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
+    uint8_t deadWeightPct = kWeightDefaultPct;     // the Dead weight row (lobby key hsm_dwt): Dead Weight Scale for everyone, percent of 1.0
+    uint8_t weaponWeightPct = kWeightDefaultPct;   // the Weapon weight row (lobby key hsm_wwt): Weapon Weight Scale for everyone, percent of 1.0
     uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
     uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
     bool freeCam = true;              // dead players may fly a free camera (F, lobby key hsm_fcam); false: they only follow the living (MatchInfo.freeCam)
-    uint8_t ctfCaptures = 3;          // Capture the flag: captures to win, 1..10 (lobby key hsm_ctfcap); Sanitize makes it scoreLimit
-    uint8_t flagReturnS = 20;         // Capture the flag: seconds a dropped flag lies before it goes home, 10..60 (lobby key hsm_ctfret); host-side, never on the wire
     uint8_t scenario = 0;             // hsm::Scenario: the world settings for the picked map (lobby key hsm_scen); host-side, the clients get the settings with the Travel, never a wire field
     bool hostPhysics = false;         // 0.9.0: the host runs every fighter's physics and every screen shows its copy (SyncMode::Host); false: each player its own (SyncMode::Owner)
 };
@@ -150,13 +183,9 @@ constexpr int8_t kSurvivorTeam = 0, kInfectedTeam = 1;   // Infection
 constexpr int kInfectedKitTeam = 6;                      // TeamColor / the team kit's colour index of the infected: a dark green of their own (hsm_team_kit.h KitTeamFor)
 // Riot and Juggernaut give each fighter a role (match/hsm_roles.h): the role sets its gear, tier, build and team.
 inline bool HasRoles(Format f) { return f == Format::Riot || f == Format::Juggernaut; }
-// Capture the flag: two teams take each other's flag home (match/hsm_ctf.h); a score is a capture, a kill scores nothing.
-inline bool IsCtf(Format f) { return f == Format::CaptureTheFlag; }
-constexpr int kCtfMinCaptures = 1, kCtfMaxCaptures = 10, kCtfDefaultCaptures = 3;
-constexpr int kFlagReturnMinS = 10, kFlagReturnMaxS = 60, kFlagReturnDefaultS = 20;
 // The formats with teams: Teams (ThreeTeams is the old value of 3 teams, which still counts so a stale one cannot lose its
 // colours) and the team rounds.
-inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams || IsTeamRound(f) || IsCrossbowTdm(f) || IsInfection(f) || IsCtf(f); }
+inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams || IsTeamRound(f) || IsCrossbowTdm(f) || IsInfection(f); }
 // The teams the lobby's Teams / My team rows and Auto-balance decide; Riot and Juggernaut's come from the roles, Infection's from the infection.
 inline bool PicksTeams(Format f) { return HasTeams(f) && !HasRoles(f) && !IsInfection(f); }
 // The Duel rules: rounds, the last one standing takes the round (Duel for two fighters, Last Man Standing for any number;
@@ -168,13 +197,13 @@ inline bool ScoresPerFighter(Format f) { return f == Format::FreeForAll || (IsRo
 // Infection and the bot formats, else 0.
 inline int TeamCount(Format f, int teams) {
     return f == Format::TwoTeams || f == Format::TeamDuel || IsCrossbowTdm(f) ? std::clamp(teams, kMinTeams, kMaxTeams) : f == Format::ThreeTeams ? 3
-         : HasRoles(f) || IsInfection(f) || IsBotFormat(f) || IsCtf(f) ? 2 : 0;
+         : HasRoles(f) || IsInfection(f) || IsBotFormat(f) ? 2 : 0;
 }
 constexpr uint8_t kFuseMinS = 10, kFuseMaxS = 60, kFuseDefaultS = 30;   // Tag's fuse, seconds
 constexpr uint16_t kInfectionDefaultTimeS = 300;                          // Infection: the survivors win when this runs out (0 is no choice)
 // The score limit is the rounds to win a fight (Tournament: always 1, one round a fight since 0.8.0-pre26), the wins to take
 // the match (Pit Bridge Duels), else rounds or kills.
-inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll || f == Format::PitBridgeDuel ? 5 : f == Format::Tournament ? 1 : IsRoundFormat(f) || IsCtf(f) ? 3 : 10; }
+inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll || f == Format::PitBridgeDuel ? 5 : f == Format::Tournament ? 1 : IsRoundFormat(f) ? 3 : 10; }
 // The lobby key a format keeps its limit under, and the value the key holds: Tournament's "Rounds per fight" (hsm_trnr: 1, 3 or
 // 5; the limit is the rounds to win), Pit Bridge Duels' "Wins to take the match" (hsm_pbwin), else hsm_lim.
 inline const char* LimitKeyFor(Format f) { return f == Format::Tournament ? "hsm_trnr" : f == Format::PitBridgeDuel ? "hsm_pbwin" : "hsm_lim"; }
@@ -294,9 +323,6 @@ public:
     const KingQueue& queue() const { return queue_; }
     void SetBracketSeed(uint32_t seed) { bracketSeed_ = seed; }
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
-    // Capture the flag: `team` took a flag home. One point for the team; at the limit the match is over, and in sudden death the
-    // team ahead wins at once. False, and no effect, outside CTF, outside a fought phase or for a team the match has not.
-    bool AddCapture(int8_t team, uint32_t nowMs);
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
     // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
     bool Forfeit(uint8_t entity, uint32_t nowMs);

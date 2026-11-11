@@ -4,9 +4,8 @@
 // instances, VFX and lighting layers, menus and Map_Test_Empty are not listed.
 //   arena    - a fight arena: Duel, and every other format
 //   bigArena - a large non-menu level: every format except Duel
-//   abyss    - the Abyss level: Zombies only (its picker entry; the owner's call)
+//   abyss    - the Abyss level: Zombies and Infection
 //   pick     - listed in the lobby's picker; Cutting, Tavern and Smithery are not (the Tavern is Progression's)
-//   ctf      - Capture the flag is played here (Alley, and the Ambush map as "Forest", which is offered for CTF only)
 #pragma once
 #include "match/hsm_match.h"
 #include <cctype>
@@ -22,24 +21,23 @@ struct MapInfo {
     bool bigArena;
     bool abyss;
     bool pick;             // offered in the lobby's map picker (the rest stay known to FindMap/MapAllowsFormat)
-    bool ctf;              // Capture the flag is played here; Forest has no other flag, so no other format offers it
 };
 
 // Order is the cycling order of NextMap.
 inline constexpr MapInfo kMaps[] = {
-    {"/Game/Maps/Arenas/Map_Arena_Alley",       "Alley",      true,  false, false, true, true},
-    {"/Game/Maps/Arenas/Map_Arena_Cellar",      "Cellar",     true,  false, false, true, false},
-    {"/Game/Maps/Arenas/Map_Arena_EastTower",   "East Tower", true,  false, false, true, false},
-    {"/Game/Maps/Arenas/Map_Arena_LordsHall",   "Lords Hall", true,  false, false, true, false},
-    {"/Game/Maps/Arenas/Map_Arena_Pit",         "Pit",        true,  false, false, true, false},
-    {"/Game/Maps/Arenas/Map_Arena_Slums",       "Slums",      true,  false, false, true, false},
-    {"/Game/Maps/Arenas/Map_Arena_Yard",        "Yard",       true,  false, false, true, false},
-    {"/Game/Maps/Arena_Cutting_Map",            "Cutting",    true,  false, false, false, false},
-    {"/Game/Maps/Map_Hub_Tavern_Frank",         "Tavern",     false, true,  false, false, false},
-    {"/Game/Maps/Workshop_Smithery_Map",        "Smithery",   false, true,  false, false, false},
-    // Forest: the Ambush map (it has a BP_CombatEvent_Forest_C). Unverified in play: CTF only, flagged experimental in its blurb.
-    {"/Game/Maps/Arenas/Map_Arena_Ambush_Test", "Forest",     false, false, false, true,  true},
-    {"/Game/Maps/Abyss/Abyss_Map_Open_EA",      "Abyss",      false, false, true,  true, false},
+    {"/Game/Maps/Arenas/Map_Arena_Alley",       "Alley",      true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Cellar",      "Cellar",     true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_EastTower",   "East Tower", true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_LordsHall",   "Lords Hall", true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Pit",         "Pit",        true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Slums",       "Slums",      true,  false, false, true},
+    {"/Game/Maps/Arenas/Map_Arena_Yard",        "Yard",       true,  false, false, true},
+    {"/Game/Maps/Arena_Cutting_Map",            "Cutting",    true,  false, false, false},
+    {"/Game/Maps/Map_Hub_Tavern_Frank",         "Tavern",     false, true,  false, false},
+    {"/Game/Maps/Workshop_Smithery_Map",        "Smithery",   false, true,  false, false},
+    // Forest: the Ambush arena (it has a BP_CombatEvent_Forest_C); an arena like the others, offered to every arena format.
+    {"/Game/Maps/Arenas/Map_Arena_Ambush_Test", "Forest",     true,  false, false, true},
+    {"/Game/Maps/Abyss/Abyss_Map_Open_EA",      "Abyss",      false, false, true,  true},
 };
 
 constexpr size_t MapCount() { return sizeof(kMaps) / sizeof(kMaps[0]); }
@@ -81,18 +79,17 @@ inline const MapInfo* FindMap(std::string_view pathOrShortName) {
     return nullptr;
 }
 
-// A map only Capture the flag plays on (Forest).
-inline bool CtfOnly(const MapInfo& m) { return m.ctf && !m.arena && !m.bigArena && !m.abyss; }
 // Pit Bridge Duels are fought on the Pit's bridge and nowhere else.
 inline constexpr const char* kPitMapPath = "/Game/Maps/Arenas/Map_Arena_Pit";
 
 inline bool MapAllowsFormat(const MapInfo& m, Format f) {
     switch (f) {
         case Format::Zombies: return m.abyss;
+        case Format::Infection: return m.arena || m.bigArena || m.abyss;
         case Format::PitBridgeDuel: return map_detail::EqualsNoCase(m.path, kPitMapPath);
         case Format::Tournament:
         case Format::Duel: return m.arena;
-        case Format::CaptureTheFlag: return m.ctf;
+        case Format::CaptureTheFlag: return false;   // removed in 0.8.0 (Sanitize turns it into Teams)
         case Format::FreeForAll:
         case Format::LastManStanding:
         case Format::TwoTeams:
@@ -100,7 +97,6 @@ inline bool MapAllowsFormat(const MapInfo& m, Format f) {
         case Format::Riot:
         case Format::Juggernaut:
         case Format::Tag:
-        case Format::Infection:
         case Format::CrossbowTDM:
         case Format::ThreeTeams:
         case Format::PlayersVsBots: return m.arena || m.bigArena;

@@ -274,17 +274,6 @@ void TestPick() {
     // A tie goes to the first.
     w = {{{1000, 10, 100}, kSword}, {{1000, -10, 100}, kSword}};
     CHECK(PickAttach(w, kSword, now, picked) == 0);
-    // #612: an actor the mod spawned and keeps (the CTF flag, a frozen rake) is never a pickup, even nearest: the real
-    // rake of the class farther off is taken instead, and when every candidate of the class is one, no attach at all.
-    w = {{{1010, 0, 100}, kSword, true}, {{1050, 0, 100}, kSword}};
-    CHECK(PickAttach(w, kSword, now, picked) == 1);
-    w = {{{1010, 0, 100}, kSword, true}, {{50, 0, 20}, kSword}};
-    CHECK(PickAttach(w, kSword, now, picked) == 1);   // nearer than the real one near either point, still never picked
-    w = {{{1000 + kAttachRadiusUu, 0, 100}, kSword, true}};
-    CHECK(PickAttach(w, kSword, now, picked) == -1);      // within the radius, inclusive, and still no pick
-    CHECK(PickAttachFar(w, kSword, now, picked) == -1);   // the far fallback skips them too
-    w = {{{1000, 10, 100}, kSword, true}, {{1000, -10, 100}, kSword, true}};
-    CHECK(PickAttach(w, kSword, now, picked) == -1);      // every candidate mod-kept: no pick
 }
 
 // Test 5: a drop heard while the stand-in's hand was empty fired its deadline 18 s later at the secondary Equip had

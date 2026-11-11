@@ -21,6 +21,13 @@ namespace {
 std::mutex g_mu;
 std::string g_version, g_mods, g_notice;
 std::atomic<bool> g_ran{false};
+std::atomic<int> g_phase{int(Ue4ssPhase::Pending)};
+std::atomic<uint64_t> g_decidedAt{0};
+// Run's outcome, set however it returns.
+struct Decide {
+    Ue4ssPhase phase = Ue4ssPhase::Absent;
+    ~Decide() { g_decidedAt.store(GetTickCount64()); g_phase.store(int(phase)); }
+};
 
 bool FileExists(const std::wstring& p) {
     const DWORD a = GetFileAttributesW(p.c_str());
@@ -155,6 +162,7 @@ void CheckProxies(const std::wstring& dir) {
 
 void Run(const Config& cfg) {
     if (g_ran.exchange(true)) return;   // once per process
+    Decide decide;
     const std::wstring dir = ModFilePath(L"");
     CheckProxies(dir);
     if (!cfg.ue4ss) {
@@ -187,6 +195,7 @@ void Run(const Config& cfg) {
         HSM_LOG("ue4ss: 2.x proxy (xinput1_3.dll%s%s) loads itself; HSMMod leaves it alone", v.empty() ? "" : ", ", v.c_str());
         if (!mods.empty()) HSM_LOG("ue4ss: mods: %s", mods.c_str());
         Set("2.x proxy", mods);
+        decide.phase = Ue4ssPhase::Loaded;
         return;
     }
 
@@ -198,6 +207,7 @@ void Run(const Config& cfg) {
         const DWORD n = GetModuleFileNameW(have, p, MAX_PATH);
         HSM_LOG("ue4ss: already loaded (%s); not loading it again", Utf8(std::wstring(p, n < MAX_PATH ? n : 0)).c_str());
         Set(FileVersion(path).empty() ? "unknown version" : FileVersion(path), mods);
+        decide.phase = Ue4ssPhase::Loaded;
         return;
     }
     // Never pick up ourselves: the candidate is a fixed UE4SS.dll name, but a copy of HSMMod renamed to it must not be
@@ -222,6 +232,13 @@ void Run(const Config& cfg) {
             cfg.ue4ssBefore ? "before" : "after");
     if (!mods.empty()) HSM_LOG("ue4ss: mods: %s", mods.c_str());
     Set(version.empty() ? "unknown version" : version, mods);
+    decide.phase = Ue4ssPhase::Loaded;
+}
+
+Ue4ssPhase LoadPhase(uint64_t* sinceMs) {
+    const Ue4ssPhase p = Ue4ssPhase(g_phase.load());
+    if (sinceMs) *sinceMs = p == Ue4ssPhase::Pending ? 0 : GetTickCount64() - g_decidedAt.load();
+    return p;
 }
 
 std::string ReportVersion() { std::lock_guard<std::mutex> lock(g_mu); return g_version; }

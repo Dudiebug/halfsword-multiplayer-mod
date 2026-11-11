@@ -310,7 +310,7 @@ static void TestLobby() {
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) card = &m;
     CHECK(card && card->name == "TAG" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::Sync}));   // bare fists: no gear rows
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // bare fists: no gear rows
     for (const SettingRow& r : s.settings) {
         if (r.id == LobbyRow::Fuse) CHECK(r.label == "Fuse time" && r.value == "30 s" && r.enabled && !r.hint.empty());
         if (r.id == LobbyRow::Limit) CHECK(r.label == "Rounds to win");
@@ -318,7 +318,7 @@ static void TestLobby() {
     }
     LobbyLocal rolled = InLobby(Format::Tag); rolled.config.gear = Gear::RandomTier;
     s = BuildLobbyScene(rolled);
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::Sync}));   // a stale gear changes nothing
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // a stale gear changes nothing
     CHECK(!ModeAvailable(Format::Tag, 1).ok && ModeAvailable(Format::Tag, 2).ok && ModeAvailable(Format::Tag, 8).ok);
     s = BuildLobbyScene(InLobby(Format::FreeForAll, 1));
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) CHECK(!m.enabled && !m.hint.empty());

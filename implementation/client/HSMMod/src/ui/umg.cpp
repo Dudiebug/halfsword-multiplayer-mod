@@ -462,9 +462,8 @@ bool Button::Clicked() {
     const bool pressed = p.get<bool>("ReturnValue");
     Call h(w_, "IsHovered"); h.invoke();
     hovered_ = h.get<bool>("ReturnValue");
-    const bool clicked = wasPressed_ && !pressed && hovered_;
-    wasPressed_ = pressed;
-    return clicked;
+    Call k(w_, "HasKeyboardFocus"); k.invoke();
+    return press_.Step(pressed, hovered_, k.get<bool>("ReturnValue"));   // match/hsm_button_press.h
 }
 
 void Button::Background(Rgba c) { if (w_ && background_.Changed(c)) Call(w_, "SetBackgroundColor").set("InBackgroundColor", c).invoke(); }
@@ -572,7 +571,7 @@ EditBox Kit::MakeEditBox() {
         ++painted;
     };
     const bool classic = style::ClassicMenus();
-    const Rgba field = classic ? Rgba{0.016f, 0.014f, 0.012f, 1} : Rgba{0.86f, 0.80f, 0.66f, 1};   // dark, or parchment
+    const Rgba field = style::ParchmentMenus() ? Rgba{0.86f, 0.80f, 0.66f, 1} : Rgba{0.016f, 0.014f, 0.012f, classic ? 1.f : 0.85f};   // parchment, or dark
     const Rgba ink = style::kMenuText;
     for (FProperty* p : {StructMember(boxStyle, "BackgroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, field);
     for (FProperty* p : {StructMember(boxStyle, "ForegroundColor"), StructMember(boxStyle, "FocusedForegroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, ink);

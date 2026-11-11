@@ -121,7 +121,6 @@ inline MatchInfo Extrapolate(const MatchInfo& m, uint32_t receivedAtMs, uint32_t
     MatchInfo e = m;
     e.timeLeftMs = m.timeLeftMs > elapsed ? m.timeLeftMs - elapsed : 0;
     e.roundGapLeftMs = m.roundGapLeftMs > elapsed ? m.roundGapLeftMs - elapsed : 0;
-    for (Objective& o : e.objectives) o.timerMs = o.timerMs > elapsed ? o.timerMs - elapsed : 0;   // a dropped flag's return clock
     e.fuseLeftMs = uint16_t(m.fuseLeftMs > elapsed ? m.fuseLeftMs - elapsed : 0);
     return e;
 }
@@ -281,7 +280,7 @@ inline std::string FormatName(Format f) {
 // `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
 inline std::string ModeName(Format f, Gear g, int teams = 0) {
     if (IsBrawl(f, g)) return "Brawl";
-    return PicksTeams(f) && !IsCtf(f) && teams > 0 ? FormatName(f) + " (" + std::to_string(TeamCount(f, teams)) + ")" : FormatName(f);
+    return PicksTeams(f) && teams > 0 ? FormatName(f) + " (" + std::to_string(TeamCount(f, teams)) + ")" : FormatName(f);
 }
 inline std::string ModeName(uint8_t format, uint8_t gear, int teams = 0) { return ModeName(Format(format), Gear(gear), teams); }
 // The value after `cur` in `options`, wrapping; the first option when `cur` is not one of them.

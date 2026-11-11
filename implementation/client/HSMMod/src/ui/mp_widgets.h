@@ -23,7 +23,8 @@ struct Card {
     explicit operator bool() const { return bool(button) && bool(frame) && bool(face); }
 };
 struct Flat { Card card; Text label; };
-Rgba Mix(Rgba a, Rgba b, float t);            // a to b by t
+Rgba Mix(Rgba a, Rgba b, float t);
+bool KeyDown(int vk);   // the key is held and the game window is in front: a key typed in another program is not the menu's            // a to b by t
 
 // Makes the page's widgets in one kit's tree.
 class Maker {

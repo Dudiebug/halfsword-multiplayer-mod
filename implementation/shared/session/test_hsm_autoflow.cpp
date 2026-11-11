@@ -38,7 +38,7 @@ int main() {
     CHECK(ParseServerMaps("", Format::FreeForAll).size() == ffaMaps);
     auto z = ParseServerMaps("all", Format::Zombies);
     CHECK(z.size() == 1 && z[0] == Idx("Abyss_Map_Open_EA"));
-    CHECK(ParseServerMaps("all", Format::Duel).size() == 8);                             // arenas only
+    CHECK(ParseServerMaps("all", Format::Duel).size() == 9);                             // arenas only, Forest too
     CHECK(ParseServerMaps("all", Format::LastManStanding).size() == ffaMaps);            // like free-for-all: arenas and big levels
     std::vector<std::string> unk;
     auto m = ParseServerMaps(" yard , EAST TOWER,Map_Arena_Cellar, nope, yard, Tavern", Format::FreeForAll, &unk);

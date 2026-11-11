@@ -23,11 +23,6 @@ static void TestKept() {
     c = DropCandidate{}; c.bodyWeapon = true; c.hasParent = true; c.inHand = true; CHECK(ClearableDrop(c) == DropVerdict::KeepOther);
     c = DropCandidate{}; c.beingDestroyed = true; CHECK(ClearableDrop(c) == DropVerdict::KeepOther);
     c = DropCandidate{}; c.levelStart = true; CHECK(ClearableDrop(c) == DropVerdict::KeepLevel);
-    // A flag the mod spawned for Capture the flag lies on the ground or hangs on a back with no Parent Actor: /clear, the timer, a
-    // round or a rematch must not destroy it, whether it is held, sheathed, a level spot or none of them.
-    c = DropCandidate{}; c.modOwned = true; CHECK(ClearableDrop(c) == DropVerdict::KeepOther);
-    c = DropCandidate{}; c.modOwned = true; c.hasParent = true; c.inHand = true; CHECK(ClearableDrop(c) == DropVerdict::KeepOther);
-    c = DropCandidate{}; c.modOwned = true; c.levelStart = true; CHECK(ClearableDrop(c) == DropVerdict::KeepOther);
 }
 
 static void TestParentBeatsLevel() {

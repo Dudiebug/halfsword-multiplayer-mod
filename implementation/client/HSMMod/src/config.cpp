@@ -1,5 +1,6 @@
 #include "config.h"
 #include "match/hsm_class.h"
+#include "match/hsm_hud_style.h"
 #include "match/hsm_match.h"
 #include "match/hsm_roles.h"
 #include "session/hsm_cmdline.h"
@@ -47,14 +48,16 @@ constexpr char kDefaultIni[] =
     "class_look=1\n"
     "; 1: a small notice in the top-left corner of a match names each player, their build and their UE4SS mods; 0: off\n"
     "build_cards=1\n"
+    "; 1: a short sound from the game's menus when a player joins your lobby or session; 0: off\n"
+    "join_sound=1\n"
+    "; 1: leave custom maps named as a test (Test_Arena, MapTest, test01) out of the map picker; 0: list them too\n"
+    "hide_test_maps=1\n"
     "; 1: other players see your Half Wolverine claws and you see theirs, if you both have LoganClaws_P.pak; 0: off\n"
     "claw_mirror=1\n"
     "; your class, picked in the multiplayer menu. It applies when you fight alone and in Classes lobbies.\n"
     "class=Fair\n"
     "; 1: a class that uses Half Wolverine writes its parts into that mod's settings when the game starts, and yours come back when you pick another class; 0: leave its file alone\n"
     "class_wolverine=1\n"
-    "; the key that bites, for a class with Bite. A letter or F1 to F12.\n"
-    "class_bite_key=B\n"
     "; 1: when you pick a class, Half Wolverine is refreshed in place (UE4SS reloads its mods); 0: restart the game instead\n"
     "wolverine_refresh=1\n"
     "; the class checker key: shows other players' classes, holds them on screen, steps through them and sends them away. A letter or F1 to F12.\n"
@@ -94,9 +97,12 @@ constexpr char kDefaultIni[] =
     "; the same switch. 0: off (default). help_improve_asked=1: the one-time question on the multiplayer page was answered.\n"
     "help_improve=0\n"
     "help_improve_asked=0\n"
-    "; the look of the mod's menus and HUD: game (the game's own art and typefaces) or classic (the earlier dark look).\n"
-    "; The SETTINGS page on the multiplayer page switches it; it is used from the next start of the game.\n"
+    "; the look of the mod's menus and HUD: game (the game's own art and typefaces, the default), dark (that art shaded\n"
+    "; dark, light text) or classic (the earlier dark look). The SETTINGS page on the multiplayer page switches it; it is\n"
+    "; used from the next start of the game.\n"
     "ui_style=game\n"
+    "; the opacity of the match HUD, the chat and the fighter card: 0.3 (faint) to 1 (solid, the default).\n"
+    "hud_opacity=1\n"
     "; voice chat (the multiplayer page and the Esc menu in a match change these). voice=1 turns it on for you (0, the\n"
     "; default: you neither talk nor hear); voice_reach=proximity fades voices with distance (full volume within\n"
     "; voice_near_m, silent past voice_far_m), everyone lets every living player hear every living one; between two\n"
@@ -230,7 +236,10 @@ bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys,
 }
 
 bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" : "0"}, {"help_improve_asked", "1"}}); }
-bool SaveUiStyle(bool classic) { return SaveIniValues({{"ui_style", classic ? "classic" : "game"}}); }
+const char* UiStyleName(style::MenuLook look) {
+    return look == style::MenuLook::Classic ? "classic" : look == style::MenuLook::Game ? "game" : "dark";
+}
+bool SaveUiStyle(style::MenuLook look) { return SaveIniValues({{"ui_style", UiStyleName(look)}}); }
 
 void ReadModRuleKeys(Config& c) {
     const std::wstring ini = ModFilePath(L"HSMMod.ini");
@@ -349,6 +358,8 @@ Config LoadConfig() {
     c.classTags = ReadString(ini, L"class_tags", "1") != "0";
     c.classLook = ReadString(ini, L"class_look", "1") != "0";
     c.buildCards = ReadString(ini, L"build_cards", "1") != "0";
+    c.joinSound = ReadString(ini, L"join_sound", "1") != "0";
+    c.hideTestMaps = ReadString(ini, L"hide_test_maps", "1") != "0";
     c.clawMirror = ReadString(ini, L"claw_mirror", "1") != "0";
     c.className = ReadString(ini, L"class", "");
     c.classWolverine = ReadString(ini, L"class_wolverine", "1") != "0";
@@ -359,25 +370,11 @@ Config LoadConfig() {
         c.classCustomName[i] = ReadString(ini, (L"class_custom" + std::to_wstring(i + 1) + L"_name").c_str(), "");
     }
     {
-        std::string k = ReadString(ini, L"class_bite_key", "B");
-        if (const std::string moved = ReadString(ini, L"bite_key_moved", "0"); moved != "1") {   // once: H was the default before B
-            const bool move = BiteKeyMovesToB(k, moved);
-            if (move) k = "B";
-            std::vector<std::pair<std::string, std::string>> keys = {{"bite_key_moved", "1"}};
-            if (move) keys.push_back({"class_bite_key", "B"});
-            if (SaveIniValues(keys) && move) HSM_LOG("config: class_bite_key moved from H to B (the new default)");
-        }
-        if (k.size() == 1 && std::isalpha(static_cast<unsigned char>(k[0]))) c.classBiteKey = std::toupper(static_cast<unsigned char>(k[0]));
-        else if (k.size() >= 2 && (k[0] == 'F' || k[0] == 'f') && std::atoi(k.c_str() + 1) >= 1 && std::atoi(k.c_str() + 1) <= 12) c.classBiteKey = VK_F1 + std::atoi(k.c_str() + 1) - 1;
-        else HSM_LOG("config: class_bite_key=%s is not a letter or F1 to F12; using B", k.c_str());
-    }
-    {
         const std::string k = ReadString(ini, L"build_card_key", "K");
         if (k.size() == 1 && std::isalpha(static_cast<unsigned char>(k[0]))) c.buildCardKey = std::toupper(static_cast<unsigned char>(k[0]));
         else if (k.size() >= 2 && (k[0] == 'F' || k[0] == 'f') && std::atoi(k.c_str() + 1) >= 1 && std::atoi(k.c_str() + 1) <= 12) c.buildCardKey = 0x6F + std::atoi(k.c_str() + 1);
         else HSM_LOG("config: build_card_key=%s is not a letter or F1 to F12; using K", k.c_str());
     }
-    c.ctfFlagInHand = ReadString(ini, L"ctf_carry", "hand") != "back";
     c.paintDefer = ReadString(ini, L"paint_defer", "1") != "0";
     c.juggernautScale = ClampD(std::atof(ReadString(ini, L"juggernaut_scale", "1.35").c_str()), hsm::kJuggernautScaleMin, hsm::kJuggernautScaleMax);
     c.reports = ReadString(ini, L"reports", "on") != "off";
@@ -387,10 +384,12 @@ Config LoadConfig() {
     c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";
     {
         const std::string look = ReadString(ini, L"ui_style", "game");
-        c.uiClassic = look == "classic";
-        if (look != "game" && look != "classic") HSM_LOG("config: ui_style=%s is not game or classic; using game", look.c_str());
-        HSM_LOG("config: ui_style=%s", c.uiClassic ? "classic" : "game");
+        c.uiLook = look == "classic" ? style::MenuLook::Classic : look == "dark" ? style::MenuLook::Dark : style::MenuLook::Game;
+        if (look != "dark" && look != "game" && look != "classic") HSM_LOG("config: ui_style=%s is not game, dark or classic; using game", look.c_str());
+        HSM_LOG("config: ui_style=%s", UiStyleName(c.uiLook));
     }
+    c.hudOpacity = hsm::style::SaneHudOpacity(std::atof(ReadString(ini, L"hud_opacity", "1").c_str()));
+    if (c.hudOpacity < 1.0) HSM_LOG("config: hud_opacity=%.2f", c.hudOpacity);
 #ifdef HSM_TESTBENCH
     c.reports = false; c.helpImprove = false; c.helpImproveAsked = true;   // a test build sends nothing to the mod's report server
 #endif   // already on: nothing to ask

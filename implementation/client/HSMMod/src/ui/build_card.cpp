@@ -32,7 +32,7 @@ BuildCardQueue g_queue;
 Text MakeLine(Box& column, Rgba color) {
     Text t = w.kit.MakeText();
     if (!t) return t;
-    if (style::ClassicMenus()) t.Font(kTextSize, 1, {0, 0, 0, 0.9f}); else t.Font(kTextSize);
+    if (!style::ParchmentMenus()) t.Font(kTextSize, 1, {0, 0, 0, 0.9f}); else t.Font(kTextSize);
     skin::Font(t, skin::Face::Body);
     t.Color(color);
     t.Align(Justify::Left);
@@ -118,7 +118,7 @@ void BuildCardTick(bool hudVisible) {
     const BuildCardView v = g_queue.Tick(uint32_t(GetTickCount64()), true);
     w.box.Show(v.visible);
     if (!v.visible) return;
-    w.box.Opacity(v.opacity);
+    w.box.Opacity(v.opacity * style::HudOpacity());
     const char* caret = v.typing ? "_" : "";
     w.player.Set(v.player + (v.typing && v.build.empty() ? caret : ""));
     w.build.Set(v.build + (v.typing && !v.build.empty() && v.mods.empty() ? caret : ""));

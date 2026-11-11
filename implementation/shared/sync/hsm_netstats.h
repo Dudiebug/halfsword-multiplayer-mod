@@ -93,8 +93,9 @@ inline std::string FighterLine(uint8_t entity, FighterNetStats& s, double nowMs)
 
 inline std::string ClaimLine(ClaimNetStats& s, double nowMs) {
     char b[160];
-    std::snprintf(b, sizeof b, "claims checked: ok %u far %u unchecked %u dropped %u | dist p50 %.0f p95 %.0f uu",
-                  s.ok, s.far, s.unchecked, s.dropped, s.dist.Quantile(nowMs, 0.5), s.dist.Quantile(nowMs, 0.95));
+    const int n = std::snprintf(b, sizeof b, "claims checked: ok %u far %u unchecked %u dropped %u", s.ok, s.far, s.unchecked, s.dropped);
+    if (s.dist.Count(nowMs) > 0 && n > 0 && size_t(n) < sizeof b)   // no distances yet: no "nan"
+        std::snprintf(b + n, sizeof b - size_t(n), " | dist p50 %.0f p95 %.0f uu", s.dist.Quantile(nowMs, 0.5), s.dist.Quantile(nowMs, 0.95));
     return b;
 }
 

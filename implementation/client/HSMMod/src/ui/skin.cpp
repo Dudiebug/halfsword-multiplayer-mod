@@ -59,6 +59,22 @@ const Found& Texture(Art art) {
     return f;
 }
 
+// The dark look: how much of the art's colour is kept (its pattern and frame stay, darkened) and how opaque it is
+// (almost fully: only a hint of what is behind). The picked and START buttons keep more colour, so they still read as
+// amber and red.
+struct Shade { float keep, alpha; };
+Shade DarkShade(Art art) {
+    switch (art) {
+        case Art::Backdrop: return {0.18f, 1};                         // a page: the tavern, dark and opaque
+        case Art::Note: return {0.25f, 0.95f};                        // a question over the page
+        case Art::Card: return {0.26f, 0.94f};
+        case Art::CardPicked: case Art::CardRed: return {0.55f, 0.95f};
+        case Art::PlatePicked: return {0.50f, 0.93f};
+        case Art::Ribbon: return {0.30f, 0.92f};
+        default: return {0.22f, 0.92f};                               // scrolls, sheets, strips, plates
+    }
+}
+
 }  // namespace
 
 bool Loaded(Art art) { return !style::ClassicMenus() && size_t(art) < kArt.size() && Texture(art).tex != nullptr; }
@@ -74,7 +90,12 @@ void Paint(Panel& p, Art art, Rgba tint) {
     }
     const Found& f = Texture(art);
     p.Texture(Look{f.tex, a.slice, {f.size.x * a.scale, f.size.y * a.scale}, false});
-    p.Color(tint);
+    if (style::DarkMenus()) {
+        const Shade s = DarkShade(art);
+        p.Color({tint.r * s.keep, tint.g * s.keep, tint.b * s.keep, tint.a * s.alpha});
+    } else {
+        p.Color(tint);
+    }
 }
 
 void Pad(Panel& p, Art art, Margin room) {

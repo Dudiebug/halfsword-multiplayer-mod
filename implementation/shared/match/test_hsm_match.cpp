@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <string>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
@@ -35,16 +36,36 @@ static void TestSanitize() {
     CHECK(DefaultScoreLimit(Format::LastManStanding) == 3 && IsRoundFormat(Format::Duel) && IsRoundFormat(Format::LastManStanding) && !IsRoundFormat(Format::FreeForAll));
     c = Cfg(Format::LastManStanding, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);   // like Duel: cleared each round
     CHECK(DefaultScoreLimit(Format::FreeForAll) == 5 && DefaultScoreLimit(Format::TwoTeams) == 10);
-    // The weapon filter: in range stays, out of range falls back to Any; the game-byte table covers every filter and Any is 0.
+    // The weapon filter: in range stays, out of range falls back to Any.
     c = MatchConfig{}; CHECK(c.weapons == WeaponFilter::Any);
     for (uint8_t w = 0; w < kWeaponFilterCount; ++w) { c.weapons = WeaponFilter(w); CHECK(Sanitize(c).weapons == WeaponFilter(w)); }
     c.weapons = WeaponFilter(kWeaponFilterCount); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
     c.weapons = WeaponFilter(255); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
+    // The game's own type values: swords 1H 1, swords 2H 2, polearms 7 (3 is one-handed maces: Polearms sent it before).
+    // Axes & maces is one of maces 1H 3, maces 2H 4, hafted 1H 5, hafted 2H 6 by the roll; any four rolls in a row give
+    // all four. The roll changes nothing else.
     CHECK(GameWeaponTypeByte(WeaponFilter::Any) == 0);
-    for (uint8_t w = 1; w < kWeaponFilterCount; ++w) CHECK(GameWeaponTypeByte(WeaponFilter(w)) != 0);       // a filter is never the game's Any
-    for (uint8_t a = 0; a < kWeaponFilterCount; ++a)
-        for (uint8_t b = uint8_t(a + 1); b < kWeaponFilterCount; ++b) CHECK(GameWeaponTypeByte(WeaponFilter(a)) != GameWeaponTypeByte(WeaponFilter(b)));
+    CHECK(GameWeaponTypeByte(WeaponFilter::Swords1H) == 1);
+    CHECK(GameWeaponTypeByte(WeaponFilter::Swords2H) == 2);
+    CHECK(GameWeaponTypeByte(WeaponFilter::Polearms) == 7);
     CHECK(GameWeaponTypeByte(WeaponFilter(200)) == 0);
+    for (uint32_t start : {0u, 1u, 6u, 0xFFFFFFFEu}) {
+        unsigned seen = 0;
+        for (uint32_t i = 0; i < 4; ++i) {
+            const uint32_t roll = start + i;
+            const uint8_t t = GameWeaponTypeByte(WeaponFilter::AxesMaces, roll);
+            CHECK(t >= 3 && t <= 6);
+            seen |= 1u << t;
+            CHECK(GameWeaponTypeByte(WeaponFilter::Any, roll) == 0 && GameWeaponTypeByte(WeaponFilter::Swords1H, roll) == 1);
+            CHECK(GameWeaponTypeByte(WeaponFilter::Swords2H, roll) == 2 && GameWeaponTypeByte(WeaponFilter::Polearms, roll) == 7);
+            CHECK(GameWeaponTypeByte(WeaponFilter(200), roll) == 0);
+        }
+        CHECK(seen == 0x78);   // 3, 4, 5 and 6
+    }
+    for (uint8_t w = 0; w < kWeaponFilterCount; ++w) CHECK(GameWeaponTypeByte(WeaponFilter(w)) < kGameWeaponTypeCount);
+    CHECK(std::string(GameWeaponTypeName(0)) == "any" && std::string(GameWeaponTypeName(7)) == "polearms");
+    CHECK(std::string(GameWeaponTypeName(3)) == "maces 1H" && std::string(GameWeaponTypeName(6)) == "hafted 2H");
+    CHECK(std::string(GameWeaponTypeName(kGameWeaponTypeCount)) == "?" && std::string(GameWeaponTypeName(255)) == "?");
 }
 
 static void TestResolveTeams() {
@@ -838,6 +859,21 @@ static void TestSides() {
     CHECK(PickRespawn(ring, s2, 5, {}) == 0);                                 // no side for team 5, no enemies -> first point
     size_t ffa = PickRespawn(ring, s2, kNoTeam, {ring[2]});
     CHECK(ffa == 6);                                                          // opposite point on the whole ring
+    // HSMBot 2263: near a living teammate, not where an enemy stands.
+    std::vector<Point3> big;
+    for (const Point3& p : ring) big.push_back({p.x * 4, p.y * 4, 0});        // 4000 cm ring, about 3060 cm between points
+    auto sb = PartitionSides(big, 2);
+    std::vector<size_t> own;
+    for (size_t i = 0; i < big.size(); ++i) if (sb[i] == sb[0]) own.push_back(i);
+    const size_t mateAt = own[own.size() / 2];
+    CHECK(PickRespawnNearTeam(big, sb, sb[0], {}, {big[mateAt]}) == mateAt);
+    const size_t away = PickRespawnNearTeam(big, sb, sb[0], {big[mateAt]}, {big[mateAt]});   // an enemy on the mate: the next point
+    CHECK(away != mateAt && sb[away] == sb[0] && Dist2(big[away], big[mateAt]) < 3100.0 * 3100.0);
+    CHECK(PickRespawnNearTeam(big, sb, sb[0], {big[own[0]]}, {}) == PickRespawn(big, sb, sb[0], {big[own[0]]}));   // no mates
+    CHECK(PickRespawnNearTeam(big, sb, kNoTeam, {big[2]}, {big[3]}) == PickRespawn(big, sb, kNoTeam, {big[2]}));     // free-for-all
+    std::vector<Point3> crowd;                                                // every own point near an enemy: the old rule
+    for (size_t i : own) crowd.push_back(big[i]);
+    CHECK(PickRespawnNearTeam(big, sb, sb[0], crowd, {big[mateAt]}) == PickRespawn(big, sb, sb[0], crowd));
 }
 
 static void TestZeroScoreBeatsNegative() {

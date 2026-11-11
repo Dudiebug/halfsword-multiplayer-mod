@@ -78,7 +78,7 @@ struct LobbyLocal {
 // Each section shows its rows in this order. Sync last: ui/menu.cpp makes one stepper per row up to it.
 // Players is the lobby's own player limit, not a MatchConfig field: the scene offers it as LobbyScene::playerLimit (it is
 // in no SettingsFor list) and the page applies it with Lobby::SetMaxPlayers. First, so it leads the MATCH section.
-enum class LobbyRow : uint8_t { Players, Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, WaveBreak, ClearGround, MyTeam, TeamKit, Crossbows, CtfCaptures, FlagReturn, Fuse, Scenario, Sync };   // Sync last: the menu builds rows in this order
+enum class LobbyRow : uint8_t { Players, Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, WaveBreak, ClearGround, MyTeam, TeamKit, Crossbows, Fuse, Scenario, Sync };   // Sync last: the menu builds rows in this order
 
 struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; };
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
@@ -108,7 +108,6 @@ enum class LobbySection : uint8_t { Match, Teams, Gear, World, Count };
 inline LobbySection SectionOf(LobbyRow r) {
     switch (r) {
         case LobbyRow::Teams: case LobbyRow::FriendlyFire: case LobbyRow::MyTeam: case LobbyRow::TeamKit: return LobbySection::Teams;
-        case LobbyRow::CtfCaptures: case LobbyRow::FlagReturn: return LobbySection::Match;
         case LobbyRow::Gear: case LobbyRow::Tier: case LobbyRow::Weapons: case LobbyRow::Crossbows: return LobbySection::Gear;
         case LobbyRow::WaveBreak: case LobbyRow::ClearGround: case LobbyRow::Scenario: case LobbyRow::Sync: return LobbySection::World;
         default: return LobbySection::Match;
@@ -125,7 +124,7 @@ inline const char* SectionName(LobbySection s) {
 
 // The browser's mode chip steps through these (0: any).
 inline const std::vector<std::string>& BrowserModes() {
-    static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "Last man standing", "Teams", "Team duel", "Riot", "Juggernaut", "Capture the flag", "Tag", "Infection", "Crossbow TDM", "Tournament", "Pit bridge duels", "Brawl", "Survival", "Zombies"};
+    static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "Last man standing", "Teams", "Team duel", "Riot", "Juggernaut", "Tag", "Infection", "Crossbow TDM", "Tournament", "Pit bridge duels", "Brawl", "Survival", "Zombies"};
     return m;
 }
 inline constexpr size_t kFilterChips = 5;   // mode, has room, compatible only, most players first, no password
@@ -160,8 +159,9 @@ inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f) {
     if (f.noPassword && l.locked) return false;
     return true;
 }
-// The format cards: every format but ThreeTeams (the old value of the Teams card's 3 teams); then Brawl and Progression.
-inline constexpr size_t kModeOrderCount = kFormatCount - 1;
+// The format cards: every format but ThreeTeams (the old value of the Teams card's 3 teams) and CaptureTheFlag (removed);
+// then Brawl and Progression.
+inline constexpr size_t kModeOrderCount = kFormatCount - 2;
 inline constexpr size_t kModeCardCount = kModeOrderCount + 2;
 
 struct LobbyScene {
@@ -215,8 +215,6 @@ inline std::vector<int> LimitOptions(Format f) {
 }
 inline const std::vector<int> kTimeOptions = {0, 300, 600, 900, 1200};
 inline const std::vector<int> kRespawnOptions = {3, 5, 10, 15, 20};
-inline const std::vector<int> kCtfCaptureOptions = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};         // Captures to win (kCtfMinCaptures..kCtfMaxCaptures)
-inline const std::vector<int> kFlagReturnOptions = {10, 15, 20, 25, 30, 40, 50, 60};        // Flag return time in seconds (kFlagReturnMinS..kFlagReturnMaxS)
 inline const std::vector<int> kInfectionTimeOptions = {300, 600, 900, 1200};   // Infection always has a clock: the survivors win by lasting
 inline const std::vector<int> kFuseOptions = {10, 15, 20, 30, 45, 60};         // Tag's fuse, seconds
 // The wave break in seconds the match runs (0 = the format's own: Survival 60, Zombies 10).
@@ -224,6 +222,11 @@ inline int WaveBreakShown(const MatchConfig& c) { return c.waveBreakS ? c.waveBr
 
 // The format and team pick go their own ways (SelectFormat, StepTeamPick); every other row steps here, by +1 or -1.
 // A value out of range steps from where Sanitize would put it. damage: the game's own slider (the Damage row's range).
+// The Dead weight or Weapon weight row's field (the menu's sliders); nullptr for another row.
+inline uint8_t* WeightField(MatchConfig& c, LobbyRow r) {
+    return r == LobbyRow::DeadWeight ? &c.deadWeightPct : r == LobbyRow::WeaponWeight ? &c.weaponWeightPct : nullptr;
+}
+inline const uint8_t* WeightField(const MatchConfig& c, LobbyRow r) { return WeightField(const_cast<MatchConfig&>(c), r); }
 inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageRange& damage = DamageRange{}) {
     bool back = dir < 0;
     switch (s) {
@@ -245,12 +248,12 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
         case LobbyRow::Crossbows:
             c.crossbows = uint8_t((ValidCrossbows(c.crossbows) ? c.crossbows : 0) + (back ? kCrossbowModeCount - 1 : 1)) % kCrossbowModeCount;
             break;
-        case LobbyRow::CtfCaptures: c.ctfCaptures = uint8_t(StepOf(kCtfCaptureOptions, c.ctfCaptures, dir)); break;
-        case LobbyRow::FlagReturn: c.flagReturnS = uint8_t(StepOf(kFlagReturnOptions, c.flagReturnS, dir)); break;
         case LobbyRow::Teams: c.teams = uint8_t(StepOf({2, 3, 4}, c.teams, dir)); break;
         case LobbyRow::FriendlyFire: c.friendlyFire = !c.friendlyFire; break;
         case LobbyRow::FreeCam: c.freeCam = !c.freeCam; break;
         case LobbyRow::Damage: c.damagePct = StepDamage(c.damagePct, dir, damage); break;
+        case LobbyRow::DeadWeight: c.deadWeightPct = StepWeight(c.deadWeightPct, dir); break;
+        case LobbyRow::WeaponWeight: c.weaponWeightPct = StepWeight(c.weaponWeightPct, dir); break;
         case LobbyRow::WaveBreak: {
             std::vector<int> o(std::begin(kWaveBreakOptions), std::end(kWaveBreakOptions));
             c.waveBreakS = uint16_t(StepOf(o, WaveBreakShown(c), dir)); break;
@@ -329,10 +332,9 @@ inline const char* FormatBlurb(Format f) {
     switch (f) {
         case Format::Duel: return "One on one, rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.";
         case Format::LastManStanding: return "Rounds to the last one standing, for two or more players. Everybody respawns together; new gear each round with random or identical gear.";
-        case Format::TwoTeams: case Format::ThreeTeams: return "Two to four teams (Red, Blue, Green, Gold). Every kill scores for the team; the first team to the limit wins.";
+        case Format::TwoTeams: case Format::ThreeTeams: case Format::CaptureTheFlag: return "Two to four teams (Red, Blue, Green, Gold). Every kill scores for the team; the first team to the limit wins.";
         case Format::TeamDuel: return "Teams in rounds: the last team standing takes the round. Two to four teams; everybody respawns together, new gear each round with random or identical gear.";
         case Format::Riot: return "One knight in the best kit against everyone else in lighter gear. The last side standing takes the round; the knight changes every match.";
-        case Format::CaptureTheFlag: return "Two teams, one flag each. Take the enemy flag and carry it home; a capture only counts while your own flag is home. The first team to the captures wins.";
         case Format::Juggernaut: return "Tall, heavy juggernauts against shorter, lighter fighters with more gear. The last side standing takes the round; the juggernauts change every match.";
         case Format::Tag: return "Bare fists and light hits. One fighter is it and carries a fuse: hit someone to pass it on, or burn out when it runs down. The last one standing takes the round. Two or more players.";
         case Format::Infection: return "Survivors against the infected. Patient zero starts infected; whoever an infected fighter kills is infected too and comes back. Survive the clock to win.";
@@ -347,7 +349,6 @@ inline const char* FormatBlurb(Format f) {
 }
 
 inline const char* MapTag(const MapInfo& m) {
-    if (CtfOnly(m)) return "Experimental \xC2\xB7 Capture the flag only";
     if (m.abyss) return "Large level \xC2\xB7 no spawn points: ring spawn";
     return m.bigArena ? "Large level" : "Arena";
 }
@@ -355,7 +356,6 @@ inline const char* MapTag(const MapInfo& m) {
 inline const char* MapRefusal(Format f) {
     if (f == Format::Zombies) return "Zombies needs the Abyss";
     if (f == Format::Duel) return "Duel needs an arena";
-    if (f == Format::CaptureTheFlag) return "Capture the flag: Alley or Forest only";
     if (f == Format::Tournament) return "Tournament needs an arena";
     if (f == Format::PitBridgeDuel) return "Pit bridge duels need the Pit";
     return "Not for this mode";
@@ -420,7 +420,6 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.label = "Time limit";
             r.value = TimeLabel(c.timeLimitS);
             if (bots) r.hint = c.timeLimitS ? "Players win if they hold out to the end (one wave cleared)." : "No clock: hold out as long as you can.";
-            else if (IsCtf(f)) r.hint = c.timeLimitS ? "When it runs out the team with more captures wins; a tie goes to sudden death (the next capture wins)." : "No clock: play to the captures.";
             else if (IsInfection(f)) r.hint = "The survivors win if any of them are still standing when it runs out.";
             else r.hint = c.timeLimitS ? "When it runs out the leader wins; a tie goes to sudden death." : "No clock: play to the limit.";
             break;
@@ -454,16 +453,6 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.hint = c.weapons == WeaponFilter::Any ? "The random gear may hold any weapon."
                    : "The random gear's weapons are only of this kind (the game's own weapon filter).";
             break;
-        case LobbyRow::CtfCaptures:
-            r.label = "Captures to win";
-            r.value = std::to_string(c.ctfCaptures);
-            r.hint = "The first team to take the enemy flag home this many times wins.";
-            break;
-        case LobbyRow::FlagReturn:
-            r.label = "Flag return time";
-            r.value = std::to_string(c.flagReturnS) + " s";
-            r.hint = "A dropped flag goes home after this long, or at once when a teammate touches it.";
-            break;
         case LobbyRow::Teams:
             r.label = "Teams";
             r.value = std::to_string(TeamCount(c.format, c.teams)) + " teams";
@@ -479,6 +468,16 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             r.label = "Player damage";
             r.value = DamageLabel(c.damagePct, l.damage);
             r.hint = "How hard hits land on every player, the game's own slider for everyone. Click the number to type up to 1000%. Yours is back after the session.";
+            break;
+        case LobbyRow::DeadWeight:
+            r.label = "Dead weight";
+            r.value = WeightLabel(c.deadWeightPct);
+            r.hint = "How heavy fallen bodies are, the game's own Dead Weight slider for everyone (the game's own is 50%). Yours is back after the session.";
+            break;
+        case LobbyRow::WeaponWeight:
+            r.label = "Weapon weight";
+            r.value = WeightLabel(c.weaponWeightPct);
+            r.hint = "How heavy every weapon is, the game's own Weapon Weight slider for everyone (the game's own is 50%). Yours is back after the session.";
             break;
         case LobbyRow::WaveBreak: {
             const int s = WaveBreakShown(c);
@@ -547,37 +546,37 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 
 }  // namespace lobby_detail
 
-// The rows the format uses, in page order. Every format has Damage (Progression co-op shows it alone).
+// The rows the format uses, in page order. Every format has Damage, Dead weight and Weapon weight, in a row
+// (Progression co-op shows them alone).
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     Format f = c.format;
     const bool rolled = c.gear == Gear::RandomTier || c.gear == Gear::Mirror;   // the Weapons row filters generated gear only
     if (IsBotFormat(f)) {                            // endless, back at a wave clear in the run's loadout
         std::vector<LobbyRow> b = {LobbyRow::Time, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier};
         if (rolled) b.push_back(LobbyRow::Weapons);
-        for (LobbyRow r : {LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::Crossbows, LobbyRow::Sync}) b.push_back(r);
+        for (LobbyRow r : {LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Crossbows, LobbyRow::Sync}) b.push_back(r);
         return b;
     }
-    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
+    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
     if (IsTag(f)) {                                  // rounds with a fuse: no clock, no teams
-        return {LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::Sync};   // bare fists: no gear rows
+        return {LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // bare fists: no gear rows
     }
     if (IsInfection(f)) {                            // two fixed sides: the infection decides the teams, the colours and the crossbows
         std::vector<LobbyRow> t = {LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier};
         if (rolled) t.push_back(LobbyRow::Weapons);
-        t.push_back(LobbyRow::Damage); t.push_back(LobbyRow::Sync);
+        for (LobbyRow r : {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}) t.push_back(r);
         return t;
     }
     if (HasRoles(f))                                 // the roles set the gear, tier, build and team: only the match's own rules are left
-        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::TeamKit, LobbyRow::Crossbows, LobbyRow::Sync};
+        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::TeamKit, LobbyRow::Crossbows, LobbyRow::Sync};
     std::vector<LobbyRow> v;
     if (f != Format::Tournament) { v.push_back(LobbyRow::Limit); v.push_back(LobbyRow::Time); }   // a bracket: one round a fight, no clock
     for (LobbyRow r : {LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear}) v.push_back(r);
-    if (IsCtf(f)) v = {LobbyRow::CtfCaptures, LobbyRow::FlagReturn, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear};   // captures, not kills
     v.push_back(LobbyRow::Tier);                     // the tier is every player's strength, with own gear too
     if (rolled) v.push_back(LobbyRow::Weapons);
-    if (HasTeams(f) && !IsCtf(f)) v.push_back(LobbyRow::Teams);                // Capture the flag is two fixed teams
+    if (HasTeams(f)) v.push_back(LobbyRow::Teams);
     if (HasTeams(f)) v.push_back(LobbyRow::FriendlyFire);
-    v.push_back(LobbyRow::Damage);
+    for (LobbyRow r : {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight}) v.push_back(r);
     if (!IsRoundFormat(f)) v.push_back(LobbyRow::ClearGround);
     if (HasTeams(f)) { v.push_back(LobbyRow::MyTeam); v.push_back(LobbyRow::TeamKit); }
     if (!IsCrossbowTdm(f)) v.push_back(LobbyRow::Crossbows);    // Crossbow TDM hands everyone one: no row
@@ -586,7 +585,7 @@ inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
 }
 
 inline constexpr Format kModeOrder[kModeOrderCount] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams,
-                                                       Format::TeamDuel, Format::Riot, Format::Juggernaut, Format::CaptureTheFlag, Format::Tag, Format::Infection,
+                                                       Format::TeamDuel, Format::Riot, Format::Juggernaut, Format::Tag, Format::Infection,
                                                        Format::CrossbowTDM, Format::Tournament, Format::PitBridgeDuel, Format::PlayersVsBots, Format::Zombies};
 
 // Which formats a lobby with `players` players can run (the host's count, a dedicated server's own seat not counted).
@@ -595,7 +594,7 @@ inline constexpr Format kModeOrder[kModeOrderCount] = {Format::FreeForAll, Forma
 struct ModeAvail { bool ok = true; const char* hint = ""; };
 inline ModeAvail ModeAvailable(Format f, int players) {
     if (f == Format::Duel && players != 2) return {false, "Duel is for 2 players"};
-    if ((f == Format::LastManStanding || f == Format::TeamDuel || IsCtf(f) || IsTag(f) || IsInfection(f) || IsCrossbowTdm(f)) && players < 2) return {false, "Needs 2 or more players"};
+    if ((f == Format::LastManStanding || f == Format::TeamDuel || IsTag(f) || IsInfection(f) || IsCrossbowTdm(f)) && players < 2) return {false, "Needs 2 or more players"};
     if ((HasRoles(f) || f == Format::Tournament) && players < 3) return {false, "Needs 3 or more players"};
     if (f == Format::PitBridgeDuel && players < 2) return {false, "Needs 2 or more players"};
     return {};
@@ -724,7 +723,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
     s.hasPlayerLimit = true;
     s.scenarioMap = lobby_detail::ScenarioMap(l);
     if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
-    else s.settings.push_back(Row(l, LobbyRow::Damage));   // co-op fights take player damage too
+    else for (LobbyRow id : {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight}) s.settings.push_back(Row(l, id));   // co-op fights take them too
     if (!l.progression && ScenariosFor(s.scenarioMap).size() > 1) { s.scenario = Row(l, LobbyRow::Scenario); s.hasScenario = true; }   // WORLD section, before Sync
     if (!l.host) s.hostOnly = "Only the host can change these.";
     size_t customChosen = l.modMaps.size();   // the picked custom map (none: l.modMaps.size())
@@ -738,7 +737,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         m.name = kMaps[i].display;
         m.tag = MapTag(kMaps[i]);
         m.allowed = MapAllowsFormat(kMaps[i], f);
-        if (!m.allowed) m.reason = CtfOnly(kMaps[i]) ? "Capture the flag only" : MapRefusal(f);
+        if (!m.allowed) m.reason = MapRefusal(f);
         m.selected = i == chosen;
         m.enabled = l.host && m.allowed;
         s.maps.push_back(m);

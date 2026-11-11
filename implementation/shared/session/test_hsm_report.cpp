@@ -32,6 +32,10 @@ static void TestRedaction() {
     // not a SteamID: other lengths, other prefixes, inside a word
     for (const char* keep : {"7656119801234567", "1234567890123456", "1234567890123456789", "x76561198012345678", "76561198012345678x"})
         CHECK(RedactLog(keep, salt) == keep);
+    // A DLL's file version is not an address: the reports showed UE4SS 3.0.1.0 as "ip:59297699".
+    for (const char* keep : {"ue4ss: loaded D:/Game/ue4ss/UE4SS.dll (3.0.1.0) [3.x layout, order=after]", "ue4ss: 2.x proxy (xinput1_3.dll, 2.5.2.0) loads itself"})
+        CHECK(RedactLog(keep, salt) == keep);
+    CHECK(RedactLog("peer (84.12.33.7) joined", salt).find("84.12.33.7") == std::string::npos);   // an address in brackets still goes
     // R7: a Steam lobby id (18 digits) and any other 17-18 digit id (a group) go too
     const std::string lobby = RedactLog("lobby 109775241234567890 created, group=12345678901234567.", salt);
     CHECK(lobby.find("109775241234567890") == std::string::npos && lobby.find("12345678901234567") == std::string::npos);
@@ -138,6 +142,27 @@ static void TestOffer() {
     CHECK(o.Open(0x10u) && o.Take(0x10u, id, tok) && id == "r2");
     o.Offer("r3", "Ab3_x-9QwertyUiop12", 0); o.Decline(); CHECK(!o.Take(1, id, tok));
     o.Offer("r4", "Ab3_x-9QwertyUiop12", 0); CHECK(!o.Take(kReportOfferMs, id, tok) && !o.Open(0));   // expired: closed
+}
+
+static void TestCrashResend() {
+    const std::string a = "crash: fault 0xC0000005 at HalfSwordUE5-Win64-Shipping.exe+0x3E77C9B reading 0xB0 (thread 16); the game may close now";
+    const std::string b = "crash: fault 0xC0000005 at HalfSwordUE5-Win64-Shipping.exe+0x3E77C9B reading 0xB0 (thread 42); the game may close now";
+    CHECK(CrashSignature(a) == "crash: fault 0xC0000005 at HalfSwordUE5-Win64-Shipping.exe+0x3E77C9B");
+    // Outside any module: the same spot in the page on every launch, whatever the address and the data it wrote.
+    CHECK(CrashSignature("crash: fault 0xC0000005 at ?+0x7FF765250FDA writing 0x67963D38448 (thread 1); the game may close now") ==
+          CrashSignature("crash: fault 0xC0000005 at ?+0x7FF631660FDA writing 0x12345678 (thread 2); the game may close now"));
+    CHECK(CrashSignature("crash: fault 0xC0000096 at ?+0x7FF61CBA0FD4 0x0 (thread 3)") == "crash: fault 0xC0000096 at ?+...FD4");
+    CHECK(CrashSignature("something else") == "something else");
+    CHECK(CrashSignature("crash: fault 0xC0000005 at Some Mod.dll+0x1A2B reading 0x10 (thread 5)") == "crash: fault 0xC0000005 at Some Mod.dll+0x1A2B");
+    CHECK(CrashSignature("crash: fault 0xC0000005 at Some Mod.dll+0x1A2B reading 0x10 (thread 5)") !=
+          CrashSignature("crash: fault 0xC0000005 at Some Mod.dll+0x99 reading 0x10 (thread 5)"));
+    CHECK(CrashSignature("crash: fault 0xC0000005 at nowhere (thread 5)") == "crash: fault 0xC0000005 at nowhere");
+    CHECK(CrashSignature(a) == CrashSignature(b));                                  // another thread: the same crash
+    CHECK(CrashReportDue("", 0, CrashSignature(a), 1000));                          // never sent
+    CHECK(!CrashReportDue(CrashSignature(a), 1000, CrashSignature(b), 1000 + 600)); // the next launch: not again
+    CHECK(CrashReportDue(CrashSignature(a), 1000, CrashSignature(a), 1000 + kCrashResendSec));   // a day later
+    CHECK(CrashReportDue(CrashSignature(a), 1000, "crash: fault 0xC0000005 at dwmapi.dll+0x10 reading 0x0", 1100));   // a new crash
+    CHECK(CrashReportDue(CrashSignature(a), 5000, CrashSignature(a), 100));        // the clock went back
 }
 
 static void TestCrashLine() {
@@ -266,7 +291,7 @@ static void TestOutcomes() {
 }
 
 int main() {
-    TestCommands(); TestRedaction(); TestTail(); TestJson(); TestIdsAndShare(); TestOffer(); TestCrashLine(); TestPendingShare(); TestOutcomes();
+    TestCommands(); TestRedaction(); TestTail(); TestJson(); TestIdsAndShare(); TestOffer(); TestCrashLine(); TestCrashResend(); TestPendingShare(); TestOutcomes();
     if (g_fail) { std::printf("test_hsm_report: %d failures\n", g_fail); return 1; }
     std::printf("test_hsm_report: all passed\n");
     return 0;

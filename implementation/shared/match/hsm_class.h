@@ -16,10 +16,6 @@
 
 namespace hsm {
 
-// Bite's key moved from H to B. An INI still on H moves once: the mod marks it bite_key_moved=1 the first time it reads it, so a
-// player who picks H again afterwards keeps it.
-inline bool BiteKeyMovesToB(std::string_view key, std::string_view moved) { return moved != "1" && (key == "H" || key == "h"); }
-
 constexpr double kRuleStatMin = 0.10, kRuleMassMin = 0.50, kRuleMassMax = 5.00, kRuleMassStep = 0.50, kRuleStatMax = 2.00;   // every multiplier in force, 1.0 being the game's own
 constexpr double kRuleEarnFloor = 0.70;                         // lowering a stat past this earns no more power
 constexpr double kRulePairGap = 0.10;                           // run and walk: how far one's lowering pays past the other
@@ -191,7 +187,7 @@ inline const std::vector<NamedClass>& BuiltInClasses() {
         {"Revenant", "Quick and light, and heals slowly.", make(ClassHeal::Logan, false, false, false, false, 1.15, 1.15, 0.80, 1.00, 1.00, 0.80, 0.80, 0.70, 0.70, 5000), kClassTabWolverine},
         {"Barber-Surgeon", "The healer: weak and slow, but steady healing and sturdy bones.", make(ClassHeal::Weathered, false, false, false, false, 0.80, 0.80, 0.70, 1.00, 1.00, 0.70, 0.70, 1.05, 1.00, 5000), kClassTabWolverine},
         {"Crusader", "Strong and slow, and heals slowly.", make(ClassHeal::Logan, false, false, false, false, 0.75, 0.80, 1.25, 1.00, 0.85, 0.80, 0.80, 0.85, 1.00, 4000), kClassTabWolverine},
-        {"Pugilist", "The bruiser: fists, kicks and teeth, and a poor hand with a blade.", make(ClassHeal::Off, false, true, true, false, 0.90, 0.90, 0.75, 1.60, 1.60, 1.25, 1.50, 0.80, 0.80, 5000)},
+        {"Pugilist", "The bruiser: fists and kicks, and a poor hand with a blade.", make(ClassHeal::Off, false, true, false, false, 0.90, 0.90, 0.75, 1.60, 1.60, 1.25, 1.50, 0.80, 0.80, 5000)},
         {"Footpad", "The rogue: very fast and very fragile. Strike and be gone.", make(ClassHeal::Off, false, true, false, false, 1.50, 1.15, 0.80, 1.00, 1.00, 0.70, 0.85, 0.70, 0.70, 5000)},
         {"Knight", "The tank: slow, heavy and hard to break, and joints that stay in.", make(ClassHeal::Off, false, false, false, true, 0.70, 0.70, 0.85, 1.00, 1.00, 0.85, 0.70, 1.50, 1.50, 4000)},
         {"Flagellant", "Feels no pain and hits hard, but slow and easily broken.", make(ClassHeal::Off, true, false, false, false, 0.70, 0.70, 1.10, 0.70, 0.70, 1.30, 1.30, 0.70, 0.70, 5000)},
@@ -208,7 +204,7 @@ inline const std::vector<NamedClass>& BuiltInClasses() {
         // Unrestricted lobbies only.
         {"Glitch", "Five times the speed, kicks and knockback, and a huge jump.", make(ClassHeal::Off, false, true, false, false, 5.00, 5.00, 1.00, 1.00, 1.00, 5.00, 5.00, 1.00, 1.00, 15000), kClassTabHacker},
         {"Juggernaut", "Three times the weight and five times the strength, and bones to match.", make(ClassHeal::Off, true, false, false, true, 1.00, 1.00, 5.00, 5.00, 5.00, 5.00, 5.00, 5.00, 3.00, 5000), kClassTabHacker},
-        {"Immortal", "Wolverine's fastest healing, an adamantium skeleton and adamantium claws, at twice the speed.", withParts(make(ClassHeal::Weathered, true, true, true, true, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 1.00, 5000), true, true, true, true), kClassTabHacker},
+        {"Immortal", "Wolverine's fastest healing, an adamantium skeleton and adamantium claws, at twice the speed.", withParts(make(ClassHeal::Weathered, true, true, false, true, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 1.00, 5000), true, true, true, true), kClassTabHacker},
     };
     return all;
 }
@@ -360,12 +356,15 @@ inline std::string ClassNameStep(std::string_view current, int dir) {
 }
 
 // A class by name: a built-in, or a slot and what's saved in it. A slot that's empty or doesn't read is the plain fighter.
+// A slot saved with Bite comes back without it: the game has its own bite key now, so the perk would only cost power.
 inline std::optional<ClassSheet> ResolveClass(std::string_view name, const std::string* customs) {
     if (const NamedClass* c = FindClassNamed(name)) return c->sheet;
     const int slot = CustomClassSlot(name);
     if (slot < 0) return std::nullopt;
-    if (const auto d = DecodeClass(customs[slot])) return d;
-    return ClassSheet{};
+    std::optional<ClassSheet> d = DecodeClass(customs[slot]);
+    if (!d) return ClassSheet{};
+    d->bite = false;
+    return d;
 }
 
 // What a class does, for the class checker: only what differs from the plain fighter, then its power. Everyone builds this from the
@@ -393,7 +392,7 @@ inline std::string ClassSummary(const ClassSheet& c) {
 
 // The Forge's rows. Stats move in 5% steps and stay inside what the rules allow, so the rows can't make a class the host refuses
 // except by being too strong, and the points line says that as it happens.
-constexpr int kClassFieldCount = 20;
+constexpr int kClassFieldCount = 19;
 struct ClassFieldView { const char* label; std::string value; };
 inline ClassFieldView ClassField(const ClassSheet& c, int i) {
     const auto pct = [](double v) { return std::to_string(int(std::lround(v * 100))) + "%"; };
@@ -405,19 +404,18 @@ inline ClassFieldView ClassField(const ClassSheet& c, int i) {
         case 3: return {"MUSCLE (WOLVERINE)", yes(c.muscle)};
         case 4: return {"FEEL NO PAIN", yes(c.noPain)};
         case 5: return {"QUICK KICKS", yes(c.quickKicks)};
-        case 6: return {"BITE", yes(c.bite)};
-        case 7: return {"NO DISLOCATION", yes(c.noDislocation)};
-        case 8: return {"RUN", pct(c.run)};
-        case 9: return {"WALK", pct(c.walk)};
-        case 10: return {"STRENGTH", pct(c.strength)};
-        case 11: return {"RECOVERY", pct(c.recovery)};
-        case 12: return {"ENDURANCE", pct(c.endurance)};
-        case 13: return {"HANDS", pct(c.hands)};
-        case 14: return {"KNOCKBACK", pct(c.knockback)};
-        case 15: return {"KICK", pct(c.kick)};
-        case 16: return {"BONES", pct(c.bones)};
-        case 17: { char w[16]; std::snprintf(w, sizeof w, "%.1f", c.mass); return {"WEIGHT", w}; }   // a real number, not a share: 1.0 is the game's own
-        case 18: return {"PERK: GRAPPLER", yes(c.grappler)};
+        case 6: return {"NO DISLOCATION", yes(c.noDislocation)};
+        case 7: return {"RUN", pct(c.run)};
+        case 8: return {"WALK", pct(c.walk)};
+        case 9: return {"STRENGTH", pct(c.strength)};
+        case 10: return {"RECOVERY", pct(c.recovery)};
+        case 11: return {"ENDURANCE", pct(c.endurance)};
+        case 12: return {"HANDS", pct(c.hands)};
+        case 13: return {"KNOCKBACK", pct(c.knockback)};
+        case 14: return {"KICK", pct(c.kick)};
+        case 15: return {"BONES", pct(c.bones)};
+        case 16: { char w[16]; std::snprintf(w, sizeof w, "%.1f", c.mass); return {"WEIGHT", w}; }   // a real number, not a share: 1.0 is the game's own
+        case 17: return {"PERK: GRAPPLER", yes(c.grappler)};
         default: return {"FLAW: PANICKER", yes(c.panicker)};
     }
 }
@@ -430,19 +428,18 @@ inline const char* ClassFieldInfo(int i) {
         case 3: return "A bigger, more muscular build in fights, from Half Wolverine, and the strongest grip and lift there is. Costs 40 power.";
         case 4: return "You ignore pain and its effects, so hits don't slow you down. Very strong: it costs 100 power, so you have to give up a lot for it.";
         case 5: return "Removes the wait between kicks, so you can kick again straight away. Costs 25 power.";
-        case 6: return "Adds a bite attack on your bite key, B unless you've changed it. Press once to bite and again to let go. Costs 5 power.";
-        case 7: return "Your joints can't be dislocated. Costs 20 power.";
-        case 8: return "How fast you run. Most fighting happens at a walk, so this costs and earns less than WALK. Lowering it earns nothing while WALK is raised, and pays fully only when WALK comes down too.";
-        case 9: return "How fast you walk, your main speed in a fight, so this costs and earns more than RUN. Lowering it earns nothing while RUN is raised, and pays fully only when RUN comes down too.";
-        case 10: return "How strong your body is: it's what lets you lift and hold people, carry armour without slowing, and it makes you heavier. Costs 60 power per 100%, and earns power when lowered, down to 70%.";
-        case 11: return "How fast your body heals by itself: your health and each limb's. No mod needed. Costs 30 power per 100%, and earns power when lowered, down to 70%.";
-        case 12: return "How long your stamina lasts. Above 100% you tire more slowly. Costs 25 power per 100%, and earns power when lowered, down to 70%.";
-        case 13: return "How rigid your hands are, which makes your punches hit harder. It only starts to matter well above 100% without gauntlets. Costs 15 power per 100%. Lowering it earns nothing.";
-        case 14: return "How far your blows push and throw people. Earns power when lowered, down to 70%.";
-        case 15: return "How much force your kicks have. Earns power when lowered, down to 70%.";
-        case 16: return "How much force it takes to break your bones. Lower breaks easier. Earns power when lowered, down to 70%.";
-        case 17: return "How heavy your body is, in half steps from 0.5 to 5.0, where 1.0 is the game's own. Heavier is harder to push and throw. Costs 60 power per 1.0, and earns power when lowered, down to 0.7.";
-        case 18: return "You carry anyone you hold the way the game carries an NPC, whatever their weight or armour, so you can lift and throw them. They also have a harder time breaking free. Does nothing else. Costs 6 power.";
+        case 6: return "Your joints can't be dislocated. Costs 20 power.";
+        case 7: return "How fast you run. Most fighting happens at a walk, so this costs and earns less than WALK. Lowering it earns nothing while WALK is raised, and pays fully only when WALK comes down too.";
+        case 8: return "How fast you walk, your main speed in a fight, so this costs and earns more than RUN. Lowering it earns nothing while RUN is raised, and pays fully only when RUN comes down too.";
+        case 9: return "How strong your body is: it's what lets you lift and hold people, carry armour without slowing, and it makes you heavier. Costs 60 power per 100%, and earns power when lowered, down to 70%.";
+        case 10: return "How fast your body heals by itself: your health and each limb's. No mod needed. Costs 30 power per 100%, and earns power when lowered, down to 70%.";
+        case 11: return "How long your stamina lasts. Above 100% you tire more slowly. Costs 25 power per 100%, and earns power when lowered, down to 70%.";
+        case 12: return "How rigid your hands are, which makes your punches hit harder. It only starts to matter well above 100% without gauntlets. Costs 15 power per 100%. Lowering it earns nothing.";
+        case 13: return "How far your blows push and throw people. Earns power when lowered, down to 70%.";
+        case 14: return "How much force your kicks have. Earns power when lowered, down to 70%.";
+        case 15: return "How much force it takes to break your bones. Lower breaks easier. Earns power when lowered, down to 70%.";
+        case 16: return "How heavy your body is, in half steps from 0.5 to 5.0, where 1.0 is the game's own. Heavier is harder to push and throw. Costs 60 power per 1.0, and earns power when lowered, down to 0.7.";
+        case 17: return "You carry anyone you hold the way the game carries an NPC, whatever their weight or armour, so you can lift and throw them. They also have a harder time breaking free. Does nothing else. Costs 6 power.";
         default: return "Below half health you panic: your stamina drains half as fast again. Earns 5 power.";
     }
 }
@@ -494,19 +491,18 @@ inline void ClassFieldStep(ClassSheet& c, int i, int dir, bool unrestricted = fa
         case 3: c.muscle = !c.muscle; break;
         case 4: c.noPain = !c.noPain; break;
         case 5: c.quickKicks = !c.quickKicks; break;
-        case 6: c.bite = !c.bite; break;
-        case 7: c.noDislocation = !c.noDislocation; break;
-        case 8: step(c.run, kRuleStatMin); break;
-        case 9: step(c.walk, kRuleStatMin); break;
-        case 10: step(c.strength, kRuleStatMin); break;
-        case 11: step(c.recovery, kRuleStatMin); break;
-        case 12: step(c.endurance, kRuleStatMin); break;
-        case 13: step(c.hands, kRuleStatMin); break;
-        case 14: step(c.knockback, kRuleStatMin); break;
-        case 15: step(c.kick, kRuleStatMin); break;
-        case 16: step(c.bones, kRuleStatMin); break;
-        case 18: c.grappler = !c.grappler; break;
-        case 19: c.panicker = !c.panicker; break;
+        case 6: c.noDislocation = !c.noDislocation; break;
+        case 7: step(c.run, kRuleStatMin); break;
+        case 8: step(c.walk, kRuleStatMin); break;
+        case 9: step(c.strength, kRuleStatMin); break;
+        case 10: step(c.recovery, kRuleStatMin); break;
+        case 11: step(c.endurance, kRuleStatMin); break;
+        case 12: step(c.hands, kRuleStatMin); break;
+        case 13: step(c.knockback, kRuleStatMin); break;
+        case 14: step(c.kick, kRuleStatMin); break;
+        case 15: step(c.bones, kRuleStatMin); break;
+        case 17: c.grappler = !c.grappler; break;
+        case 18: c.panicker = !c.panicker; break;
         default: c.mass = std::clamp(std::round((c.mass + dir * kRuleMassStep) / kRuleMassStep) * kRuleMassStep, kRuleMassMin, kRuleMassMax); break;
     }
 }
@@ -529,14 +525,14 @@ struct ClassReloadGate {
 // class can't be applied to it and what it reads says nothing about cheating. The report: "strength 0.000" removed a tester from the lobby.
 inline bool ClassRunsOnMyFighter(bool hostPhysics, bool isHost, bool handedToAnother) { return (!hostPhysics || isHost) && !handedToAnother; }
 // Under host physics the host simulates every guest's real fighter, so it applies their classes: the same stats, from what each guest reports. What a
-// guest's class can't do from there (Half Wolverine's parts and Bite, which run on their own machine) is said to them. Empty: the plain fighter.
+// guest's class can't do from there (Half Wolverine's parts, which run on their own machine) is said to them. Empty: the plain fighter.
 inline std::optional<ClassSheet> GuestClassOnHost(std::string_view reported, bool classesLobby, bool unrestricted) {
     if (!classesLobby) return std::nullopt;
     const std::optional<ClassSheet> sheet = DecodeClass(reported);
     if (!sheet || !ClassProblems(*sheet, unrestricted).empty()) return std::nullopt;   // what a player sends is untrusted
     return sheet;
 }
-inline bool ClassLosesPartsOnGuest(const ClassSheet& c) { return ClassNeedsWolverine(c) || c.bite; }
+inline bool ClassLosesPartsOnGuest(const ClassSheet& c) { return ClassNeedsWolverine(c); }
 // How a fighter's class shows on their body, on every machine: the game's 'Muscles' body material value, 0..1. The plain fighter in the middle, Strength
 // to either side, Half Wolverine's Muscle at the top where their parts run (partsRun): under host physics a guest's don't (ClassLosesPartsOnGuest).
 constexpr double kClassLookPlain = 0.5, kClassLookSpread = 1.5;

@@ -83,6 +83,7 @@ bool IsScriptFunction(const UFunction* f);          // Func is this build's Proc
 // This build's ProcessLocalScriptFunction (UObject*, FFrame&, RESULT_DECL), the one executor every Blueprint function body
 // runs through, after checking Func's offset, ProcessInternal's call into it and both prologues. nullptr = not verified.
 void* ScriptExecutorAddress();
+bool ScriptExecutorForeignHooked();   // the executor starts with another mod's jump (UE4SS's hook); asked before HSMMod's own hook goes in
 
 // Calling and field access -----------------------------------------------------
 // False (nothing called) when obj is not an object any more: a pointer kept past its object's life.

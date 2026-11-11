@@ -390,24 +390,24 @@ static void TestHostAgainstMember() {
 static void TestRowsPerFormat() {
     using V = std::vector<LobbyRow>;
     using enum LobbyRow;
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, ClearGround, Crossbows, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, ClearGround, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, ClearGround, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(Teamed(true, 3, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(Teamed(false, 4))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, Crossbows, Sync}));   // Duel's rows
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(true, 3, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(false, 4))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));   // Duel's rows
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding, Gear::RandomTier))) == Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, FreeCam, Gear, Tier, WaveBreak, FriendlyFire, Damage, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, Crossbows, Sync}));   // 0.8.0-pre20: the bot formats take a gear setting
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots, Gear::Mirror))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, FreeCam, Gear, Tier, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));   // 0.8.0-pre20: the bot formats take a gear setting
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots, Gear::Mirror))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
     // Wave 2 integration: the team rounds and the role formats take every row that fits them. Team Duel is Duel's rows with the team rows; Riot and
     // Juggernaut deal gear, tier, build and team by role, so only the match rules, Free camera, Team colours and Crossbows remain.
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TeamDuel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Riot))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Juggernaut))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TeamDuel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, MyTeam, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Riot))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, DeadWeight, WeaponWeight, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Juggernaut))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, DeadWeight, WeaponWeight, TeamKit, Crossbows, Sync}));
     for (Format f : {Format::TwoTeams, Format::TeamDuel, Format::Riot, Format::Juggernaut}) { MatchConfig c; c.format = f; CHECK(HasTeams(f)); bool k = false; for (LobbyRow r : SettingsFor(c)) k = k || r == TeamKit; CHECK(k); }
     for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies}) { MatchConfig c; c.format = f; for (LobbyRow r : SettingsFor(c)) CHECK(r != TeamKit); }   // no teams (the bot formats always wear the full kit)
     { MatchConfig br; br.gear = Gear::Fists; for (LobbyRow r : SettingsFor(br)) CHECK(r != Crossbows && r != TeamKit); CHECK(SectionOf(TeamKit) == LobbySection::Teams); }
@@ -669,11 +669,11 @@ static void TestModes() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::Duel));
     CHECK(s.modes.size() == kModeCardCount);
     const Format order[] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Riot,
-                            Format::Juggernaut, Format::CaptureTheFlag, Format::Tag, Format::Infection, Format::CrossbowTDM, Format::Tournament, Format::PitBridgeDuel,
+                            Format::Juggernaut, Format::Tag, Format::Infection, Format::CrossbowTDM, Format::Tournament, Format::PitBridgeDuel,
                             Format::PlayersVsBots, Format::Zombies};
-    const char* names[] = {"FREE-FOR-ALL", "DUEL", "LAST MAN STANDING", "TEAMS", "TEAM DUEL", "RIOT", "JUGGERNAUT", "CAPTURE THE FLAG", "TAG", "INFECTION",
+    const char* names[] = {"FREE-FOR-ALL", "DUEL", "LAST MAN STANDING", "TEAMS", "TEAM DUEL", "RIOT", "JUGGERNAUT", "TAG", "INFECTION",
                            "CROSSBOW TDM", "TOURNAMENT", "PIT BRIDGE DUELS", "SURVIVAL", "ZOMBIES"};
-    CHECK(kModeOrderCount == 15 && kModeCardCount == 17);
+    CHECK(kModeOrderCount == 14 && kModeCardCount == 16);
     for (size_t i = 0; i < s.modes.size() && i < kModeOrderCount; ++i) {
         CHECK(s.modes[i].format == order[i] && s.modes[i].name == names[i] && !s.modes[i].description.empty());
         CHECK(s.modes[i].selected == (order[i] == Format::Duel));
@@ -699,7 +699,7 @@ static void TestBrawl() {
     int selected = 0, brawls = 0;
     for (const ModeCard& m : s.modes) { selected += m.selected; brawls += m.brawl; }
     CHECK(selected == 1 && brawls == 1 && !s.modes[0].selected);              // the free-for-all card is not also lit
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::ClearGround, LobbyRow::Sync}));   // no Gear, no Tier
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::ClearGround, LobbyRow::Sync}));   // no Gear, no Tier
     CHECK(RowOf(s, LobbyRow::Gear) == nullptr && RowOf(s, LobbyRow::Tier) == nullptr);
     LobbyScene own = BuildLobbyScene(InLobby(true));
     CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 2].selected && RowOf(own, LobbyRow::Gear) != nullptr);
@@ -744,7 +744,7 @@ static void TestMaps() {
     for (const MapCard& m : s.maps) {
         CHECK(m.name == kMaps[m.index].display);
         CHECK(m.selected == (m.index == yard));
-        CHECK(m.allowed == (m.index != abyss && m.index != IndexOf("Forest")));   // the Abyss is Zombies only; Forest is Capture the flag only
+        CHECK(m.allowed == (m.index != abyss));   // the Abyss is for Zombies and Infection
     }
     CHECK(Card(s, yard)->tag == "Arena");
     CHECK(Card(s, abyss)->tag == "Large level " + kDot + " no spawn points: ring spawn");
@@ -760,7 +760,7 @@ static void TestMaps() {
     s = BuildLobbyScene(l);
     for (const MapCard& m : s.maps) {
         CHECK(m.allowed == (m.index == abyss) && m.selected == (m.index == abyss));
-        if (m.index != abyss) CHECK(m.reason == (m.index == IndexOf("Forest") ? "Capture the flag only" : "Zombies needs the Abyss"));
+        if (m.index != abyss) CHECK(m.reason == "Zombies needs the Abyss");
     }
     CHECK(std::string(MapRefusal(Format::FreeForAll)) == "Not for this mode");
 }
@@ -818,7 +818,47 @@ static void TestDamage() {
     LobbyLocal m = InLobby(false, Format::FreeForAll);
     CHECK(!Need(BuildLobbyScene(m), LobbyRow::Damage).enabled);                 // the host's alone
     LobbyLocal prog = InLobby(true, Format::FreeForAll); prog.progression = true;
-    CHECK(Ids(BuildLobbyScene(prog)) == (std::vector<LobbyRow>{LobbyRow::Damage}));   // co-op takes damage too
+    CHECK(Ids(BuildLobbyScene(prog)) == (std::vector<LobbyRow>{LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight}));   // co-op takes them too
+}
+
+// The Dead weight and Weapon weight rows: 20% of the game's 0..1 sliders unless the host moves them, 5% a step, 0..100%.
+static void TestWeights() {
+    MatchConfig c;
+    CHECK(c.deadWeightPct == 20 && c.weaponWeightPct == 20 && Sanitize(c).deadWeightPct == 20 && Sanitize(c).weaponWeightPct == 20);
+    CHECK(WeightScale(20) == 0.2f && WeightScale(0) == 0.f && WeightScale(100) == 1.f && WeightScale(kWeightStockPct) == 0.5f);
+    c.deadWeightPct = 250; c.weaponWeightPct = 101;
+    CHECK(Sanitize(c).deadWeightPct == 100 && Sanitize(c).weaponWeightPct == 100);
+    c.deadWeightPct = 0; c.weaponWeightPct = 35;
+    CHECK(Sanitize(c).deadWeightPct == 0 && Sanitize(c).weaponWeightPct == 35);
+    for (LobbyRow r : {LobbyRow::DeadWeight, LobbyRow::WeaponWeight}) {
+        MatchConfig m;
+        CHECK(WeightField(m, r) == (r == LobbyRow::DeadWeight ? &m.deadWeightPct : &m.weaponWeightPct) && *WeightField(m, r) == 20);
+        MatchConfig up = StepSetting(m, r, 1), down = StepSetting(m, r, -1);
+        CHECK(*WeightField(up, r) == 25 && *WeightField(down, r) == 15);
+        const LobbyRow other = r == LobbyRow::DeadWeight ? LobbyRow::WeaponWeight : LobbyRow::DeadWeight;
+        CHECK(*WeightField(up, other) == 20 && up.damagePct == m.damagePct && up.tier == m.tier);   // a step changes that row alone
+        *WeightField(m, r) = 22;                                   // off the 5% grid: the next step that way
+        CHECK(*WeightField(StepSetting(m, r, 1), r) == 25 && *WeightField(StepSetting(m, r, -1), r) == 20);
+        *WeightField(m, r) = 100;
+        CHECK(*WeightField(StepSetting(m, r, 1), r) == 100 && *WeightField(StepSetting(m, r, -1), r) == 95);   // no wrap
+        *WeightField(m, r) = 0;
+        CHECK(*WeightField(StepSetting(m, r, -1), r) == 0 && *WeightField(StepSetting(m, r, 1), r) == 5);
+        CHECK(SectionOf(r) == SectionOf(LobbyRow::Damage));
+    }
+    MatchConfig m;
+    CHECK(WeightField(m, LobbyRow::Damage) == nullptr && WeightField(m, LobbyRow::Tier) == nullptr);
+    CHECK(WeightFromSlider(0.f) == 0 && WeightFromSlider(19.9f) == 20 && WeightFromSlider(22.4f) == 20 && WeightFromSlider(22.6f) == 25);
+    CHECK(WeightFromSlider(100.f) == 100 && WeightFromSlider(150.f) == 100 && WeightFromSlider(-3.f) == 0 && WeightFromSlider(std::nanf("")) == 0);
+    CHECK(WeightLabel(20) == "20%" && WeightLabel(50) == "50% (stock)" && WeightLabel(0) == "0%");
+
+    LobbyLocal l = InLobby(true, Format::FreeForAll);
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).label == "Dead weight" && Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "20%");
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).label == "Weapon weight" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "20%");
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).enabled && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).enabled);
+    l.config.deadWeightPct = 50; l.config.weaponWeightPct = 75;
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "50% (stock)" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "75%");
+    LobbyLocal guest = InLobby(false, Format::FreeForAll);
+    CHECK(!Need(BuildLobbyScene(guest), LobbyRow::DeadWeight).enabled && !Need(BuildLobbyScene(guest), LobbyRow::WeaponWeight).enabled);   // the host's alone
 }
 
 static void TestModdedMaps() {
@@ -1093,83 +1133,38 @@ static void TestDuelOutgrown() {
 }
 
 
-// Capture the flag: the card, two players at least, two fixed teams, the captures and flag-return rows, the maps.
-static void TestCaptureTheFlag() {
-    CHECK(uint8_t(Format::CaptureTheFlag) == 10 && kFormatCount == 16 && FormatName(Format::CaptureTheFlag) == "Capture the flag");
-    CHECK(ModeName(Format::CaptureTheFlag, Gear::Own, 2) == "Capture the flag");     // the team count is not part of its name
-    for (int n : {0, 1}) CHECK(!ModeAvailable(Format::CaptureTheFlag, n).ok && std::string(ModeAvailable(Format::CaptureTheFlag, n).hint) == "Needs 2 or more players");
-    for (int n : {2, 3, 8}) CHECK(ModeAvailable(Format::CaptureTheFlag, n).ok);
-    LobbyLocal h = InLobby(true, Format::CaptureTheFlag);
-    LobbyScene s = BuildLobbyScene(h);
-    const ModeCard* card = nullptr;
-    for (const ModeCard& m : s.modes) if (m.format == Format::CaptureTheFlag) card = &m;
-    CHECK(card && card->name == "CAPTURE THE FLAG" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->brawl && !card->progression);
-    CHECK(card && card->description == FormatBlurb(Format::CaptureTheFlag) && card->description.find("flag") != std::string::npos);
-    int cards = 0; for (const ModeCard& m : s.modes) cards += m.format == Format::CaptureTheFlag ? 1 : 0;
-    CHECK(cards == 1);
-    LobbyLocal alone = h; alone.players = {Player("Ann", true, true)};
-    s = BuildLobbyScene(alone);
-    for (const ModeCard& m : s.modes) if (m.format == Format::CaptureTheFlag) CHECK(!m.enabled && m.hint == "Needs 2 or more players");
-    CHECK(!s.start && s.waiting == "Needs 2 or more players");
-    // The rows: captures and the flag return time lead; no Limit, no Teams row (two fixed teams).
-    s = BuildLobbyScene(h);
-    const std::vector<LobbyRow> ids = Ids(s);
-    CHECK(ids.size() >= 4 && ids[0] == LobbyRow::CtfCaptures && ids[1] == LobbyRow::FlagReturn && ids[2] == LobbyRow::Time);
-    CHECK(!RowOf(s, LobbyRow::Limit) && !RowOf(s, LobbyRow::Teams) && RowOf(s, LobbyRow::FriendlyFire) && RowOf(s, LobbyRow::MyTeam) && RowOf(s, LobbyRow::TeamKit));
-    const SettingRow& caps = Need(s, LobbyRow::CtfCaptures);
-    CHECK(caps.label == "Captures to win" && caps.value == "3" && caps.enabled && SectionOf(LobbyRow::CtfCaptures) == LobbySection::Match);
-    const SettingRow& ret = Need(s, LobbyRow::FlagReturn);
-    CHECK(ret.label == "Flag return time" && ret.value == "20 s" && ret.enabled && SectionOf(LobbyRow::FlagReturn) == LobbySection::Match);
-    { LobbyLocal timed = h; timed.config.timeLimitS = 300; CHECK(Need(BuildLobbyScene(timed), LobbyRow::Time).hint.find("sudden death") != std::string::npos); }
-    CHECK(!BuildLobbyScene(InLobby(false, Format::CaptureTheFlag)).settings[0].enabled);   // members read
-    // Steppers: 1..10, wrapping; 10..60 s.
-    MatchConfig c; c.format = Format::CaptureTheFlag;
-    CHECK(c.ctfCaptures == 3 && c.flagReturnS == 20);
-    CHECK(StepSetting(c, LobbyRow::CtfCaptures, 1).ctfCaptures == 4 && StepSetting(c, LobbyRow::CtfCaptures, -1).ctfCaptures == 2);
-    c.ctfCaptures = 10; CHECK(StepSetting(c, LobbyRow::CtfCaptures, 1).ctfCaptures == 1);
-    c.ctfCaptures = 1; CHECK(StepSetting(c, LobbyRow::CtfCaptures, -1).ctfCaptures == 10);
-    c.flagReturnS = 60; CHECK(StepSetting(c, LobbyRow::FlagReturn, 1).flagReturnS == 10);
-    c.flagReturnS = 10; CHECK(StepSetting(c, LobbyRow::FlagReturn, -1).flagReturnS == 60 && StepSetting(c, LobbyRow::FlagReturn, 1).flagReturnS == 15);
-    for (int v : kCtfCaptureOptions) CHECK(v >= kCtfMinCaptures && v <= kCtfMaxCaptures);
-    for (int v : kFlagReturnOptions) CHECK(v >= kFlagReturnMinS && v <= kFlagReturnMaxS);
-    // Selecting the card: the format's default limit; two fixed teams.
-    MatchConfig sel = SelectMode(MatchConfig{}, Format::CaptureTheFlag, false);
-    CHECK(sel.format == Format::CaptureTheFlag && sel.scoreLimit == 3 && DefaultScoreLimit(Format::CaptureTheFlag) == 3);
-    CHECK(Sanitize(sel).teams == 2 && TeamCount(Format::CaptureTheFlag, 4) == 2 && PicksTeams(Format::CaptureTheFlag) && HasTeams(Format::CaptureTheFlag) && IsCtf(Format::CaptureTheFlag));
-    CHECK(!IsRoundFormat(Format::CaptureTheFlag) && !IsBotFormat(Format::CaptureTheFlag) && !ScoresPerFighter(Format::CaptureTheFlag));
-    CHECK(Need(BuildLobbyScene(InLobby(true, Format::CaptureTheFlag)), LobbyRow::MyTeam).value == "Auto");
-    LobbyLocal t = InLobby(true, Format::CaptureTheFlag);
-    t.players[0].team = 1; t.players[1].team = 3;                    // Blue; a Gold pick means nothing in two teams
-    s = BuildLobbyScene(t);
-    CHECK(s.roster[0].team == "Blue" && s.roster[1].team == "Auto" && s.balance);
-    // Maps: Alley and Forest are playable, the rest are refused; Forest is flagged experimental.
-    LobbyLocal m = InLobby(true, Format::CaptureTheFlag);
-    s = BuildLobbyScene(m);
-    const size_t alley = IndexOf("Alley"), forest = IndexOf("Forest"), yard = IndexOf("Yard");
-    CHECK(Card(s, alley) && Card(s, forest) && Card(s, yard) && Card(s, alley)->allowed && Card(s, forest)->allowed && !Card(s, yard)->allowed);
-    CHECK(Card(s, forest)->tag.find("Experimental") == 0 && Card(s, yard)->reason == "Capture the flag: Alley or Forest only" && !Card(s, yard)->enabled);
-    CHECK(Card(s, alley)->selected);                                  // no pick: the first map CTF allows
+// Capture the flag was removed in 0.8.0: no card, no browser chip, no rows; a stale Format 10 (an old lobby) plays Teams.
+// Forest, once its only map, is an arena like the others and is offered to every arena format.
+static void TestCaptureTheFlagRemoved() {
+    CHECK(uint8_t(Format::CaptureTheFlag) == 10 && kFormatCount == 16);              // the number stays taken
+    LobbyScene s = BuildLobbyScene(InLobby(true, Format::TwoTeams));
+    for (const ModeCard& m : s.modes) CHECK(m.format != Format::CaptureTheFlag && m.name != "CAPTURE THE FLAG");
+    for (size_t i = 0; i < kModeOrderCount; ++i) CHECK(kModeOrder[i] != Format::CaptureTheFlag);
+    for (const std::string& n : BrowserModes()) CHECK(n != "Capture the flag");
+    MatchConfig old; old.format = Format::CaptureTheFlag; old.teams = 4; old.scoreLimit = 7;
+    const MatchConfig ok = Sanitize(old);
+    CHECK(ok.format == Format::TwoTeams && ok.teams == 2 && ok.scoreLimit == 7);
+    LobbyLocal stale = InLobby(true, Format::CaptureTheFlag);
+    stale.config = Sanitize(stale.config);
+    s = BuildLobbyScene(stale);
+    const ModeCard* sel = nullptr;
+    for (const ModeCard& m : s.modes) if (m.selected) sel = &m;
+    CHECK(sel && sel->format == Format::TwoTeams);
+    // Forest: every arena format offers it, tagged as an arena; Zombies and Pit bridge duels keep their own maps.
+    const size_t forest = IndexOf("Forest");
+    CHECK(forest < MapCount());
+    if (forest >= MapCount()) return;
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Riot, Format::Juggernaut,
+                     Format::Tag, Format::Infection, Format::CrossbowTDM, Format::Tournament, Format::PlayersVsBots}) {
+        s = BuildLobbyScene(InLobby(true, f));
+        CHECK(Card(s, forest) && Card(s, forest)->allowed && Card(s, forest)->enabled && Card(s, forest)->reason.empty() && Card(s, forest)->tag == "Arena");
+    }
+    LobbyLocal m = InLobby(true, Format::Duel);
     m.mapPick = "/Game/Maps/Arenas/Map_Arena_Ambush_Test";
     s = BuildLobbyScene(m);
-    CHECK(Card(s, forest)->selected && !Card(s, alley)->selected && s.summary == "CAPTURE THE FLAG " + kDot + " Forest " + kDot + " Own loadouts");
-    m.mapPick = "/Game/Maps/Arenas/Map_Arena_Yard";                   // refused for CTF: falls back to Alley
-    CHECK(Card(BuildLobbyScene(m), alley)->selected);
-    // Forest is offered to no other format, and says so.
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::Duel, Format::Riot}) {
-        s = BuildLobbyScene(InLobby(true, f));
-        CHECK(!Card(s, forest)->allowed && !Card(s, forest)->enabled && Card(s, forest)->reason == "Capture the flag only");
-    }
-    CHECK(std::string(MapRefusal(Format::CaptureTheFlag)) == "Capture the flag: Alley or Forest only");
-    // The browser has a chip entry for the mode.
-    bool listed = false; for (const std::string& n : BrowserModes()) listed = listed || n == "Capture the flag";
-    CHECK(listed && ModeMatches("Capture the flag", "Capture the flag"));
-    // Sanitize: captures and the return time are clamped; the limit follows the captures; other formats keep their limit.
-    MatchConfig bad; bad.format = Format::CaptureTheFlag; bad.ctfCaptures = 200; bad.flagReturnS = 2; bad.scoreLimit = 77; bad.teams = 4;
-    MatchConfig ok = Sanitize(bad);
-    CHECK(ok.ctfCaptures == 10 && ok.flagReturnS == 10 && ok.scoreLimit == 10 && ok.teams == 2);
-    bad.ctfCaptures = 0; bad.flagReturnS = 255; ok = Sanitize(bad);
-    CHECK(ok.ctfCaptures == 1 && ok.flagReturnS == 60 && ok.scoreLimit == 1);
-    MatchConfig ffa; ffa.scoreLimit = 7; ffa.ctfCaptures = 9; CHECK(Sanitize(ffa).scoreLimit == 7);
+    CHECK(Card(s, forest)->selected && s.summary.find("Forest") != std::string::npos);
+    s = BuildLobbyScene(InLobby(true, Format::Zombies));
+    CHECK(!Card(s, forest)->allowed && Card(s, forest)->reason == "Zombies needs the Abyss");
 }
 
 int main() {
@@ -1206,11 +1201,12 @@ int main() {
     TestModdedMaps();
     TestBuildMismatch();
     TestDamage();
+    TestWeights();
     TestGroupsAndSections();
     TestClassLine();
     TestSummary();
     TestFilters();
-    TestCaptureTheFlag();
+    TestCaptureTheFlagRemoved();
     if (g_fail) { std::printf("%d lobby scene checks failed\n", g_fail); return 1; }
     std::printf("all lobby scene tests passed\n");
     return 0;

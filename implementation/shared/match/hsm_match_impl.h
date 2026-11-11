@@ -13,10 +13,8 @@ inline MatchConfig Sanitize(MatchConfig c) {
     if (c.format == Format::Tournament) c.timeLimitS = 0;               // a bracket ends when it is decided
     c.respawnDelayS = std::min<uint16_t>(c.respawnDelayS, 60);
     if (c.format == Format::ThreeTeams) { c.format = Format::TwoTeams; c.teams = 3; }   // the old "3 teams" mode
+    if (c.format == Format::CaptureTheFlag) { c.format = Format::TwoTeams; c.teams = 2; }   // removed in 0.8.0: a stale lobby plays Teams
     c.teams = uint8_t(std::clamp<int>(c.teams, kMinTeams, kMaxTeams));
-    c.ctfCaptures = uint8_t(std::clamp<int>(c.ctfCaptures, kCtfMinCaptures, kCtfMaxCaptures));
-    c.flagReturnS = uint8_t(std::clamp<int>(c.flagReturnS, kFlagReturnMinS, kFlagReturnMaxS));
-    if (IsCtf(c.format)) { c.teams = 2; c.scoreLimit = c.ctfCaptures; }   // two fixed teams; the captures to win are the limit
     if (IsTag(c.format)) c.gear = Gear::Fists;                          // Tag is bare-fisted: no Gear, Tier or Weapons row
     if (!GearAllowed(c.format, c.gear)) c.gear = Gear::Own;
     if (HasRoles(c.format)) c.gear = Gear::RandomTier;                  // the roles roll every loadout (hsm_roles.h); the lobby has no Gear row for them
@@ -35,6 +33,8 @@ inline MatchConfig Sanitize(MatchConfig c) {
         c.friendlyFire = false;                                                               // survivors and infected are the sides; no row
     }
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
+    c.deadWeightPct = std::min(c.deadWeightPct, kWeightMaxPct);
+    c.weaponWeightPct = std::min(c.weaponWeightPct, kWeightMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
     if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || IsRoundFormat(c.format) || IsInfection(c.format)) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
     return c;
@@ -223,14 +223,6 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
     auto it = fighters_.find(victim);
     if (it == fighters_.end() || !it->second.alive) return;          // unknown or already dead (repeat report)
     F& v = it->second;
-    if (IsCtf(cfg_.format)) {                                         // a kill scores nothing in Capture the flag; the fallen come back after the respawn delay
-        v.alive = false; v.diedAt = nowMs;
-        if (!CombatPhase(phase_)) return;
-        ++v.deaths;
-        auto k = fighters_.find(killer);
-        if (killer != victim && k != fighters_.end() && k->second.team != v.team) ++k->second.kills;
-        return;
-    }
     // K7: two kills in one host tick (a trade at the score limit): the first one ended the match, the second still counts.
     // Level on the limit, neither wins yet: sudden death, the next kill decides.
     if (phase_ == MatchPhase::Results && endedPending_ && nowMs == phaseStart_ && winner_ != kNoWinner &&
@@ -283,14 +275,6 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
         if (s >= int(cfg_.scoreLimit)) { End(key, nowMs); return; }
     }
     if (phase_ == MatchPhase::SuddenDeath) { int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
-}
-
-inline bool Match::AddCapture(int8_t team, uint32_t nowMs) {
-    if (!IsCtf(cfg_.format) || !CombatPhase(phase_) || team < 0 || team >= TeamCount(cfg_.format, cfg_.teams)) return false;
-    AddPoints(team, 1);
-    if (Score(team) >= int(cfg_.scoreLimit)) End(team, nowMs);
-    else if (phase_ == MatchPhase::SuddenDeath) { const int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }
-    return true;
 }
 
 inline bool Match::Forfeit(uint8_t entity, uint32_t nowMs) {
@@ -677,6 +661,27 @@ inline size_t PickRespawn(const std::vector<Point3>& points, const std::vector<i
         if (nearest > bestScore) { bestScore = nearest; best = i; }
     }
     return best;
+}
+
+// Team battles: a fighter comes back next to its living teammates (HSMBot 2263): the point of its side nearest to one
+// of them that has no enemy within kSafeRespawnCm. With no teammate placed yet, or every such point near an enemy,
+// PickRespawn's answer (the farthest from the enemies).
+constexpr double kSafeRespawnCm = 1500.0;
+inline size_t PickRespawnNearTeam(const std::vector<Point3>& points, const std::vector<int8_t>& sides, int team,
+                                  const std::vector<Point3>& enemies, const std::vector<Point3>& mates) {
+    if (team == kNoTeam || mates.empty()) return PickRespawn(points, sides, team, enemies);
+    bool teamHasSide = false;
+    for (size_t i = 0; i < points.size() && i < sides.size(); ++i) teamHasSide = teamHasSide || sides[i] == team;
+    size_t best = points.size(); double bestMate = INFINITY;
+    for (size_t i = 0; i < points.size(); ++i) {
+        if (teamHasSide && (i >= sides.size() || sides[i] != team)) continue;
+        double enemy = INFINITY, mate = INFINITY;
+        for (const Point3& e : enemies) enemy = std::fmin(enemy, Dist2(points[i], e));
+        if (enemy < kSafeRespawnCm * kSafeRespawnCm) continue;
+        for (const Point3& m : mates) mate = std::fmin(mate, Dist2(points[i], m));
+        if (mate < bestMate) { bestMate = mate; best = i; }
+    }
+    return best < points.size() ? best : PickRespawn(points, sides, team, enemies);
 }
 
 }  // namespace hsm

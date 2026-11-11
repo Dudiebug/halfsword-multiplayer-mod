@@ -13,7 +13,7 @@ namespace hsm::game::fetchlink {
 // `facts` and reads Fetch's. `dtMs`: the tick's length.
 void Tick(const interop::HsmFacts& facts, uint32_t dtMs);
 
-// Fetch's menu has the keyboard (its half live, its menu open or a name being typed in it): the chat key, the class bite,
+// Fetch's menu has the keyboard (its half live, its menu open or a name being typed in it): the chat key,
 // the build card, push to talk, G, Tab, the spectate keys and the rest are Fetch's until it closes. Always false
 // without a live Fetch.
 bool KeysHeld();

@@ -35,13 +35,12 @@ struct DropCandidate {
     bool bodyWeapon = false;      // fists or feet
     bool levelStart = false;      // a recorded level weapon still at its start spot
     bool beingDestroyed = false;  // already going
-    bool modOwned = false;        // an actor the mod spawned and keeps (Capture the flag's flags): never a drop, whatever it lies on
 };
 
 enum class DropVerdict : uint8_t { Clear, KeepHeld, KeepSheathed, KeepLevel, KeepOther };
 
 inline DropVerdict ClearableDrop(const DropCandidate& c) {
-    if (c.bodyWeapon || c.beingDestroyed || c.modOwned) return DropVerdict::KeepOther;
+    if (c.bodyWeapon || c.beingDestroyed) return DropVerdict::KeepOther;
     if (c.hasParent) return c.inHand ? DropVerdict::KeepHeld : DropVerdict::KeepSheathed;
     if (c.levelStart) return DropVerdict::KeepLevel;
     return DropVerdict::Clear;

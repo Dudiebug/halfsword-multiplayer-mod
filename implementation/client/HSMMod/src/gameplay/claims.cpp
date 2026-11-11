@@ -196,15 +196,6 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
             return true;
         }
         if (striker && !isProp) GatherPush(c, striker, attacker, victim);   // a push is physics: friendly fire does not stop it
-        // #612: the mod's own spawned actor (the CTF flag, a frozen rake a carrier holds) is nobody's weapon: its blow
-        // pushes like any bump, but never claims damage.
-        if (adapter_->IsModActor(OuterOf(comp))) {
-            c.ZeroOutputs();
-            ++n_.blockedFlag;
-            if (audit) ++audit->blocked;
-            if (n_.blockedFlag <= kLogFirst) HSM_LOG("claims: a blow by the CTF flag deals no damage");
-            return true;
-        }
         if (env_.allowed && !env_.allowed(attacker, victim)) {
             c.ZeroOutputs();
             ++n_.friendly;
@@ -941,14 +932,14 @@ std::string Claims::HealthLine() {
                   "claims: sent %llu (props %llu gated %llu limited %llu friendly %llu coalesced %llu zero-impulse %llu "
                   "capped %llu, stuck %llu limited %llu) | replayed %llu (stuck %llu armour-held %llu armour-stopped %llu props %llu queued %llu dropped %llu dupes %llu stale %llu "
                   "age? %llu parried %llu novictim %llu nobone %llu nostriker %llu failed %llu) | blocked: on stand-ins %llu, "
-                  "on mine %llu, driven props on mine %llu, get damage %llu, ctf flags %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu) | bad bone names %llu",
+                  "on mine %llu, driven props on mine %llu, get damage %llu | fx %llu (skipped %llu) clashes %llu (unmatched %llu) | bad bone names %llu",
                   d(a.sent, b.sent), d(a.propSent, b.propSent), d(a.gated, b.gated), d(a.limited, b.limited),
                   d(a.friendly, b.friendly), d(a.coalesced, b.coalesced), d(a.zeroImpulse, b.zeroImpulse), d(a.capped, b.capped),
                   d(a.stuckSent, b.stuckSent), d(a.stuckLimited, b.stuckLimited), d(a.replayed, b.replayed), d(a.stuckReplayed, b.stuckReplayed), d(a.stuckHeld, b.stuckHeld), d(a.armorStopped, b.armorStopped), d(a.propReplayed, b.propReplayed), d(a.queued, b.queued), d(a.dropped, b.dropped),
                   d(a.dupes, b.dupes), d(a.stale, b.stale), d(a.ageUnknown, b.ageUnknown),
                   d(a.parried, b.parried), d(a.noVictim, b.noVictim), d(a.noBone, b.noBone), d(a.noStriker, b.noStriker),
                   d(a.failed, b.failed), d(a.blockedStandIn, b.blockedStandIn), d(a.blockedOnMine, b.blockedOnMine),
-                  d(a.blockedPropCopy, b.blockedPropCopy), d(a.getDamageBlocked, b.getDamageBlocked), d(a.blockedFlag, b.blockedFlag),
+                  d(a.blockedPropCopy, b.blockedPropCopy), d(a.getDamageBlocked, b.getDamageBlocked),
                   d(a.effects, b.effects), d(a.effectsSkipped, b.effectsSkipped), d(a.clashes, b.clashes), d(a.clashUnmatched, b.clashUnmatched), d(a.badBone, b.badBone));
     reported_ = n_;
     std::string out = line;

@@ -293,9 +293,12 @@ struct Local {
     std::vector<std::string> registryMaps;
     bool registryDone = false, registryTried = false;
     DWORD registryAt = 0;
-    std::vector<ModMapEntry> maps;
+    std::vector<ModMapEntry> maps;       // the picker's list: without the test maps when hide_test_maps is on
+    std::vector<ModMapEntry> allMaps;    // every custom map: what a host's pick and a lobby's map are checked against
     std::set<std::string> loggedMaps;
     bool dirty = true;
+    bool hideTest = true;
+    size_t hiddenLogged = 0;
 };
 Local g;
 
@@ -365,11 +368,16 @@ bool QueryRegistry(std::vector<std::string>& out) {
 }
 
 void Rebuild() {
-    g.maps = BuildModMapList(g.pakMaps, g.registryMaps);
-    for (const ModMapEntry& e : g.maps) {
+    g.allMaps = BuildModMapList(g.pakMaps, g.registryMaps);
+    g.maps = g.hideTest ? WithoutTestMaps(g.allMaps) : g.allMaps;
+    for (const ModMapEntry& e : g.allMaps) {
         if (!g.loggedMaps.insert(e.path).second) continue;
         const std::string pak = e.pak >= 0 && size_t(e.pak) < g.paks.size() ? g.paks[size_t(e.pak)].name : std::string("?");
         HSM_LOG("maps: custom map %s (%s)", e.path.c_str(), pak.c_str());
+    }
+    if (const size_t hidden = g.allMaps.size() - g.maps.size(); hidden != g.hiddenLogged) {
+        g.hiddenLogged = hidden;
+        HSM_LOG("maps: %zu test map(s) left out of the map picker (hide_test_maps=1)", hidden);
     }
     g.dirty = false;
 }
@@ -420,9 +428,11 @@ bool AllHashed() { return g.allHashed; }
 
 bool PickPending(const std::string& pick) {
     if (pick.empty()) return false;
-    return MakeHostModMap(pick, g.maps, g.paks).state == HostModMap::HashPending;
+    return MakeHostModMap(pick, g.allMaps, g.paks).state == HostModMap::HashPending;
 }
-HostModMapResult HostMessage(const std::string& pick) { return MakeHostModMap(pick, g.maps, g.paks); }
-ModMapVerdict Decide(const ModMapMsg& host) { return DecideModMap(host, g.paks, g.maps, g.listed && g.allHashed && g.registryDone); }
+HostModMapResult HostMessage(const std::string& pick) { return MakeHostModMap(pick, g.allMaps, g.paks); }
+ModMapVerdict Decide(const ModMapMsg& host) { return DecideModMap(host, g.paks, g.allMaps, g.listed && g.allHashed && g.registryDone); }
+
+void HideTestMaps(bool on) { g.hideTest = on; g.dirty = true; }
 
 }  // namespace hsm::game::modmaps

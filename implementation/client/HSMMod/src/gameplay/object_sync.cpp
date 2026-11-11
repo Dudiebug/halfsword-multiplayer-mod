@@ -503,9 +503,6 @@ bool ObjectSync::LooseParts(UObject* actor, UObject* root) {
 
 ObjectSync::Prop* ObjectSync::Track(uint64_t propId, UObject* actor) {
     if (props_.count(propId) || byActor_.count(actor)) return nullptr;
-    // A Capture the flag flag: every machine spawns and places its own from MatchInfo, so it is never streamed, announced,
-    // reset or cleared as a loose object (Adapter::IsModActor).
-    if (adapter_ && adapter_->IsModActor(actor)) return nullptr;
     Prop probe;
     probe.actor = actor;
     probe.index = ObjectIndex(actor);
@@ -1577,7 +1574,7 @@ std::string ObjectSync::HealthLine() {
                   "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu islands %llu | "
                   "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
                   "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu spawned %llu (failed %llu) "
-                  "released %llu selfDrops %llu reattached %llu leaseReleased %llu flagSkipped %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
+                  "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
                   "leftOut %zu purged %llu censuses %llu censusRejected %llu | despawned %llu resetUnmoved %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
                   d(a.resolved, b.resolved), d(a.forced, b.forced), d(a.kept, b.kept), d(a.unresolved, b.unresolved), d(a.adopted, b.adopted), d(a.releaseSkipped, b.releaseSkipped),
@@ -1587,7 +1584,7 @@ std::string ObjectSync::HealthLine() {
                   d(a.statesStale, b.statesStale), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
                   d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss), d(a.spawned, b.spawned), d(a.spawnFailed, b.spawnFailed),
                   d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased),
-                  d(a.flagSkipped, b.flagSkipped), level,
+                  level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),
                   d(a.levelDeferred, b.levelDeferred), misses_, book_.LeftOut(), d(a.censusPurged, b.censusPurged),
                   d(a.censuses, b.censuses), d(a.censusRejected, b.censusRejected), d(a.despawned, b.despawned), d(a.resetUnmoved, b.resetUnmoved));

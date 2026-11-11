@@ -3,6 +3,7 @@
 // main menu) and lives and dies with it. Setters are diffed: a value a widget already has is not sent again, so a
 // per-frame update costs nothing while nothing changes. Game thread only.
 #pragma once
+#include "match/hsm_button_press.h"
 #include "ue/engine.h"
 #include "match/hsm_match.h"
 #include <cstring>
@@ -224,10 +225,12 @@ public:
     Slot Content(const Widget& child);
     bool Clicked();
     bool Hovered() const { return hovered_; }   // under the mouse at the last Clicked() (no extra call)
+    bool Focused() const { return press_.keyFocus; }   // the keys or a gamepad are on it (not the focus a mouse click leaves)
     void Background(Rgba c);
     void StyleFrom(ue::UObject* button);      // copies another button's WidgetStyle (the game's own look)
 private:
-    bool wasPressed_ = false, hovered_ = false;
+    bool hovered_ = false;
+    ButtonPress press_;
     Sent<Rgba> background_;
 };
 

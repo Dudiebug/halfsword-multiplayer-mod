@@ -7,7 +7,6 @@
 #include "combat/hsm_sever.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
-#include "match/hsm_ctf.h"
 #include "session/hsm_career.h"
 #include "session/hsm_dice.h"
 #include "session/hsm_lease.h"
@@ -73,7 +72,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<combat::SeverClaimMsg>(d, n); Try<combat::SeverNoticeMsg>(d, n); Try<combat::StuckBladeMsg>(d, n);
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
-    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<CtfEventMsg>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
+    Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
     Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
@@ -146,11 +145,6 @@ std::vector<std::vector<uint8_t>> Seeds() {
     { MatchInfo pb = mi; pb.format = uint8_t(Format::PitBridgeDuel); pb.crossbows = 0; pb.queueOrder = {2, 1}; pb.streak = 2; s.push_back(Encode(pb)); }   // Pit Bridge Duels: the queue
     { MatchInfo rt = mi; rt.format = uint8_t(Format::Riot); rt.teamKit = uint8_t(TeamKit::Tabard); rt.freeCam = 0; rt.crossbows = 4;       // a Riot: roles on the wire, the kit, camera and crossbow bytes
       rt.fighters = {{1, 0, 0, 0, "k", 10, true, false, 7, kRoleKnight}, {2, 1, 0, 0, "r", 20, true, false, 8, uint8_t(kRoleRioterLast)}}; s.push_back(Encode(rt)); }
-    { MatchInfo ct = mi; ct.format = uint8_t(Format::CaptureTheFlag); ct.teams = 2;                                                  // a CTF match: both flags on the wire
-      Objective carried; carried.owner = 0; carried.state = ObjectiveState::Carried; carried.carrier = 2; carried.x = 100; carried.y = -50; carried.z = 30;
-      Objective lying; lying.owner = 1; lying.state = ObjectiveState::Dropped; lying.timerMs = 14000; lying.x = 5; lying.y = 6; lying.z = 7;
-      ct.objectives = {carried, lying}; s.push_back(Encode(ct)); }
-    s.push_back(Encode(CtfEventMsg{{CtfEventKind::Captured, 1, 2}})); s.push_back(Encode(CtfEventMsg{{CtfEventKind::Expired, 0, 0}}));
     MatchInfo md; md.format = 4; md.scoreLimit = 3; md.phase = 2; md.gear = 3; md.tier = 4; md.round = 2; md.roundGapLeftMs = 3000; md.roundWinner = 1;
     md.scores = {{1, 1}}; md.fighters = {{1, -1, 1, 0, "a", 40, true}, {2, -1, 0, 1, "bb", 120, false}}; s.push_back(Encode(md));
     Kill kl; kl.killer = 1; kl.victim = 2; s.push_back(Encode(kl));

@@ -10,7 +10,6 @@
 //   kill feed     top right: the newest four rows, each fading on its own
 //   scoreboard    on Tab, and at results
 #pragma once
-#include "match/hsm_ctf.h"
 #include "match/hsm_giveup_action.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_hud_text.h"
@@ -140,7 +139,7 @@ public:
                 if (p == MatchPhase::Live && prev == MatchPhase::Countdown) Fire("FIGHT", FightSub(m, me), style::kBloodInk, nowMs);
                 else if (p == MatchPhase::SuddenDeath)
                     Fire("SUDDEN DEATH", f == Format::FreeForAll ? "NEXT KILL WINS" : IsRoundFormat(f) ? "NEXT ROUND WINS"
-                                         : IsBotFormat(f) ? "CLEAR THE WAVE TO WIN" : IsCtf(f) ? "NEXT CAPTURE WINS" : "NEXT POINT WINS", style::kBloodInk, nowMs);
+                                         : IsBotFormat(f) ? "CLEAR THE WAVE TO WIN" : "NEXT POINT WINS", style::kBloodInk, nowMs);
                 else if (p == MatchPhase::Results) { shot_ = ResultShot(m, me); shot_.atMs = nowMs; }
             } else if (fighting && IsRoundFormat(f)) {
                 if (gap && !gap_) {
@@ -181,17 +180,6 @@ private:
 struct Span { std::string text; Rgba color = style::kBone; };
 struct FeedRow { std::vector<Span> spans; bool mine = false; };   // mine: names this machine's fighter
 
-// A flag event as a feed row: "Ann" (team ink) " took the " "BLUE flag" (that team's ink). Made when the event arrives.
-inline FeedRow MakeCtfFeedRow(const MatchInfo& m, const CtfEvent& e, uint8_t me) {
-    FeedRow r;
-    r.mine = e.entity != 0 && e.entity == me;
-    const char* words = e.kind == CtfEventKind::Taken ? " took the " : e.kind == CtfEventKind::Dropped ? " dropped the "
-                      : e.kind == CtfEventKind::Returned ? " returned the " : e.kind == CtfEventKind::Captured ? " captured the " : "";
-    const Span flag{TeamName(e.flag) + " flag", style::TeamInk(e.flag)};
-    if (e.kind == CtfEventKind::Expired) r.spans = {{"The ", style::kIron}, flag, {" went home", style::kIron}};
-    else r.spans = {{NameOf(m, e.entity), FighterInk(m, e.entity)}, {words, style::kIron}, flag};
-    return r;
-}
 struct FeedItem { uint32_t atMs = 0; FeedRow row; };
 
 // The words of KillLine, the names in their inks and the rest in iron. Made when the kill arrives, so a fighter
@@ -266,7 +254,6 @@ struct HoldView { bool visible = false; std::string text; Rgba color = style::kB
 struct HudScene {
     bool visible = false;
     std::vector<ScoreBlock> strip;
-    std::vector<SceneText> flags;    // Capture the flag: one line per flag under the strip ("RED FLAG: taken by Ann")
     bool timeBar = false; float timeFrac = 0; std::string clock;
     SceneText pill, banner, bannerSub;
     SceneText info;                  // under the pill: Tournament's pairing and what is next, Pit Bridge Duels' streak and queue
@@ -330,7 +317,7 @@ inline SceneText Pill(const MatchInfo& m, uint8_t me, bool oneFight) {
         else p.text = "WAVE " + std::to_string(ScoreOf(m, kHumanTeam) + 1) + left;
         return p;
     }
-    p.text = "FIRST TO " + std::to_string(m.scoreLimit) + (IsCtf(f) ? (m.scoreLimit == 1 ? " CAPTURE" : " CAPTURES") : "");
+    p.text = "FIRST TO " + std::to_string(m.scoreLimit);
     return p;
 }
 
@@ -461,12 +448,6 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
         s.clock = Clock(m.timeLeftMs);
     }
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
-    if (IsCtf(Format(m.format)) && m.phase != uint8_t(MatchPhase::Results))
-        for (const Objective& o : m.objectives) {
-            if (o.kind != ObjectiveKind::Flag) continue;
-            const std::string who = o.state == ObjectiveState::Carried ? NameOf(m, o.carrier) : std::string();
-            s.flags.push_back({true, FlagStatusLine(o, who), style::TeamInk(o.owner), 1, 1});
-        }
     if (const std::string line = QueueLine(m); !line.empty()) s.info = {true, line, style::kIron, 1, 1};
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.

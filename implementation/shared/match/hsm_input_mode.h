@@ -6,6 +6,7 @@
 // open they must not run; the menu's own mode is set once when it opens and the game's is restored once when it closes.
 #pragma once
 #include <cstdint>
+#include <string_view>
 
 namespace hsm {
 
@@ -30,6 +31,19 @@ inline InputMode ChooseInputMode(const InputModeState& s) {
     if (s.menuOpen) return s.wasMenuOpen ? InputMode::Leave : InputMode::GameAndUI;
     if (s.wasMenuOpen || s.respawnHappened || s.delayedFixDue) return InputMode::GameOnly;
     return InputMode::Leave;
+}
+
+// The stock pause menu (UI_Pause_Eng) and the settings screens it opens: its SETTINGS button adds UI_DisplaySettings2
+// and removes itself, whose tabs open UI_GameSettings, UI_AudioSettings, UI_CameraSettings, ... (decomp
+// UI_Pause_Eng.cpp LatentResume_Lf). While a settings screen is up the menu counts as open, or closing it would hand
+// the mouse back to the game under the settings (HSMBot 2752, 2774). Matched by Blueprint class name.
+enum class PauseScreen : uint8_t { None, Menu, Settings };
+inline PauseScreen PauseScreenOf(std::string_view cls) {
+    if (cls.find("UI_Pause") != std::string_view::npos) return PauseScreen::Menu;
+    if (cls.rfind("UI_", 0) != 0) return PauseScreen::None;
+    for (std::string_view s : {"Settings", "UI_Controls", "UI_KeyBinds"})
+        if (cls.find(s) != std::string_view::npos) return PauseScreen::Settings;
+    return PauseScreen::None;
 }
 
 }  // namespace hsm

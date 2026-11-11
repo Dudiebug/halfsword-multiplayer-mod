@@ -23,7 +23,7 @@ static void TestCatalog() {
         CHECK(p.find("Test_Empty") == std::string::npos);
         CHECK(p.find('.') == std::string::npos);                      // no object suffix
         CHECK(m.display[0] != '\0');
-        CHECK(m.arena || m.bigArena || m.abyss || m.ctf);             // every map supports something (Forest: Capture the flag only)
+        CHECK(m.arena || m.bigArena || m.abyss);                      // every map supports something
         CHECK(paths.insert(p).second);
         CHECK(shorts.insert(std::string(p.substr(p.rfind('/') + 1))).second);
     }
@@ -47,7 +47,7 @@ static void TestFindByShortName() {
     CHECK(FindMap("MAP_ARENA_YARD") == yard);
     CHECK(FindMap("Map_Arena_Yard.Map_Arena_Yard") == yard);
     CHECK(FindMap("Workshop_Smithery_Map") && std::strcmp(FindMap("Workshop_Smithery_Map")->display, "Smithery") == 0);
-    // The Ambush map is the CTF-only "Forest" (see TestCtfMaps).
+    // The Ambush map is the arena "Forest" (see TestForestEverywhere).
     CHECK(FindMap("Map_Arena_Ambush_Test") != nullptr && std::strcmp(FindMap("Map_Arena_Ambush_Test")->display, "Forest") == 0);
 }
 
@@ -75,15 +75,16 @@ static void TestFormatFilter() {
     CHECK(!MapAllowsFormat(yard, Format::Zombies));
     CHECK(MapAllowsFormat(cutting, Format::Duel));
 
-    // Big non-menu levels: every format except Duel (Last Man Standing is free-for-all's), Zombies only on the abyss.
+    // Big non-menu levels: every format except Duel (Last Man Standing is free-for-all's), Zombies only on the abyss (Infection plays there too).
     for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::LastManStanding})
         CHECK(MapAllowsFormat(hub, f));
     CHECK(!MapAllowsFormat(hub, Format::Duel));
     CHECK(!MapAllowsFormat(hub, Format::Zombies));
 
-    // Abyss: Zombies, plus the big-level formats; not Duel.
+    // Abyss: Zombies and Infection; not Duel.
     CHECK(MapAllowsFormat(abyss, Format::Zombies));
-    CHECK(!MapAllowsFormat(abyss, Format::PlayersVsBots));         // the picker's Abyss is Zombies only
+    CHECK(MapAllowsFormat(abyss, Format::Infection));
+    CHECK(!MapAllowsFormat(abyss, Format::PlayersVsBots));
     CHECK(!MapAllowsFormat(abyss, Format::FreeForAll));
     CHECK(!MapAllowsFormat(abyss, Format::Duel) && !MapAllowsFormat(abyss, Format::LastManStanding));
 
@@ -100,26 +101,23 @@ static void TestFormatFilter() {
     CHECK(!MapAllowsFormat(MapAt(0), Format(200)));                   // out-of-range enum allows nothing
 }
 
-static void TestCtfMaps() {
-    // Capture the flag is played on Alley and Forest only; Forest is offered for no other format.
-    const MapInfo& alley = *FindMap("Map_Arena_Alley");
+static void TestForestEverywhere() {
+    // Forest (the Ambush map) is an arena like the others: every arena format, Duel and Tournament included, offers it.
+    // Capture the flag, its old only format, was removed: no map allows it.
     const MapInfo& forest = *FindMap("/Game/Maps/Arenas/Map_Arena_Ambush_Test");
-    CHECK(alley.ctf && forest.ctf && forest.pick && !forest.arena && !forest.bigArena && !forest.abyss);
-    CHECK(MapAllowsFormat(alley, Format::CaptureTheFlag) && MapAllowsFormat(forest, Format::CaptureTheFlag));
-    size_t ctfMaps = 0;
-    for (size_t i = 0; i < MapCount(); ++i) {
-        if (MapAllowsFormat(MapAt(i), Format::CaptureTheFlag)) { ++ctfMaps; CHECK(MapAt(i).ctf); }
-        else CHECK(!MapAt(i).ctf);
-    }
-    CHECK(ctfMaps == 2);
+    CHECK(forest.arena && forest.pick && !forest.bigArena && !forest.abyss);
     for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::Duel, Format::LastManStanding,
-                     Format::TeamDuel, Format::Riot, Format::Juggernaut, Format::Zombies})
-        CHECK(!MapAllowsFormat(forest, f));
-    CHECK(!MapAllowsFormat(*FindMap("Map_Arena_Yard"), Format::CaptureTheFlag) && !MapAllowsFormat(*FindMap("Map_Hub_Tavern_Frank"), Format::CaptureTheFlag));
-    CHECK(!MapAllowsFormat(*FindMap("Abyss_Map_Open_EA"), Format::CaptureTheFlag));
-    // The CTF picker cycles Alley, Forest, Alley.
-    const size_t a = size_t(&alley - kMaps), fo = size_t(&forest - kMaps);
-    CHECK(NextMap(a, Format::CaptureTheFlag) == fo && NextMap(fo, Format::CaptureTheFlag) == a);
+                     Format::TeamDuel, Format::Riot, Format::Juggernaut, Format::Tag, Format::Infection, Format::CrossbowTDM, Format::Tournament})
+        CHECK(MapAllowsFormat(forest, f));
+    CHECK(!MapAllowsFormat(forest, Format::Zombies) && !MapAllowsFormat(forest, Format::PitBridgeDuel));
+    for (size_t i = 0; i < MapCount(); ++i) CHECK(!MapAllowsFormat(MapAt(i), Format::CaptureTheFlag));
+    CHECK(NextMap(0, Format::CaptureTheFlag) == MapCount());
+    // The Duel picker reaches Forest.
+    const size_t fo = size_t(&forest - kMaps);
+    bool reached = false;
+    size_t at = 0;
+    for (size_t step = 0; step < MapCount() && !reached; ++step) { at = NextMap(at, Format::Duel); reached = at == fo; }
+    CHECK(reached);
 }
 
 static void TestNextMapCycles() {
@@ -137,7 +135,7 @@ static void TestNextMapCycles() {
     const size_t hub = IndexOfName("Map_Hub_Tavern_Frank");
     const size_t duelNext = NextMap(hub, Format::Duel);
     CHECK(duelNext < n && MapAllowsFormat(MapAt(duelNext), Format::Duel));
-    CHECK(duelNext == 0);                                             // wraps past the big levels to Alley
+    CHECK(duelNext == IndexOfName("Map_Arena_Ambush_Test"));          // past the big levels to the Forest arena
 
     // Duel skips hub, workshop and abyss; the full Duel cycle is every arena once.
     std::set<size_t> seen;
@@ -157,8 +155,8 @@ static void TestNextMapCycles() {
     CHECK(NextMap(0, Format::Zombies) == abyss);
     CHECK(NextMap(n - 1, Format::Zombies) == abyss);
 
-    // Skips disallowed and unpickable maps going forward: from Cutting the next team-capable pickable map is Alley.
-    CHECK(NextMap(IndexOfName("Arena_Cutting_Map"), Format::TwoTeams) == 0);
+    // Skips disallowed and unpickable maps going forward: from Cutting the next team-capable pickable map is Forest.
+    CHECK(NextMap(IndexOfName("Arena_Cutting_Map"), Format::TwoTeams) == IndexOfName("Map_Arena_Ambush_Test"));
     CHECK(NextMap(IndexOfName("Abyss_Map_Open_EA"), Format::Duel) == 0);
 
     // Out-of-range current index still lands on a valid allowed map.
@@ -172,7 +170,7 @@ int main() {
     TestFindByShortName();
     TestFindUnknown();
     TestFormatFilter();
-    TestCtfMaps();
+    TestForestEverywhere();
     TestNextMapCycles();
     if (g_fail) { std::printf("test_hsm_maps: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_maps: all passed\n");

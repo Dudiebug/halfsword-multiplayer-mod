@@ -18,11 +18,12 @@ inline constexpr Rgba kWarn{0.85f, 0.62f, 0.05f, 1};
 inline constexpr Rgba kInfectedInk{0.45f, 0.78f, 0.28f, 1};      // Infection: the infected, as text
 inline constexpr Rgba kSceneGrey{0.18f, 0.18f, 0.18f, 1};        // the reference scene behind a panel
 
-// The menus (multiplayer page, Esc panel) and the HUD's panels. Two looks, chosen once at start (ui_style in
-// HSMMod.ini, UseMenuLook): the game's own (the default: faces are its parchment and gilt art, tinted, and these are
-// the plain fills drawn when the art is not loaded, and the faces text is judged on; text is dark ink, as on its
-// scrolls) and the classic one ("Iron & Blood": opaque dark faces, light text). Set before any widget is made; read
-// only on the game thread after that.
+// The menus (multiplayer page, Esc panel) and the HUD's panels. Three looks, chosen once at start (ui_style in
+// HSMMod.ini, UseMenuLook): the game's own (the default: faces are its parchment and gilt art, tinted, and these are the
+// plain fills drawn when the art is not loaded, and the faces text is judged on; text is dark ink, as on its scrolls), dark
+// (the game's art shaded dark and almost opaque, light text; a menu page sits on a darkened painting) and the classic
+// one ("Iron & Blood": opaque dark faces, light text). Set before any widget is made; read only on the game thread
+// after that.
 struct MenuPalette {
     Rgba bg, backdrop, panel, card, cardHover, frame, frameHover, text, dim, accent, accentInk, ok, warn, light;
 };
@@ -42,6 +43,22 @@ inline constexpr MenuPalette kGameMenus{
     {0.19f, 0.055f, 0.002f, 1},        // warn
     {0.80f, 0.72f, 0.58f, 1},          // light: text on the dark backdrop and on START's red
 };
+inline constexpr MenuPalette kDarkMenus{
+    {0.010f, 0.009f, 0.008f, 1},          // bg: behind a page, opaque (the game's own menu never shows through)
+    {1, 1, 1, 1},                         // backdrop: the tavern painting, shaded dark by the skin
+    {0.012f, 0.010f, 0.008f, 0.92f},      // panel: a column (the plain fill when the art is not loaded)
+    {0.020f, 0.017f, 0.014f, 0.94f},      // card
+    {0.045f, 0.037f, 0.030f, 0.95f},      // cardHover
+    {0.0423f, 0.0343f, 0.0273f, 1},       // frame
+    {0.30f, 0.20f, 0.08f, 1},             // frameHover: dull gilt
+    {0.8148f, 0.7529f, 0.6514f, 1},       // text: bone
+    {0.64f, 0.58f, 0.48f, 1},             // dim: labels, hints
+    {0.42f, 0.030f, 0.020f, 1},           // accent: START, the selected frame, rules
+    {1.00f, 0.47f, 0.37f, 1},             // accentInk: the accent as text, tabs, section heads
+    {0.35f, 0.80f, 0.35f, 1},             // ok
+    {0.85f, 0.55f, 0.08f, 1},             // warn
+    {0.8148f, 0.7529f, 0.6514f, 1},       // light: START's label, as the rest of the text
+};
 inline constexpr MenuPalette kClassicMenus{
     {0.0040f, 0.0037f, 0.0033f, 0.97f},   // bg: the page behind everything
     {0.0040f, 0.0037f, 0.0033f, 0.97f},   // backdrop: the same page
@@ -59,28 +76,45 @@ inline constexpr MenuPalette kClassicMenus{
     {0.8148f, 0.7529f, 0.6514f, 1},       // light: START's label, as the rest of the text
 };
 
-inline bool gClassicMenus = false;
+enum class MenuLook : uint8_t { Dark, Game, Classic };
+inline MenuLook gMenuLook = MenuLook::Game;
 inline Rgba kMenuBg = kGameMenus.bg, kMenuBackdrop = kGameMenus.backdrop, kMenuPanel = kGameMenus.panel, kMenuCard = kGameMenus.card,
             kMenuCardHover = kGameMenus.cardHover, kMenuFrame = kGameMenus.frame, kMenuFrameHover = kGameMenus.frameHover,
             kMenuText = kGameMenus.text, kMenuDim = kGameMenus.dim, kMenuAccent = kGameMenus.accent, kMenuAccentInk = kGameMenus.accentInk,
             kMenuOk = kGameMenus.ok, kMenuWarn = kGameMenus.warn, kMenuLight = kGameMenus.light;
 
-// classic: the old dark menus; otherwise the game's own look.
-inline void UseMenuLook(bool classic) {
-    const MenuPalette& m = classic ? kClassicMenus : kGameMenus;
-    gClassicMenus = classic;
+inline const MenuPalette& PaletteOf(MenuLook look) {
+    return look == MenuLook::Classic ? kClassicMenus : look == MenuLook::Game ? kGameMenus : kDarkMenus;
+}
+inline void UseMenuLook(MenuLook look) {
+    const MenuPalette& m = PaletteOf(look);
+    gMenuLook = look;
     kMenuBg = m.bg; kMenuBackdrop = m.backdrop; kMenuPanel = m.panel; kMenuCard = m.card; kMenuCardHover = m.cardHover;
     kMenuFrame = m.frame; kMenuFrameHover = m.frameHover; kMenuText = m.text; kMenuDim = m.dim; kMenuAccent = m.accent;
     kMenuAccentInk = m.accentInk; kMenuOk = m.ok; kMenuWarn = m.warn; kMenuLight = m.light;
 }
-inline bool ClassicMenus() { return gClassicMenus; }
+inline MenuLook CurrentMenuLook() { return gMenuLook; }
+inline bool ClassicMenus() { return gMenuLook == MenuLook::Classic; }
+inline bool DarkMenus() { return gMenuLook == MenuLook::Dark; }
+inline bool ParchmentMenus() { return gMenuLook == MenuLook::Game; }   // dark ink on light parchment
+
+// hud_opacity in HSMMod.ini: the render opacity of the match HUD, the chat and the fighter card, for a less harsh and
+// less distracting overlay (HSMBot 2801). kHudOpacityMin..1; below it is kHudOpacityMin, above 1 or not a number is 1.
+constexpr float kHudOpacityMin = 0.3f;
+inline float SaneHudOpacity(double raw) {
+    if (!(raw == raw) || raw > 1.0) return 1.f;
+    return raw < kHudOpacityMin ? kHudOpacityMin : float(raw);
+}
+inline float gHudOpacity = 1.f;
+inline void UseHudOpacity(double raw) { gHudOpacity = SaneHudOpacity(raw); }
+inline float HudOpacity() { return gHudOpacity; }
 
 // A menu heading as the look writes it. Classic: capitals. The game look: title case ("HOST A LOBBY" as "Host A Lobby"),
 // as the game writes its own ("Paused", "Options"): blackletter capitals run together. Only capitals inside a word are
 // lowered, so "Help Improve the Mod?" keeps its small "the". The word "HS" (HS Enhancer) is a name and keeps both capitals.
 inline std::string MenuTitle(std::string s) {
     const auto letter = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
-    if (gClassicMenus) {
+    if (ClassicMenus()) {
         for (char& c : s) if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
         return s;
     }
@@ -119,9 +153,9 @@ inline double TextContrast(Rgba c) { Rgba p = PanelOverScene(); return Contrast(
 inline Rgba Faded(Rgba c, float opacity) { return {c.r, c.g, c.b, c.a * opacity}; }
 
 // A light ink (made for the dark HUD panels) as ink on parchment: the same hue, darkened until it reads on the menu
-// faces. Dark colours stay as they are, and so does everything in the classic look (its faces are dark).
+// faces. Dark colours stay as they are, and so does everything in the dark and classic looks (their faces are dark).
 inline Rgba OnParchment(Rgba c) {
-    if (gClassicMenus) return c;
+    if (!ParchmentMenus()) return c;
     constexpr double kMaxLuminance = 0.06;
     const double l = Luminance(c);
     if (l <= kMaxLuminance) return c;

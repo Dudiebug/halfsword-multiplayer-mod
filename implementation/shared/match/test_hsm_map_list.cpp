@@ -38,7 +38,7 @@ static void TestRows() {
     std::vector<MapRow> d = MapRows(Format::Duel, "/Game/Maps/Arenas/Map_Arena_Yard");
     CHECK(d.size() == MapCount());
     for (size_t i = 0; i < d.size(); ++i) CHECK(d[i].index == i);
-    CHECK(Shown(d) == 7);                                               // the 7 pickable arenas (not Cutting)
+    CHECK(Shown(d) == 8);                                               // the 8 pickable arenas, Forest too (not Cutting)
     CHECK(!d[Idx("Tavern")].shown && !d[Idx("Smithery")].shown && !d[Idx("Abyss")].shown);
     CHECK(Selected(d) == 1 && d[Idx("Yard")].selected);
     CHECK(d[Idx("Yard")].label == "> Yard <");
@@ -48,7 +48,7 @@ static void TestRows() {
     CHECK(Shown(z) == 1 && z[Idx("Abyss")].shown && z[Idx("Abyss")].selected && Selected(z) == 1);
 
     std::vector<MapRow> f = MapRows(Format::FreeForAll, "/Game/Maps/Map_Hub_Tavern_Frank");
-    CHECK(Shown(f) == 7);                                              // the pickable arenas; Abyss is Zombies only
+    CHECK(Shown(f) == 8);                                              // the pickable arenas, Forest too; the Abyss is for Zombies and Infection
     CHECK(Selected(f) == 1 && f[Idx("Alley")].selected && f[Idx("Alley")].label == "> Alley <");
     CHECK(!f[Idx("Tavern")].shown && !f[Idx("Cutting")].shown && !f[Idx("Abyss")].shown);
 

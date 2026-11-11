@@ -61,6 +61,7 @@ static void TestTeamInk() {
 }
 
 static void TestMenuPalette() {
+    UseMenuLook(MenuLook::Game);
     // Every menu text colour reads on every parchment face it can sit on; the light text reads on the backdrop and on START.
     for (Rgba face : {kMenuPanel, kMenuCard, kMenuCardHover})
         for (Rgba c : {kMenuText, kMenuDim, kMenuAccentInk, kMenuOk, kMenuWarn}) CHECK(Contrast(c, face) >= 4.5);
@@ -72,11 +73,29 @@ static void TestMenuPalette() {
     CHECK(Luminance(kMenuCard) > Luminance(kMenuPanel) && Luminance(kMenuCardHover) > Luminance(kMenuCard));
     CHECK(Luminance(kMenuFrameHover) > Luminance(kMenuFrame) && Luminance(kMenuFrameHover) < Luminance(kMenuPanel));
     CHECK(kMenuAccent.r > 10 * kMenuAccent.g && kMenuAccentInk.r > 10 * kMenuAccentInk.g);   // rubric red, not orange
+    UseMenuLook(MenuLook::Game);
+}
+
+// The dark look: light text reads on every face, laid over black and over a mid-grey scene; the faces are almost opaque
+// and a page's background is opaque; light ink stays.
+static void TestDarkMenus() {
+    // The default before UseMenuLook is called is the game's own look, as before the dark one came.
+    CHECK(ParchmentMenus() && !DarkMenus() && Same(kMenuText, kGameMenus.text) && Same(kMenuPanel, kGameMenus.panel) && Same(kMenuBg, kGameMenus.bg));
+    UseMenuLook(MenuLook::Dark);
+    CHECK(DarkMenus() && Same(kMenuText, kDarkMenus.text));
+    for (Rgba face : {kMenuPanel, kMenuCard, kMenuCardHover})
+        for (Rgba under : {Rgba{0, 0, 0, 1}, kSceneGrey})
+            for (Rgba c : {kMenuText, kMenuDim, kMenuAccentInk, kMenuOk, kMenuWarn}) CHECK(Contrast(c, Over(face, under)) >= 4.5);
+    for (Rgba face : {kMenuPanel, kMenuCard, kMenuCardHover}) CHECK(face.a >= 0.9f);
+    CHECK(kMenuBg.a >= 0.99f && Contrast(kMenuLight, kMenuBg) >= 4.5);
+    CHECK(Contrast(kMenuLight, kMenuAccent) >= 4.5);
+    CHECK(Same(OnParchment(TeamInk(1)), TeamInk(1)));
+    UseMenuLook(MenuLook::Game);
 }
 
 // The classic look: every menu text colour reads on every dark face, START's label on the accent; light ink stays.
 static void TestClassicMenus() {
-    UseMenuLook(true);
+    UseMenuLook(MenuLook::Classic);
     CHECK(ClassicMenus());
     for (Rgba face : {kMenuBg, kMenuPanel, kMenuCard, kMenuCardHover, Over(kMenuBg, {0, 0, 0, 1})})
         for (Rgba c : {kMenuText, kMenuDim, kMenuAccentInk, kMenuOk, kMenuWarn}) CHECK(Contrast(c, face) >= 4.5);
@@ -84,8 +103,9 @@ static void TestClassicMenus() {
     CHECK(Contrast(kMenuLight, kMenuAccent) >= 4.5);
     CHECK(Luminance(kMenuCard) > Luminance(kMenuPanel) && Luminance(kMenuCardHover) > Luminance(kMenuCard));
     CHECK(Same(OnParchment(TeamInk(1)), TeamInk(1)));   // classic faces are dark: light inks stay
-    UseMenuLook(false);
+    UseMenuLook(MenuLook::Game);
     CHECK(!ClassicMenus() && Same(kMenuText, kGameMenus.text) && Same(kMenuPanel, kGameMenus.panel));
+    UseMenuLook(MenuLook::Game);
 }
 
 // Headings: title case in the game look, capitals in the classic one. HS Enhancer keeps its name in both.
@@ -97,13 +117,14 @@ static void TestMenuTitle() {
     CHECK(MenuTitle("BLOCK HS") == "Block HS" && MenuTitle("HS") == "HS" && MenuTitle("(HS)") == "(HS)");
     CHECK(MenuTitle("HSM MOD") == "Hsm Mod" && MenuTitle("DASHS") == "Dashs" && MenuTitle("H S") == "H S");   // only the whole word
     CHECK(MenuTitle("").empty() && MenuTitle("UNRESTRICTED CLASSES") == "Unrestricted Classes");
-    UseMenuLook(true);
+    UseMenuLook(MenuLook::Classic);
     CHECK(MenuTitle("Allow HS Enhancer") == "ALLOW HS ENHANCER" && MenuTitle("Help Improve the Mod?") == "HELP IMPROVE THE MOD?");
     CHECK(MenuTitle("PLAYERS 3/8") == "PLAYERS 3/8");
-    UseMenuLook(false);
+    UseMenuLook(MenuLook::Game);
 }
 
 static void TestOnParchment() {
+    UseMenuLook(MenuLook::Game);
     for (int t = 0; t < 4; ++t) {                  // each team keeps its hue
         const Rgba a = TeamInk(t), b = OnParchment(a);
         CHECK(Luminance(b) <= 0.0601 && Near(b.a, a.a));
@@ -111,13 +132,24 @@ static void TestOnParchment() {
     }
     CHECK(Same(OnParchment(kMenuText), kMenuText));   // ink stays ink
     CHECK(Same(OnParchment({0, 0, 0, 0.5f}), {0, 0, 0, 0.5f}));
+    UseMenuLook(MenuLook::Game);
+}
+
+static void TestHudOpacity() {
+    CHECK(SaneHudOpacity(1.0) == 1.f && SaneHudOpacity(0.6) == 0.6f && SaneHudOpacity(kHudOpacityMin) == kHudOpacityMin);
+    CHECK(SaneHudOpacity(0.0) == kHudOpacityMin && SaneHudOpacity(-2) == kHudOpacityMin);   // never invisible
+    CHECK(SaneHudOpacity(3.0) == 1.f && SaneHudOpacity(std::nan("")) == 1.f);
+    UseHudOpacity(0.5); CHECK(HudOpacity() == 0.5f);
+    UseHudOpacity(1.0); CHECK(HudOpacity() == 1.f);
 }
 
 int main() {
+    TestHudOpacity();
     TestPlanValues();
     TestContrastMath();
     TestTextIsReadable();
     TestTeamInk();
+    TestDarkMenus();
     TestMenuPalette();
     TestOnParchment();
     TestClassicMenus();

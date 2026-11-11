@@ -141,6 +141,25 @@ inline bool LooksLikeSublevel(std::string_view path) {
     return false;
 }
 
+// A map made for testing: "test" as a word of the map's own name ("Test_Arena", "MapTest", "test01", "TestingRoom",
+// "Arena_Tests"), not a part of another word ("Contest", "Testudo", "Greatest"). The folders above it do not count.
+inline bool LooksLikeTestMap(std::string_view path) {
+    const std::string_view name = modmaps_detail::LastSegment(path);
+    auto lower = [](char c) { return c >= 'a' && c <= 'z'; };
+    auto upper = [](char c) { return c >= 'A' && c <= 'Z'; };
+    auto ends = [&](size_t k) { return k >= name.size() || !lower(name[k]); };   // a word ends: no more small letters
+    for (size_t i = 0; i + 4 <= name.size(); ++i) {
+        if (!modmaps_detail::EqNoCase(name.substr(i, 4), "test")) continue;
+        const bool starts = i == 0 || !(lower(name[i - 1]) || upper(name[i - 1])) || (upper(name[i]) && lower(name[i - 1]));
+        if (!starts) continue;
+        const std::string_view rest = name.substr(i + 4);
+        if (ends(i + 4)) return true;
+        if (rest.size() >= 1 && rest[0] == 's' && ends(i + 5)) return true;                    // tests
+        if (rest.size() >= 3 && rest.substr(0, 3) == "ing" && ends(i + 7)) return true;       // testing
+    }
+    return false;
+}
+
 // "/Game/Maps/Custom/My_Cool-Map" -> "My Cool Map": the picker label.
 inline std::string ModMapDisplayName(std::string_view path) {
     std::string s;
@@ -193,6 +212,14 @@ inline std::vector<ModMapEntry> BuildModMapList(const std::vector<PakMaps>& from
         return a.path < b.path;
     });
     if (out.size() > kMaxModMaps) out.resize(kMaxModMaps);
+    return out;
+}
+
+// The map picker's list with hide_test_maps on: the custom maps without the ones made for testing. Only the picker uses
+// it; a host's pick and a lobby's map are checked against the whole list.
+inline std::vector<ModMapEntry> WithoutTestMaps(const std::vector<ModMapEntry>& all) {
+    std::vector<ModMapEntry> out;
+    for (const ModMapEntry& e : all) if (!LooksLikeTestMap(e.path)) out.push_back(e);
     return out;
 }
 

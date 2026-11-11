@@ -46,8 +46,14 @@ static void TestPick() {
     CHECK(one.size() == all.size());
 }
 
+static void TestSpawnFlags() {
+    CHECK(SpawnBodyFlags(true, false) == 1 && SpawnBodyFlags(false, false) == 0);
+    CHECK(SpawnBodyFlags(true, true) == 2 && SpawnBodyFlags(false, true) == 2);   // an infected holder: no crossbow
+}
+
 int main() {
     TestCounts();
+    TestSpawnFlags();
     TestPick();
     if (g_fail) { std::printf("test_hsm_crossbow: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_crossbow: ok\n");

@@ -122,6 +122,23 @@ void ReadSlider() {
     }
 }
 
+// The game's Dead Weight and Weapon Weight sliders (UI_GameSettings' DamageNPC_1 and DamageNPC_2, bound to the two
+// GI_Settings doubles): their range, logged once for the testers. The lobby's rows take 0..100% as 0..1.
+void LogWeightSliders() {
+    static bool logged = false;
+    if (logged || !g.sliderRead) return;               // the settings widget's class is loaded: its sliders are too
+    logged = true;
+    for (UObject* s : FindInstances("Slider")) {
+        const auto name = ObjectName(s);
+        const bool dead = name == "DamageNPC_1";
+        if ((!dead && name != "DamageNPC_2") || !IsGameSettingsSlider(FullName(s))) continue;
+        double lo = 0, hi = 0, step = 0;
+        if (ReadReal(s, "MinValue", lo) && ReadReal(s, "MaxValue", hi) && ReadReal(s, "StepSize", step))
+            HSM_LOG("physics: the game's %s slider runs %.3f..%.3f, step %.3f (%s)", dead ? "Dead Weight Scale" : "Weapon Weight Scale", lo, hi,
+                    step, FullName(s).c_str());
+    }
+}
+
 // The rate a fighter should be hit at: player-controlled fighters (Player) the player rate, the others the NPC rate.
 void WriteCache(UObject* willie, double player, double npc) {
     double* c = Field<double>(willie, kCache);
@@ -178,6 +195,7 @@ void TickDamagePin(bool active, uint16_t stored, bool host) {
     }
     ReadStock();
     ReadSlider();
+    LogWeightSliders();
     double* p = Rate(g.gi, kPlayer);
     double* n = Rate(g.gi, kNpc);
     if (!p || !n || !g.stockRead) return;
@@ -232,7 +250,8 @@ void TickPhysicsPin(const std::array<float, kPinnedPhysics>& forced) {
         Phys& ph = gp[i];
         double* d = Rate(g.gi, kPinnedPhysicsNames[i]);
         const bool want = g.active && d && forced[i] >= 0.f;
-        if (want && !ph.active) {
+        const bool began = want && !ph.active;         // logged as the pin below
+        if (began) {
             ph.own = *d; ph.active = true; ph.restore = false;
             HSM_LOG("physics: %s pinned to the host's %.3f (own %.3f)", kPinnedPhysicsNames[i], double(forced[i]), ph.own);
         } else if (!want && ph.active) {
@@ -241,7 +260,12 @@ void TickPhysicsPin(const std::array<float, kPinnedPhysics>& forced) {
             HSM_LOG("physics: %s back to the player's own %.3f", kPinnedPhysicsNames[i], ph.own);
         }
         if (ph.active) {
-            if (ph.forced != double(forced[i])) { ph.forced = forced[i]; physSweepNow = true; }
+            if (ph.forced != double(forced[i])) {
+                static unsigned changes = 0;           // the host moved a slider, or the host's own changed
+                if (!began && ++changes <= 40)
+                    HSM_LOG("physics: %s now the host's %.3f (was %.3f)", kPinnedPhysicsNames[i], double(forced[i]), ph.forced);
+                ph.forced = forced[i]; physSweepNow = true;
+            }
             if (*d != ph.forced) *d = ph.forced;   // a level load reads the save back (BP_HalfSwordGameMode.cpp:163)
         }
         any = any || ph.active || ph.restore;

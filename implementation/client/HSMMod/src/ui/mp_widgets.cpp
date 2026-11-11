@@ -14,9 +14,14 @@ constexpr Rgba kClear{1, 1, 1, 0};
 constexpr Rgba kNone{0, 0, 0, 0};
 constexpr float kMeterWidth = 300;
 constexpr uint32_t kConfirmMs = 4000;
-
-bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 }  // namespace
+
+bool KeyDown(int vk) {
+    if (!(GetAsyncKeyState(vk) & 0x8000)) return false;   // the key first: asking whose window is in front costs more
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
 
 // ---------------------------------------------------------------- the card look
 
@@ -24,7 +29,7 @@ Text Maker::NewText(const std::string& text, float size, Rgba color) {
     Text t = kit_ ? kit_->MakeText() : Text{};
     if (!t) return t;
     t.Set(text);
-    t.Font(size);
+    if (style::DarkMenus()) t.Font(size, 1, {0, 0, 0, 0.85f}); else t.Font(size);   // dark: the scene shows behind
     skin::Font(t, size >= 26 ? skin::Face::Heading : skin::Face::Body);
     t.Color(color);
     return t;
@@ -78,7 +83,7 @@ Rgba Mix(Rgba a, Rgba b, float t) { return {a.r + (b.r - a.r) * t, a.g + (b.g - 
 
 void Paint(Card& c) {
     if (!c) return;
-    const bool hover = c.live && c.button.Hovered();
+    const bool hover = c.live && (c.button.Hovered() || c.button.Focused());   // the highlight follows the keys and the gamepad too
     c.glow += ((hover ? 1.f : 0.f) - c.glow) * kGlowStep;
     if (c.glow < 0.01f) c.glow = 0; else if (c.glow > 0.99f) c.glow = 1;
     if (c.arrow) {                              // a bare arrow: no card behind it, a little larger under the mouse
@@ -269,8 +274,8 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
         return false;
     }
     root.Add(panel_).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(1000);
-    // The fight dimmed behind the game's old paper, as its own pause scroll sits over it.
-    panel_.Color({0, 0, 0, 0.72f});
+    // The fight dimmed behind the game's old paper, as its own pause scroll sits over it (dark look: hidden, as a menu).
+    panel_.Color({0, 0, 0, style::DarkMenus() ? 0.94f : 0.72f});
     panel_.Padding({56, 32, 56, 28});
     panel_.Content(sheet).Align(HAlign::Fill, VAlign::Fill);
     skin::Paint(sheet, skin::Art::Sheet);

@@ -200,7 +200,7 @@ static void TestConfig() {
     const auto t = ResolveTeams({{0, kNoTeam, kNoTeam}, {1, 3, kNoTeam}}, Format::Infection, 4);
     CHECK(t.size() == 2);                                                              // the lobby's picks are not used: the infection decides
     CHECK(MapAllowsFormat(kMaps[0], Format::Infection) == MapAllowsFormat(kMaps[0], Format::FreeForAll));
-    for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, Format::Infection) == MapAllowsFormat(m, Format::FreeForAll) && (!m.abyss || !MapAllowsFormat(m, Format::Infection)));
+    for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, Format::Infection) == (MapAllowsFormat(m, Format::FreeForAll) || m.abyss));   // the Abyss too
 }
 
 // Criterion: the trait table names the zombie flag and the pain fields the stand-ins zero, the consciousness floor is half of the
@@ -311,7 +311,7 @@ static void TestLobby() {
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Infection) card = &m;
     CHECK(card && card->name == "INFECTION" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::Damage, LobbyRow::Sync}));
+    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));
     for (const SettingRow& r : s.settings) {
         if (r.id == LobbyRow::Time) CHECK(r.label == "Time limit" && r.value == "5 min" && Has(r.hint, "survivors"));
         if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay" && Has(r.hint, "infected"));
@@ -322,7 +322,7 @@ static void TestLobby() {
     c.format = Format::FreeForAll; c.timeLimitS = 300; CHECK(StepSetting(c, LobbyRow::Time, -1).timeLimitS == 0);       // other modes keep "no clock"
     CHECK(!ModeAvailable(Format::Infection, 1).ok && ModeAvailable(Format::Infection, 2).ok);
     LobbyLocal rolled = InLobby(Format::Infection); rolled.config.gear = Gear::Mirror;
-    CHECK(RowIds(BuildLobbyScene(rolled)).size() == 8);
+    CHECK(RowIds(BuildLobbyScene(rolled)).size() == 10);
     LobbyLocal withPlayers = InLobby(Format::Infection);
     LobbyPlayer ann, bo; ann.name = "Ann"; ann.host = ann.me = true; bo.name = "Bo";
     withPlayers.players = {ann, bo};

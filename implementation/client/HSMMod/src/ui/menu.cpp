@@ -86,6 +86,14 @@ struct DamageView {
     bool editing = false, hadFocus = false, focused = false, enterDown = false, escDown = false, dragging = false;
     float shown = -1;                                // where the slider was last put (-1: not yet)
 };
+// The Dead weight and Weapon weight rows' value: a slider (0..100%, 5% a step) with the number beside it. Host only.
+struct WeightView {
+    LobbyRow id = LobbyRow::DeadWeight;
+    Slider slider;
+    Text number;
+    bool dragging = false;
+    float shown = -1;                                // where the slider was last put (-1: not yet)
+};
 // MODS tab: one mod: its name, "kind · who runs it", why the lobby refuses it; the verdict on the right.
 struct ModItemView { Box box; Text name, detail, note, verdict; };
 constexpr size_t kModItemRows = 48;                  // more: "+N more" (the host's log has the whole list)
@@ -131,7 +139,7 @@ struct State {
     Box classRow;                            // in a lobby that uses classes: the class we fight as, and CHANGE
     Text classRowText;
     bool classShown = false;                 // not in a lobby: YOUR CLASS has put the classes in the right column
-    int classFieldSel = 8;                   // the row the description box explains
+    int classFieldSel = 7;                   // the row the description box explains (RUN)
     Box updateRow;                           // the update notice and its UPDATE NOW button (net/update_check.h)
     Flat updateNow;
     Text title, me, badge, status, notice, updateNote, pillText, playersTitle, idleHint, hostOnly, waiting, summary;
@@ -162,9 +170,9 @@ struct State {
     bool reportOpenNow = false;
     bool reportTyping = false;   // the report box has the keyboard (MenuTyping)
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF (SETTINGS)
-    Flat lookToggle;                         // MENU LOOK: GAME ART / CLASSIC (SETTINGS); ui_style, used from the next start
+    Flat lookToggle;                         // MENU LOOK: GAME ART / DARK / CLASSIC (SETTINGS); ui_style, used from the next start
     Text lookNote;
-    bool lookClassic = false, lookSaved = true;   // what HSMMod.ini will say at the next start; written
+    style::MenuLook look = style::MenuLook::Game; bool lookSaved = true;   // what HSMMod.ini will say at the next start; written
     mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
@@ -196,6 +204,7 @@ struct State {
     std::vector<ModeView> modes;             // kModeOrder, then Brawl, then Progression
     std::vector<StepperView> steppers;       // one per LobbyRow, in its order
     DamageView damage;
+    std::array<WeightView, 2> weights;       // Dead weight, Weapon weight
     std::vector<MapView> maps;               // the pickable maps, kMaps order, then the modded ones
     Card start;
     Text startLabel;
@@ -631,7 +640,7 @@ bool HandleWarn(Session& session) {
     game::Lobby& lobby = session.lobby();
     if (g.warnOpen && g.warnKind == State::WarnKind::Switch && !lobby.SwitchAskPending().lobby) { g.warnOpen = false; g.warn.Show(false); }   // the lobby went away
     if (!g.warnOpen) return false;
-    const bool on = Clicked(g.warnOn.card), cancelClick = Clicked(g.warnCancel.card), esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0 && !game::fetchlink::KeysHeld();   // Esc in Fetch's menu is Fetch's
+    const bool on = Clicked(g.warnOn.card), cancelClick = Clicked(g.warnCancel.card), esc = mp::KeyDown(VK_ESCAPE) && !game::fetchlink::KeysHeld();   // Esc in Fetch's menu is Fetch's
     const bool cancel = cancelClick || esc;
     Paint(g.warnOn.card); Paint(g.warnCancel.card);
     if (on) {
@@ -735,6 +744,20 @@ bool BuildDamageValue(Fixed& cell) {
     return true;
 }
 
+// A weight row's value cell: "slider | number". Empty when a widget could not be made.
+bool BuildWeightValue(LobbyRow id, Fixed& cell) {
+    WeightView& w = g.weights[id == LobbyRow::DeadWeight ? 0 : 1];
+    Box row = g.kit.MakeRow();
+    w.slider = g.kit.MakeSlider();
+    w.number = NewText(WeightLabel(kWeightDefaultPct), 15, style::kMenuText);
+    if (!row || !w.slider || !w.number) { w = WeightView{}; return false; }
+    w.id = id;
+    AddToHorizontalBox(row, w.slider, 1, 6).Align(HAlign::Fill, VAlign::Center);
+    AddToHorizontalBox(row, w.number, 0, 0).Align(HAlign::Right, VAlign::Center);
+    cell.Content(row).Align(HAlign::Fill, VAlign::Center);
+    return true;
+}
+
 // A stepper row, "label and hint | < | value | >" (the RULES and MODS tabs). The caller puts the value cell's content
 // in `valueBox` (v.value, or the Damage slider) and adds v.box to its column. Empty when a widget could not be made.
 StepperView MakeStepper(Fixed& valueBox) {
@@ -772,6 +795,7 @@ void BuildRulesTab(Box& page) {
         // The Damage row shows the slider instead: its value text is in no tree, so garbage collection frees it, and a
         // later Set on it crashed (0.8.0-pre26). Drop it; the UpdatePanel writes to an empty Text are no-ops.
         if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) v.value = Text{};
+        else if ((LobbyRow(i) == LobbyRow::DeadWeight || LobbyRow(i) == LobbyRow::WeaponWeight) && BuildWeightValue(LobbyRow(i), valueBox)) v.value = Text{};   // the same
         else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(home, v.box, 10);
         g.steppers.push_back(v);
@@ -1033,9 +1057,9 @@ void BuildSettingsView(Box& col) {
                          "crashes. Steam IDs, IPs and your Windows user name are removed; player names stay. Off unless you turn it on.",
                          14, style::kMenuDim);
     if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(col, g.helpNote, 8); }
-    // MENU LOOK: the game's own art, or the earlier dark look. The widgets are built once, so it takes effect at the next start.
+    // MENU LOOK: the game's own art (the default), dark, or the earlier look. The widgets are built once, so it takes effect at the next start.
     Section(col, "MENU LOOK", 28);
-    g.lookClassic = style::ClassicMenus();
+    g.look = style::CurrentMenuLook();
     g.lookToggle = MakeFlat("", 17);
     AddFlat(col, g.lookToggle, 8);
     g.lookNote = NewText("", 14, style::kMenuDim);
@@ -1278,7 +1302,7 @@ void PaintTabs() {
         TabView& t = g.tabs[i];
         if (!t.card) continue;
         const bool on = i == g.tab;
-        const bool hover = t.card.button.Hovered();
+        const bool hover = t.card.button.Hovered() || t.card.button.Focused();
         t.card.frame.Color(kClear);
         t.card.face.Color(kClear);
         t.label.Color(on ? style::kMenuAccentInk : hover ? style::kMenuText : style::kMenuDim);
@@ -1637,7 +1661,7 @@ void UpdateOpenLabel(Session& session) {
 // box commits on Enter), sends what is typed through the session (commands included). While the box has the keyboard
 // the game's hotkeys stay off (ui::Typing).
 void HandleChat(Session& session, bool in) {
-    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    const bool enter = mp::KeyDown(VK_RETURN);
     const bool enterEdge = enter && !g.enterDown;
     g.enterDown = enter;
     if (!g.chatBox || !in) { g.chatFocused = false; SetLobbyTyping(false); return; }
@@ -1666,8 +1690,8 @@ void CloseDamageEdit() {
 void HandleDamage(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
     DamageView& d = g.damage;
     if (!d.slider) return;
-    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !d.enterDown;
-    const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !d.escDown;
+    const bool enter = mp::KeyDown(VK_RETURN), enterEdge = enter && !d.enterDown;
+    const bool esc = mp::KeyDown(VK_ESCAPE), escEdge = esc && !d.escDown;
     d.enterDown = enter; d.escDown = esc;
     const bool numberClicked = Clicked(d.number.card);
     const SettingRow* row = nullptr;
@@ -1723,10 +1747,45 @@ void HandleDamage(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
     d.number.label.Set(std::to_string(DamagePct(c.damagePct, r)) + "%");
 }
 
+// The Dead weight and Weapon weight sliders, every frame, as the Damage one: the config is written when the handle is
+// let go, the number follows it live.
+void HandleWeights(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
+    for (WeightView& w : g.weights) {
+        if (!w.slider) continue;
+        const SettingRow* row = nullptr;
+        for (const SettingRow& r : s.settings) if (r.id == w.id) row = &r;
+        const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
+        MatchConfig c = lobby.config();
+        uint8_t& pct = *WeightField(c, w.id);
+        w.slider.Range(0.f, float(kWeightMaxPct), float(kWeightStepPct));
+        w.slider.Colors(style::kMenuDim, live ? style::kMenuAccentInk : style::kMenuDim);
+        w.slider.Enabled(live);
+        w.number.Color(live ? style::kMenuText : style::kMenuDim);
+        const float at = w.slider.Value();
+        if (live && std::isfinite(at) && w.slider.Dragging()) {
+            w.dragging = true;
+            w.number.Set(WeightLabel(WeightFromSlider(at)));
+            continue;
+        }
+        if (live && std::isfinite(at) && w.shown >= 0 && (w.dragging || std::fabs(at - w.shown) > 0.5f)) {
+            const uint8_t v = WeightFromSlider(at);
+            if (v != pct) {
+                pct = v; lobby.SetConfig(c); acted = true;
+                HSM_LOG("ui: %s slid to %u%%", w.id == LobbyRow::DeadWeight ? "dead weight" : "weapon weight", unsigned(v));
+            }
+        }
+        w.dragging = false;
+        const float want = float(pct);
+        if (w.shown < 0 || !std::isfinite(at) || std::fabs(at - want) > 0.01f) w.slider.Set(want);
+        w.shown = want;
+        w.number.Set(WeightLabel(pct));
+    }
+}
+
 // The host's password row: SET (or Enter in the box) locks the lobby with what is typed, CLEAR opens it. Nobody is kicked.
 // While the box has the keyboard the game's hotkeys stay off, as in the chat box.
 void HandlePassword(Session& session, bool host) {
-    const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    const bool enter = mp::KeyDown(VK_RETURN);
     const bool enterEdge = enter && !g.pwHostEnterDown;
     g.pwHostEnterDown = enter;
     if (!g.pwHostBox || !host) { g.pwHostFocused = false; return; }
@@ -1752,7 +1811,7 @@ void HandlePassword(Session& session, bool host) {
 // START: the game's red button, brighter under the mouse (without the art: the accent face, a little toward its ink).
 void PaintStart() {
     if (!g.start) return;
-    const bool hover = g.start.button.Hovered();
+    const bool hover = g.start.button.Hovered() || g.start.button.Focused();
     g.start.glow += ((hover ? 1.f : 0.f) - g.start.glow) * 0.18f;
     if (skin::Loaded(skin::Art::CardRed)) {
         skin::Paint(g.start.frame, skin::Art::CardRed, mp::Mix({0.85f, 0.85f, 0.85f, 1}, {1, 1, 1, 1}, g.start.glow));
@@ -1782,7 +1841,7 @@ void HandleClicks(Session& session) {
         if (lobby.state() == game::Lobby::State::Idle) lobby.RefreshList();   // the browser is filled on arrival
     };
     if (g.askOpen) {                            // the one-time question: nothing else on the menu until it is answered
-        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.escDown && !game::fetchlink::KeysHeld();
+        const bool esc = mp::KeyDown(VK_ESCAPE), escEdge = esc && !g.escDown && !game::fetchlink::KeysHeld();
         g.escDown = esc;
         const bool yes = Clicked(g.askYes.card), no = Clicked(g.askNo.card) || escEdge;
         Paint(g.askYes.card); Paint(g.askNo.card);
@@ -1799,14 +1858,14 @@ void HandleClicks(Session& session) {
         g.pwOpen = true; g.pw.Show(true);
         g.pwText.Clear(); g.pwText.Focus();
         g.pwNote.Set(lobby.PasswordNote());
-        g.pwEscDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-        g.pwEnterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+        g.pwEscDown = mp::KeyDown(VK_ESCAPE);
+        g.pwEnterDown = mp::KeyDown(VK_RETURN);
         g.pwFocused = true;
         if (!g.panelOpen) openPage();                  // an invite arrived on the bare main menu
     }
     if (g.pwOpen) {
-        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0, escEdge = esc && !g.pwEscDown && !game::fetchlink::KeysHeld();
-        const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !g.pwEnterDown;
+        const bool esc = mp::KeyDown(VK_ESCAPE), escEdge = esc && !g.pwEscDown && !game::fetchlink::KeysHeld();
+        const bool enter = mp::KeyDown(VK_RETURN), enterEdge = enter && !g.pwEnterDown;
         g.pwEscDown = esc; g.pwEnterDown = enter;
         const bool focused = g.pwText.Focused();
         const bool ok = Clicked(g.pwOk.card) || (enterEdge && (focused || g.pwFocused));   // the box commits on Enter, so it may have lost the keyboard this frame
@@ -1859,7 +1918,7 @@ void HandleClicks(Session& session) {
     }
     if (openClicked && !g.panelOpen && !session.HelpImproveAsked() && g.ask) {
         g.askOpen = true; g.ask.Show(true);
-        g.escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        g.escDown = mp::KeyDown(VK_ESCAPE);
         HSM_LOG("ui: first MULTIPLAYER click: asking about help improve the mod (off until answered)");
         return;
     }
@@ -1917,15 +1976,18 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
     if (g.lookToggle.card) {
         if (act(Clicked(g.lookToggle.card), g.settingsShown)) {
-            g.lookClassic = !g.lookClassic;
-            g.lookSaved = SaveUiStyle(g.lookClassic);
-            HSM_LOG("ui: menu look set to %s for the next start%s", g.lookClassic ? "classic" : "game", g.lookSaved ? "" : " (HSMMod.ini could not be written)");
+            g.look = g.look == style::MenuLook::Game ? style::MenuLook::Dark
+                   : g.look == style::MenuLook::Dark ? style::MenuLook::Classic : style::MenuLook::Game;
+            g.lookSaved = SaveUiStyle(g.look);
+            HSM_LOG("ui: menu look set to %s for the next start%s", UiStyleName(g.look), g.lookSaved ? "" : " (HSMMod.ini could not be written)");
         }
-        g.lookToggle.label.Set(g.lookClassic ? "MENU LOOK: CLASSIC" : "MENU LOOK: GAME ART");
-        const bool pending = g.lookClassic != style::ClassicMenus();
+        g.lookToggle.label.Set(g.look == style::MenuLook::Classic ? "MENU LOOK: CLASSIC"
+                               : g.look == style::MenuLook::Game ? "MENU LOOK: GAME ART" : "MENU LOOK: DARK");
+        const bool pending = g.look != style::CurrentMenuLook();
         g.lookNote.Set(!g.lookSaved ? "HSMMod.ini could not be written, so this will not stick. Set ui_style in it by hand."
                        : pending ? "Restart the game to see it."
-                                 : "Game art: the game's own parchment, buttons and lettering. Classic: the earlier dark look.");
+                                 : "Game art: the game's own parchment and lettering. Dark: that art, darkened. Classic: the "
+                                   "earlier look.");
         g.lookNote.Color(!g.lookSaved || pending ? style::kMenuWarn : style::kMenuDim);
     }
     // MODS: the checkboxes for this machine's lobbies, while that tab is what's on screen.
@@ -2004,7 +2066,7 @@ void HandleClicks(Session& session) {
             }
             if (g.classNameFor != picked) { g.classNameFor = picked; g.classNameNote.clear(); g.classNameBox.Set(session.ClassOwnName()); }
             const bool focused = g.classNameBox.Focused();
-            const bool enter = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0, enterEdge = enter && !g.classNameEnterDown;
+            const bool enter = mp::KeyDown(VK_RETURN), enterEdge = enter && !g.classNameEnterDown;
             g.classNameEnterDown = enter;
             const bool save = Clicked(g.classNameSave.card) || (enterEdge && (focused || g.classNameFocused));
             g.classNameFocused = focused;
@@ -2047,7 +2109,7 @@ void HandleClicks(Session& session) {
             if (!v.box) continue;
             const bool rowShown = ClassFieldShown(int(i), g.classTab);
             v.box.Show(rowShown);
-            if (!rowShown) { if (g.classFieldSel == int(i)) g.classFieldSel = 8; continue; }
+            if (!rowShown) { if (g.classFieldSel == int(i)) g.classFieldSel = 7; continue; }
             const ClassFieldView f = ClassField(sheet, int(i));
             v.value.Set(f.value);
             v.name.card.selected = int(i) == g.classFieldSel;
@@ -2071,6 +2133,7 @@ void HandleClicks(Session& session) {
     HandleChat(session, s.in && !g.settingsShown);
     HandlePassword(session, s.hostPassword && !g.settingsShown);
     HandleDamage(lobby, s, acted);               // after the two boxes: its own text box keeps the hotkeys off too
+    HandleWeights(lobby, s, acted);
     if (ClassesOpen(s) && g.classNameBox && g.classNameBox.Focused()) SetLobbyTyping(true);   // and the class name's, after all of them
 
     // Not in a lobby: hosting, the browser and its filters.

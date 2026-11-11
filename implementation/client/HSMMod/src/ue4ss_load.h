@@ -2,6 +2,7 @@
 // game exe; UE4SS 3.x lives in <exe dir>/ue4ss/UE4SS.dll (older installs: UE4SS.dll next to the exe). The choice of file
 // and the mods.txt reading are in shared/session/hsm_ue4ss.h.
 #pragma once
+#include "session/hsm_hook_order.h"
 #include <string>
 #include <vector>
 #include "config.h"
@@ -16,6 +17,9 @@ void Run(const Config& cfg);
 // For bug reports and crash notes (thread safe): "3.0.1.0" (the file version), "unknown version", "2.x proxy", "none",
 // "off", or "load failed (error N)"; empty before Run.
 std::string ReportVersion();
+// Where the load stands (any thread): Pending until Run has decided, then Loaded (UE4SS runs in this process; sinceMs is
+// the time since Run found that out) or Absent. HSMMod's script VM hook waits on it (session/hsm_hook_order.h).
+Ue4ssPhase LoadPhase(uint64_t* sinceMs = nullptr);
 // Names of the enabled UE4SS mods, "A, B, C" (bounded, names only; session/hsm_ue4ss.h), empty for none.
 std::string ReportMods();
 // A warning for the multiplayer page when the dwmapi.dll next to the exe is not HSMMod's, else empty.

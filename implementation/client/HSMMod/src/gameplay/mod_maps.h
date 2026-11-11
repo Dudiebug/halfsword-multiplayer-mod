@@ -19,6 +19,7 @@
 namespace hsm::game::modmaps {
 
 void Tick();      // each frame: starts the first scan, takes the worker's results, runs the registry query when due
+void HideTestMaps(bool on);   // hide_test_maps: set at start, before the first Tick
 void Rescan();    // files may have been dropped in since the start: list again (a hash already known is not recomputed)
 
 const std::vector<ModMapEntry>& Maps();   // the custom maps, sorted; ModMapEntry::pak indexes Paks()

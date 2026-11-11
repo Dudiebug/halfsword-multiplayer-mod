@@ -1,4 +1,4 @@
-// The picker's catalog: only pickable maps are offered or cycled to; the Abyss is Zombies only.
+// The picker's catalog: only pickable maps are offered or cycled to; the Abyss is for Zombies and Infection.
 #include "match/hsm_map_list.h"
 #include "match/hsm_maps.h"
 #include <cstdio>

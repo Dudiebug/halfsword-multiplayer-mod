@@ -275,7 +275,6 @@ private:
         uint64_t structFollowed = 0, followStarts = 0, breaksWhileFollowing = 0;   // 0.8.0-pre35 moving follow
         uint64_t gameBreaks = 0;   // planks that came off by the barrel's own code
         uint64_t lateRecovered = 0, lateAliased = 0, lateExpired = 0, dropRestored = 0;   // 0.8.0-pre18 (weapon_hands.cpp)
-        uint64_t flagSkipped = 0;   // #612 (weapon_hands.cpp): the CTF flag left alone by stand-in hands
     };
 
     static constexpr double kCensusRefreshMs = 5000.0;  // the host walks again this often; a client retries its misses this often

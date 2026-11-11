@@ -197,10 +197,10 @@ static std::vector<LobbyRow> RowIds(const LobbyScene& s) { std::vector<LobbyRow>
 static void TestLobby() {
     using R = LobbyRow;
     const LobbyScene riot = BuildLobbyScene(InLobby(Format::Riot, 4));
-    CHECK(RowIds(riot) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::FriendlyFire, R::Damage, R::TeamKit, R::Crossbows, R::Sync}));   // no Gear, Tier, Weapons, Teams, My team; the camera, Team colours and Crossbows rows apply
+    CHECK(RowIds(riot) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::FriendlyFire, R::Damage, R::DeadWeight, R::WeaponWeight, R::TeamKit, R::Crossbows, R::Sync}));   // no Gear, Tier, Weapons, Teams, My team; the camera, Team colours and Crossbows rows apply
     CHECK(RowIds(BuildLobbyScene(InLobby(Format::Juggernaut, 4))) == RowIds(riot));
     const LobbyScene td = BuildLobbyScene(InLobby(Format::TeamDuel, 4));
-    CHECK(RowIds(td) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Teams, R::FriendlyFire, R::Damage, R::MyTeam, R::TeamKit, R::Crossbows, R::Sync}));
+    CHECK(RowIds(td) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Teams, R::FriendlyFire, R::Damage, R::DeadWeight, R::WeaponWeight, R::MyTeam, R::TeamKit, R::Crossbows, R::Sync}));
     CHECK(SettingsFor(MatchConfig{Format::Riot}) == SettingsFor(MatchConfig{Format::Juggernaut}));
     // Teams row: Team Duel counts 2..4 and steps; Riot's rows hold none to step.
     MatchConfig c; c.format = Format::TeamDuel;

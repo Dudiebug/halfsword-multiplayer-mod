@@ -57,10 +57,8 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 
 ### Waves 3 and 4
 
-- **Capture the flag** (Format 10; lobby keys `hsm_ctfcap` captures to win, `hsm_ctfret` flag return seconds; `ctf_carry=hand|back`
-  under `[net]`): Alley and "Forest" (the Ambush arena, `/Game/Maps/Arenas/Map_Arena_Ambush_Test`, Capture the flag only).
-  The host decides every take, drop, return and capture (CtfEvent 62); flags and carriers are HUD markers
-  (`match/hsm_objective.h`). The flag actors are kept out of ground clears and map resets.
+- **Forest** (the Ambush arena, `/Game/Maps/Arenas/Map_Arena_Ambush_Test`) is an arena like the others, offered to every
+  arena format. Capture the flag was removed (protocol rev 43): a lobby that still says Format 10 plays Teams.
 - **Tag** (11; `hsm_fuse` fuse seconds), **Infection** (12), **Crossbow TDM** (13), **Tournament** (14; `hsm_trnr` rounds
   per fight) and **Pit Bridge Duels** (15, the Pit only; `hsm_pbwin` wins to take the match). Tournament and Pit Bridge
   Duels bench everyone not fighting.
@@ -71,7 +69,7 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
   exports, and swaps the DLL (the old one is kept as `dwmapi.dll.old` until the next start).
 - **Modpack:** `~mods/<pack>/HSMPack.ini` (tools/make_pack_manifest.py, docs/MODPACK.md); lobby keys `hsm_pack`,
   `hsm_packv`, `hsm_packh`; `[mod] pack=<name>|off`. A player without the host's pack is told what to install.
-- With `role=server`, `server_format` also takes `teamduel`, `riot`, `juggernaut`, `ctf`, `tag`, `infection`,
+- With `role=server`, `server_format` also takes `teamduel`, `riot`, `juggernaut`, `tag`, `infection`,
   `crossbowtdm`, `tournament` and `pitbridge`.
 
 

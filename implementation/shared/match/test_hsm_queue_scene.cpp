@@ -56,13 +56,13 @@ static void TestRows() {
     using R = LobbyRow;
     const LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     // no limit (one round a fight) and no time limit (a bracket has no clock); the rest as every round format
-    CHECK((Ids(t) == std::vector<LobbyRow>{R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::Crossbows, R::Sync}));
+    CHECK((Ids(t) == std::vector<LobbyRow>{R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
     CHECK(RowOf(t, R::Limit) == nullptr);
     bool oneRound = false;
     for (const ModeCard& m : t.modes) if (m.format == Format::Tournament) oneRound = m.description.find("One round a fight") != std::string::npos;
     CHECK(oneRound);
     const LobbyScene p = BuildLobbyScene(InLobby(Format::PitBridgeDuel));
-    CHECK((Ids(p) == std::vector<LobbyRow>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::Crossbows, R::Sync}));
+    CHECK((Ids(p) == std::vector<LobbyRow>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
     const SettingRow* win = RowOf(p, R::Limit);
     CHECK(win && win->label == "Wins to take the match" && win->value == "5");
     // random gear adds the Weapons row, as everywhere
@@ -93,15 +93,15 @@ static void TestMaps() {
     CHECK(EffectiveMap(Format::PitBridgeDuel, "") == size_t(pit - kMaps));
     LobbyScene s = BuildLobbyScene(InLobby(Format::PitBridgeDuel));
     int allowed = 0;
-    for (const MapCard& m : s.maps) { allowed += m.allowed ? 1 : 0; CHECK(m.allowed == (m.name == "Pit")); if (!m.allowed) CHECK(m.reason == (m.name == "Forest" ? "Capture the flag only" : "Pit bridge duels need the Pit")); }
+    for (const MapCard& m : s.maps) { allowed += m.allowed ? 1 : 0; CHECK(m.allowed == (m.name == "Pit")); if (!m.allowed) CHECK(m.reason == "Pit bridge duels need the Pit"); }
     CHECK(allowed == 1);
     LobbyLocal mod = InLobby(Format::PitBridgeDuel);
     LobbyModMap mm; mm.path = "/Game/Mods/X"; mm.display = "X"; mod.modMaps = {mm};
     for (const MapCard& m : BuildLobbyScene(mod).maps) if (m.modded) CHECK(!m.allowed);
     LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
-    for (const MapCard& m : t.maps) if (!m.allowed) CHECK(m.reason == (m.name == "Forest" ? "Capture the flag only" : "Tournament needs an arena"));
-    CHECK(BrowserModes().size() == 17 && BrowserModes()[12] == "Tournament" && BrowserModes()[13] == "Pit bridge duels");
-    CHECK(ModeMatches("Tournament", BrowserModes()[12]) && ModeMatches("Pit bridge duels", BrowserModes()[13]));
+    for (const MapCard& m : t.maps) if (!m.allowed) CHECK(m.reason == "Tournament needs an arena");
+    CHECK(BrowserModes().size() == 16 && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels");
+    CHECK(ModeMatches("Tournament", BrowserModes()[11]) && ModeMatches("Pit bridge duels", BrowserModes()[12]));
 }
 
 // ---------------------------------------------------------------- the HUD

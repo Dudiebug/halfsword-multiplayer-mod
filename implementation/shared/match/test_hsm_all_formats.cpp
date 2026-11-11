@@ -7,6 +7,7 @@
 #include "session/hsm_autoflow.h"
 #include "session/hsm_migration.h"
 #include <cstdio>
+#include <algorithm>
 #include <set>
 #include <string>
 
@@ -33,14 +34,19 @@ static bool HasCard(Format f) {
 static void TestTables() {
     CHECK(kFormatCount == 16 && uint8_t(Format::CaptureTheFlag) == 10 && uint8_t(Format::Tag) == 11 && uint8_t(Format::Infection) == 12 &&
           uint8_t(Format::CrossbowTDM) == 13 && uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15);
-    // One card per format but ThreeTeams (the Teams card's 3 teams), none twice; then Brawl and Progression.
-    CHECK(kModeOrderCount == kFormatCount - 1 && kModeCardCount == kModeOrderCount + 2);
+    // One card per format but ThreeTeams (the Teams card's 3 teams) and CaptureTheFlag (removed), none twice; then Brawl and Progression.
+    CHECK(kModeOrderCount == kFormatCount - 2 && kModeCardCount == kModeOrderCount + 2);
     std::set<uint8_t> carded;
     for (Format k : kModeOrder) CHECK(carded.insert(uint8_t(k)).second);
     std::set<std::string> names, blurbs;
     for (uint8_t i = 0; i < kFormatCount; ++i) {
         const Format f = Format(i);
         const bool teams3 = f == Format::ThreeTeams;
+        if (f == Format::CaptureTheFlag) {             // removed: no card, no map; an old lobby's 10 plays Teams
+            MatchConfig old; old.format = f;
+            CHECKF(!HasCard(f) && Sanitize(old).format == Format::TwoTeams && Sanitize(old).teams == 2 && EffectiveMap(f, "") >= MapCount(), i);
+            continue;
+        }
         CHECKF(HasCard(f) == !teams3, i);
         // Name and blurb: each format has its own (ThreeTeams is spelled as Teams), neither empty, neither the free-for-all fallback.
         const std::string name = FormatName(f), blurb = FormatBlurb(f);
@@ -70,6 +76,10 @@ static void TestTables() {
         MatchConfig c; c.format = f; c.scoreLimit = DefaultScoreLimit(f);
         const std::vector<LobbyRow> rows = SettingsFor(c);
         CHECKF(!rows.empty() && rows.back() == LobbyRow::Sync, i);
+        {   // Player damage, Dead weight and Weapon weight in every format, in that order
+            const auto d = std::find(rows.begin(), rows.end(), LobbyRow::Damage);
+            CHECKF(d != rows.end() && rows.end() - d >= 3 && d[1] == LobbyRow::DeadWeight && d[2] == LobbyRow::WeaponWeight, i);
+        }
         std::set<uint8_t> seen;
         const LobbyLocal l = InLobby(f, 4);
         for (LobbyRow r : rows) { CHECKF(seen.insert(uint8_t(r)).second, i); CHECKF(!lobby_detail::Row(l, r).label.empty(), i); CHECKF(r <= LobbyRow::Sync, i); }
@@ -86,7 +96,7 @@ static void TestTables() {
         if (HasTeams(f) || IsBotFormat(f)) CHECKF(TeamCount(f, 3) >= 2, i); else CHECKF(TeamCount(f, 3) == 0, i);
         if (IsTeamRound(f) || HasRoles(f)) CHECKF(HasTeams(f), i);
         if (IsQueueFormat(f) || IsTag(f)) CHECKF(IsRoundFormat(f) && !HasTeams(f) && ScoresPerFighter(f), i);
-        if (IsCtf(f) || IsInfection(f)) CHECKF(HasTeams(f) && !ScoresPerFighter(f) && TeamCount(f, 3) == 2, i);
+        if (IsInfection(f)) CHECKF(HasTeams(f) && !ScoresPerFighter(f) && TeamCount(f, 3) == 2, i);
         CHECKF(!(ScoresPerFighter(f) && HasTeams(f)), i);
         CHECKF(DefaultScoreLimit(f) >= 1, i);
     }
@@ -102,15 +112,13 @@ static void TestWire() {
         m.format = i; m.phase = uint8_t(MatchPhase::Live); m.scoreLimit = DefaultScoreLimit(f); m.teams = uint8_t(std::max(TeamCount(f, 2), 2));
         m.fighters.resize(3);
         for (uint8_t e = 0; e < 3; ++e) { m.fighters[e].entity = uint8_t(e + 1); m.fighters[e].alive = 1; m.fighters[e].team = HasTeams(f) ? int8_t(e % 2) : kNoTeam; m.fighters[e].name = "p"; }
-        Objective flag; flag.kind = ObjectiveKind::Flag; flag.owner = 0; flag.state = ObjectiveState::Home;
-        if (IsCtf(f)) { m.objectives = {flag, flag}; m.objectives[1].owner = 1; }
         if (IsTag(f)) { m.tagIt = 2; m.fuseLeftMs = 12000; }
         if (f == Format::Tournament) { m.queueOrder = {1, 2, 3}; m.bracketWinners = {0, 0, 0}; }
         if (f == Format::PitBridgeDuel) { m.queueOrder = {1, 2, 3}; m.streak = 1; }
         const std::vector<uint8_t> b = Encode(m);
         MatchInfo back;
         CHECKF(Decode(b.data(), b.size(), back), i);
-        CHECKF(back.format == i && back.objectives.size() == m.objectives.size() && back.queueOrder == m.queueOrder &&
+        CHECKF(back.format == i && back.queueOrder == m.queueOrder &&
                back.bracketWinners == m.bracketWinners && back.streak == m.streak && back.tagIt == m.tagIt && back.fuseLeftMs == m.fuseLeftMs, i);
         // The queue fields belong to the two queue formats only.
         if (!IsQueueFormat(f)) {
@@ -123,8 +131,7 @@ static void TestWire() {
 
 // A host migration hands the new host the old one's scores (ScoreCarryFrom -> Match::Start). Whatever the format, the new match
 // starts, plays through its countdown and a minute of ticks and ends or runs on without a crash or a negative score; the
-// queue formats and Tag start a fresh bracket, queue and "it", Infection deals its zeros again (its scores are headcounts), and
-// Capture the flag's captures stay (they are the team scores).
+// queue formats and Tag start a fresh bracket, queue and "it", and Infection deals its zeros again (its scores are headcounts).
 static void TestMigration() {
     for (uint8_t i = 0; i < kFormatCount; ++i) {
         const Format f = Format(i);
@@ -151,7 +158,6 @@ static void TestMigration() {
         for (int step = 0; step < 600; ++step) { t += 100; m.Tick(t); }   // a minute
         CHECKF(m.phase() != MatchPhase::Idle, i);
         for (uint8_t e = 1; e <= 4; ++e) CHECKF(m.Score(int(e)) >= 0 || !ScoresPerFighter(f), i);
-        if (IsCtf(f)) CHECKF(m.Score(0) == 2 && m.Score(1) == 1, i);          // the captures stay
         if (IsInfection(f)) CHECKF(carry.empty() || carry.teams.size() <= 2, i);
         if (IsQueueFormat(f)) CHECKF(m.PairA() != 0 && m.PairB() != 0 && m.PairA() != m.PairB(), i);   // a fresh pairing is seated
     }
@@ -162,25 +168,25 @@ static void TestServerFormat() {
     struct W { const char* word; Format f; int teams; };
     const W words[] = {{"ffa", Format::FreeForAll, 2}, {"duel", Format::Duel, 2}, {"lms", Format::LastManStanding, 2}, {"teams", Format::TwoTeams, 2},
                        {"teamduel", Format::TeamDuel, 2}, {"riot", Format::Riot, 2}, {"juggernaut", Format::Juggernaut, 2},
-                       {"ctf", Format::CaptureTheFlag, 2}, {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
+                       {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
                        {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2}, {"pitbridge", Format::PitBridgeDuel, 2},
-                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2}, {"CTF", Format::CaptureTheFlag, 2}, {"PitBridge", Format::PitBridgeDuel, 2}};
+                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2}, {"PitBridge", Format::PitBridgeDuel, 2}};
     for (const W& w : words) {
         Format f = Format::FreeForAll; int teams = 0;
         CHECK(ParseServerFormat(w.word, &f, &teams) && f == w.f && teams == w.teams);
     }
     Format f = Format::FreeForAll;
-    CHECK(!ParseServerFormat("capture", &f) && !ParseServerFormat("", &f) && !ParseServerFormat("pit bridge", &f));
-    // Every format with a card but ThreeTeams has a word.
+    CHECK(!ParseServerFormat("capture", &f) && !ParseServerFormat("ctf", &f) && !ParseServerFormat("", &f) && !ParseServerFormat("pit bridge", &f));
+    // Every format with a card has a word (not ThreeTeams, nor the removed CaptureTheFlag).
     std::set<uint8_t> reachable;
     for (const W& w : words) reachable.insert(uint8_t(w.f));
-    for (uint8_t i = 0; i < kFormatCount; ++i) CHECKF(reachable.count(i) || Format(i) == Format::ThreeTeams, i);
+    for (uint8_t i = 0; i < kFormatCount; ++i) CHECKF(reachable.count(i) != (Format(i) == Format::ThreeTeams || Format(i) == Format::CaptureTheFlag), i);
     // A player count that cannot start the format falls back to Last Man Standing (Duel: not exactly two; the 3-player formats: two).
     CHECK(ServerFormatFor(Format::Duel, 3) == Format::LastManStanding && ServerFormatFor(Format::Duel, 2) == Format::Duel);
     for (Format r : {Format::Riot, Format::Juggernaut, Format::Tournament}) {
         CHECK(ServerFormatFor(r, 2) == Format::LastManStanding && ServerFormatFor(r, 3) == r && ServerFormatFor(r, 8) == r);
     }
-    for (Format r : {Format::CaptureTheFlag, Format::Tag, Format::Infection, Format::CrossbowTDM, Format::PitBridgeDuel, Format::TeamDuel})
+    for (Format r : {Format::Tag, Format::Infection, Format::CrossbowTDM, Format::PitBridgeDuel, Format::TeamDuel})
         CHECK(ServerFormatFor(r, 2) == r && ServerFormatFor(r, 6) == r);
 }
 

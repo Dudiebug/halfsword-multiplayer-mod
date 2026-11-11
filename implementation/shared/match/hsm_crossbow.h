@@ -46,4 +46,8 @@ inline std::vector<uint8_t> PickCrossbowHolders(uint8_t mode, std::vector<uint8_
     return fighters;
 }
 
+// A body built as the zombie Willie never spawns with a crossbow, even when its fighter holds the draw (an infected
+// holder keeps the draw for the rest of the round but comes back a zombie). Spawn.flags bits: 1 crossbow, 2 zombie.
+inline uint8_t SpawnBodyFlags(bool crossbowDraw, bool zombie) { return zombie ? uint8_t(2) : crossbowDraw ? uint8_t(1) : uint8_t(0); }
+
 }  // namespace hsm

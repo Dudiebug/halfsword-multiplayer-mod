@@ -5,6 +5,7 @@
 #include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "log.h"
+#include "match/hsm_input_mode.h"
 #include "match/hsm_roles.h"
 #include "match/hsm_match.h"
 #include "match/hsm_modes.h"
@@ -151,18 +152,19 @@ bool Adapter::PauseMenuOpen() {
         UObject* o = ObjectAt(i);
         if (!o || IsDefaultObject(o) || !IsA(o, uw)) continue;
         const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(o)));
-        if (cls.find("UI_Pause") == std::string::npos) continue;
+        const PauseScreen screen = PauseScreenOf(cls);   // the menu, or a settings screen it opened (match/hsm_input_mode.h)
+        if (screen == PauseScreen::None) continue;
         Call v(o, "IsInViewport");
         if (!v.invoke() || !v.get<bool>("ReturnValue")) continue;
         found = true;
-        pauseWidget_ = o; pauseWidgetIndex_ = i;
+        pauseWidget_ = o; pauseWidgetIndex_ = i; pauseIsMenu_ = screen == PauseScreen::Menu;
         if (!pauseLogged_) { pauseLogged_ = true; HSM_LOG("adapter: pause menu widget class '%s'", cls.c_str()); }
     }
     pauseOpen_ = found;
     return pauseOpen_;
 }
 
-UObject* Adapter::PauseMenu() { return PauseMenuOpen() && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ ? pauseWidget_ : nullptr; }
+UObject* Adapter::PauseMenu() { return PauseMenuOpen() && pauseIsMenu_ && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ ? pauseWidget_ : nullptr; }
 
 // The click handler of the stock Continue button is a Blueprint function bound to its OnClicked, named like
 // "BndEvt__UI_Pause_Eng_<button>_K2Node_ComponentBoundEvent_N_OnButtonClickedEvent__DelegateSignature". The one whose
@@ -204,6 +206,25 @@ void Adapter::ShowPauseCursor() {
     mode.set<UObject*>("PlayerController", ctrl).set<UObject*>("InWidgetToFocus", nullptr).set<uint8_t>("InMouseLockMode", 0)
         .set<bool>("bHideCursorDuringCapture", false).set<bool>("bFlushInput", false).invoke();
     SetBool(ctrl, "bShowMouseCursor", true);
+}
+
+bool Adapter::PlayUiSound(const char* name) {
+    UObject* sound = FindObject(name, "SoundWave");   // by class: another kind of object may share the name
+    if (!sound) sound = FindObject(name, "SoundCue");
+    UClass* base = FindClass("SoundBase");
+    if (!sound || !base || IsDefaultObject(sound) || !IsA(sound, base)) return false;
+    Call c(statics_, "PlaySound2D");
+    c.set<UObject*>("WorldContextObject", world_).set<UObject*>("Sound", sound).set<float>("VolumeMultiplier", 1.f)
+        .set<float>("PitchMultiplier", 1.f).set<bool>("bIsUISound", true);
+    return c.invoke();
+}
+
+bool Adapter::PauseCursorLost() {
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    bool shown = true;
+    return ctrl && GetBool(ctrl, "bShowMouseCursor", shown) && !shown;
 }
 
 bool Adapter::MenuInputBack() {
@@ -2136,13 +2157,6 @@ std::vector<UObject*> Adapter::WeaponActors() {
     return out;
 }
 
-bool Adapter::IsModActor(UObject* a) {
-    if (!a || modActors_.empty()) return false;
-    std::erase_if(modActors_, [&](const auto& m) { return !StillValid(m.first, m.second); });   // gone ones leave the list
-    for (const auto& m : modActors_) if (m.first == a) return true;
-    return false;
-}
-
 Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObject*)>& levelStart) {
     DropClear out;
     for (UObject* w : WeaponActors()) {
@@ -2151,7 +2165,6 @@ Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObje
         DropCandidate c;
         c.bodyWeapon = IsBodyWeapon(w);
         c.beingDestroyed = BeingDestroyed(w);
-        c.modOwned = IsModActor(w);                              // the CTF flags: respawned by the mod when they are gone, but never cleared as drops
         c.hasParent = *parent != nullptr;
         if (c.hasParent) {
             UObject** right = Field<UObject*>(*parent, "Weapon R");
@@ -2174,7 +2187,7 @@ Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObje
 std::vector<UObject*> Adapter::LevelWeapons() {
     std::vector<UObject*> out;
     for (UObject* w : WeaponActors()) {
-        if (IsBodyWeapon(w) || IsModActor(w)) continue;          // a flag is no level weapon: the map reset must not put it back or respawn it
+        if (IsBodyWeapon(w)) continue;
         UObject** parent = Field<UObject*>(w, "Parent Actor");
         UObject** last = Field<UObject*>(w, "Last Parent");
         if (parent && !*parent && last && !*last) out.push_back(w);
@@ -2332,129 +2345,6 @@ bool Adapter::GiveCrossbow(UObject* willie) {
             quiver && *quiver ? "yes" : "NO", bolts, armed ? "string drawn, bolt on its way" : "not armed");
     if (!inHand) DestroyActor(x);                   // never leave a loose crossbow behind a failed pick-up
     return inHand;
-}
-
-// ---------------------------------------------------------------- capture the flag (the owner's CTF test)
-namespace {
-// What a flag may be, in the order tried: long tools first (a long haft reads as a flag pole), then the lantern. The game has no
-// banner weapon, and a polearm haft without its head is not creatable without module setup. Names go through FindClassLoose.
-constexpr const char* kFlagClasses[] = {"BP_Weapon_Tool_Rake_C", "BP_Weapon_Tool_PitchforkA_C", "BP_Weapon_Tool_PitchforkB_C", "BP_Weapon_Tool_ShovelA_C",
-                                        "BP_Weapon_Tool_ShovelB_C", "BP_Weapon_Tool_ScytheA_C", "BP_Weapon_Improv_Lantern_C"};
-
-std::vector<UObject*> ComponentsOf(UObject* actor, UClass* cls) {
-    std::vector<UObject*> parts;
-    if (!actor || !cls) return parts;
-    Call comps(actor, "K2_GetComponentsByClass");
-    comps.set<UClass*>("ComponentClass", cls);
-    if (!comps.invoke()) return parts;
-    void* value = comps.paramPtr("ReturnValue");
-    const FObjArray* arr = static_cast<const FObjArray*>(value);
-    if (arr && arr->data && arr->num > 0 && arr->num <= 64) parts.assign(arr->data, arr->data + arr->num);
-    if (FProperty* prop = FindProperty(comps.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
-    return parts;
-}
-}  // namespace
-
-int Adapter::TintFlag(UObject* flag, int team) {
-    if (!meshClass_) meshClass_ = FindClass("MeshComponent");
-    int n = 0;
-    for (UObject* part : ComponentsOf(flag, meshClass_)) n += TintMesh(part, KitSlot::Cloth, TeamKit::Full, team);
-    return n;
-}
-
-void Adapter::FlagFreeze(UObject* flag, bool frozen) {
-    UClass* prim = FindClass("PrimitiveComponent");
-    if (!flag || !prim) return;
-    std::vector<FlagBody>& saved = flagBodies_[flag];
-    if (frozen) {
-        if (saved.empty())
-            for (UObject* c : ComponentsOf(flag, prim)) {
-                FlagBody b; b.comp = c;
-                Call col(c, "GetCollisionEnabled"); if (col.invoke()) b.collision = col.get<uint8_t>("ReturnValue");
-                Call sim(c, "IsSimulatingPhysics"); if (sim.invoke()) b.simulating = sim.get<bool>("ReturnValue");
-                saved.push_back(b);
-            }
-        for (const FlagBody& b : saved) {
-            Call(b.comp, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
-            Call(b.comp, "SetCollisionEnabled").set<uint8_t>("NewType", 0).invoke();
-        }
-        return;
-    }
-    for (const FlagBody& b : saved) {
-        Call(b.comp, "SetCollisionEnabled").set<uint8_t>("NewType", b.collision).invoke();
-        if (b.simulating) Call(b.comp, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
-    }
-}
-
-UObject* Adapter::SpawnFlagActor(int team, const FVector& at, std::string* className) {
-    if (!flagClass_) {
-        for (const char* n : kFlagClasses) if (UClass* c = FindClassLoose(n)) { flagClass_ = c; flagClassName_ = ObjectName(reinterpret_cast<UObject*>(c)); break; }
-        if (flagClass_) HSM_LOG("ctf: flag actor class %s", flagClassName_.c_str());
-        else { HSM_LOG("ctf: no flag actor class is loaded (tried Rake, Pitchfork A/B, Shovel A/B, Scythe, Lantern); the flags are HUD markers only"); return nullptr; }
-    }
-    if (className) *className = flagClassName_;
-    UObject* a = SpawnActorAt(flagClass_, at, FRotator{});
-    if (!a) { HSM_LOG("ctf: spawning the flag actor %s failed", flagClassName_.c_str()); return nullptr; }
-    FlagFreeze(a, true);
-    modActors_.emplace_back(a, ObjectIndex(a));
-    HSM_LOG("ctf: team %d flag spawned as %s at (%.0f, %.0f, %.0f): tinted %d parameter(s)", team, flagClassName_.c_str(), at.x, at.y, at.z, TintFlag(a, team));
-    return a;
-}
-
-void Adapter::FlagPlace(UObject* flag, UObject* carrier, const FVector& at, double yawDeg) {
-    if (!flag) return;
-    if (carrier) {
-        for (int h = 0; h < 2; ++h) {                      // out of a hand, the way a dropped weapon leaves it
-            UObject** held = Field<UObject*>(carrier, h == 0 ? "Weapon R" : "Weapon L");
-            if (!held || *held != flag) continue;
-            Call c(carrier, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
-            c.set<bool>(h == 0 ? "Dropped With no Damage" : "Dropped with No Damage", true);
-            c.invoke();
-        }
-    }
-    Call parent(flag, "GetAttachParentActor");
-    if (parent.invoke() && parent.get<UObject*>("ReturnValue"))
-        Call(flag, "K2_DetachFromActor").set<uint8_t>("LocationRule", 1).set<uint8_t>("RotationRule", 1).set<uint8_t>("ScaleRule", 1).invoke();
-    FlagFreeze(flag, true);
-    Call move(flag, "K2_SetActorLocationAndRotation");
-    move.set<FVector>("NewLocation", at).set<FRotator>("NewRotation", FRotator{0, yawDeg, 0}).set<bool>("bSweep", false).set<bool>("bTeleport", true);
-    move.invoke();
-}
-
-bool Adapter::FlagHeld(UObject* willie, UObject* flag) {
-    if (!willie || !flag) return false;
-    for (const char* hand : {"Weapon R", "Weapon L"}) { UObject** held = Field<UObject*>(willie, hand); if (held && *held == flag) return true; }
-    return false;
-}
-
-bool Adapter::FlagHold(UObject* willie, UObject* flag) {
-    if (!willie || !flag) return false;
-    for (int h = 0; h < 2; ++h) {
-        UObject** held = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
-        if (!held || (*held && !IsBodyWeapon(*held))) continue;     // a weapon in this hand: not ours to drop
-        FlagFreeze(flag, false);
-        Call take(willie, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
-        take.set<UObject*>(h == 0 ? "Weapon R" : "Weapon L", flag);
-        const bool called = take.valid() && take.invoke();
-        UObject** now = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
-        if (called && now && *now == flag) return true;
-        FlagFreeze(flag, true);
-    }
-    return false;
-}
-
-bool Adapter::FlagAttachedTo(UObject* carrier, UObject* flag) {
-    Call parent(flag, "GetAttachParentActor");
-    return carrier && flag && parent.invoke() && parent.get<UObject*>("ReturnValue") == carrier;
-}
-
-bool Adapter::FlagCarryOnBack(UObject* carrier, UObject* flag) {
-    UObject* mesh = carrier ? MeshOf(carrier) : nullptr;
-    if (!mesh || !flag) return false;
-    FlagFreeze(flag, true);
-    Call(flag, "K2_AttachToComponent").set<UObject*>("Parent", mesh).setName("SocketName", MakeName("Sheath_Slot_Back"))
-        .set<uint8_t>("LocationRule", 2).set<uint8_t>("RotationRule", 2).set<uint8_t>("ScaleRule", 2).set<bool>("bWeldSimulatedBodies", false).invoke();
-    return FlagAttachedTo(carrier, flag);
 }
 
 int Adapter::DropHeldWeapons(UObject* willie) {

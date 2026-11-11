@@ -170,7 +170,14 @@ inline std::string RedactLog(const std::string& in, uint64_t salt) {
             }
             if (size_t n = Ipv4At(in, i)) {
                 const std::string ip = in.substr(i, n);
-                out += ip == "127.0.0.1" || ip == "0.0.0.0" ? ip : "ip:" + RedactHash(ip, salt);
+                // A DLL's file version ("UE4SS.dll (3.0.1.0)", "xinput1_3.dll, 2.5.2.0") is four numbers too: kept.
+                bool version = false;
+                if (i >= 6) {
+                    std::string before = in.substr(i - 6, 6);
+                    for (char& b : before) b = Lower(b);
+                    version = before == ".dll (" || before == ".dll, ";
+                }
+                out += ip == "127.0.0.1" || ip == "0.0.0.0" || version ? ip : "ip:" + RedactHash(ip, salt);
                 i += n; continue;
             }
             out.append(in, i, p - i); i = p; continue;
@@ -418,6 +425,28 @@ inline std::string CrashLineOf(const std::string& log) {
     return line;
 }
 inline std::string CrashReportText(const std::string& crashLine) { return "Crash (sent automatically): " + crashLine; }
+
+// The same crash at every start (a game that never gets past its splash screen) sent one report per launch: a machine
+// filed 50 in three hours. A crash is known by its fault line without the thread; the same one goes again only after
+// kCrashResendSec (a clock that went back counts as due).
+constexpr int64_t kCrashResendSec = 86400;
+// The fault code and where it hit: "crash: fault 0xC0000005 at X.exe+0x3E77C9B". The address it read or wrote is left out,
+// and so is the high part of an address outside any module ("?+0x7FF765250FDA" -> "?+...FDA"): both change every launch.
+inline std::string CrashSignature(const std::string& line) {
+    const std::string head = line.substr(0, line.find(" (thread"));
+    const size_t at = head.find(" at ");
+    if (at == std::string::npos) return head;
+    const size_t plus = head.find("+0x", at);                       // a module's file name may hold spaces
+    if (plus == std::string::npos) return head;
+    size_t end = plus + 3;
+    while (end < head.size() && report_detail::Hex(head[end])) ++end;
+    std::string where = head.substr(at + 4, end - (at + 4));
+    if (where.rfind("?+0x", 0) == 0 && where.size() > 7) where = "?+..." + where.substr(where.size() - 3);
+    return head.substr(0, at + 4) + where;
+}
+inline bool CrashReportDue(const std::string& lastSig, int64_t lastAt, const std::string& sig, int64_t now) {
+    return sig.empty() || sig != lastSig || now < lastAt || now - lastAt >= kCrashResendSec;
+}
 
 // A report filed while no session was up (the crash report at start): its id and token wait for the next session, so
 // the players there who turned on help_improve add their logs. Taken once; gone after kPendingShareMs.
