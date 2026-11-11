@@ -90,9 +90,9 @@ constexpr int8_t kNoTeam = -1;        // free-for-all: everyone on their own
 constexpr int8_t kHumanTeam = 0, kBotTeam = 1;   // players vs bots
 
 // The Dead weight and Weapon weight rows: the game's Dead Weight Scale and Weapon Weight Scale sliders (GI_Settings
-// doubles, 0..1; the game's own is 0.5), as a percent of 1.0. The host's are every machine's in a session, the host's own
+// doubles, 0..1; the game's own is 0.5, and so is the rows' default), as a percent of 1.0. The host's are every machine's in a session, the host's own
 // too (gameplay/damage_pin.cpp); the player's own come back after it.
-inline constexpr uint8_t kWeightDefaultPct = 20, kWeightStockPct = 50, kWeightMaxPct = 100, kWeightStepPct = 5;
+inline constexpr uint8_t kWeightStockPct = 50, kWeightDefaultPct = kWeightStockPct, kWeightMaxPct = 100, kWeightStepPct = 5;
 inline float WeightScale(uint8_t pct) { return float(pct) / 100.f; }
 // A step of the row's arrows: to the next multiple of kWeightStepPct that way, within 0..kWeightMaxPct (no wrap).
 inline uint8_t StepWeight(uint8_t pct, int dir) {

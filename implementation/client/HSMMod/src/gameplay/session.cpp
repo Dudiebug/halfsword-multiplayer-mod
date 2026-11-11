@@ -5806,7 +5806,7 @@ private:
     }
 
     // The Dead weight and Weapon weight rows as the game's Dead Weight Scale and Weapon Weight Scale, for everyone and the
-    // host too: the host's lobby (a server and a direct connection: the 20% default). Gore Rate and Bone Snapping stay
+    // host too: the host's lobby (a server and a direct connection: the 50% default). Gore Rate and Bone Snapping stay
     // the host's own (-1: not pinned on the host; the clients get its own values in MatchInfo).
     std::array<float, kPinnedPhysics> HostWeights() const {
         const MatchConfig c = IsServer() ? ServerMatchConfig() : steamMode() && lobby_.InLobby() ? lobby_.config() : MatchConfig{};

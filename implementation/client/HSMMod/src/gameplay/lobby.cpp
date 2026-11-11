@@ -367,8 +367,8 @@ MatchConfig Lobby::config() const {
     c.fuseS = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_fuse"), kFuseDefaultS), int(kFuseMinS), int(kFuseMaxS)));   // none: 30 s (Tag)
     c.scenario = ScenarioFromKey(steam::LobbyData(lobby_, "hsm_scen"));                              // none: Standard
     c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
-    c.deadWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));     // none: 20%
-    c.weaponWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));   // none: 20%
+    c.deadWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));     // none: 50%
+    c.weaponWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));   // none: 50%
     c.waveBreakS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wbrk"), 0), 0, 600));      // 0: the format's own
     c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
     c.freeCam = steam::LobbyData(lobby_, "hsm_fcam") != "0";                                       // none: on

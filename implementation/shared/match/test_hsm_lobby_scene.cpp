@@ -821,10 +821,12 @@ static void TestDamage() {
     CHECK(Ids(BuildLobbyScene(prog)) == (std::vector<LobbyRow>{LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight}));   // co-op takes them too
 }
 
-// The Dead weight and Weapon weight rows: 20% of the game's 0..1 sliders unless the host moves them, 5% a step, 0..100%.
+// The Dead weight and Weapon weight rows: 50% of the game's 0..1 sliders (its own default) unless the host moves them,
+// 5% a step, 0..100%.
 static void TestWeights() {
     MatchConfig c;
-    CHECK(c.deadWeightPct == 20 && c.weaponWeightPct == 20 && Sanitize(c).deadWeightPct == 20 && Sanitize(c).weaponWeightPct == 20);
+    CHECK(c.deadWeightPct == 50 && c.weaponWeightPct == 50 && Sanitize(c).deadWeightPct == 50 && Sanitize(c).weaponWeightPct == 50);
+    CHECK(kWeightDefaultPct == kWeightStockPct && WeightScale(kWeightDefaultPct) == 0.5f);   // the game's own 0.5
     CHECK(WeightScale(20) == 0.2f && WeightScale(0) == 0.f && WeightScale(100) == 1.f && WeightScale(kWeightStockPct) == 0.5f);
     c.deadWeightPct = 250; c.weaponWeightPct = 101;
     CHECK(Sanitize(c).deadWeightPct == 100 && Sanitize(c).weaponWeightPct == 100);
@@ -832,11 +834,11 @@ static void TestWeights() {
     CHECK(Sanitize(c).deadWeightPct == 0 && Sanitize(c).weaponWeightPct == 35);
     for (LobbyRow r : {LobbyRow::DeadWeight, LobbyRow::WeaponWeight}) {
         MatchConfig m;
-        CHECK(WeightField(m, r) == (r == LobbyRow::DeadWeight ? &m.deadWeightPct : &m.weaponWeightPct) && *WeightField(m, r) == 20);
+        CHECK(WeightField(m, r) == (r == LobbyRow::DeadWeight ? &m.deadWeightPct : &m.weaponWeightPct) && *WeightField(m, r) == 50);
         MatchConfig up = StepSetting(m, r, 1), down = StepSetting(m, r, -1);
-        CHECK(*WeightField(up, r) == 25 && *WeightField(down, r) == 15);
+        CHECK(*WeightField(up, r) == 55 && *WeightField(down, r) == 45);
         const LobbyRow other = r == LobbyRow::DeadWeight ? LobbyRow::WeaponWeight : LobbyRow::DeadWeight;
-        CHECK(*WeightField(up, other) == 20 && up.damagePct == m.damagePct && up.tier == m.tier);   // a step changes that row alone
+        CHECK(*WeightField(up, other) == 50 && up.damagePct == m.damagePct && up.tier == m.tier);   // a step changes that row alone
         *WeightField(m, r) = 22;                                   // off the 5% grid: the next step that way
         CHECK(*WeightField(StepSetting(m, r, 1), r) == 25 && *WeightField(StepSetting(m, r, -1), r) == 20);
         *WeightField(m, r) = 100;
@@ -852,11 +854,11 @@ static void TestWeights() {
     CHECK(WeightLabel(20) == "20%" && WeightLabel(50) == "50% (stock)" && WeightLabel(0) == "0%");
 
     LobbyLocal l = InLobby(true, Format::FreeForAll);
-    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).label == "Dead weight" && Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "20%");
-    CHECK(Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).label == "Weapon weight" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "20%");
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).label == "Dead weight" && Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "50% (stock)");
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).label == "Weapon weight" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "50% (stock)");
     CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).enabled && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).enabled);
-    l.config.deadWeightPct = 50; l.config.weaponWeightPct = 75;
-    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "50% (stock)" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "75%");
+    l.config.deadWeightPct = 20; l.config.weaponWeightPct = 75;
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::DeadWeight).value == "20%" && Need(BuildLobbyScene(l), LobbyRow::WeaponWeight).value == "75%");
     LobbyLocal guest = InLobby(false, Format::FreeForAll);
     CHECK(!Need(BuildLobbyScene(guest), LobbyRow::DeadWeight).enabled && !Need(BuildLobbyScene(guest), LobbyRow::WeaponWeight).enabled);   // the host's alone
 }
