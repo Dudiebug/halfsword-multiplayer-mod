@@ -481,9 +481,10 @@ static void TestOneFight() {
     s = BuildHudScene(Survival(), tab, kAt);
     CHECK(s.board.title == "PROGRESSION FIGHT \xC2\xB7 ARENA" && s.board.rows.size() == 2);
     tab.map.clear();
-    CHECK(BuildHudScene(Survival(), tab, kAt).board.title == "PROGRESSION FIGHT");
+    CHECK(BuildHudScene(Survival(), tab, kAt).board.title == "PROGRESSION FIGHT" && !BuildHudScene(Survival(), tab, kAt).board.results);   // Tab: the board stays in the middle
     b = Survival(); b.phase = uint8_t(MatchPhase::Results); b.winner = kHumanTeam; b.timeLeftMs = 4200;
     s = BuildHudScene(b, one, kAt);
+    CHECK(s.board.visible && s.board.results);                                   // the results board goes to a corner (#3056)
     // won: the fight waits for G, as the stock game does (the report); a loss goes back by itself, as before
     CHECK(s.board.footer == "FIGHT WON \xC2\xB7 HOLD G TO GO ON \xC2\xB7 OR IN 5" && s.pill.text == "PLAYERS WIN");
     CHECK(s.hold.visible && s.hold.text == "FIGHT WON - HOLD G TO GO ON (OR IN 5)" && !s.hold.bar);
@@ -687,7 +688,25 @@ static void TestFourTeamsAndLms() {
     r.winner = 1; CHECK(BuildHudScene(r, Me(), kAt).pill.text == "YOU WIN");
 }
 
+// The living player's free camera hid the HUD (H, #2624): nothing is drawn; shown again, everything is back.
+static void TestHiddenForTheCamera() {
+    MatchInfo m; m.format = uint8_t(Format::FreeForAll); m.phase = uint8_t(MatchPhase::Live); m.scoreLimit = 5;
+    FighterEntry a; a.entity = 1; a.name = "Ann"; a.alive = true;
+    FighterEntry b; b.entity = 2; b.name = "Bo"; b.alive = true;
+    m.fighters = {a, b};
+    LocalHud l = Me();
+    const HudScene shown = BuildHudScene(m, l, kAt);
+    CHECK(shown.visible && shown.pill.visible);
+    l.hidden = true;
+    const HudScene hidden = BuildHudScene(m, l, kAt);
+    CHECK(!hidden.visible && !hidden.pill.visible && !hidden.info.visible && hidden.strip.empty());
+    l.hidden = false;
+    CHECK(BuildHudScene(m, l, kAt).visible);
+    CHECK(!LocalHud{}.hidden);
+}
+
 int main() {
+    TestHiddenForTheCamera();
     TestBannerLook();
     TestFeedOpacity();
     TestIdleShowsNothing();

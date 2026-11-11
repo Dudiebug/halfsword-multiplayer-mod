@@ -5,6 +5,7 @@
 #include "combat/hsm_claimcheck.h"
 #include "hsm_chat.h"
 #include "hsm_inputdelay.h"
+#include "session/hsm_region.h"
 #include "session/hsm_structure.h"
 #include "voice/hsm_voice_ui.h"
 #include <cstdint>
@@ -19,6 +20,15 @@ enum class Role { Off, Steam, Server };   // Server: a hosted retail instance wi
 struct Config {
     Role role = Role::Steam;
     std::string playerName = "Player";
+    // Names (session/hsm_player_names.h). nickname=: what other players see instead of your Steam name, 24 characters at most
+    // (empty: the Steam name). lobbyName=: the name of the lobby you host, 32 characters (empty: "<you>'s fight"). hideNames=1:
+    // every other player shows as "Player N" by slot on this screen only (name tags, chat, scores, kill feed, lobby page).
+    // region=: the lobby browser's region pick (Auto guesses it from the nearest Steam relay; session/hsm_region.h).
+    // All four are set on the multiplayer page and written back (SaveIniValues).
+    std::string nickname;
+    std::string lobbyName;
+    bool hideNames = false;
+    Region region = Region::Auto;
     int snapshotHz = 30;
     int inputHz = 60;
     // 1: send input only for host physics or hand-off; capture still drains in owner mode. 0 restores the always-on uplink.
@@ -98,6 +108,14 @@ struct Config {
     // destroys the bags (#706). fence_fix=0: as 0.8.0-pre23 (the fence never survives a level load). Per machine:
     // every machine's level manager wipes its own game instance, so every player in the fight needs it on.
     bool fenceFix = true;
+    // true (default from 0.8.0-pre50): the host kills a wave bot that fell far below its spawn height or stood still for 90 s
+    // with no player near, and the bots left of a wave in which nothing spawned or died for 5 minutes (#2413;
+    // match/hsm_bot_watchdog.h). bot_watchdog=0: a stuck bot holds its wave. Host only.
+    bool botWatchdog = true;
+    // true (default from 0.8.0-pre50): a client removes the fighters only its own copy of the level has (the level starts
+    // its stock foes on every machine) every frame for 6 s after the level's start-up, and once a second after that, match or
+    // no match (#2754; match/hsm_foreign_purge.h). purge_early=0: once a second, only while a match runs. Client only.
+    bool purgeEarly = true;
     // true (default from 0.8.0-pre26): a blade lodged in my fighter on the attacker's screen does no stuck damage here where
     // my own replay of that blow found my armour stopped the whole cut (combat/hsm_armor_gate.h): the attacker's copy of my
     // fighter lags mine, so a blade could lodge there through armour that held here. stuck_armor_gate=0: every stuck
@@ -178,10 +196,15 @@ struct Config {
     // fighter's muscles show their class's Strength (class_look=0 leaves the game's own look).
     bool classTags = true;
     bool classLook = true;
+    // Tag's Tagger speed row: whoever is "it" runs and walks faster by the lobby's percent (tagger_speed=0 turns it off on this machine).
+    bool taggerSpeed = true;
     // Build cards (match/hsm_build_card.h). buildCards: show other players' cards (build_cards=0 hides them; yours is still
     // published). buildName: the build named by a launcher with -hsmbuild=, shown on your card; empty: none.
     bool buildCards = true;
     bool joinSound = true;    // join_sound: the game's menu click sound when a player joins
+    // mod_pause=0: Esc in a session match opens the game's own pause menu (with the mod's overlay on it) as before. 1 (default): the game's
+    // Esc pause toggle is blocked there and Esc opens the mod's own pause panel (ui/pause_panel.h).
+    bool modPause = true;
     bool hideTestMaps = true; // hide_test_maps: leave maps named "test" out of the custom map list
     std::string className;    // class=: the class picked in the mods menu; empty or Fair: the game's own fighter
     bool classWolverine = true;   // class_wolverine=0: don't write a class's parts into Half Wolverine's settings at start
@@ -203,10 +226,11 @@ struct Config {
     // help_improve_asked=1: the one-time HELP IMPROVE THE MOD question (the first MULTIPLAYER click, 0.8.0-pre7) was
     // answered, or the toggle was used. It never turns help_improve on by itself.
     bool helpImproveAsked = false;
-    // ui_style=game (the default): the game's own parchment art and typefaces (ui/skin.h); dark: that art shaded dark and
-    // almost opaque, light text; classic: the mod's earlier opaque dark look. Read at start (the widgets are built once);
-    // the SETTINGS page writes it (SaveUiStyle).
-    style::MenuLook uiLook = style::MenuLook::Game;
+    // ui_style=classic (the default): the mod's opaque dark look from before 0.8.0-pre43; game: the game's own parchment
+    // art and typefaces (ui/skin.h); dark: that art shaded dark and almost opaque, light text. Read at start (the widgets
+    // are built once); the SETTINGS page writes it (SaveUiStyle). ui_style_moved=1: a ui_style=game is the player's own
+    // pick, not the pre43 to pre49 template's (style::ReadStartLook).
+    style::MenuLook uiLook = style::MenuLook::Classic;
     // hud_opacity: the match HUD, the chat and the fighter card drawn at this opacity, 0.3 to 1 (the default: 1).
     double hudOpacity = 1.0;
     std::string reportUrl = "https://reports.dudiebug.net";
@@ -277,6 +301,7 @@ struct Config {
     bool modChallenge = true;
     std::string modRule = "vanilla";
     bool blockHse = true;     // in lobbies you host, HS Enhancer is refused. Guests go by the host
+    bool hseShareKeys = true; // [mod] hse_share_keys (#1290): HS Enhancer gets no input while an HSMMod text box is open; an open HS Enhancer menu holds HSMMod's keys
     bool modOfficialOnly = false;
     std::string modAllow;
 };
@@ -288,7 +313,7 @@ void ReadModRuleKeys(Config& c);
 const char* RoleName(Role r);
 bool SaveHelpImprove(bool on);   // writes help_improve= (and help_improve_asked=1) under [net] in HSMMod.ini, the rest untouched; false: could not
 const char* UiStyleName(style::MenuLook look);   // dark, game or classic: the ui_style value
-bool SaveUiStyle(style::MenuLook look);  // writes ui_style= under [net] in HSMMod.ini (used from the next start); false: could not
+bool SaveUiStyle(style::MenuLook look);  // writes ui_style= and ui_style_moved=1 under [net] in HSMMod.ini (used from the next start); false: could not
 // Writes these keys under [section] (default [net]) in HSMMod.ini in one replace, the rest of the file untouched; false: could not.
 bool SaveIniValues(const std::vector<std::pair<std::string, std::string>>& keys, const char* section = "net");
 }  // namespace hsm

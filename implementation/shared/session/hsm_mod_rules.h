@@ -778,10 +778,10 @@ inline bool Decode(const uint8_t* d, size_t n, ModListMsg& m) {
 }
 
 // SessionMods, host -> everyone: the union of every player's report, each item with the slots that run it (bit = slot),
-// for the multiplayer page's MODS block. [flags u8: 1 truncated][count u8] then per item [item][mask u16].
+// for the multiplayer page's MODS block. [flags u8: 1 truncated][count u8] then per item [item][mask u32].
 struct SessionModEntry {
     ModItem item;
-    uint16_t slots = 0;
+    uint32_t slots = 0;
     bool operator==(const SessionModEntry& o) const { return item == o.item && slots == o.slots; }
 };
 struct SessionModsMsg {
@@ -794,7 +794,7 @@ inline std::vector<uint8_t> Encode(const SessionModsMsg& m) {
     const size_t n = std::min(m.entries.size(), kMaxModItems);
     w.u8(m.truncated || n < m.entries.size() ? 1 : 0);
     w.u8(uint8_t(n));
-    for (size_t i = 0; i < n; ++i) { modrules_detail::PutItem(w, m.entries[i].item); w.u16(m.entries[i].slots); }
+    for (size_t i = 0; i < n; ++i) { modrules_detail::PutItem(w, m.entries[i].item); w.u32(m.entries[i].slots); }
     return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, SessionModsMsg& m) {
@@ -808,24 +808,24 @@ inline bool Decode(const uint8_t* d, size_t n, SessionModsMsg& m) {
     m.entries.resize(count);
     for (SessionModEntry& e : m.entries) {
         if (!modrules_detail::GetItem(r, e.item)) return false;
-        e.slots = r.u16();
+        e.slots = r.u32();
         if (!r.ok() || e.slots == 0) return false;
     }
     return r.done();
 }
 
-// The union for SessionMods: reports by slot (slot < 16), merged by kind + name + hash, in canonical order.
+// The union for SessionMods: reports by slot (slot < 32), merged by kind + name + hash, in canonical order.
 struct SlotReport { uint8_t slot = 0; const ModReport* report = nullptr; };
 inline SessionModsMsg BuildSessionMods(const std::vector<SlotReport>& reports) {
     SessionModsMsg m;
     for (const SlotReport& sr : reports) {
-        if (!sr.report || sr.slot >= 16) continue;
+        if (!sr.report || sr.slot >= 32) continue;
         for (const ModItem& it : sr.report->items) {
             bool merged = false;
-            for (SessionModEntry& e : m.entries) if (e.item == it) { e.slots = uint16_t(e.slots | (1u << sr.slot)); merged = true; break; }
+            for (SessionModEntry& e : m.entries) if (e.item == it) { e.slots |= 1u << sr.slot; merged = true; break; }
             if (merged) continue;
             if (m.entries.size() >= kMaxModItems) { m.truncated = true; continue; }
-            m.entries.push_back({it, uint16_t(1u << sr.slot)});
+            m.entries.push_back({it, 1u << sr.slot});
         }
     }
     std::stable_sort(m.entries.begin(), m.entries.end(), [](const SessionModEntry& a, const SessionModEntry& b) {

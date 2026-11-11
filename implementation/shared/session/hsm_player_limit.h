@@ -1,4 +1,4 @@
-// The host's player limit (2..8): the Steam lobby's member limit, the browser's "3/4" and the host's own check at Hello.
+// The host's player limit (2..20, 8 unless the host changes it): the Steam lobby's member limit, the browser's "3/4" and the host's own check at Hello.
 // Steam enforces it at join; the host turns away anyone over it too (a modified client may not honour Steam's limit, an
 // old steam_api64 may lack the export). It can never be set below the players already in: nobody is kicked by it.
 // Game-independent and unit-tested; the Steam calls are in gameplay/lobby.cpp.
@@ -11,23 +11,24 @@
 namespace hsm {
 
 constexpr int kMinPlayerLimit = 2;
-constexpr int kMaxPlayerLimit = kMaxPlayers;   // the roster's fixed 8 stays the hard cap
+constexpr int kMaxPlayerLimit = kMaxPlayers;   // the roster's 20 is the hard cap
+constexpr int kDefaultPlayerLimit = 8;         // a new lobby's limit, and that of a lobby that publishes none
 
-// The limit the host may set: `want` within 2..8, and never below the players in now.
+// The limit the host may set: `want` within 2..20, and never below the players in now.
 inline int ClampPlayerLimit(int want, int playersNow) {
     const int lo = std::clamp(playersNow, kMinPlayerLimit, kMaxPlayerLimit);
     return std::clamp(want, lo, kMaxPlayerLimit);
 }
 
-// The limit a lobby published (lobby data hsm_max, peer-written): absent or not a number is the old fixed 8.
+// The limit a lobby published (lobby data hsm_max, peer-written): absent or not a number is the default 8.
 inline int ParsePlayerLimit(const std::string& s) {
-    if (s.empty() || s.size() > 3) return kMaxPlayerLimit;
+    if (s.empty() || s.size() > 3) return kDefaultPlayerLimit;
     int v = 0;
-    for (char c : s) { if (c < '0' || c > '9') return kMaxPlayerLimit; v = v * 10 + (c - '0'); }
+    for (char c : s) { if (c < '0' || c > '9') return kDefaultPlayerLimit; v = v * 10 + (c - '0'); }
     return std::clamp(v, kMinPlayerLimit, kMaxPlayerLimit);
 }
 
-// The Players stepper: one step up or down within [lowest allowed .. 8], wrapping.
+// The Players stepper: one step up or down within [lowest allowed .. 20], wrapping.
 inline int StepPlayerLimit(int cur, int playersNow, int dir) {
     const int lo = ClampPlayerLimit(kMinPlayerLimit, playersNow);
     cur = std::clamp(cur, lo, kMaxPlayerLimit);

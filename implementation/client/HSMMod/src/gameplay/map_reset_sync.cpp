@@ -180,15 +180,17 @@ bool Unmoved(const BodyStateMsg& now, const BodyStateMsg& start) {
 }
 }  // namespace
 
-size_t ObjectSync::ClearMovedProps(double nowMs) {
+size_t ObjectSync::ClearMovedProps(double nowMs, bool propsOff) {
     if (!active_ || !adapter_) return 0;
-    if (baselineMs_ < 0) { HSM_LOG("clear: rocks, but the match has not begun here yet; nothing to clear"); return 0; }
+    if (baselineMs_ < 0) { if (!propsOff) HSM_LOG("clear: rocks, but the match has not begun here yet; nothing to clear"); return 0; }
+    std::unordered_set<uint64_t> queued;                  // Props off runs every few seconds: what an earlier pass queued is not queued twice
+    for (const ResetItem& it : resetQueue_) if (it.action == ResetAction::Destroy) queued.insert(it.id);
     std::unordered_set<UObject*> armor;                   // armour is the armour pass's, not a rock
     for (UObject* a : adapter_->LooseArmor()) armor.insert(a);
     size_t level = 0, spawned = 0;
     for (auto& [id, p] : props_) {
         if (!p.level && !p.spawned) continue;
-        if (!adapter_->StillValid(p.actor, p.index) || armor.count(p.actor)) continue;
+        if (!adapter_->StillValid(p.actor, p.index) || armor.count(p.actor) || queued.count(id)) continue;
         PropCandidate c;
         c.level = p.level; c.spawned = p.spawned;
         c.haveStart = !p.start.empty();
@@ -196,16 +198,21 @@ size_t ObjectSync::ClearMovedProps(double nowMs) {
         c.held = p.attachedSent || ObjectField(p.actor, 0) != nullptr;
         c.denied = p.denied; c.sub = p.sub;
         c.structure = IsStructure(id, p.sub, p.bodies.size(), p.constraints.size(), p.found);   // by shape, whatever sync_structures says
+        c.fence = propsOff && ObjectName(p.actor).find("Fence_Bags") != std::string::npos;     // the ring of Fenced ring stays
         c.unmoved = true;                                  // a body that cannot be read counts as at rest: kept
         for (size_t b = 0; b < p.bodies.size() && b < p.start.size(); ++b) {
             if (!p.start[b].ok || p.bodies[b].detached) continue;
             if (BodyStateMsg here; Read(p, b, here) && !Unmoved(here, p.start[b].s)) { c.unmoved = false; break; }
         }
-        if (!ClearableProp(c)) continue;
+        if (!(propsOff ? PropsOffClears(c) : ClearableProp(c))) continue;
         ResetItem it; it.action = ResetAction::Destroy; it.id = id; resetQueue_.push_back(it);
         if (p.level) ++level; else ++spawned;
     }
     resetPerFrame_ = std::max(resetPerFrame_, ResetPerFrame(resetQueue_.size()));
+    if (propsOff) {
+        if (level + spawned) HSM_LOG("clear: props off: %zu level prop(s) and %zu spawned object(s) to clear", level, spawned);
+        return level + spawned;
+    }
     HSM_LOG("clear: rocks: %zu moved level prop(s) and %zu spawned object(s) to clear (%zu frame(s))", level, spawned,
             resetQueue_.empty() ? size_t(0) : (resetQueue_.size() + resetPerFrame_ - 1) / resetPerFrame_);
     (void)nowMs;

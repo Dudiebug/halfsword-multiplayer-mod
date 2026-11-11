@@ -1,5 +1,6 @@
 #include "steam/steam_api.h"
 #include "steam/hsm_steam_abi.h"
+#include "steam/hsm_steam_route.h"
 #include "log.h"
 #include "ue/hook.h"
 #include <windows.h>
@@ -49,6 +50,7 @@ struct Api {
     FLAT(uint64_t, RequestLobbyList, void*)
     FLAT(uint64_t, GetLobbyByIndex, void*, int)
     FLAT(void, AddRequestLobbyListStringFilter, void*, const char*, const char*, int)
+    FLAT(void, AddRequestLobbyListDistanceFilter, void*, int)   // optional
     FLAT(bool, SendLobbyChatMsg, void*, uint64_t, const void*, int)
     FLAT(int, GetLobbyChatEntry, void*, uint64_t, int, uint64_t*, void*, int, int*)
     FLAT(void, ActivateGameOverlayInviteDialog, void*, uint64_t)
@@ -68,6 +70,9 @@ struct Api {
     FLAT(bool, CloseSessionWithUser, void*, const NetIdentity*)
     FLAT(int, GetSessionConnectionInfo, void*, const NetIdentity*, NetConnectionInfo*, NetStatus*)
     FLAT(void, InitRelayNetworkAccess, void*)
+    FLAT(int, GetPOPCount, void*)   // optional, with the next two: the region guess
+    FLAT(int, GetPOPList, void*, uint32_t*, int)
+    FLAT(int, GetDirectPingToPOP, void*, uint32_t)
     FLAT(int64_t, GetLocalTimestamp, void*)
     FLAT(bool, SetGlobalConfigValueInt32, void*, int, int32_t)
     FLAT(void, ReleaseMessage, void*)
@@ -243,6 +248,14 @@ bool Init() {
     g.SetLobbyMemberLimit = Fn<Api::SetLobbyMemberLimit_t>("SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit");
     g.GetLobbyMemberLimit = Fn<Api::GetLobbyMemberLimit_t>("SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
     if (!g.SetLobbyMemberLimit || !g.GetLobbyMemberLimit) HSM_LOG("steam: no lobby member limit exports; the player limit is enforced by the host only");
+    // Optional: the lobby browser's distance filter (RequestLobbyList) and the relay data centres with their pings (the region
+    // guess). Without the first the browser keeps Steam's default distance; without the others the region stays unknown.
+    g.AddRequestLobbyListDistanceFilter = Fn<Api::AddRequestLobbyListDistanceFilter_t>("SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
+    g.GetPOPCount = Fn<Api::GetPOPCount_t>("SteamAPI_ISteamNetworkingUtils_GetPOPCount");
+    g.GetPOPList = Fn<Api::GetPOPList_t>("SteamAPI_ISteamNetworkingUtils_GetPOPList");
+    g.GetDirectPingToPOP = Fn<Api::GetDirectPingToPOP_t>("SteamAPI_ISteamNetworkingUtils_GetDirectPingToPOP");
+    if (!g.AddRequestLobbyListDistanceFilter) HSM_LOG("steam: no lobby distance filter export; the browser looks only as far as Steam does by default");
+    if (!g.GetPOPCount || !g.GetPOPList || !g.GetDirectPingToPOP) HSM_LOG("steam: no relay data centre exports; Auto region cannot be guessed");
     // Optional: avatars on the multiplayer page; without them the rows keep an empty space.
     g.GetMediumFriendAvatar = Fn<Api::GetMediumFriendAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
     g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
@@ -417,9 +430,11 @@ std::vector<SteamId> LobbyMembers(SteamId lobby) {
 }
 SteamId LobbyOwner(SteamId lobby) { return g_ready && lobby ? g.GetLobbyOwner(g_mm, lobby) : 0; }
 bool SendLobbyChat(SteamId lobby, const std::string& t) { return g_ready && g.SendLobbyChatMsg(g_mm, lobby, t.c_str(), int(t.size() + 1)); }
-void RequestLobbyList(const std::string& key, const std::string& value) {
+void RequestLobbyList(const std::string& key, const std::string& value, int distance) {
     if (!g_ready) return;
     if (!key.empty()) g.AddRequestLobbyListStringFilter(g_mm, key.c_str(), value.c_str(), 0 /* equal */);
+    if (distance >= 0 && g.AddRequestLobbyListDistanceFilter) g.AddRequestLobbyListDistanceFilter(g_mm, distance);
+    HSM_LOG("steam: RequestLobbyList distance=%d%s", distance, distance < 0 ? " (Steam's default)" : g.AddRequestLobbyListDistanceFilter ? "" : " (no export: default)");
     const ApiCall call = g.RequestLobbyList(g_mm);
     if (call) { g_pending.push_back({call, kCbLobbyMatchList, Event::LobbyList}); return; }
     HSM_LOG("steam: RequestLobbyList returned no call handle");
@@ -429,6 +444,20 @@ void InviteOverlay(SteamId lobby) { if (g_ready) g.ActivateGameOverlayInviteDial
 void SetRichPresence(const std::string& k, const std::string& v) { if (g_ready) g.SetRichPresence(g_friends, k.c_str(), v.c_str()); }
 
 void InitRelay() { if (g_ready) g.InitRelayNetworkAccess(g_netUtils); }
+std::vector<hsm::PopPing> RelayPings() {
+    std::vector<hsm::PopPing> out;
+    if (!g_ready || !g.GetPOPCount || !g.GetPOPList || !g.GetDirectPingToPOP) return out;
+    const int count = g.GetPOPCount(g_netUtils);
+    if (count <= 0 || count > 256) return out;
+    std::vector<uint32_t> ids(size_t(count), 0);
+    const int n = g.GetPOPList(g_netUtils, ids.data(), count);
+    for (int i = 0; i < n && i < count; ++i) {
+        const std::string name = PopName(ids[size_t(i)]);
+        if (name.empty()) continue;
+        out.push_back({name, g.GetDirectPingToPOP(g_netUtils, ids[size_t(i)])});
+    }
+    return out;
+}
 bool AllowDirectP2P(bool on) {
     // k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable (104): Private | Public (6) shares this machine's addresses with
     // the peer so a direct path can win over the relay; -1 is the Steam client's own default (direct only with friends,

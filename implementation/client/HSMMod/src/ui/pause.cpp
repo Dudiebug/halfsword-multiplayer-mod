@@ -250,6 +250,7 @@ PauseAction PauseMenuTick(UObject* menu, Session* session, bool reportButton) {
         case mp::EscPanel::Action::GameMenu: s.esc.Show(false); HSM_LOG("ui: Esc menu: GAME MENU (the stock pause menu)"); break;
         case mp::EscPanel::Action::ReportBug: return PauseAction::ReportBug;
         case mp::EscPanel::Action::Leave: return PauseAction::Leave;
+        case mp::EscPanel::Action::Back: break;   // only the pause panel's layout (ui/pause_panel.cpp) has BACK
     }
     return PauseAction::None;
 }

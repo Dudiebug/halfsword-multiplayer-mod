@@ -576,14 +576,18 @@ static void TestWire() {
     // SessionMods: the union with slot masks.
     ModReport a = Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::Ue4ssMod, "HSHelper", 2)});
     ModReport c = Report({Item(ModKind::MapPak, "Tavern.pak", 1), Item(ModKind::MapPak, "Tavern.pak", 9)});
-    SessionModsMsg s = BuildSessionMods({{0, &a}, {3, &c}, {20, &a}, {1, nullptr}});
+    SessionModsMsg s = BuildSessionMods({{0, &a}, {3, &c}, {32, &a}, {1, nullptr}});
     CHECK(s.entries.size() == 3 && !s.truncated);
     CHECK(s.entries[0].item.name == "Tavern.pak" && (s.entries[0].slots == 0x9 || s.entries[1].slots == 0x9));
     b = Encode(s);
     SessionModsMsg sb;
     CHECK(Decode(b.data(), b.size(), sb) && sb.entries == s.entries && !sb.truncated);
     for (size_t n = 0; n < b.size(); ++n) { SessionModsMsg x; CHECK(!Decode(b.data(), n, x)); }
-    { auto e = b; e[e.size() - 1] = 0; e[e.size() - 2] = 0; SessionModsMsg x; CHECK(!Decode(e.data(), e.size(), x)); }   // an empty mask
+    { auto e = b; for (size_t i = 1; i <= 4; ++i) e[e.size() - i] = 0; SessionModsMsg x; CHECK(!Decode(e.data(), e.size(), x)); }   // an empty mask
+    SessionModsMsg far = BuildSessionMods({{20, &a}});                 // the twentieth client: a u32 mask
+    b = Encode(far);
+    CHECK(far.entries.size() == 2 && far.entries[0].slots == 0x100000u && Decode(b.data(), b.size(), sb) && sb.entries == far.entries);
+    b = Encode(s);
     // Wrong type.
     b = Encode(m);
     { SessionModsMsg x; CHECK(!Decode(b.data(), b.size(), x)); }

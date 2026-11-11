@@ -57,6 +57,7 @@ public:
         double weight = -1.0, height = -1.0;          // a role's build (match/hsm_roles.h; Riot, Juggernaut): the passport Weight / Height this fighter spawns with, 0..1; negative: none (SetBuild's rules)
         const char* fighterClass = nullptr;           // nullptr = the stock Willie_BP_C; else the actor class to spawn as (match/hsm_fighter_class.h: the Zombies format's bots)
         bool careerBody = false;                      // keep the body the passport carries (a career's injuries, session/hsm_career.h CareerBodyAtSpawn); off: the fighter starts whole
+        bool bare = false;                            // no equipment at all on this body (a role's: Hide and Seek's hiders), as SetBare does for every body
     };
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
@@ -69,9 +70,25 @@ public:
     void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
     // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
     // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
+    // With mod_pause=1 the mod's own panel counts too (SetModPanelOpen), so the input-mode logic that gives the stock menu
+    // its cursor gives the panel the same.
     bool PauseMenuOpen();
-    // The pause menu widget PauseMenuOpen found (nullptr: none on screen).
+    // The stock menu or one of its settings screens only (the search PauseMenuOpen is built on).
+    bool StockPauseOpen();
+    // The pause menu widget StockPauseOpen found (nullptr: none on screen, or it is a settings screen).
     ue::UObject* PauseMenu();
+    // mod_pause=1: the mod's pause panel (ui/pause_panel.h) is up. Counted by PauseMenuOpen.
+    void SetModPanelOpen(bool on) { modPanelOpen_ = on; }
+    bool ModPanelOpen() const { return modPanelOpen_; }
+    // One of the game's settings screens (the ones the panel's SETTINGS opens) is on screen. Its Back and its Esc make a new
+    // "Go Back To" widget (the pause class), which SuppressStockScreens can swallow.
+    bool SettingsScreenOpen();
+    // Opens one of the game's own screens the way its Blueprints do (decomp UI/UI_Pause_Eng.cpp LatentResume_Lf): the class
+    // loaded by path, made with WidgetBlueprintLibrary.Create, its "Go Back To" class set when goBackToPath is given, added
+    // to the viewport at z 99. Returns the widget; nullptr when a class would not load or the call failed (nothing opened).
+    ue::UObject* OpenStockScreen(const std::string& objectPath, const std::string& goBackToPath = {});
+    // The game's pause screen class path, the "Go Back To" of the screens the panel opens.
+    static constexpr const char* kStockPauseClassPath = "/Game/UI/UI_Pause_Eng.UI_Pause_Eng_C";
     // Closes the pause menu the way its Continue button does (that button's click handler, found by name on the widget's
     // class); when none is found or the menu stays up, removes it, unpauses and gives the game its input back. True when
     // the menu is gone.
@@ -99,6 +116,8 @@ public:
                    std::string* hitName);
     // Where the player's camera is (the game's, or our follow camera while spectating); false when there is none.
     bool CameraLocation(ue::FVector& out);
+    // Hide and Seek: the local player's view goes black (the camera manager's manual fade; the HUD stays) or clear again.
+    bool SetBlind(bool on);
     // The actors a fighter carries or wears: weapons (held and sheathed), quiver, feet and fists, attached armour.
     std::vector<ue::UObject*> CarriedActors(ue::UObject* willie);
     // Where a bone (socket) of the fighter's Mesh is in the world; false without a Mesh or a finite position.
@@ -166,6 +185,9 @@ public:
     // False when none of the fields it needed could be set.
     bool ApplyScenario(const hsm::ScenarioWorld& w);
     void RestoreScenario();
+    // The Time of day row: GI "Current FreeMode Time" (an Enum_DayTime, 0..3) for the next level, "FreeMode Time Random" off. The
+    // host's own values are kept and come back with RestoreScenario. False when the game instance has no such field.
+    bool ApplyDayTime(int dayTime);
     // The Fenced-ring scenario's lose condition back on the game instance (hsm::kLoseConditionFence), after the level
     // manager's level-load reset wiped it and before the level script checks it to keep the BP_Fence_Bags (#706).
     // True when the field was set.
@@ -254,9 +276,18 @@ public:
     // classes. Logs "crossbow: class <name> found|missing, bolt class <name> found|missing" each time `log` is set. The classes
     // are Blueprint classes, found only while some loaded asset references them; missing ones leave the Crossbows row without effect.
     bool CrossbowAvailable(bool log);
+    // One Crossbow's endless bolts (match/hsm_modes.h EndlessBolts): -1 when `willie` holds no crossbow, else the bolts
+    // put into its quiver now (0: enough already). A holder without a quiver gets one, as GiveCrossbow gives.
+    int KeepQuiverFull(ue::UObject* willie);
     // Hands a living fighter a crossbow: spawns the weapon actor and puts it in the right hand the way the game's own pick-up
     // does ("Set Up Right Hand Weapon"), then makes sure the quiver holds bolts. False (logged) when any step failed.
-    bool GiveCrossbow(ue::UObject* willie);
+    bool GiveCrossbow(ue::UObject* willie, bool arm = true);
+    // Roulette (match/hsm_modes.h RouletteGame): its crossbow is given unarmed and with an empty quiver
+    // (GiveCrossbow(w, false)). TakeCrossbow removes the crossbow(s) `willie` holds (how many). ArmCrossbow draws the
+    // string and seats one bolt on the one it holds. CrossbowArmed: -1 with no crossbow in hand, else its String Loaded.
+    int TakeCrossbow(ue::UObject* willie);
+    bool ArmCrossbow(ue::UObject* willie);
+    int CrossbowArmed(ue::UObject* willie);
     // The crossbow's bolt class (BP_Weapon_Ranged_Projectle_Bolt_1_C), found once and kept while it stays loaded; null when
     // no loaded asset references it. Used to seat a bolt on a stand-in's crossbow (fx_sync's crossbow replay).
     ue::UClass* CrossbowBoltClass();
@@ -285,14 +316,18 @@ public:
     // Spawns a fresh fighter for local player 0 and possesses it; the old pawn is destroyed.
     ue::UObject* RespawnLocalPlayer(const SpawnOptions& o);
     // Host: a stock NPC fighter with a passport from the game's random generator (Enum_Ranks tier 0..7).
-    ue::UObject* SpawnAbyssNpc(const ue::FVector& at);   // the Abyss level's own enemy spawner; null elsewhere
+    ue::UObject* SpawnAbyssNpc(const ue::FVector& at, int tier);   // the Abyss level's own enemy spawner at Enum_Ranks `tier`; null elsewhere
     ue::UObject* SpawnBot(int rank, const ue::FVector& at, double yawDeg, int teamInt);
     int DropHeldWeapons(ue::UObject* willie);   // real weapons out of both hands, as a dropped weapon leaves; fists stay
     // The Willie's own passport serialized like ExportPassport (bots are relayed as blobs too).
     bool ExportPassportOf(ue::UObject* willie, std::vector<uint8_t>& out);
     // Per tick: UI_DED / UI_DeathDoor / UI_WinScreen / UI_WIN never construct while on. ownerMatch (owner sync) also
     // suppresses UI_Lose / UI_GiveUp / UI_NextFIght, the single-player lose flow that pauses the game.
-    void SuppressStockScreens(bool on, bool ownerMatch = false);
+    // swallowPause (mod_pause=1 in a session match): the game's pause screen never constructs either, whoever makes it (the
+    // settings screens' Back does), so no pause, no input-mode change; the mod's panel is the pause menu there.
+    void SuppressStockScreens(bool on, bool ownerMatch = false, bool swallowPause = false);
+    // How many pause screens were swallowed since the last call (the settings screen's Back: the panel shows again).
+    uint32_t TakePauseSwallowed() { const uint32_t n = pauseSwallowed_; pauseSwallowed_ = 0; return n; }
 
     // Input (resolved from Willie_BP_C event functions)
     bool BindInputs(ue::UObject* willie);
@@ -300,6 +335,7 @@ public:
     void ApplyAxis(ue::UObject* willie, Axis a, float value);
     void FireAction(ue::UObject* willie, Action a, bool pressed);
     static float ReadAxisParam(ue::UFunction* fn, void* params);
+    static void WriteAxisParam(ue::UFunction* fn, void* params, float value);   // the value the event's own code then reads (#2624)
 
     // State
     bool ReadState(ue::UObject* willie, uint8_t entity, WillieState& out);
@@ -364,7 +400,8 @@ private:
     bool bare_ = false;
     ue::UClass* boltClass_ = nullptr;               // CrossbowBoltClass
     int32_t boltClassIndex_ = -1;
-    struct ScenarioSaved { bool saved = false, carnage = false, brawling = false, hasLose = false; uint8_t lose = 0; } scenarioSaved_;   // the GI values ApplyScenario replaced
+    struct ScenarioSaved { bool saved = false, carnage = false, brawling = false, hasLose = false; uint8_t lose = 0; } scenarioSaved_;
+    struct DaySaved { bool saved = false, random = false; uint8_t time = 0; } daySaved_;   // the GI time of day ApplyDayTime replaced   // the GI values ApplyScenario replaced
     bool ResolveBones(ue::UObject* mesh);
     std::string TempSlot();
     void DeleteSlot(const std::string& slot);
@@ -392,6 +429,8 @@ private:
     ue::UObject* pauseWidget_ = nullptr;           // with its object-array slot: the widget PauseMenuOpen last found on screen
     int32_t pauseWidgetIndex_ = -1;
     uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)
+    bool modPanelOpen_ = false;                    // the mod's pause panel is up (SetModPanelOpen)
+    uint32_t pauseSwallowed_ = 0;                  // pause screens SuppressStockScreens kept from constructing (TakePauseSwallowed)
     bool inputTouched_ = false;    // RestoreGameInput or CaptureInput ran since the last MenuInputBack
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;

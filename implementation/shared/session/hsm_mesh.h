@@ -15,7 +15,7 @@
 
 namespace hsm {
 
-static_assert(kMaxFighters <= 16, "MeshHeard and the mesh masks carry one bit per slot in 16 bits");
+static_assert(kMaxFighters < 32, "MeshHeard and the mesh masks carry one bit per slot in 32 bits");
 
 constexpr uint32_t kMeshHoldMs = 2000;        // a slot counts as heard this long after its last direct packet
 constexpr uint32_t kMeshReportGapMs = 1000;   // at most one MeshHeard per second
@@ -25,14 +25,14 @@ class MeshHearing {
 public:
     void Note(uint8_t slot, uint32_t nowMs) { if (slot < kMaxFighters) { at_[slot] = nowMs; seen_[slot] = true; } }
     bool Heard(uint8_t slot, uint32_t nowMs) const { return slot < kMaxFighters && seen_[slot] && nowMs - at_[slot] <= kMeshHoldMs; }
-    uint16_t Mask(uint32_t nowMs) const {
-        uint16_t m = 0;
-        for (uint8_t s = 0; s < kMaxFighters; ++s) if (Heard(s, nowMs)) m |= uint16_t(1u << s);
+    uint32_t Mask(uint32_t nowMs) const {
+        uint32_t m = 0;
+        for (uint8_t s = 0; s < kMaxFighters; ++s) if (Heard(s, nowMs)) m |= 1u << s;
         return m;
     }
     // True when the mask differs from the last one sent and the report gap has passed; *mask is then what to send.
-    bool TakeChange(uint32_t nowMs, uint16_t* mask) {
-        const uint16_t m = Mask(nowMs);
+    bool TakeChange(uint32_t nowMs, uint32_t* mask) {
+        const uint32_t m = Mask(nowMs);
         if (!resend_ && (m == lastSent_ || (sentAny_ && nowMs - lastSentAt_ < kMeshReportGapMs))) return false;
         lastSent_ = m; lastSentAt_ = nowMs; sentAny_ = true; resend_ = false; *mask = m;
         return true;
@@ -43,7 +43,7 @@ public:
 private:
     uint32_t at_[kMaxFighters] = {};
     bool seen_[kMaxFighters] = {};
-    uint16_t lastSent_ = 0;
+    uint32_t lastSent_ = 0;
     uint32_t lastSentAt_ = 0;
     bool sentAny_ = false;
     bool resend_ = false;   // Invalidate: report even an unchanged mask (every bit is a valid mask; no sentinel)
@@ -52,20 +52,20 @@ private:
 // Host side: per slot, the slots that client says it hears directly.
 class MeshMasks {
 public:
-    void Set(uint8_t slot, uint16_t mask) {
+    void Set(uint8_t slot, uint32_t mask) {
         if (slot >= kMaxFighters) return;
-        m_[slot] = uint16_t(mask & ((1u << kMaxFighters) - 1) & ~(1u << slot));
+        m_[slot] = mask & ((1u << kMaxFighters) - 1) & ~(1u << slot);
     }
     // A slot joined or left: its own report is void, and nobody hears it any more.
     void Reset(uint8_t slot) {
         if (slot >= kMaxFighters) return;
         m_[slot] = 0;
-        for (uint16_t& x : m_) x = uint16_t(x & ~(1u << slot));
+        for (uint32_t& x : m_) x &= ~(1u << slot);
     }
-    void Clear() { for (uint16_t& x : m_) x = 0; }
+    void Clear() { for (uint32_t& x : m_) x = 0; }
     bool Hears(uint8_t listener, uint8_t from) const { return listener < kMaxFighters && from < kMaxFighters && (m_[listener] >> from & 1); }
 private:
-    uint16_t m_[kMaxFighters] = {};
+    uint32_t m_[kMaxFighters] = {};
 };
 
 // RelayTargets for a Pose or Vitals: skips the slots that already hear fromSlot directly.

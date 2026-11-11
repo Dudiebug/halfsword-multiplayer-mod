@@ -1,6 +1,7 @@
 // Combat scenarios per map (match/hsm_scenarios.h): the per-map table, the fallback to Standard, the Scenario lobby row.
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_scenarios.h"
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -71,12 +72,85 @@ int main() {
     CHECK(EffectiveScenario("/Game/Maps/Arenas/Map_Arena_Yard", kScenarioCount) == Scenario::Standard);
     CHECK(EffectiveScenario("", 0) == Scenario::Standard);
 
-    // What each one sets.
-    CHECK(WorldOf(Scenario::Standard).loseCondition < 0 && !WorldOf(Scenario::Standard).carnage && !WorldOf(Scenario::Standard).brawling);
-    CHECK(WorldOf(Scenario::FencedRing).loseCondition == 3 && !WorldOf(Scenario::FencedRing).carnage);
-    CHECK(WorldOf(Scenario::Carnage).carnage && WorldOf(Scenario::Carnage).loseCondition < 0 && !WorldOf(Scenario::Carnage).brawling);
-    CHECK(WorldOf(Scenario::Brawling).brawling && !WorldOf(Scenario::Brawling).carnage && WorldOf(Scenario::Brawling).loseCondition < 0);
+    // What each one sets on the game instance: only the Fenced ring has a setting; Carnage and Brawling are the mod's own effects.
+    CHECK(WorldOf(Scenario::Standard).loseCondition < 0 && WorldOf(Scenario::Carnage).loseCondition < 0 && WorldOf(Scenario::Brawling).loseCondition < 0);
+    CHECK(WorldOf(Scenario::FencedRing).loseCondition == 3 && kLoseConditionFence == 3);
     for (uint8_t i = 0; i < kScenarioCount; ++i) CHECK(*ScenarioName(Scenario(i)) && *ScenarioHint(Scenario(i)));
+
+    // The bot count: one more than the players, 3 to 5.
+    CHECK(kCarnageBotsMin == 3 && kCarnageBotsMax == 5);
+    CHECK(CarnageBotCount(-4) == 3 && CarnageBotCount(0) == 3 && CarnageBotCount(1) == 3 && CarnageBotCount(2) == 3);
+    CHECK(CarnageBotCount(3) == 4 && CarnageBotCount(4) == 5 && CarnageBotCount(5) == 5 && CarnageBotCount(10) == 5 && CarnageBotCount(1000000) == 5);
+    for (int p = 0; p < 40; ++p) CHECK(CarnageBotCount(p) >= 3 && CarnageBotCount(p) <= 5 && CarnageBotCount(p + 1) >= CarnageBotCount(p));
+
+    // Where a scenario works: Carnage in free-for-all only, Brawling in any format but the bot formats, the rest anywhere.
+    {
+        const ScenarioFormat ffa{true, false}, teams{false, false}, bots{false, true};
+        for (const ScenarioFormat& f : {ffa, teams, bots}) CHECK(ScenarioApplies(Scenario::Standard, f) && ScenarioApplies(Scenario::FencedRing, f));
+        CHECK(ScenarioApplies(Scenario::Carnage, ffa) && !ScenarioApplies(Scenario::Carnage, teams) && !ScenarioApplies(Scenario::Carnage, bots));
+        CHECK(ScenarioApplies(Scenario::Brawling, ffa) && ScenarioApplies(Scenario::Brawling, teams) && !ScenarioApplies(Scenario::Brawling, bots));
+        // The effects: Standard and the Fenced ring change nothing in the match itself.
+        for (const ScenarioFormat& f : {ffa, teams, bots})
+            for (Scenario s : {Scenario::Standard, Scenario::FencedRing}) CHECK(!EffectsOf(s, f, 3).bare && EffectsOf(s, f, 3).carnageBots == 0);
+        CHECK(EffectsOf(Scenario::Brawling, ffa, 3).bare && EffectsOf(Scenario::Brawling, ffa, 3).carnageBots == 0);
+        CHECK(EffectsOf(Scenario::Brawling, teams, 3).bare && !EffectsOf(Scenario::Brawling, bots, 3).bare);
+        CHECK(!EffectsOf(Scenario::Carnage, ffa, 3).bare && EffectsOf(Scenario::Carnage, ffa, 3).carnageBots == 4);
+        CHECK(EffectsOf(Scenario::Carnage, ffa, 1).carnageBots == 3 && EffectsOf(Scenario::Carnage, ffa, 8).carnageBots == 5);
+        CHECK(EffectsOf(Scenario::Carnage, teams, 3).carnageBots == 0 && EffectsOf(Scenario::Carnage, bots, 3).carnageBots == 0);
+    }
+    // From the lobby's config and the map: the pick the map does not offer is Standard, a format that does not use it too.
+    {
+        const char* alley = "/Game/Maps/Arenas/Map_Arena_Alley";
+        MatchConfig c; c.format = Format::FreeForAll;
+        c.scenario = uint8_t(Scenario::Carnage);
+        CHECK(ScenarioEffectsFor(c, alley, 2).carnageBots == 3 && ScenarioEffectsFor(c, alley, 4).carnageBots == 5 && !ScenarioEffectsFor(c, alley, 4).bare);
+        CHECK(ScenarioEffectsFor(c, "/Game/Maps/Abyss/Abyss_Map_Open_EA", 4).carnageBots == 0);   // the Abyss offers Standard only
+        c.format = Format::TwoTeams; CHECK(ScenarioEffectsFor(c, alley, 4).carnageBots == 0);
+        c.format = Format::PlayersVsBots; CHECK(ScenarioEffectsFor(c, alley, 4).carnageBots == 0);
+        c.scenario = uint8_t(Scenario::Brawling);
+        c.format = Format::FreeForAll; CHECK(ScenarioEffectsFor(c, alley, 2).bare && ScenarioEffectsFor(c, alley, 2).carnageBots == 0);
+        c.format = Format::LastManStanding; CHECK(ScenarioEffectsFor(c, alley, 2).bare);
+        c.format = Format::Zombies; CHECK(!ScenarioEffectsFor(c, alley, 2).bare);
+        c.format = Format::PlayersVsBots; CHECK(!ScenarioEffectsFor(c, alley, 2).bare);
+        c.format = Format::FreeForAll; CHECK(!ScenarioEffectsFor(c, "/Mods/Cool/Map_Cool", 2).bare);   // a modded map: Standard
+        c.scenario = 77; CHECK(!ScenarioEffectsFor(c, alley, 2).bare && ScenarioEffectsFor(c, alley, 2).carnageBots == 0);
+        c.scenario = uint8_t(Scenario::FencedRing); CHECK(!ScenarioEffectsFor(c, "/Game/Maps/Arenas/Map_Arena_Yard", 2).bare);
+        CHECK(ScenarioFormatOf(Format::FreeForAll).freeForAll && !ScenarioFormatOf(Format::FreeForAll).botFormat);
+        CHECK(!ScenarioFormatOf(Format::TwoTeams).freeForAll && !ScenarioFormatOf(Format::TwoTeams).botFormat);
+        CHECK(!ScenarioFormatOf(Format::Zombies).freeForAll && ScenarioFormatOf(Format::Zombies).botFormat);
+        CHECK(!ScenarioFormatOf(Format::PlayersVsBots).freeForAll && ScenarioFormatOf(Format::PlayersVsBots).botFormat);
+    }
+    // The wording keeps to what is done: the blurb of a scenario names its effect, and where the format has none it says so.
+    {
+        const ScenarioFormat ffa{true, false}, teams{false, false}, bots{false, true};
+        CHECK(std::string(ScenarioHint(Scenario::Carnage)).find("computer fighters") != std::string::npos);
+        CHECK(std::string(ScenarioHint(Scenario::Carnage)).find("Free-for-all only") != std::string::npos);
+        CHECK(std::string(ScenarioHint(Scenario::Carnage)).find("3 to 5") != std::string::npos);
+        CHECK(std::string(ScenarioHint(Scenario::Brawling)).find("pants with no weapons") != std::string::npos);
+        CHECK(std::string(ScenarioHint(Scenario::FencedRing)).find("Experimental") != std::string::npos);
+        CHECK(std::string(ScenarioHint(Scenario::Carnage)).find("Experimental") == std::string::npos && std::string(ScenarioHint(Scenario::Brawling)).find("Experimental") == std::string::npos);
+        CHECK(ScenarioHintFor(Scenario::Carnage, ffa) == ScenarioHint(Scenario::Carnage));
+        CHECK(ScenarioHintFor(Scenario::Brawling, teams) == ScenarioHint(Scenario::Brawling));
+        CHECK(ScenarioHintFor(Scenario::Standard, bots) == ScenarioHint(Scenario::Standard) && ScenarioHintFor(Scenario::FencedRing, bots) == ScenarioHint(Scenario::FencedRing));
+        CHECK(ScenarioHintFor(Scenario::Carnage, teams) == "Carnage works in Free-for-all only. In this mode the match plays as Standard.");
+        CHECK(ScenarioHintFor(Scenario::Carnage, bots) == ScenarioHintFor(Scenario::Carnage, teams));
+        CHECK(ScenarioHintFor(Scenario::Brawling, bots) == "Brawling does not work in Survival or Zombies. Here the match plays as Standard.");
+    }
+    // The fence the game builds: a bag every 0.8 m of the circle, and the lose volume at 0.95 of the radius.
+    CHECK(FenceBagsFor(525) == 41 && FenceBagsFor(400) == 31 && FenceBagsFor(0) == 0 && FenceBagsFor(-10) == 0);
+    CHECK(FenceBagsFor(130) == 10 && FenceBagsFor(135) == 11 && FenceBagsFor(2000) == 157);   // rounded, not cut: 10.21 and 10.60
+    CHECK(FenceBagsFor(std::nan("")) == 0);
+    {
+        FencePlacement f;
+        CHECK(FencePlacementFor("/Game/Maps/Arenas/Map_Arena_Yard", f));
+        CHECK(!OutsideFence(f, f.x, f.y, f.z) && !OutsideFence(f, f.x + 400, f.y + 200, f.z) && OutsideFence(f, f.x + 500, f.y, f.z) && OutsideFence(f, f.x + 500, f.y + 200, f.z));
+        CHECK(!OutsideFence(f, f.x + 498, f.y, f.z) && OutsideFence(f, f.x + 499.5, f.y, f.z) && OutsideFence(f, f.x - 600, f.y, f.z));
+        CHECK(OutsideFence(f, f.x, f.y - 499.5, f.z) && !OutsideFence(f, f.x, f.y - 498, f.z));
+        CHECK(!OutsideFence(f, f.x, f.y, f.z + 498) && OutsideFence(f, f.x, f.y, f.z + 499.5) && OutsideFence(f, f.x, f.y, f.z - 499.5));   // the volume is a sphere
+        const FencePlacement u{0, 0, 0, 100};                                                                                                 // the edge itself is inside
+        CHECK(!OutsideFence(u, 95, 0, 0) && OutsideFence(u, 95.01, 0, 0) && !OutsideFence(u, 0, 0, -95) && OutsideFence(u, -95.01, 0, 0));
+        CHECK(!OutsideFence(f, f.x + 300, f.y + 300, f.z) && OutsideFence(f, f.x + 360, f.y + 360, f.z));                                   // a diagonal: 0.95 * 525 = 498.75
+    }
 
     // The stepper walks what the map offers and wraps; a pick the map does not offer steps from Standard.
     const char* yard = "/Game/Maps/Arenas/Map_Arena_Yard";
@@ -124,6 +198,27 @@ int main() {
         l.mapPick = "/Game/Maps/Arenas/Map_Arena_Pit";
         LobbyScene c = BuildLobbyScene(l);
         CHECK(Find(c, LobbyRow::Scenario) && Find(c, LobbyRow::Scenario)->value == "Carnage");
+    }
+    {
+        LobbyLocal l = Lobby("/Game/Maps/Arenas/Map_Arena_Alley");               // the row's hint follows the format: Carnage does nothing in Teams
+        l.config.scenario = uint8_t(Scenario::Carnage);
+        const LobbyScene f = BuildLobbyScene(l);
+        const SettingRow* r = Find(f, LobbyRow::Scenario);
+        CHECK(r && r->value == "Carnage" && r->hint == ScenarioHint(Scenario::Carnage));
+        l.config = SelectFormat(l.config, Format::TwoTeams);
+        l.config.scenario = uint8_t(Scenario::Carnage);
+        const LobbyScene t = BuildLobbyScene(l);
+        r = Find(t, LobbyRow::Scenario);
+        CHECK(r && r->value == "Carnage" && r->hint == ScenarioHintFor(Scenario::Carnage, ScenarioFormatOf(Format::TwoTeams)) && r->hint.find("plays as Standard") != std::string::npos);
+        l.config.scenario = uint8_t(Scenario::Brawling);
+        const LobbyScene w = BuildLobbyScene(l);
+        r = Find(w, LobbyRow::Scenario);
+        CHECK(r && r->hint == ScenarioHint(Scenario::Brawling));
+        l.config = SelectFormat(l.config, Format::PlayersVsBots);
+        l.config.scenario = uint8_t(Scenario::Brawling);
+        const LobbyScene b = BuildLobbyScene(l);
+        r = Find(b, LobbyRow::Scenario);
+        CHECK(!b.hasScenario || (r && r->hint.find("does not work in Survival") != std::string::npos));
     }
     {
         LobbyLocal l = Lobby("/Game/Maps/Arenas/Map_Arena_Yard");               // a member sees the row but cannot step it

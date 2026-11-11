@@ -62,23 +62,24 @@ static void TestPeerMap() {
     PeerMapMsg m; PeerMapMsg o;
     auto b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.empty());   // a lone host in the lobby
     for (uint8_t s = 0; s < kMaxPeerMap; ++s) m.peers.push_back({s, 76561198000000000ull + s});
-    b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 9 && o.peers[8].slot == 8 && o.peers[8].steamId == 76561198000000008ull);
+    b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 21 && o.peers[20].slot == 20 && o.peers[20].steamId == 76561198000000020ull);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), o));
-    auto ten = b; ten[4] = 10; CHECK(!Decode(ten.data(), ten.size(), o));    // count byte follows the 4-byte header
-    PeerMapMsg bad; bad.peers = {{9, 5}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));      // slot out of range
+    auto ten = b; ten[4] = 22; CHECK(!Decode(ten.data(), ten.size(), o));    // count byte follows the 4-byte header
+    PeerMapMsg bad; bad.peers = {{21, 5}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));      // slot out of range
     bad.peers = {{1, 0}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));                      // no SteamID
     bad.peers = {{1, 5}, {1, 6}}; b = Encode(bad); CHECK(!Decode(b.data(), b.size(), o));              // duplicate slot
-    PeerMapMsg many; for (int i = 0; i < 11; ++i) many.peers.push_back({uint8_t(i % kMaxPeerMap), uint64_t(i + 1)});
-    b = Encode(many); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 9);                     // the encoder bounds it
+    PeerMapMsg many; for (int i = 0; i < 23; ++i) many.peers.push_back({uint8_t(i % kMaxPeerMap), uint64_t(i + 1)});
+    b = Encode(many); CHECK(Decode(b.data(), b.size(), o) && o.peers.size() == 21);                     // the encoder bounds it
 }
 
 static void TestMeshHeard() {
     MeshHeardMsg m; MeshHeardMsg o;
     auto b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0);
     m.mask = 0x3F; b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0x3F);
-    m.mask = 0x1FE; b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0x1FE);   // rev 22: nine slots, two bytes
-    m.mask = 0x200; b = Encode(m); CHECK(!Decode(b.data(), b.size(), o));                     // no slot 9
+    m.mask = 0x1FE; b = Encode(m); CHECK(Decode(b.data(), b.size(), o) && o.mask == 0x1FE);
+    m.mask = 0x1FFFFE; b = Encode(m); CHECK(b.size() == 4 + 4 && Decode(b.data(), b.size(), o) && o.mask == 0x1FFFFE);   // rev 46: 21 slots, four bytes
+    m.mask = 0x200000; b = Encode(m); CHECK(!Decode(b.data(), b.size(), o));                  // no slot 21
     m.mask = 0x3F; b = Encode(m);
     for (size_t cut = 0; cut < b.size(); ++cut) CHECK(!Decode(b.data(), cut, o));
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), o));

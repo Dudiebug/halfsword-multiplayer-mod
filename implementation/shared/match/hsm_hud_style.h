@@ -19,10 +19,10 @@ inline constexpr Rgba kInfectedInk{0.45f, 0.78f, 0.28f, 1};      // Infection: t
 inline constexpr Rgba kSceneGrey{0.18f, 0.18f, 0.18f, 1};        // the reference scene behind a panel
 
 // The menus (multiplayer page, Esc panel) and the HUD's panels. Three looks, chosen once at start (ui_style in
-// HSMMod.ini, UseMenuLook): the game's own (the default: faces are its parchment and gilt art, tinted, and these are the
-// plain fills drawn when the art is not loaded, and the faces text is judged on; text is dark ink, as on its scrolls), dark
-// (the game's art shaded dark and almost opaque, light text; a menu page sits on a darkened painting) and the classic
-// one ("Iron & Blood": opaque dark faces, light text). Set before any widget is made; read only on the game thread
+// HSMMod.ini, UseMenuLook): the classic one (the default, the look before 0.8.0-pre43, "Iron & Blood": opaque dark
+// faces, light text), the game's own (faces are its parchment and gilt art, tinted, and these are the plain fills drawn
+// when the art is not loaded, and the faces text is judged on; text is dark ink, as on its scrolls) and dark (the game's
+// art shaded dark and almost opaque, light text; a menu page sits on a darkened painting). Set before any widget is made; read only on the game thread
 // after that.
 struct MenuPalette {
     Rgba bg, backdrop, panel, card, cardHover, frame, frameHover, text, dim, accent, accentInk, ok, warn, light;
@@ -77,11 +77,12 @@ inline constexpr MenuPalette kClassicMenus{
 };
 
 enum class MenuLook : uint8_t { Dark, Game, Classic };
-inline MenuLook gMenuLook = MenuLook::Game;
-inline Rgba kMenuBg = kGameMenus.bg, kMenuBackdrop = kGameMenus.backdrop, kMenuPanel = kGameMenus.panel, kMenuCard = kGameMenus.card,
-            kMenuCardHover = kGameMenus.cardHover, kMenuFrame = kGameMenus.frame, kMenuFrameHover = kGameMenus.frameHover,
-            kMenuText = kGameMenus.text, kMenuDim = kGameMenus.dim, kMenuAccent = kGameMenus.accent, kMenuAccentInk = kGameMenus.accentInk,
-            kMenuOk = kGameMenus.ok, kMenuWarn = kGameMenus.warn, kMenuLight = kGameMenus.light;
+inline MenuLook gMenuLook = MenuLook::Classic;
+inline Rgba kMenuBg = kClassicMenus.bg, kMenuBackdrop = kClassicMenus.backdrop, kMenuPanel = kClassicMenus.panel,
+            kMenuCard = kClassicMenus.card, kMenuCardHover = kClassicMenus.cardHover, kMenuFrame = kClassicMenus.frame,
+            kMenuFrameHover = kClassicMenus.frameHover, kMenuText = kClassicMenus.text, kMenuDim = kClassicMenus.dim,
+            kMenuAccent = kClassicMenus.accent, kMenuAccentInk = kClassicMenus.accentInk, kMenuOk = kClassicMenus.ok,
+            kMenuWarn = kClassicMenus.warn, kMenuLight = kClassicMenus.light;
 
 inline const MenuPalette& PaletteOf(MenuLook look) {
     return look == MenuLook::Classic ? kClassicMenus : look == MenuLook::Game ? kGameMenus : kDarkMenus;
@@ -97,6 +98,25 @@ inline MenuLook CurrentMenuLook() { return gMenuLook; }
 inline bool ClassicMenus() { return gMenuLook == MenuLook::Classic; }
 inline bool DarkMenus() { return gMenuLook == MenuLook::Dark; }
 inline bool ParchmentMenus() { return gMenuLook == MenuLook::Game; }   // dark ink on light parchment
+
+// ui_style in HSMMod.ini at start (`value`; "classic" when the line is missing). Classic is the default. The HSMMod.ini
+// that 0.8.0-pre43 to pre49 wrote says ui_style=game whether or not the player picked it, so the first start with this
+// build reads "game" as classic once and has it written back (`moveToClassic`, with ui_style_moved=1). `moved`: that
+// marker is in the file, so a "game" there is the player's own pick and is kept. Anything unknown is classic.
+struct StartLook {
+    MenuLook look;
+    bool known;           // false: the value is none of classic, game or dark
+    bool moveToClassic;   // write ui_style=classic and ui_style_moved=1 back
+};
+inline StartLook ReadStartLook(const std::string& value, bool moved) {
+    if (value == "dark") return {MenuLook::Dark, true, false};
+    if (value == "game") return moved ? StartLook{MenuLook::Game, true, false} : StartLook{MenuLook::Classic, true, true};
+    return {MenuLook::Classic, value == "classic", false};
+}
+// The SETTINGS button's order, starting at the default: classic, game art, dark, classic.
+inline MenuLook NextMenuLook(MenuLook look) {
+    return look == MenuLook::Classic ? MenuLook::Game : look == MenuLook::Game ? MenuLook::Dark : MenuLook::Classic;
+}
 
 // hud_opacity in HSMMod.ini: the render opacity of the match HUD, the chat and the fighter card, for a less harsh and
 // less distracting overlay (HSMBot 2801). kHudOpacityMin..1; below it is kHudOpacityMin, above 1 or not a number is 1.

@@ -14,12 +14,12 @@
 
 namespace hsm::game {
 
-constexpr int kMaxLobbyMembers = 8;   // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
+constexpr int kMaxLobbyMembers = 20;  // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre49-test";
+constexpr const char* kModVersion = "0.8.0-pre50-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre49";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre50";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -31,13 +31,14 @@ void SetAllowBuildMismatch(bool on);
 void SetDirectP2P(bool on);
 bool AllowBuildMismatch();
 
-struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
+struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; std::string steamName; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
 
 struct LobbyListing {
     steam::SteamId id = 0;
     std::string name, map, mode;
+    Region region = Region::Auto;   // the host's region (hsm_region); Auto: it did not say
     int players = 0;      // players: a role=server lobby's server is not counted
-    int maxPlayers = kMaxLobbyMembers;   // the host's player limit (hsm_max); 8 when the lobby has none
+    int maxPlayers = 8;   // the host's player limit (hsm_max); 8 (kDefaultPlayerLimit) when the lobby has none
     bool locked = false;  // asks for a password (hsm_lock); the password is never listed
     LobbyPack pack;       // the modpack the host announced (hsm_pack/hsm_packv/hsm_packh); empty: none. Checked live, not here
     bool banned = false;  // the owner is on the global ban list (session/hsm_global_bans.h): left out of the list
@@ -67,7 +68,7 @@ public:
     bool InClassesLobby() const;                 // the lobby this machine is in uses classes (mod_rule=classes or unrestricted)
     bool InUnrestrictedLobby() const;            // ...with no class power budget (mod_rule=unrestricted)
     std::function<std::string()> myRuleSheet;   // this machine's class settings (hsm_online_rules.h)
-    std::function<std::string(ModPreset, bool blockHse)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
+    std::function<std::string(ModPreset, bool blockHse, double powerLimit)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
     std::function<void()> onEnterCard;   // a new lobby: the old lobby's cards go
     void RepublishMyCard();   // the card again, if it changed since it was sent
     std::function<std::string()> myCard;                                        // this machine's build card (hsm_build_card.h), asked for on entering a lobby
@@ -83,7 +84,7 @@ public:
     bool SendChat(const std::string& text);        // to every member (Steam lobby chat); false: not in a lobby or Steam refused
     void SetType(steam::LobbyType type);
     void SetReady(bool ready);
-    // The host's player limit, 2..8 (Steam's member limit and lobby data hsm_max). Never below the players already in:
+    // The host's player limit, 2..20 (Steam's member limit and lobby data hsm_max). Never below the players already in:
     // nobody is kicked by it. Before the lobby exists it is what Host creates it with.
     int MaxPlayers() const;
     void SetMaxPlayers(int n);
@@ -112,6 +113,13 @@ public:
     std::function<void(const std::string& text)> onRuleChanged;    // the host changed this lobby's mod rule: a line for the player
     void SetPublicState(const std::string& state, const std::string& map, const std::string& mode);
     void RefreshList();
+    // Names and region (session/hsm_player_names.h, session/hsm_region.h). Set from HSMMod.ini at start and again when the
+    // multiplayer page changes them. Nothing new is on the wire: lobby data (name, hsm_region) and member data (hsm_nick).
+    void SetNickname(const std::string& nickname);   // member data hsm_nick: what the other members show for us ("" clears)
+    void SetHideNames(bool on);                      // HIDE PLAYER NAMES: members() shows the other members as "Player N" on this screen
+    void SetName(const std::string& lobbyName);      // the host's lobby name (key name); "" keeps "<you>'s fight". Stored before a lobby exists too
+    void SetRegion(Region region);                   // the host's region (key hsm_region); Auto: none. Stored before a lobby exists too
+    void SetListDistance(LobbyDistance d);           // how far the next RefreshList asks Steam to look
     // Match settings (lobby data, host writes) and teams (own pick in member data, host moves in lobby data).
     MatchConfig config() const;
     void SetConfig(const MatchConfig& c);
@@ -132,6 +140,7 @@ public:
     void SetTeamPick(int team);
     void SetOverride(steam::SteamId member, int team);
     void ClearOverrides();
+    void ShuffleTeamsNow();                         // host: SHUFFLE NOW: deal everyone to a team at random, balanced (match/hsm_match.h ShuffleTeams)
 
     State state() const { return state_; }
     bool IsHost() const { return state_ == State::InLobby && owner_ == steam::MySteamId(); }
@@ -162,8 +171,13 @@ private:
     void AskBack(steam::SteamId lobby, const std::string& name, const std::string& ruleText, const BackPlan& b);
     ModRule lastRule_;                    // this lobby's rule as last seen (RuleTick)
     bool lastRuleNamed_ = false;
-    int maxPlayers_ = kMaxLobbyMembers;   // the host's choice; hsm_max is what everyone reads
+    int maxPlayers_ = 8;                  // the host's choice (kDefaultPlayerLimit until it changes it, up to 20); hsm_max is what everyone reads
     std::string officialSent_;   // the kMemberOfficialKey value last written (SetOfficial)
+    std::string nickname_, lobbyName_;    // this machine's nickname and lobby name (HSMMod.ini), both already cleaned
+    bool hideNames_ = false;
+    Region region_ = Region::Auto;
+    LobbyDistance listDistance_ = LobbyDistance::Default;
+    std::string LobbyTitleNow() const;    // the Steam lobby key "name": test prefix, then the lobby name or "<you>'s fight"
     bool server_ = false;   // Host(type, true): this machine runs role=server
     State state_ = State::Offline;
     steam::SteamId lobby_ = 0, owner_ = 0, joining_ = 0;   // joining_: the lobby Join asked for, until its enter

@@ -15,27 +15,41 @@ inline MatchConfig Sanitize(MatchConfig c) {
     if (c.format == Format::ThreeTeams) { c.format = Format::TwoTeams; c.teams = 3; }   // the old "3 teams" mode
     if (c.format == Format::CaptureTheFlag) { c.format = Format::TwoTeams; c.teams = 2; }   // removed in 0.8.0: a stale lobby plays Teams
     c.teams = uint8_t(std::clamp<int>(c.teams, kMinTeams, kMaxTeams));
-    if (IsTag(c.format)) c.gear = Gear::Fists;                          // Tag is bare-fisted: no Gear, Tier or Weapons row
+    if (IsTag(c.format) || IsOneCrossbow(c.format)) c.gear = Gear::Fists;   // Tag and One Crossbow are bare-fisted: no Gear, Tier or Weapons row
+    if (IsRoulette(c.format)) c.gear = Gear::Fists;                     // Roulette as well (bare: no crossbow of the Crossbows row either)
     if (!GearAllowed(c.format, c.gear)) c.gear = Gear::Own;
     if (HasRoles(c.format)) c.gear = Gear::RandomTier;                  // the roles roll every loadout (hsm_roles.h); the lobby has no Gear row for them
     c.tier = std::min<uint8_t>(c.tier, 7);
-    if (uint8_t(c.weapons) >= kWeaponFilterCount) c.weapons = WeaponFilter::Any;
+    c.weapons = CleanWeaponMask(c.weapons);
     if (uint8_t(c.teamKit) >= kTeamKitCount) c.teamKit = TeamKit::Full;
+    if (uint8_t(c.shuffle) >= kTeamShuffleCount || !PicksTeams(c.format)) c.shuffle = TeamShuffle::Off;   // only the formats whose teams the lobby picks deal them
+    if (c.shuffle == TeamShuffle::EachRound && !IsTeamRound(c.format)) c.shuffle = TeamShuffle::EachMatch;   // only the team rounds have rounds to deal for
     if (!ValidCrossbows(c.crossbows)) c.crossbows = 0;
+    c.classPower = SnapClassPower(c.classPower);                                                 // a value that is no stop: +15
     if (!ValidScenario(c.scenario)) c.scenario = 0;                                              // which scenarios a map offers is EffectiveScenario's
-    if (c.gear == Gear::Fists) { c.tier = kBrawlTier; c.crossbows = 0; }                     // Brawl: one fixed strength
+    if (c.gear == Gear::Fists) { c.tier = IsOneCrossbow(c.format) ? kOneCrossbowTier : kBrawlTier; c.crossbows = 0; }   // Brawl: one fixed strength; One Crossbow: peasants
+    if (IsRoulette(c.format)) c.tier = kOneCrossbowTier;                                     // Roulette: peasants too
     c.fuseS = uint8_t(std::clamp<int>(c.fuseS, kFuseMinS, kFuseMaxS));
+    if (!ValidTaggerSpeedPct(c.taggerSpeedPct)) c.taggerSpeedPct = kTaggerSpeedDefault;
     if (IsCrossbowTdm(c.format)) c.crossbows = uint8_t(Crossbows::All);                      // the mode's rule, no row
+    else if (IsOneCrossbow(c.format)) c.crossbows = uint8_t(Crossbows::One);                 // the same: exactly one, drawn each round
     else if (IsTag(c.format) || IsInfection(c.format)) c.crossbows = 0;                      // no Crossbows row there: a stale pick from another mode must not apply
     if (IsTag(c.format)) c.timeLimitS = 0;                                                   // the rounds and the fuse are the clock
     if (IsInfection(c.format)) {
         if (c.timeLimitS == 0) c.timeLimitS = kInfectionDefaultTimeS;                        // the survivors win by lasting: there is always a clock
         c.friendlyFire = false;                                                               // survivors and infected are the sides; no row
     }
+    if (IsHideSeek(c.format)) {                                                              // the Time row is a round's Seek time, the Fuse row the Hide time
+        c.timeLimitS = c.timeLimitS ? std::clamp<uint16_t>(c.timeLimitS, kSeekMinS, kSeekMaxS) : kSeekDefaultS;
+        c.fuseS = uint8_t(std::clamp<int>(c.fuseS, kHideMinS, kHideMaxS));
+        c.crossbows = 0;                                                                     // no Crossbows row
+    }
     if (c.damagePct != kDamageStock) c.damagePct = std::min(c.damagePct, kDamageMaxPct);
     c.deadWeightPct = std::min(c.deadWeightPct, kWeightMaxPct);
     c.weaponWeightPct = std::min(c.weaponWeightPct, kWeightMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
+    if (c.timeOfDay >= kTimeOfDayCount) c.timeOfDay = 0;   // a stale or peer-written value: the map's own
+    if (c.winBy > 2) c.winBy = 0;                                                         // hsm::WinBy: Death, First blood, Knockdown
     if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || IsRoundFormat(c.format) || IsInfection(c.format)) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
     return c;
 }
@@ -45,10 +59,18 @@ inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
     if (IsBotFormat(c.format) && cause != RespawnCause::Rematch) return Regear::None;   // the run's start: that loadout lasts the run
     if (c.gear == Gear::RandomTier) return Regear::Each;
     if (c.gear == Gear::Mirror && (cause == RespawnCause::RoundReset || cause == RespawnCause::Rematch)) return Regear::Shared;
+    if (c.gear == Gear::HostKit && cause == RespawnCause::Rematch) return Regear::Shared;   // the host's loadout, handed out when everybody starts together; kept until the rematch
     return Regear::None;
 }
 
 inline Regear JoinRegearFor(const MatchConfig& c) { return RegearFor(c, RespawnCause::Rematch) == Regear::Each ? Regear::Each : Regear::None; }
+
+inline bool NeedsDealtGear(const MatchConfig& c, MatchPhase phase, bool inMatch, uint32_t slotBlob, uint32_t dealtBlob) {
+    if (phase == MatchPhase::Idle) return false;                              // no match: nothing is dealt
+    if (!inMatch) return true;                                                // new to the match
+    if (RegearFor(c, RespawnCause::Rematch) == Regear::None) return false;    // Own gear, Brawl: the upload is the loadout
+    return dealtBlob == 0 || slotBlob != dealtBlob;
+}
 
 inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f, int teamsWanted) {
     std::map<uint8_t, int8_t> out;
@@ -70,6 +92,39 @@ inline std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& me
     for (uint8_t slot : unassigned) {
         size_t best = size_t(std::min_element(size.begin(), size.end()) - size.begin());   // ties: lowest index
         out[slot] = int8_t(best); ++size[best];
+    }
+    return out;
+}
+
+// ShuffleTeams' random numbers: a small seeded generator, so the same seed deals the same teams on any machine and in the tests.
+inline uint32_t ShuffleNext(uint32_t& state) {
+    state += 0x9E3779B9u;
+    uint32_t z = state;
+    z = (z ^ (z >> 16)) * 0x85EBCA6Bu;
+    z = (z ^ (z >> 13)) * 0xC2B2AE35u;
+    return z ^ (z >> 16);
+}
+
+inline std::map<uint8_t, int8_t> ShuffleTeams(const std::vector<TeamRequest>& members, Format f, int teamsWanted, uint32_t seed) {
+    if (!PicksTeams(f)) return ResolveTeams(members, f, teamsWanted);
+    std::map<uint8_t, int8_t> out;
+    const int teams = TeamCount(f, teamsWanted);
+    std::vector<int> size(size_t(teams), 0);
+    std::vector<TeamRequest> sorted = members;
+    std::sort(sorted.begin(), sorted.end(), [](const TeamRequest& a, const TeamRequest& b) { return a.slot < b.slot; });
+    std::vector<uint8_t> dealt;   // the members without a lock, in slot order
+    for (const TeamRequest& m : sorted) {
+        if (m.hostOverride >= 0 && m.hostOverride < teams) { out[m.slot] = m.hostOverride; ++size[size_t(m.hostOverride)]; }
+        else dealt.push_back(m.slot);
+    }
+    uint32_t state = seed;
+    for (size_t i = dealt.size(); i > 1; --i) std::swap(dealt[i - 1], dealt[ShuffleNext(state) % i]);   // Fisher-Yates
+    for (uint8_t slot : dealt) {
+        const int fewest = *std::min_element(size.begin(), size.end());
+        std::vector<size_t> smallest;
+        for (size_t t = 0; t < size.size(); ++t) if (size[t] == fewest) smallest.push_back(t);
+        const size_t pick = smallest[ShuffleNext(state) % smallest.size()];
+        out[slot] = int8_t(pick); ++size[pick];
     }
     return out;
 }
@@ -121,12 +176,18 @@ inline void Match::AddFighter(const FighterInfo& f) {
     if (!f.human && spawnOwed_ > 0) --spawnOwed_;
     if (bench || queued) { fighters_[f.entity].alive = false; benched_.insert(f.entity); }
     if (queued && cfg_.format == Format::PitBridgeDuel) queue_.Add(f.entity);
+    if (queued && cfg_.format == Format::Tournament && !leftIds_.count(f.id)) FillVacant(f.entity);   // one who left waits for the next
     RefreshInfectionScores();
 }
 inline void Match::RemoveFighter(uint8_t entity) {
     auto it = fighters_.find(entity);
     if (it != fighters_.end() && IsQueueFormat(cfg_.format)) {   // out of the bracket / queue (a forfeit was decided at Leave, which has the time)
-        if (cfg_.format == Format::Tournament) bracket_.Remove(entity); else queue_.Remove(entity);
+        if (cfg_.format != Format::Tournament) queue_.Remove(entity);
+        else {
+            if (it->second.id) leftIds_.insert(it->second.id);
+            if (!Vacate(entity)) bracket_.Remove(entity);
+            SettleVacant();
+        }
     }
     const bool own = ScoresPerFighter(cfg_.format);   // teams keep their score
     if (it != fighters_.end() && it->second.id)
@@ -184,6 +245,24 @@ inline bool Match::AwaitsRespawn(uint8_t e) const {
 inline int Match::ScoreKeyOf(uint8_t entity) const { return ScoresPerFighter(cfg_.format) ? int(entity) : int(TeamOf(entity)); }
 
 inline void Match::AddPoints(int key, int points) { score_[key] += points; }
+inline bool Match::AwardPoint(uint8_t entity, uint32_t nowMs) {
+    if (!IsRoulette(cfg_.format) || !RoundInPlay() || !Alive(entity)) return false;
+    AddPoints(ScoreKeyOf(entity), 1);
+    if (Score(ScoreKeyOf(entity)) >= int(cfg_.scoreLimit)) End(ScoreKeyOf(entity), nowMs);
+    return true;
+}
+inline bool Match::AwardRound(const std::vector<uint8_t>& winners, uint32_t nowMs) {
+    if (!IsHideSeek(cfg_.format) || !RoundInPlay()) return false;
+    roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = winners.size() == 1 ? winners.front() : uint8_t(0);
+    bool reached = false;
+    for (uint8_t e : winners) {
+        if (!fighters_.count(e)) continue;
+        AddPoints(ScoreKeyOf(e), 1);
+        reached = reached || Score(ScoreKeyOf(e)) >= int(cfg_.scoreLimit);
+    }
+    if (reached) { const int leader = UniqueLeader(); if (leader != kNoWinner) End(leader, nowMs); }   // a tie at the top plays another round
+    return true;
+}
 
 inline void Match::End(int winnerKey, uint32_t nowMs) {
     winner_ = winnerKey; phase_ = MatchPhase::Results; phaseStart_ = nowMs; endedPending_ = true;
@@ -193,7 +272,7 @@ inline int Match::UniqueLeader() const {
     std::set<int> keys;                                                // fighters who never scored still count, at 0
     for (const auto& [key, s] : score_) keys.insert(key);
     if (!IsBotFormat(cfg_.format))
-        for (const auto& [e, f] : fighters_) keys.insert(ScoreKeyOf(e));
+        for (const auto& [e, f] : fighters_) if (f.human) keys.insert(ScoreKeyOf(e));   // Carnage's computer fighters never lead
     int best = kNoWinner, bestScore = 0; bool tie = false;
     for (int key : keys) {
         if (IsBotFormat(cfg_.format) && key == kBotTeam) continue;
@@ -205,6 +284,7 @@ inline int Match::UniqueLeader() const {
 }
 
 inline void Match::ResolveDuelRound(uint32_t nowMs) {
+    if (IsHideSeek(cfg_.format)) return;                  // the game rule ends its rounds (AwardRound)
     if (roundOver_) return;
     int alive = 0; uint8_t last = 0; std::set<int8_t> sides;
     for (const auto& [e, f] : fighters_) if (f.alive) { ++alive; last = e; sides.insert(f.team); }
@@ -229,7 +309,7 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
         (cfg_.format == Format::FreeForAll || TeamCount(cfg_.format, cfg_.teams) > 0) && !IsBotFormat(cfg_.format) && !IsRoundFormat(cfg_.format) && !IsInfection(cfg_.format)) {
         v.alive = false; v.diedAt = nowMs; ++v.deaths;
         auto k = fighters_.find(killer);
-        if (killer == victim || k == fighters_.end() || (cfg_.format != Format::FreeForAll && k->second.team == v.team)) return;
+        if (killer == victim || k == fighters_.end() || !k->second.human || !v.human || (cfg_.format != Format::FreeForAll && k->second.team == v.team)) return;   // points move between players only
         AddPoints(ScoreKeyOf(killer), 1); ++k->second.kills;
         const int key = ScoreKeyOf(killer);
         if (key == winner_) return;
@@ -258,12 +338,12 @@ inline void Match::OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs) {
         ResolveDuelRound(nowMs);
         return;
     }
-    if (killer == victim) { if (!pvb) AddPoints(ScoreKeyOf(victim), -1); }                    // suicide
+    if (killer == victim) { if (!pvb && v.human) AddPoints(ScoreKeyOf(victim), -1); }        // suicide (a Carnage bot's fall costs nothing)
     else if (kit != fighters_.end()) {
         bool teamkill = cfg_.format != Format::FreeForAll && kit->second.team == v.team;
         if (teamkill) { if (!pvb) AddPoints(ScoreKeyOf(killer), -1); }
         else if (pvb) { if (kit->second.human) ++kit->second.kills; }   // survival scores waves, not kills
-        else { AddPoints(ScoreKeyOf(killer), 1); ++kit->second.kills; }
+        else if (kit->second.human && v.human) { AddPoints(ScoreKeyOf(killer), 1); ++kit->second.kills; }   // points move between players only: Carnage's bots score nothing
     }
     if (pvb) {
         bool anyHumanAlive = false;
@@ -308,7 +388,7 @@ inline bool Match::Draw(uint32_t nowMs) {
 inline void Match::StartQueue() {
     std::vector<uint8_t> humans;
     for (const auto& [e, f] : fighters_) if (f.human && !gone_.count(e)) humans.push_back(e);
-    bracket_ = Bracket{}; queue_ = KingQueue{};
+    bracket_ = Bracket{}; queue_ = KingQueue{}; vacant_.clear(); leftIds_.clear();
     if (cfg_.format == Format::Tournament) bracket_.Start(humans, bracketSeed_); else queue_.Start(humans, bracketSeed_);
     pair_[0] = pair_[1] = 0; pairWins_.clear(); pairingOver_ = false;
     SeatPair(nullptr);
@@ -353,6 +433,7 @@ inline void Match::ResolveQueueRound(uint8_t winner, uint32_t nowMs) {
 
 inline void Match::FinishPairing(uint8_t winner, uint32_t nowMs) {
     bracket_.Report(winner);
+    SettleVacant();                                     // the next fight is due: an open place in it is a bye
     AddPoints(int(winner), 1);                          // the score is the fights won
     pairingOver_ = true;
     if (bracket_.Done()) End(bracket_.Champion() ? int(bracket_.Champion()) : kNoWinner, nowMs);
@@ -362,13 +443,35 @@ inline void Match::QueueLeft(uint8_t entity, uint32_t nowMs) {
     if (cfg_.format == Format::PitBridgeDuel) { queue_.Remove(entity); return; }
     const bool fighting = (entity == pair_[0] || entity == pair_[1]) && !pairingOver_;
     const uint8_t opponent = entity == pair_[0] ? pair_[1] : pair_[0];
-    bracket_.Remove(entity);                            // his place is a bye from here: the opponent advances
+    if (!Vacate(entity)) bracket_.Remove(entity);       // his place is a bye from here (the opponent advances), or open till his fight
+    SettleVacant();
     if (fighting) {                                     // a forfeit: the fight goes to the opponent
         pairingOver_ = true;
         if (opponent && fighters_.count(opponent)) AddPoints(int(opponent), 1);
         if (!roundOver_) { roundOver_ = true; roundEnd_ = nowMs; roundWinner_ = Alive(opponent) ? opponent : uint8_t(0); }
     }
     if (bracket_.Done() && CombatPhase(phase_)) End(bracket_.Champion() ? int(bracket_.Champion()) : kNoWinner, nowMs);
+}
+
+// #1429: a player who leaves a Tournament before he has won a fight keeps his place open: a newcomer who joins before that
+// fight is due takes the whole seat. A seat with a fight behind it is a bye at once; so is one whose fight is due
+// (SettleVacant, run after every Vacate).
+inline bool Match::Vacate(uint8_t entity) {
+    if (!bracket_.Unfought(entity)) return false;
+    if (!Vacant(entity)) vacant_.push_back(entity);
+    return true;
+}
+inline void Match::SettleVacant() {
+    Bracket::Game g;
+    while (bracket_.Current(g) && (Vacant(g.a) || Vacant(g.b))) {
+        for (const uint8_t e : {g.a, g.b})
+            if (Vacant(e)) { std::erase(vacant_, e); bracket_.Remove(e); }
+    }
+}
+// The first left first. A newcomer on a reused slot whose place is open gets that one (Replace takes nobody already in).
+inline void Match::FillVacant(uint8_t entity) {
+    for (const uint8_t v : vacant_)
+        if (bracket_.Replace(v, entity)) { std::erase(vacant_, v); return; }
 }
 
 inline void Match::EndQueueMatch(uint32_t nowMs) {
@@ -389,7 +492,7 @@ inline bool GiveUpHold::Update(bool down, uint32_t nowMs) {
 }
 
 inline size_t Match::LoadoutsAhead() const {
-    if (HasRoles(cfg_.format)) return 0;                // each role rolls at its own tier: nothing to make ahead at the lobby's
+    if (HasRoles(cfg_.format) || cfg_.gear == Gear::HostKit) return 0;   // each role rolls at its own tier, the host's loadout is not rolled: nothing to make ahead
     RespawnCause cause;
     if (phase_ == MatchPhase::Results) cause = RespawnCause::Rematch;
     else if (roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath)) cause = RespawnCause::RoundReset;
@@ -411,24 +514,24 @@ inline size_t Match::LoadoutsAhead() const {
 }
 
 inline size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans) {
-    if (HasRoles(c.format)) return 0;
+    if (HasRoles(c.format) || c.gear == Gear::HostKit) return 0;
     const Regear r = RegearFor(c, RespawnCause::Rematch);
     if (IsQueueFormat(c.format)) humans = std::min<size_t>(humans, 2);   // two fight at a time
     if (r == Regear::Shared) return humans ? 1 : 0;
     return r == Regear::Each ? humans : 0;
 }
 
-inline void GearPool::Use(uint8_t tier, WeaponFilter weapons) {
+inline void GearPool::Use(uint8_t tier, WeaponMask weapons) {
     if (tier == tier_ && weapons == weapons_) return;
     blobs_.clear();
     tier_ = tier; weapons_ = weapons;
 }
-inline bool GearPool::Wants(uint8_t tier, WeaponFilter weapons, size_t ahead) { Use(tier, weapons); return blobs_.size() < ahead; }
-inline void GearPool::Put(uint8_t tier, WeaponFilter weapons, std::vector<uint8_t> blob) {
+inline bool GearPool::Wants(uint8_t tier, WeaponMask weapons, size_t ahead) { Use(tier, weapons); return blobs_.size() < ahead; }
+inline void GearPool::Put(uint8_t tier, WeaponMask weapons, std::vector<uint8_t> blob) {
     Use(tier, weapons);
     if (!blob.empty()) blobs_.push_back(std::move(blob));
 }
-inline std::vector<uint8_t> GearPool::Take(uint8_t tier, WeaponFilter weapons) {
+inline std::vector<uint8_t> GearPool::Take(uint8_t tier, WeaponMask weapons) {
     Use(tier, weapons);
     if (blobs_.empty()) return {};
     std::vector<uint8_t> b = std::move(blobs_.front());
@@ -488,6 +591,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         if (IsBotFormat(cfg_.format)) StartWave(nowMs, ev);
     } else if (phase_ == MatchPhase::Live && IsInfection(cfg_.format) && cfg_.timeLimitS && elapsed >= uint32_t(cfg_.timeLimitS) * 1000u) {
         End(Score(kSurvivorTeam) > 0 ? kSurvivorTeam : kInfectedTeam, nowMs);                 // survivors still standing at the clock: they win
+    } else if (IsHideSeek(cfg_.format)) {                 // its clock is a round's (HideSeekGame), never the match's
     } else if (phase_ == MatchPhase::Live && cfg_.timeLimitS && elapsed >= uint32_t(cfg_.timeLimitS) * 1000u) {
         int leader = UniqueLeader();
         if (leader != kNoWinner) End(leader, nowMs);

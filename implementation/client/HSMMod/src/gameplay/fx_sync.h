@@ -45,6 +45,7 @@ public:
         std::function<ue::UObject*(uint8_t)> ownedActor;            // the live Willie of an entity simulated here
         std::function<void(uint8_t)> gearChanged;                   // an entity's worn armour changed (put on here or on a stand-in): the team kit is put back. Optional.
         std::function<void()> noteSpawn;                            // armour came off a fighter: a new loose object (ObjectSync::NoteSpawn). Optional.
+        std::function<bool()> stripOff;                             // the lobby's Stripping row is Off (match/hsm_strip.h StripOffHere). Optional.
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
     bool Start(Adapter& adapter, StandIns& standIns, Env env);
@@ -64,7 +65,7 @@ private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
     struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
                       skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0, stripHeld = 0,
-                      crossbow = 0, crossbowReplayed = 0, bloodGated = 0, paintGated = 0, stripWeapon = 0, stripBlocked = 0, woundDeferred = 0,
+                      crossbow = 0, crossbowReplayed = 0, bloodGated = 0, paintGated = 0, stripWeapon = 0, stripBlocked = 0, stripOff = 0, woundDeferred = 0,
                       woundGaveUp = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
@@ -74,6 +75,7 @@ private:
     void OnRemoveArmor(ue::ScriptCall& c);
     void OnStripBegin(ue::ScriptCall& c);   // a stand-in its owner reports down counts as Fallen for the stock strip
     void OnStripEnd();
+    bool StripKeepsArmor(ue::ScriptCall& c);   // pre-hook on Remove Armor: true blocks it
     void SendHitSound(uint8_t entity, ue::UObject* willie, ue::ScriptCall& c, double damageRawScaled);
     void ApplyVoice(const combat::PaintFxMsg& m, ue::UObject* standIn);
     void CrossbowTick();                                             // the owner's side: poll, report changes
@@ -110,6 +112,7 @@ private:
     uint32_t noBoneLogged_ = 0;                                      // one bit per (kind, reason) already logged
     bool equipLogged_ = false;                                       // the Equip Armor observer has fired once (logged)
     bool replaying_ = false;                                         // inside our own Remove / Equip Armor on a stand-in
+    ue::UObject* stripping_ = nullptr;                                // the Stripped Willie of the running strip call, any stripper
     ue::UObject* stripFallen_ = nullptr;                              // the stand-in made Fallen for the running strip call
     ue::UObject* stripWatch_ = nullptr;                               // the stand-in the running strip call acts on, its weapons noted below
     uint8_t stripWatchEntity_ = 0;

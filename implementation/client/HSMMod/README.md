@@ -2,7 +2,8 @@
 
 One DLL, no game files changed. It installs as `dwmapi.dll` next to the game exe (a DLL the game loads at
 startup, the same load point UE4SS uses), forwards every dwmapi export to the real system DLL, and (when enabled in
-`HSMMod.ini`) adds host-authoritative online play for up to 8 fighters, each in their own loadout. Delete the DLL to
+`HSMMod.ini`) adds host-authoritative online play for up to 20 fighters (8 unless the host raises the lobby's Players row), each in
+their own loadout. Delete the DLL to
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
@@ -45,10 +46,37 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
   kit on one side against everyone else as Rioters of tier 1 to 4) and Juggernaut (a few tall, heavy Juggernauts against
   Skirmishers, short and light, with a bigger equipment budget). The Knight and the Juggernauts move on at every rematch.
   Riot and Juggernaut need 3 players or more and deal the gear by role.
+- **Chaos** (2 players or more): Last Man Standing's rounds, and every round each fighter is dealt a random rank of gear
+  (Peasant to Knight), one weapon type, a height and a weight, and the round its own player damage (50 to 200%), Dead
+  weight and Weapon weight. The FIGHT banner says what you were dealt and a line under the round pill what the round
+  runs at. Each fighter's stats are dealt too (#2151): run and walk, strength, grip, kick and knockback at 75 to 125%
+  of the game's own and the jump at 80 to 120%, told in the chat area each round; a picked class does not apply in
+  Chaos. The lobby has no Gear, Tier, Weapons, Damage or weight rows for it. Server word: `chaos`.
+- **One crossbow** (#778; 2 players or more): Last Man Standing's rounds between unarmed peasants. One fighter, drawn
+  anew each round, starts with a crossbow; whoever holds it has a quiver that never runs out (each machine fills its
+  own fighter's quiver back up to 8 under 2 bolts). The crossbow drops with its holder for the next player. The lobby
+  has no Gear, Tier, Weapons or Crossbows row for it. Server word: `onecrossbow`.
+- **Roulette** (#836; 2 players or more): unarmed peasants pass one crossbow round, six chambers and one of them
+  live; the odds rise with every blank until it fires, then it is spun again. The holder presses X to pull the
+  trigger on themself (a blank is a point) or C on the fighter they face (a blank hands the crossbow over). The live
+  chamber on yourself puts you out for the round; on someone else it loads a real bolt to shoot. The last one
+  standing scores too, and the first to the Points to win row takes the match. Server word: `roulette`.
+- **Hide and Seek** (#1082; 3 players or more; Slums or a custom map): rounds of seekers against hiders, dealt anew
+  each round (one seeker, two with six players or more). The hiders, unarmed peasants without name tags, get the
+  Hide time (15 to 60 s) while the seekers stand still with a dark screen; then the seekers hunt with two-handed
+  swords for the Seek time (2 to 10 minutes). Every hider down: the seekers standing take the round. Time up: the
+  hiders standing do. Server word: `hideseek`.
+- **Bodies row** (#1410, lobby key `hsm_body`; with own loadouts only): Same for all builds every player for the Gear
+  tier, as every match did before; Own leaves each player the build of their own character for that match.
+- **Gear row: Host's loadout** (#777, lobby key `hsm_gear` 4): everyone fights in the loadout the host built. It is
+  handed out at the match's start and at a rematch and kept at every respawn in between; the tier is the strength only.
 - **Team colours row** (lobby key `hsm_kit`: 0 Off, 1 Tabard, 2 Full kit): what takes the team colour on each machine's own
   copies of the fighters; blades stay steel. Every team format has it (Teams, Team Duel, Riot, Juggernaut).
 - **Spectator camera:** a dead player orbits the fighter watched with the mouse, zooms with the wheel, and presses F for a free
   camera (W A S D, Space, Ctrl, Shift). The host's Free camera row (lobby key `hsm_fcam`) turns it off.
+- **A free camera while alive** (#2624): the game's photo mode pauses the world, so it stays blocked in a session
+  match; its key flies the mod's free camera instead while your fighter lives (same keys, same box, same host row).
+  Your fighter's input is held meanwhile, H hides the mod's HUD and the name tags, and the key again ends it.
 - **CHANGE LOADOUT** in the Esc menu: edit your kit in the game's menu, then bring it into the match out of the fight. Own
   gear only (not in Riot or Juggernaut); one change per 5 s.
 - **Crossbows row** (lobby key `hsm_xbow`: Off, 1, 2, Half, All; experimental): random players spawn with a crossbow,
@@ -70,7 +98,7 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **Modpack:** `~mods/<pack>/HSMPack.ini` (tools/make_pack_manifest.py, docs/MODPACK.md); lobby keys `hsm_pack`,
   `hsm_packv`, `hsm_packh`; `[mod] pack=<name>|off`. A player without the host's pack is told what to install.
 - With `role=server`, `server_format` also takes `teamduel`, `riot`, `juggernaut`, `tag`, `infection`,
-  `crossbowtdm`, `tournament` and `pitbridge`.
+  `crossbowtdm`, `tournament`, `pitbridge`, `chaos`, `onecrossbow`, `roulette` and `hideseek`.
 
 
 ## New in 0.7.0 (pre-release)
@@ -243,7 +271,7 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - Traffic goes through Steam's relay network, so no port forwarding is needed. Lobbies and joins are checked for mod
   protocol and game build, and incompatible lobbies show the reason.
 
-## Up to 8 fighters with their own loadouts (Phase 2)
+## Up to 20 fighters with their own loadouts (Phase 2)
 
 - **Loadouts**: each player's own fighter is exported from their game (Free Mode: `Free Mode Player Character 1`;
   Progression: `Player Character`) into an `SG_GameProgress_C` SaveGame serialized in memory. The engine deep-copies
@@ -265,14 +293,15 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 | Load / vanilla safety | XInput proxy; `role=off` or an unknown build = pure passthrough |
 | Engine access | Runtime reflection by name; startup self-test (`Add_IntInt` layout, object index round trip, a ProcessEvent call) or it disables itself |
 | Transport | Steam relay (ISteamNetworkingMessages): reliable channel (hello/welcome/travel/spawn/blobs/events), unreliable channel (input 60 Hz, snapshots 30 Hz); every packet decoded and validated before the game thread sees it |
-| Host | Up to 8 fighters; snapshots 23 body bones + vitals per fighter to every client; announces spawns, despawns and deaths |
+| Host | Up to 20 fighters; snapshots 23 body bones + vitals per fighter to every client; announces spawns, despawns and deaths |
 | Client | Captures its input and blocks it locally (camera look/turn still local); velocity-tracks its fighter and puppets to host poses; copies vitals; plays deaths on host events |
 | Damage authority | Clients block all `...ComponentHitSignature` delegates while joined, so Chaos contacts never run damage locally |
 
 ## Install (every player)
 
 1. Copy `build/dwmapi.dll` to `Half Sword/HalfswordUE5/Binaries/Win64/`.
-2. Proton/Linux only: set Steam launch options to `WINEDLLOVERRIDES="dwmapi=n,b" %command%`. Launch through Steam:
+2. Proton/Linux only: set Steam launch options to `WINEDLLOVERRIDES="dwmapi=n,b" %command%`. Paste only that line; if the quotes
+   came out curly, use the form without them: `WINEDLLOVERRIDES=dwmapi=n,b %command%` (#869). Launch through Steam:
    starting Proton by hand outside Steam's runtime falls back to software rendering or crashes the D3D12 renderer.
 3. Start the game once to create `HSMMod.ini` (same folder; default `role=steam`). Direct IP (`role=host`, `role=client`, `host=`, `port=`) was removed in 0.8.0: an old
    value is logged once as ignored and Steam is used. Players join through Steam lobbies.

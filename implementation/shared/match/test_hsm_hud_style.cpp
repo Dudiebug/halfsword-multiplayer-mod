@@ -79,8 +79,6 @@ static void TestMenuPalette() {
 // The dark look: light text reads on every face, laid over black and over a mid-grey scene; the faces are almost opaque
 // and a page's background is opaque; light ink stays.
 static void TestDarkMenus() {
-    // The default before UseMenuLook is called is the game's own look, as before the dark one came.
-    CHECK(ParchmentMenus() && !DarkMenus() && Same(kMenuText, kGameMenus.text) && Same(kMenuPanel, kGameMenus.panel) && Same(kMenuBg, kGameMenus.bg));
     UseMenuLook(MenuLook::Dark);
     CHECK(DarkMenus() && Same(kMenuText, kDarkMenus.text));
     for (Rgba face : {kMenuPanel, kMenuCard, kMenuCardHover})
@@ -110,6 +108,7 @@ static void TestClassicMenus() {
 
 // Headings: title case in the game look, capitals in the classic one. HS Enhancer keeps its name in both.
 static void TestMenuTitle() {
+    UseMenuLook(MenuLook::Game);
     CHECK(MenuTitle("HOST A LOBBY") == "Host A Lobby" && MenuTitle("CO-OP") == "Co-Op" && MenuTitle("PLAYERS 3/8") == "Players 3/8");
     CHECK(MenuTitle("PLAYER'S CLASS") == "Player's Class");            // no new word after the apostrophe
     CHECK(MenuTitle("Help Improve the Mod?") == "Help Improve the Mod?" && MenuTitle("report a bug") == "report a bug");
@@ -121,6 +120,40 @@ static void TestMenuTitle() {
     CHECK(MenuTitle("Allow HS Enhancer") == "ALLOW HS ENHANCER" && MenuTitle("Help Improve the Mod?") == "HELP IMPROVE THE MOD?");
     CHECK(MenuTitle("PLAYERS 3/8") == "PLAYERS 3/8");
     UseMenuLook(MenuLook::Game);
+}
+
+// Before UseMenuLook is called the menus are in the classic look, the default (the look before 0.8.0-pre43).
+static void TestDefaultLook() {
+    CHECK(ClassicMenus() && !ParchmentMenus() && !DarkMenus() && CurrentMenuLook() == MenuLook::Classic);
+    CHECK(Same(kMenuText, kClassicMenus.text) && Same(kMenuPanel, kClassicMenus.panel) && Same(kMenuBg, kClassicMenus.bg));
+    CHECK(Same(kMenuCard, kClassicMenus.card) && Same(kMenuAccent, kClassicMenus.accent) && Same(kMenuLight, kClassicMenus.light));
+}
+
+// ui_style at start: classic is the default; a "game" the old template wrote moves to classic once; dark is kept.
+static void TestStartLook() {
+    const StartLook missing = ReadStartLook("classic", false);   // no ui_style line reads as classic
+    CHECK(missing.look == MenuLook::Classic && missing.known && !missing.moveToClassic);
+    const StartLook oldTemplate = ReadStartLook("game", false);   // pre43 to pre49 wrote this for everyone
+    CHECK(oldTemplate.look == MenuLook::Classic && oldTemplate.known && oldTemplate.moveToClassic);
+    const StartLook picked = ReadStartLook("game", true);        // picked after the move: kept
+    CHECK(picked.look == MenuLook::Game && picked.known && !picked.moveToClassic);
+    for (bool moved : {false, true}) {
+        const StartLook dark = ReadStartLook("dark", moved);     // only a deliberate pick writes dark
+        CHECK(dark.look == MenuLook::Dark && dark.known && !dark.moveToClassic);
+        const StartLook classic = ReadStartLook("classic", moved);
+        CHECK(classic.look == MenuLook::Classic && classic.known && !classic.moveToClassic);
+        for (const char* bad : {"", "nonsense", "Game", "GAME", " game"}) {
+            const StartLook b = ReadStartLook(bad, moved);
+            CHECK(b.look == MenuLook::Classic && !b.known && !b.moveToClassic);
+        }
+    }
+}
+
+// SETTINGS > MENU LOOK starts at classic and goes through the other two back to it.
+static void TestNextMenuLook() {
+    CHECK(NextMenuLook(MenuLook::Classic) == MenuLook::Game);
+    CHECK(NextMenuLook(MenuLook::Game) == MenuLook::Dark);
+    CHECK(NextMenuLook(MenuLook::Dark) == MenuLook::Classic);
 }
 
 static void TestOnParchment() {
@@ -144,6 +177,9 @@ static void TestHudOpacity() {
 }
 
 int main() {
+    TestDefaultLook();   // first: before any test sets a look
+    TestStartLook();
+    TestNextMenuLook();
     TestHudOpacity();
     TestPlanValues();
     TestContrastMath();

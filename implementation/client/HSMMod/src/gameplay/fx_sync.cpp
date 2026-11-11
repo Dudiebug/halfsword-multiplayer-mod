@@ -1,5 +1,6 @@
 #include "gameplay/fx_sync.h"
 #include "combat/hsm_paintgate.h"
+#include "match/hsm_strip.h"
 #include "log.h"
 #include "ue/script_hook.h"
 #include "util/hsm_sanitize.h"
@@ -130,6 +131,7 @@ bool FxSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Helmet Muffle Voice", [this](ScriptCall& c) { OnVoice(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Equip Armor", {}, [this](ScriptCall& c) { OnEquipArmor(c); });   // was Pick Up Armor before build 26568321 (Willie_BP.cpp:4623)
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Remove Armor", {}, [this](ScriptCall& c) { OnRemoveArmor(c); });
+    n += HookScript(kHookOwner, "Willie_BP_C", "Remove Armor", [this](ScriptCall& c) { return StripKeepsArmor(c); });   // the Stripping row Off
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Strip Armor From Bone", [this](ScriptCall& c) { OnStripBegin(c); },
                        [this](ScriptCall&) { OnStripEnd(); });
     active_ = ScriptHookActive();
@@ -369,6 +371,7 @@ void FxSync::OnRemoveArmor(ScriptCall& c) {
 void FxSync::OnStripBegin(ScriptCall& c) {
     stripFallen_ = nullptr;
     stripWatch_ = nullptr;
+    stripping_ = active_ && !replaying_ ? c.get<UObject*>("Stripped Willie") : nullptr;   // StripKeepsArmor
     if (!active_ || replaying_ || !env_.ownedEntity(c.self())) return;
     UObject* target = c.get<UObject*>("Stripped Willie");
     const uint8_t entity = target ? standIns_->EntityOf(target) : 0;
@@ -393,7 +396,23 @@ void FxSync::OnStripBegin(ScriptCall& c) {
     if (n_.stripTries++ < 10) HSM_LOG("fx: stripping e%u's stand-in (its owner reports it down)", entity);
 }
 
+// The Stripping row Off (#1931): the Remove Armor a strip makes on the fighter being stripped is blocked here, whoever strips,
+// so nothing comes off and nothing is sent (the stripper's hand has already let go). Spawned Armor reads null, which ends the
+// strip (Willie_BP.cpp:10302). Remove Armor for anything else (a pick-up swap, our replays) runs as usual.
+bool FxSync::StripKeepsArmor(ScriptCall& c) {
+    const bool off = active_ && !replaying_ && env_.stripOff && env_.stripOff();
+    if (!BlockStripArmor(off, stripping_, c.self())) return false;
+    c.ZeroOutputs();
+    uint8_t slot = 0;
+    c.get("Slot", slot);
+    if (n_.stripOff++ < kLogFirst)
+        HSM_LOG("fx: Stripping is Off in this lobby: armour slot %u stays on (the strip took nothing) (%llu)", unsigned(slot),
+                static_cast<unsigned long long>(n_.stripOff));
+    return true;
+}
+
 void FxSync::OnStripEnd() {
+    stripping_ = nullptr;
     if (stripFallen_) SetBool(stripFallen_, "Fallen", false);
     stripFallen_ = nullptr;
     if (stripWatch_) {
@@ -783,6 +802,13 @@ void FxSync::ApplyVoice(const PaintFxMsg& m, UObject* standIn) {
 void FxSync::ApplyStrip(const PaintFxMsg& m) {
     UObject* own = env_.ownedActor ? env_.ownedActor(m.entity) : nullptr;
     if (!own || !Flag(own, "Fallen")) { ++n_.skipped; return; }
+    if (env_.stripOff && env_.stripOff()) {   // the Stripping row Off: the stripper's machine keeps it on too (StripKeepsArmor)
+        ++n_.skipped;
+        if (n_.stripOff++ < kLogFirst)
+            HSM_LOG("fx: strip of armour slot %u from my fallen e%u refused: Stripping is Off in this lobby (%llu)", unsigned(m.rate), m.entity,
+                    static_cast<unsigned long long>(n_.stripOff));
+        return;
+    }
     if (UndressBlocked(own, uint8_t(m.rate))) {
         ++n_.skipped;
         if (n_.stripBlocked++ < kLogFirst)

@@ -104,10 +104,14 @@ static void TestFreeSpot() {
 
 // Test 5: "fighters stand -96 cm above the floor" in the Abyss (the trace hit something above); the Yard read 110-114.
 static void TestSaneStandOffset() {
-    CHECK(SaneStandOffset(114) == 114 && SaneStandOffset(0) == 0 && SaneStandOffset(kStandMaxCm) == kStandMaxCm);
+    CHECK(SaneStandOffset(114) == 114 && SaneStandOffset(kStandMaxCm) == kStandMaxCm && SaneStandOffset(kStandDefaultCm) == kStandDefaultCm);
+    // 0.8.0-pre49: a host that read 86 cm put every fighter of that level 30 cm in the floor.
+    CHECK(SaneStandOffset(86) == kStandDefaultCm && SaneStandOffset(95) == kStandDefaultCm && SaneStandOffset(0) == kStandDefaultCm);
+    CHECK(SaneStandOffset(kStandDefaultCm - 1) == kStandDefaultCm && SaneStandOffset(kStandDefaultCm + 1) == kStandDefaultCm + 1);
+    CHECK(SaneStandOffset(123) == 123 && SaneStandOffset(169) == 169);   // a high reading is a short drop, not a problem
     CHECK(SaneStandOffset(-96) == kStandDefaultCm && SaneStandOffset(-0.5) == kStandDefaultCm);
     CHECK(SaneStandOffset(250) == kStandMaxCm && SaneStandOffset(NAN) == kStandDefaultCm && SaneStandOffset(INFINITY) == kStandDefaultCm);
-    CHECK(kStandDefaultCm > 0 && kStandDefaultCm < kStandMaxCm && kStandMaxCm == 200);
+    CHECK(kStandDefaultCm == 110 && kStandDefaultCm < kStandMaxCm && kStandMaxCm == 200);
 }
 
 // Spawner-less maps: points on a ring around the host where a fighter can stand.

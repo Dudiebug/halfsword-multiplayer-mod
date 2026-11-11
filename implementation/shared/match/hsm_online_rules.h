@@ -222,11 +222,11 @@ inline bool LivePastLimits(const ClassSheet& live) { return !ClassProblems(live,
 
 // `unrestricted`: the lobby has no class budget. `blockHse`: this player's block_hse; the strictest copy of the rules still wins, because
 // everyone in the lobby runs this on everyone else.
-inline std::vector<std::string> CheckClassValue(std::string_view value, std::string_view cardMods, bool unrestricted = false, bool blockHse = true) {
+inline std::vector<std::string> CheckClassValue(std::string_view value, std::string_view cardMods, bool unrestricted = false, bool blockHse = true, double maxPoints = kRuleMaxPoints) {
     std::vector<std::string> out;
     const std::optional<ClassSheet> c = DecodeClass(value);
     if (!c) { out.push_back("no class data"); return out; }
-    out = ClassProblems(*c, unrestricted);
+    out = ClassProblems(*c, unrestricted, maxPoints);
     if (blockHse && cardMods.find("HSEnhancer") != std::string_view::npos) out.push_back("HS Enhancer is on");
     if (ClassNeedsWolverine(*c) && cardMods.find("HalfWolverine") == std::string_view::npos) out.push_back("the class needs Half Wolverine");
     return out;
@@ -384,14 +384,16 @@ inline std::vector<std::string> HseLockProblems(std::string_view ini) {
 // Every game starts with HSE's features off (gameplay/mod_rules.cpp writes this before HSE reads its file), so a lobby
 // that refuses HS Enhancer needs no restart: HSMMod holds HSE's keys back there (hse_hold.cpp), and nothing is on to begin
 // with. The keys stay as the player set them, for solo play and lobbies that allow it, where the player turns on what
-// they want again: nothing puts the features back by itself. From HSE's source (2026-11): "enabled" is false when missing, and so are [UE] console_enabled and
-// [Graphics] apply_on_startup, so the start adds nothing. [Discord] and [Notifications] keep theirs: they switch nothing.
+// they want again: nothing puts the features back by itself. From HSE's source (2026-11): "enabled" is false when missing, and so is [UE]
+// console_enabled, so the start adds nothing. [Discord] and [Notifications] keep theirs: they switch nothing. [Graphics] is left
+// alone whole, apply_on_startup included: it sets how the game looks, and turning it off in the player's own file reset their
+// graphics settings at every restart (#2974).
 namespace online_detail {
 inline std::string_view WithoutBom(std::string_view ini) { return ini.substr(0, 3) == "\xEF\xBB\xBF" ? ini.substr(3) : ini; }
 // A setting the start turns off. `section` as its line reads, brackets and all.
 inline bool HseStartTurnsOff(std::string_view section, std::string_view key) {
-    if (key == "enabled") return section != "[Discord]" && section != "[Notifications]";
-    return (section == "[UE]" && key == "console_enabled") || (section == "[Graphics]" && key == "apply_on_startup");
+    if (key == "enabled") return section != "[Discord]" && section != "[Notifications]" && section != "[Graphics]";
+    return section == "[UE]" && key == "console_enabled";
 }
 // Each setting line of an INI, in order: its section line, key and value, trimmed, and where the value sits in the text.
 template <class F> void ForEachIniSetting(std::string_view ini, F&& f) {
@@ -436,8 +438,7 @@ inline std::vector<std::string> HseStartOffProblems(std::string_view ini) {
     online_detail::ForEachIniSetting(online_detail::WithoutBom(ini), [&](std::string_view section, std::string_view key, std::string_view value, size_t, size_t) {
         if (!online_detail::HseStartTurnsOff(section, key) || value == "false") return;
         if (key == "enabled") out.push_back(std::string(section) + " is on");
-        else if (key == "console_enabled") out.push_back("the console is on");
-        else out.push_back("graphics commands run at start");
+        else out.push_back("the console is on");
     });
     return out;
 }

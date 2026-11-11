@@ -1,10 +1,11 @@
-// Unit tests for hsm_ini.h (SetIniValue). Run via implementation/shared/run_tests.sh test_hsm_ini.
+// Unit tests for hsm_ini.h (SetIniValue, GetIniValue). Run via implementation/shared/run_tests.sh test_hsm_ini.
 #include "util/hsm_ini.h"
 #include <cstdio>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 
+using hsm::util::GetIniValue;
 using hsm::util::SetIniValue;
 
 static void TestReplace() {
@@ -49,6 +50,29 @@ static void TestRefusals() {
     CHECK(SetIniValue(in, "ne]t", "k", "1") == in);
 }
 
+// GetIniValue: the bytes of a value, found the way SetIniValue finds it.
+static void TestGet() {
+    const std::string in = "; note\n[other]\nnickname=wrong\n[net]\nrole=steam\n  Nickname =  Zo\xC3\xAB the 3rd \t\r\n; nickname=comment\nlobby_name=\nmore=1\n";
+    std::string v = "keep";
+    CHECK(GetIniValue(in, "net", "nickname", v) && v == "Zo\xC3\xAB the 3rd");                // UTF-8 kept, ends trimmed, case ignored
+    CHECK(GetIniValue(in, "NET", "ROLE", v) && v == "steam");
+    CHECK(GetIniValue(in, "net", "lobby_name", v) && v.empty());                              // present and empty
+    v = "keep";
+    CHECK(!GetIniValue(in, "net", "missing", v) && v == "keep");                              // not there: untouched
+    CHECK(!GetIniValue(in, "nope", "role", v) && v == "keep");
+    CHECK(!GetIniValue("", "net", "role", v));
+    CHECK(GetIniValue(in, "other", "nickname", v) && v == "wrong");                           // each section its own
+    CHECK(!GetIniValue("[net]\n; nickname=comment\n# nickname=other\n", "net", "nickname", v));   // comments are not keys
+    CHECK(GetIniValue("[net]\nk=1\nk=2\n", "net", "k", v) && v == "1");                       // the first one
+    CHECK(GetIniValue("[net]\r\nk=a=b\r\n", "net", "k", v) && v == "a=b");                    // only the first = splits
+    CHECK(GetIniValue("[net]\nk=v", "net", "k", v) && v == "v");                              // no final line break
+    CHECK(GetIniValue("\xEF\xBB\xBF[net]\nk=bom\n", "net", "k", v) && v == "bom");            // a UTF-8 byte-order mark
+    CHECK(!GetIniValue("[net]\nk\n", "net", "k", v));                                          // no =: not a key
+    // What SetIniValue writes is what GetIniValue reads.
+    const std::string saved = SetIniValue("[net]\nrole=steam\n", "net", "nickname", "Zo\xC3\xAB");
+    CHECK(GetIniValue(saved, "net", "nickname", v) && v == "Zo\xC3\xAB");
+}
+
 int main() {
     TestReplace();
     TestAddToSection();
@@ -56,6 +80,7 @@ int main() {
     TestLineEndings();
     TestCommentedKeyIsNotTheKey();
     TestRefusals();
+    TestGet();
     if (g_fail) { std::printf("%d ini checks failed\n", g_fail); return 1; }
     std::printf("all ini tests passed\n");
     return 0;

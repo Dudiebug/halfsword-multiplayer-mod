@@ -202,12 +202,24 @@ void BuildKeyState(BYTE (&ks)[256], const SHORT (&st)[256]) {
 // bit still holds an Enter pressed in another window (Discord), in a menu or in the lobby's chat box, which opened the
 // chat on the first Poll back with no key pressed in the fight (#136). Every key is asked once and forgotten, and a key
 // still held counts as down already (it fires only once pressed again).
-void Drain() {
+// Returns how many keys had a tap waiting (released, with the bit set), for the log.
+int Drain() {
+    int taps = 0;
     for (int vk = 0x08; vk <= 0xFE; ++vk) {
         const SHORT st = GetAsyncKeyState(vk);
         d.keys[vk] = Key{};
         d.keys[vk].down = (st & 0x8000) != 0;
+        if ((st & 1) && !d.keys[vk].down) ++taps;
     }
+    return taps;
+}
+
+// The chat has just opened: every key pressed while it was closed still has its "pressed since last asked" bit set, because
+// only the open key was asked. The first typing poll would read each as a tap and type it (#1976). Ask every key once and
+// forget it; a key still held counts as down already.
+void DrainOnOpen(const char* how) {
+    const int taps = Drain();
+    HSM_LOG("chat: opened by %s; %d key(s) pressed before it opened were dropped, not typed", how, taps);
 }
 
 void Poll(uint32_t now) {
@@ -216,6 +228,7 @@ void Poll(uint32_t now) {
         if (d.paused && d.paused()) return;   // no chat over the pause menu
         if (d.openVk != VK_RETURN) d.swallowVk = d.openVk;
         Feed(d.openVk == VK_RETURN ? hsm::ChatEvent::Enter : hsm::ChatEvent::OpenKey, now);
+        if (d.session.typing()) DrainOnOpen("key");
         return;
     }
     if (d.paused && d.paused()) { Feed(hsm::ChatEvent::Paused, now); return; }
@@ -250,7 +263,7 @@ void OpenPending(uint32_t now) {
     if (d.paused && d.paused()) return;
     d.pending = false;
     Feed(hsm::ChatEvent::OpenKey, now, std::string(), "text prefilled");
-    if (d.session.typing()) Feed(hsm::ChatEvent::Char, now, d.pendingText);
+    if (d.session.typing()) { DrainOnOpen("text prefilled"); Feed(hsm::ChatEvent::Char, now, d.pendingText); }
 }
 
 void Draw(const ChatScene& s) {

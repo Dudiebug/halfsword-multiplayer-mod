@@ -31,13 +31,14 @@ static void TestWire() {
     CHECK(bad(Entry(3, 1, 0, 1, 4)));                                   // unknown coupling
     HandOffMsg f; f.full = true; b = Encode(f); CHECK(Decode(b.data(), b.size(), o) && o.full && o.entries.empty());
 
-    HandOffAskMsg a; a.victim = 3; a.by = 12; a.why = kCoupleStuck;
+    HandOffAskMsg a; a.victim = 3; a.by = 22; a.why = kCoupleStuck;
     b = Encode(a);
     HandOffAskMsg ao;
-    CHECK(Decode(b.data(), b.size(), ao) && ao.victim == 3 && ao.by == 12 && ao.why == kCoupleStuck);
+    CHECK(Decode(b.data(), b.size(), ao) && ao.victim == 3 && ao.by == 22 && ao.why == kCoupleStuck);
     a.why = 0; b = Encode(a); CHECK(!Decode(b.data(), b.size(), ao));
     a.why = kCoupleGrab; a.by = 3; b = Encode(a); CHECK(!Decode(b.data(), b.size(), ao));
-    a.by = 1; a.victim = 12; b = Encode(a); CHECK(!Decode(b.data(), b.size(), ao));
+    a.by = 1; a.victim = 22; b = Encode(a); CHECK(!Decode(b.data(), b.size(), ao));   // a bot is never handed
+    a.victim = 21; b = Encode(a); CHECK(Decode(b.data(), b.size(), ao));              // the twentieth client's fighter
 }
 
 static void TestTable() {
@@ -94,9 +95,9 @@ static void TestJudge() {
     CHECK(JudgeAsk(t, a, 1, 2, true) == AskVerdict::Grant);              // both asked: slot 1 is lower, it takes the pair
     HandOffAskMsg back; back.victim = 2; back.by = 3; back.why = kCoupleGrab;
     CHECK(JudgeAsk(t, back, 2, 1, true) == AskVerdict::Mine);            // ... and slot 1 refuses slot 2's ask
-    HandOffAskMsg bot; bot.victim = 3; bot.by = 12; bot.why = kCoupleStuck;
+    HandOffAskMsg bot; bot.victim = 3; bot.by = 22; bot.why = kCoupleStuck;
     CHECK(JudgeAsk(t, bot, kHostSlot, 2, false) == AskVerdict::Grant);   // a bot's blade: the host takes it
-    t.Write(3, kHostSlot, 12, kCoupleStuck);
+    t.Write(3, kHostSlot, 22, kCoupleStuck);
     CHECK(JudgeAsk(t, a, 1, 2, false) == AskVerdict::Leased);
     LeaseTable c; c.Write(4, 1, 2, kCoupleGrab);                         // slot 1 already holds entity 4: it may take a second
     CHECK(JudgeAsk(c, a, 1, 2, false) == AskVerdict::Grant);

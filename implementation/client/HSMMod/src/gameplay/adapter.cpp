@@ -132,12 +132,19 @@ bool InViewportNow(UObject* w) {
     Call v(w, "IsInViewport");
     return v.invoke() && v.get<bool>("ReturnValue");
 }
+std::vector<std::pair<UObject*, int32_t>> g_suppressed;   // widgets whose Construct was skipped; removed next tick (SuppressStockScreens)
+bool IsSuppressedWidget(UObject* o) {
+    for (const auto& [w, index] : g_suppressed) if (w == o && ObjectAt(index) == w) return true;
+    return false;
+}
 }  // namespace
 
 // The stock pause menu is UI_Pause_Eng (decomp Willie_BP.cpp:11091). Matched by the substring "UI_Pause" so a different
 // Blueprint suffix still works; the class name found is logged once. A closed menu can linger until garbage collection,
 // so only a widget IsInViewport counts. Esc or a paused game arms a 2 s window of searches, kept up while the menu is open.
-bool Adapter::PauseMenuOpen() {
+bool Adapter::PauseMenuOpen() { return modPanelOpen_ || StockPauseOpen(); }
+
+bool Adapter::StockPauseOpen() {
     const uint32_t now = GetTickCount();
     if (pauseCheckAt_ && now - pauseCheckAt_ < 100) return pauseOpen_;
     pauseCheckAt_ = now;
@@ -153,7 +160,7 @@ bool Adapter::PauseMenuOpen() {
         if (!o || IsDefaultObject(o) || !IsA(o, uw)) continue;
         const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(o)));
         const PauseScreen screen = PauseScreenOf(cls);   // the menu, or a settings screen it opened (match/hsm_input_mode.h)
-        if (screen == PauseScreen::None) continue;
+        if (screen == PauseScreen::None || IsSuppressedWidget(o)) continue;   // a swallowed one is leaving the screen
         Call v(o, "IsInViewport");
         if (!v.invoke() || !v.get<bool>("ReturnValue")) continue;
         found = true;
@@ -164,7 +171,9 @@ bool Adapter::PauseMenuOpen() {
     return pauseOpen_;
 }
 
-UObject* Adapter::PauseMenu() { return PauseMenuOpen() && pauseIsMenu_ && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ ? pauseWidget_ : nullptr; }
+UObject* Adapter::PauseMenu() { return StockPauseOpen() && pauseIsMenu_ && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_ ? pauseWidget_ : nullptr; }
+
+bool Adapter::SettingsScreenOpen() { return StockPauseOpen() && !pauseIsMenu_ && pauseWidget_ && ObjectAt(pauseWidgetIndex_) == pauseWidget_; }
 
 // The click handler of the stock Continue button is a Blueprint function bound to its OnClicked, named like
 // "BndEvt__UI_Pause_Eng_<button>_K2Node_ComponentBoundEvent_N_OnButtonClickedEvent__DelegateSignature". The one whose
@@ -295,6 +304,17 @@ bool Adapter::CameraLocation(FVector& out) {
     if (!loc.invoke()) return false;
     out = loc.get<FVector>("ReturnValue");
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+}
+
+bool Adapter::SetBlind(bool on) {
+    Call pc(statics_, "GetPlayerCameraManager");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* cm = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!cm) return false;
+    if (!on) return Call(cm, "StopCameraFade").invoke();
+    Call fade(cm, "SetManualCameraFade");               // the colour and the audio flag stay zero: black, sound on
+    fade.set<float>("InFadeAmount", 1.0f);
+    return fade.invoke();
 }
 
 bool Adapter::LineClear(const FVector& from, const FVector& to, const std::vector<UObject*>& ignore, std::string* hitName) {
@@ -625,7 +645,7 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
                 std::memcpy(reinterpret_cast<uint8_t*>(willie) + PropertyOffset(dst) + PropertyOffset(h), &height, sizeof height);
             }
     ApplyBuild(willie, dst, o.bot, o.weight);
-    if (bare_) StripEquipment(willie, dst);
+    if (bare_ || o.bare) StripEquipment(willie, dst);
     if (!o.bot && !o.careerBody) WholeBody(reinterpret_cast<uint8_t*>(willie) + PropertyOffset(dst), true);
     return true;
 }
@@ -1408,6 +1428,11 @@ bool Adapter::BindInputs(UObject* willie) {
     return !bindings_.empty();
 }
 
+void Adapter::WriteAxisParam(UFunction* fn, void* params, float value) {
+    FProperty* p = FindProperty(fn, "AxisValue");
+    if (p && params) std::memcpy(static_cast<uint8_t*>(params) + PropertyOffset(p), &value, sizeof value);
+}
+
 float Adapter::ReadAxisParam(UFunction* fn, void* params) {
     FProperty* p = FindProperty(fn, "AxisValue");
     if (!p || !params) return 0.f;
@@ -1674,8 +1699,8 @@ constexpr const char* kStockScreens[] = {"UI_DED_C", "UI_DeathDoor_C", "UI_WinSc
 constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_NextFIght_C", "UI_EE_C"};   // UI_EE (build 26568321) pauses too (UI_EE.cpp:19)
 bool g_suppressScreens = false;
 bool g_suppressOwnerScreens = false;
+bool g_swallowPause = false;
 bool g_screenHooks = false;
-std::vector<std::pair<UObject*, int32_t>> g_suppressed;
 
 // A pause menu other than `self` is in the viewport (see PauseMenuOpen for the class match).
 bool OtherPauseMenuOnScreen(UObject* self) {
@@ -1786,14 +1811,34 @@ bool Adapter::ApplyScenario(const hsm::ScenarioWorld& w) {
         GetBool(gi, "Free Mode Brawling", scenarioSaved_.brawling);
         if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { scenarioSaved_.hasLose = true; scenarioSaved_.lose = *l; }
     }
-    bool any = false;
-    if (w.carnage) any |= SetBool(gi, "Free Mode Carnage", true);
-    if (w.brawling) any |= SetBool(gi, "Free Mode Brawling", true);
+    bool any = false;   // Carnage and Brawling set nothing here: the mod does them (match/hsm_scenarios.h EffectsOf)
     if (w.loseCondition >= 0) if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { *l = uint8_t(w.loseCondition); any = true; }
     return any;
 }
 
+bool Adapter::ApplyDayTime(int dayTime) {
+    UObject* gi = GameInstance();
+    if (!gi || dayTime < 0 || dayTime > 3) return false;
+    uint8_t* t = Field<uint8_t>(gi, "Current FreeMode Time");
+    if (!t) return false;
+    if (!daySaved_.saved) {                                         // the host's own, kept once
+        daySaved_.saved = true;
+        daySaved_.time = *t;
+        GetBool(gi, "FreeMode Time Random", daySaved_.random);
+    }
+    *t = uint8_t(dayTime);
+    SetBool(gi, "FreeMode Time Random", false);
+    return true;
+}
+
 void Adapter::RestoreScenario() {
+    if (daySaved_.saved) {
+        if (UObject* gi = GameInstance()) {
+            if (uint8_t* t = Field<uint8_t>(gi, "Current FreeMode Time")) *t = daySaved_.time;
+            SetBool(gi, "FreeMode Time Random", daySaved_.random);
+        }
+        daySaved_ = DaySaved{};
+    }
     if (!scenarioSaved_.saved) return;
     if (UObject* gi = GameInstance()) {
         SetBool(gi, "Free Mode Carnage", scenarioSaved_.carnage);
@@ -2083,6 +2128,33 @@ UClass* Adapter::LoadClassBlocking(const std::string& path) {
     return load.invoke() ? load.get<UClass*>("ReturnValue") : nullptr;
 }
 
+// What the stock pause screen's SETTINGS button does (decomp UI/UI_Pause_Eng.cpp LatentResume_Lf), minus removing the pause
+// screen: Create, 'Go Back To' = the pause class, AddToViewport(99). The settings screen's Back and Esc then make the
+// pause class (UI_DisplaySettings2.cpp:1508, 1718), which the Construct hook swallows in a mod_pause session match.
+UObject* Adapter::OpenStockScreen(const std::string& objectPath, const std::string& goBackToPath) {
+    UClass* cls = LoadClassBlocking(objectPath);
+    UClass* back = goBackToPath.empty() ? nullptr : LoadClassBlocking(goBackToPath);
+    if (!cls || (!goBackToPath.empty() && !back)) {
+        HSM_LOG("adapter: stock screen %s not opened: class %s would not load", objectPath.c_str(), cls ? goBackToPath.c_str() : objectPath.c_str());
+        return nullptr;
+    }
+    Call make(WidgetLibrary(), "Create");
+    make.set<UObject*>("WorldContextObject", world_).set<UClass*>("WidgetType", cls).set<UObject*>("OwningPlayer", nullptr);
+    UObject* w = make.valid() && make.invoke() ? make.get<UObject*>("ReturnValue") : nullptr;
+    if (!w) { HSM_LOG("adapter: stock screen %s not opened: Create failed", objectPath.c_str()); return nullptr; }
+    if (back) {
+        UClass** slot = Field<UClass*>(w, "Go Back To");
+        if (!slot) { HSM_LOG("adapter: stock screen %s has no 'Go Back To'; not opened", objectPath.c_str()); return nullptr; }
+        *slot = back;
+    }
+    Call(w, "AddToViewport").set<int32_t>("ZOrder", 99).invoke();
+    // The pause-screen search finds it at once: it is the widget that counts as the open menu now.
+    pauseOpen_ = true; pauseWidget_ = w; pauseWidgetIndex_ = ObjectIndex(w); pauseIsMenu_ = false;
+    pauseCheckAt_ = 0; pauseScanAt_ = 0; pauseArmedUntil_ = GetTickCount() + 2000;
+    HSM_LOG("adapter: opened the game's screen %s", objectPath.c_str());
+    return w;
+}
+
 void Adapter::ConsoleCommand(const std::string& command) {
     UObject* ksl = nullptr;
     if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
@@ -2286,7 +2358,85 @@ UClass* Adapter::CrossbowBoltClass() {
     return boltClass_;
 }
 
-bool Adapter::GiveCrossbow(UObject* willie) {
+int Adapter::KeepQuiverFull(UObject* willie) {
+    UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
+    if (!cls) return -1;
+    bool holds = false;
+    for (const char* hand : {"Weapon R", "Weapon L"}) {
+        UObject** held = Field<UObject*>(willie, hand);
+        if (held && *held && !IsGarbage(*held) && IsA(*held, cls)) holds = true;
+    }
+    if (!holds) return -1;
+    UObject** quiver = Field<UObject*>(willie, "Attached Bolt Quiver");
+    if (!quiver || !*quiver || IsGarbage(*quiver) || (destroyAware_ && BeingDestroyed(*quiver))) {
+        Call(willie, "Attach Empty Quiver").invoke();
+        quiver = Field<UObject*>(willie, "Attached Bolt Quiver");
+    }
+    int32_t* count = quiver && *quiver ? Field<int32_t>(*quiver, "Projectile Count") : nullptr;
+    if (!count) return 0;
+    const int before = *count, after = EndlessBolts(before, kCrossbowStartBolts);
+    if (after == before) return 0;
+    *count = after;
+    Call(*quiver, "Rearrange Projectiles").invoke();   // racks the bolts on the quiver mesh, as GiveCrossbow does
+    if (int32_t* inQuiver = Field<int32_t>(willie, "Bolts in Quiver")) *inQuiver = after;
+    return after - before;
+}
+
+// The crossbow `willie` holds in either hand, else null.
+static UObject* HeldCrossbow(UObject* willie) {
+    UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
+    if (!cls) return nullptr;
+    for (const char* hand : {"Weapon R", "Weapon L"}) {
+        UObject** held = Field<UObject*>(willie, hand);
+        if (held && *held && !IsGarbage(*held) && IsA(*held, cls)) return *held;
+    }
+    return nullptr;
+}
+
+// "Event Load String" draws the string onto its peg (String Loaded, what fire and Load Bolt gate on), "Event Add Bolt"
+// spawns the bolt and the game seats it itself a second later ("Event Load Bolt" with that bolt). String Loaded is also
+// set directly in case the string event is missing or blocked (Block String Loading). A crossbow whose Load Bolt takes
+// no bolt (an older game build) is seated here.
+bool Adapter::ArmCrossbow(UObject* willie) {
+    UObject* x = HeldCrossbow(willie);
+    if (!x) return false;
+    Call string(x, "Event Load String");
+    if (string.valid()) string.invoke();
+    Call add(x, "Event Add Bolt");
+    bool armed = SetBool(x, "String Loaded", true) && add.invoke();
+    Call load(x, "Event Load Bolt");
+    if (armed && load.valid() && !FindProperty(load.function(), "Loaded Ammo")) armed = load.invoke();
+    return armed;
+}
+
+int Adapter::CrossbowArmed(UObject* willie) {
+    UObject* x = HeldCrossbow(willie);
+    if (!x) return -1;
+    bool loaded = false;
+    return GetBool(x, "String Loaded", loaded) && loaded ? 1 : 0;
+}
+
+int Adapter::TakeCrossbow(UObject* willie) {
+    UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
+    if (!cls) return 0;
+    int taken = 0;
+    for (int h = 0; h < 2; ++h) {
+        UObject** held = Field<UObject*>(willie, h == 0 ? "Weapon R" : "Weapon L");
+        if (!held || !*held || IsGarbage(*held) || !IsA(*held, cls)) continue;
+        UObject* x = *held;
+        uint8_t* grip = Field<uint8_t>(willie, h == 0 ? "R_GripType_Current" : "L_GripType_Current");
+        if (grip && *grip != 0) {                       // the hand lets go first, as DropHeldWeapons does
+            Call c(willie, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
+            c.set<bool>(h == 0 ? "Dropped With no Damage" : "Dropped with No Damage", true);
+            c.invoke();
+        }
+        DestroyActor(x);
+        ++taken;
+    }
+    return taken;
+}
+
+bool Adapter::GiveCrossbow(UObject* willie, bool arm) {
     UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
     if (!cls) { HSM_LOG("crossbow: not given, the class is missing"); return false; }
     // An occupied right hand lets go first, as a fallen bot's loot does (a grip type of 0 would destroy the weapon).
@@ -2322,25 +2472,15 @@ bool Adapter::GiveCrossbow(UObject* willie) {
         if (UObject* gi = GameInstance())
             if (int32_t* carried = Field<int32_t>(gi, "Carried Bolt Count"))
                 if (*carried > 0) bolts = *carried;
+        if (!arm) bolts = 0;                            // Roulette's crossbow: an empty quiver, nothing to reload
         if (int32_t* n = Field<int32_t>(*quiver, "Projectile Count")) *n = bolts;
         Call(*quiver, "Rearrange Projectiles").invoke();   // racks the bolts on the quiver mesh, as the game's respawn path does
         if (int32_t* inQuiver = Field<int32_t>(willie, "Bolts in Quiver")) *inQuiver = bolts;
     }
 
-    // Hand it armed: "Event Load String" draws the string onto its peg (String Loaded, what fire and Load Bolt gate on),
-    // "Event Add Bolt" spawns the bolt and the game seats it itself a second later ("Event Load Bolt" with that bolt).
-    // String Loaded is also set directly in case the string event is missing or blocked (Block String Loading). A
-    // crossbow whose Load Bolt takes no bolt (an older game build) is seated here. A step that fails to invoke just leaves
-    // the cocking to the game's own reload, which now has the quiver it needs.
-    bool armed = false;
-    if (inHand && bolts > 0) {
-        Call string(x, "Event Load String");
-        if (string.valid()) string.invoke();
-        Call add(x, "Event Add Bolt");
-        armed = SetBool(x, "String Loaded", true) && add.invoke();
-        Call load(x, "Event Load Bolt");
-        if (armed && load.valid() && !FindProperty(load.function(), "Loaded Ammo")) armed = load.invoke();
-    }
+    // Hand it armed (ArmCrossbow). A step that fails to invoke just leaves the cocking to the game's own reload, which
+    // now has the quiver it needs. Roulette's crossbow (an empty quiver) stays unarmed.
+    const bool armed = inHand && bolts > 0 && ArmCrossbow(willie);
     HSM_LOG("adapter: crossbow given to %s: in hand %s, quiver %s, %d bolt(s), %s", ObjectName(willie).c_str(), inHand ? "yes" : "NO",
             quiver && *quiver ? "yes" : "NO", bolts, armed ? "string drawn, bolt on its way" : "not armed");
     if (!inHand) DestroyActor(x);                   // never leave a loose crossbow behind a failed pick-up
@@ -2701,10 +2841,17 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     return w;
 }
 
-// Abyss_Map_Open_EA_C::Spawn_NPC builds a procedural Abyss enemy (decomp Maps/Abyss_Map_Open_EA.cpp:175).
-UObject* Adapter::SpawnAbyssNpc(const FVector& at) {
+// Abyss_Map_Open_EA_C::Spawn_NPC builds a procedural Abyss enemy (decomp Maps/Abyss_Map_Open_EA.cpp:175). In Free Mode it
+// rolls the passport's tier from the level's own "Abyss Tier" byte (Clamp(tier - rand(0, tier / 2), 0, 7), line 212), which
+// the level raises as its own fights are won and the mod never touched: every zombie came out at tier 0 (#1832). The byte is
+// set to the wave's rank for this one call and put back after it.
+UObject* Adapter::SpawnAbyssNpc(const FVector& at, int tier) {
     std::vector<UObject*> level = FindInstances("Abyss_Map_Open_EA_C");
     if (level.empty()) return nullptr;
+    uint8_t* tierField = Field<uint8_t>(level[0], "Abyss Tier");
+    const uint8_t hadTier = tierField ? *tierField : 0;
+    if (tierField) *tierField = uint8_t(std::clamp(tier, 0, 7));
+    else { static bool warned = false; if (!warned) { warned = true; HSM_LOG("adapter: the Abyss level has no 'Abyss Tier' field; zombies spawn at the level's own tier"); } }
     FTransform t; t.translation = at;
     Call c(level[0], "Spawn NPC");
     c.set("SpawnTransform", t);
@@ -2716,6 +2863,7 @@ UObject* Adapter::SpawnAbyssNpc(const FVector& at) {
     if (had) SetBool(gi, "Disable Revenants", false);
     UObject* npc = c.invoke() ? c.get<UObject*>("ReturnValue") : nullptr;
     if (had) SetBool(gi, "Disable Revenants", true);
+    if (tierField) *tierField = hadTier;   // the level's own count of tiers is not ours to move
     return npc;
 }
 
@@ -2749,12 +2897,13 @@ UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamI
     return bot;
 }
 
-void Adapter::SuppressStockScreens(bool on, bool ownerMatch) {
+void Adapter::SuppressStockScreens(bool on, bool ownerMatch, bool swallowPause) {
     // Remove widgets suppressed since the last tick (never from inside their own construction).
     for (auto& [w, index] : g_suppressed) if (ObjectAt(index) == w) Call(w, "RemoveFromParent").invoke();
     g_suppressed.clear();
     g_suppressScreens = on;
     g_suppressOwnerScreens = on && ownerMatch;
+    g_swallowPause = on && swallowPause;
     if (g_screenHooks) return;
     g_screenHooks = true;
     HookFunctionsMatching([](const std::string& n) { return n == "Construct"; }, [this](UObject* obj, UFunction*, void*) {
@@ -2764,6 +2913,15 @@ void Adapter::SuppressStockScreens(bool on, bool ownerMatch) {
             bool played = false;
             if (UObject* gi = GameInstance()) GetBool(gi, "First Start Intro Played", played);
             if (!played) return false;
+            g_suppressed.push_back({obj, ObjectIndex(obj)});
+            return true;
+        }
+        // mod_pause=1 in a session match: the mod's panel is the pause menu. Willie's Esc action is blocked, so a pause
+        // screen only comes from a settings screen's Back or Esc ("Go Back To"): skipping its Construct means no pause, no
+        // input-mode change and no cursor change; it is removed next tick and the panel shows again (session.cpp ModPauseTick).
+        if (g_swallowPause && ObjectName(reinterpret_cast<UObject*>(ClassOf(obj))).find("UI_Pause") != std::string::npos) {
+            ++pauseSwallowed_;
+            HSM_LOG("adapter: the game's pause screen was swallowed (mod pause menu)");
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;
         }

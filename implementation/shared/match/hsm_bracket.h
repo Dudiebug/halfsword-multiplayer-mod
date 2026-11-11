@@ -8,6 +8,8 @@
 //   Report     the winner of the current game; a bye settles on its own
 //   Remove     a player who left: his place becomes a bye from where he stands, so the opponent in his next unplayed game
 //              advances (a forfeit in the game being fought, a bye in one not yet played); a player already out stays out
+//   Replace    a newcomer takes the whole seat of a player who left before winning a fight (#1429): the seed and every
+//              place he came through are the newcomer's, so the bracket still holds together on the wire
 //   Restore    the same bracket on a client, from the wire (seeds in seed order, the winner of every game in play order)
 //
 // Node values: kUnknown (the game feeding the place is not decided), 0 (empty: a bye, or a player who left) or the entity.
@@ -20,7 +22,7 @@
 
 namespace hsm {
 
-constexpr size_t kMaxBracketPlayers = 16;
+constexpr size_t kMaxBracketPlayers = 32;   // 20 players at most: a bracket of 32 places
 constexpr uint8_t kBracketEmpty = 0xFF;   // wire: this game's winner place is empty (a bye with nobody behind it, or the player left)
 
 // The places of a bracket of `size` (a power of two) in order, each holding the seed that sits there (1 = the top seed).
@@ -140,6 +142,22 @@ public:
         return true;
     }
 
+    // In the running with no fought game behind him: every game he came through was a bye. Such a seat can change hands
+    // whole without rewriting a game somebody played.
+    bool Unfought(uint8_t e) const {
+        int r = 0, i = 0;
+        if (!InRunning(e) || !Position(e, r, i)) return false;
+        const auto at = std::find(node_[0].begin(), node_[0].end(), int16_t(e)) - node_[0].begin();
+        for (int k = 0; k < r; ++k) if (node_[size_t(k)][size_t((at >> k) ^ 1)] != 0) return false;
+        return true;
+    }
+    // `to` takes `from`'s seat: false unless `from` is Unfought and `to` is a valid entity not in the bracket (or `from`).
+    bool Replace(uint8_t from, uint8_t to) {
+        if (!Unfought(from) || to == 0 || to == kBracketEmpty || (to != from && Contains(to))) return false;
+        for (uint8_t& s : seeds_) if (s == from) s = to;
+        for (auto& row : node_) for (int16_t& v : row) if (v == int16_t(from)) v = int16_t(to);
+        return true;
+    }
     bool Done() const { return valid() && node_[size_t(rounds_)][0] != kUnknown; }
     uint8_t Champion() const { return Done() && node_[size_t(rounds_)][0] > 0 ? uint8_t(node_[size_t(rounds_)][0]) : uint8_t(0); }
     bool Contains(uint8_t e) const { int r, i; return Position(e, r, i); }
@@ -158,6 +176,16 @@ public:
         if (k == 2) return "Semi-final";
         if (k == 3) return "Quarter-final";
         return "Round of " + std::to_string(Size() >> round);
+    }
+    // A game's two places and its winner, for the Tab board's bracket: the entity, 0 (empty) or -1 (not decided yet).
+    struct Places { int a = -1, b = -1, winner = -1; };
+    Places PlacesOf(int round, int index) const {
+        Places p;
+        if (round < 0 || round >= rounds_ || index < 0 || index >= GamesInRound(round)) return p;
+        p.a = node_[size_t(round)][size_t(2 * index)];
+        p.b = node_[size_t(round)][size_t(2 * index + 1)];
+        p.winner = node_[size_t(round + 1)][size_t(index)];
+        return p;
     }
     // A game that is no bye: the places it needs both hold (or will hold) a player.
     bool IsBye(int round, int index) const {

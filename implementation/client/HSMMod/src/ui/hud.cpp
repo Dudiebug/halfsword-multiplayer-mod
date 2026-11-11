@@ -12,9 +12,12 @@ using namespace hsm::ue;
 namespace {
 
 constexpr int32_t kZOrder = 50;
-constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = 12;   // eight fighters, three team bands, slack
+constexpr size_t kStripBlocks = 4, kFeedSpans = 3, kBoardRows = kBoardRowBudget;   // twenty fighters and four team bands; or a Tournament's fighters and the bracket lines that fit (FitBracket)
 constexpr Rgba kOutline{0, 0, 0, 0.9f}, kClear{0, 0, 0, 0};
 constexpr Rgba kMine{0.95f, 0.55f, 0.08f, 0.45f};   // our own scoreboard row: the amber of the game's pressed button, under the ink
+// #3056: at the results the banner is a headline, not a wall across the middle of the screen, and the board sits in a corner.
+constexpr float kResultsBannerScale = 0.6f, kResultsSubScale = 0.85f;
+constexpr Anchors kBoardMiddle{{0.5, 0.17}, {0.5, 0.17}}, kBoardCorner{{0.985, 0.97}, {0.985, 0.97}};
 
 struct Block { Box column; Panel panel; Text label, score; };
 struct FeedLine { Panel panel; std::array<Text, kFeedSpans> spans; };
@@ -37,7 +40,7 @@ struct State {
     UObject* statics = nullptr; UObject* layout = nullptr;                                                      // CDOs, resolved once
     Format tagFormat = Format::Duel;
     bool tagsOff = false;                                                                                       // a name was not found: hidden for good
-    Blur board; Text boardTitle, boardFooter; BoardLine boardHeader; std::array<BoardLine, kBoardRows> boardLines;
+    Blur board; Slot boardSlot{nullptr}; bool boardInCorner = false; Text boardTitle, boardFooter; BoardLine boardHeader; std::array<BoardLine, kBoardRows> boardLines;
 } g;
 
 // Text in the game's font with a dark outline.
@@ -196,7 +199,8 @@ void BuildBoard(Canvas& root) {
     g.board = g.kit.MakeBlur();
     // The game's scroll is opaque: nothing to blur, and a blur showed as a grey box round its rods. Classic: smoke over a blur.
     g.board.Strength(style::ParchmentMenus() ? 0.f : 8.f);
-    root.Add(g.board).Anchor({{0.5, 0.17}, {0.5, 0.17}}, {0.5, 0}).AutoSize().Z(kZOrder + 2);
+    g.boardSlot = root.Add(g.board);
+    g.boardSlot.Anchor(kBoardMiddle, {0.5, 0}).AutoSize().Z(kZOrder + 2);
     Panel back = MakeArt(skin::Art::Scroll, {36, 14, 26, 34});   // the game's scroll, inside its rods
     g.board.Content(back);
     Box col = g.kit.MakeColumn();
@@ -299,13 +303,13 @@ void Line(Text& t, const std::string& s, bool show) {
     t.Show(show);
 }
 
-void Apply(Text& t, const SceneText& s) {
+void Apply(Text& t, const SceneText& s, float scaleMul = 1.f) {
     t.Show(s.visible);
     if (!s.visible) return;
     t.Set(s.text);
     t.Color(s.color);
     t.Opacity(s.opacity);
-    t.Scale(s.scale);
+    t.Scale(s.scale * scaleMul);
 }
 
 void ApplyTop(const HudScene& s) {
@@ -361,26 +365,32 @@ void ApplyFeed(const std::vector<FeedView>& feed) {
 }
 
 void ApplyBoardLine(BoardLine& l, const BoardRow& r) {
-    bool band = r.kind == BoardRow::Kind::Band;
+    bool band = r.kind == BoardRow::Kind::Band || r.kind == BoardRow::Kind::Stage;
+    bool bracket = r.kind == BoardRow::Kind::Stage || r.kind == BoardRow::Kind::Game;   // the bracket's lines: a name, no columns
     l.frame.Color(r.local ? (style::ClassicMenus() ? style::kBlood : kMine) : kClear);
     l.panel.Color(band ? Rgba{r.swatch.r, r.swatch.g, r.swatch.b, 0.30f} : kClear);
-    l.swatch.Color(band ? kClear : r.swatch);
+    l.swatch.Color(band || bracket ? kClear : r.swatch);
     l.name.Set(r.tag.empty() ? r.name : r.name + "  " + r.tag); Ink(l.name, r.ink);
     l.badge.Set(r.host ? "HOST" : "");
-    l.kills.Set(band ? "" : std::to_string(r.kills)); Ink(l.kills, r.ink);
-    l.deaths.Set(band ? "" : std::to_string(r.deaths)); Ink(l.deaths, r.ink);
-    l.score.Set(std::to_string(r.score)); Ink(l.score, r.ink);
-    l.ping.Set(band || !r.pingMs ? "" : std::to_string(r.pingMs) + " ms");
+    l.kills.Set(band || bracket ? "" : std::to_string(r.kills)); Ink(l.kills, r.ink);
+    l.deaths.Set(band || bracket ? "" : std::to_string(r.deaths)); Ink(l.deaths, r.ink);
+    l.score.Set(bracket ? "" : std::to_string(r.score)); Ink(l.score, r.ink);
+    l.ping.Set(band || bracket || !r.pingMs ? "" : std::to_string(r.pingMs) + " ms");
     l.status.Set(r.dead ? "DEAD" : r.down ? "DOWN" : "");
 }
 
 void ApplyBoard(const Board& b) {
     g.board.Show(b.visible);
     if (!b.visible) return;
+    if (b.results != g.boardInCorner && g.boardSlot) {   // the results board in the bottom right corner, the Tab board in the middle
+        g.boardInCorner = b.results;
+        g.boardSlot.Anchor(b.results ? kBoardCorner : kBoardMiddle, b.results ? Vec2{1, 1} : Vec2{0.5, 0});
+    }
     g.boardTitle.Set(b.title);
+    const size_t n = b.rows.size() + b.bracket.size();       // the fighters, then a Tournament's bracket (Tab)
     for (size_t i = 0; i < g.boardLines.size(); ++i) {
-        g.boardLines[i].frame.Show(i < b.rows.size());
-        if (i < b.rows.size()) ApplyBoardLine(g.boardLines[i], b.rows[i]);
+        g.boardLines[i].frame.Show(i < n);
+        if (i < n) ApplyBoardLine(g.boardLines[i], i < b.rows.size() ? b.rows[i] : b.bracket[i - b.rows.size()]);
     }
     Line(g.boardFooter, b.footer, !b.footer.empty());
 }
@@ -424,8 +434,8 @@ void HudTick(const HudScene& s, const std::vector<NameTagSrc>& tags, Format form
     }
     if (!g.built && !Build()) return;
     ApplyTop(s);
-    Apply(g.banner, s.banner);
-    Apply(g.bannerSub, s.bannerSub);
+    Apply(g.banner, s.banner, s.board.results ? kResultsBannerScale : 1.f);
+    Apply(g.bannerSub, s.bannerSub, s.board.results ? kResultsSubScale : 1.f);
     ApplyHold(s.hold);
     ApplyDead(s.dead);
     ApplyFeed(s.feed);

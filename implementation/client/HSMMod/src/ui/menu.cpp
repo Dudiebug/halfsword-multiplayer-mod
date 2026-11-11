@@ -43,6 +43,8 @@ using mp::Card;
 using mp::Flat;
 using mp::Paint;
 constexpr float kChatHeight = 170;                // the chat log's frame, in px
+constexpr int kMemberRowsShown = 8;               // the players list: eight rows as ever ...
+constexpr float kMoreMembersHeight = 150;         // ... and the rest of a bigger lobby (up to 20) in a scrolling frame, in px
 constexpr Rgba kClear{1, 1, 1, 0};                  // a Button's own brush, hidden: the frame and face are ours
 constexpr float kStartGlow = 0.2f;                  // START under the mouse: this far from the accent to its ink (text stays >= 4.5)
 
@@ -101,6 +103,17 @@ constexpr size_t kTabCount = 5;                      // MODE, RULES, MAP, MODS, 
 constexpr size_t kModsTab = 3, kClassesTab = 4;
 constexpr size_t kSectionCount = size_t(LobbySection::Count);
 
+// A name row: a text box with SET and CLEAR and a line under it (the host's lobby name, the player's nickname).
+struct NameRow {
+    Box box;
+    EditBox text;
+    Flat set, clear;
+    Text note;
+    bool focused = false, enterDown = false;
+    std::string filled;                      // the saved name the box was last filled with
+    std::string refused;                     // why the last SET was refused ("" when it was taken)
+};
+
 struct State {
     UObject* worldContext = nullptr;
     UClass* menuClass = nullptr;
@@ -147,7 +160,9 @@ struct State {
     // Not in a lobby: HOST on the left, the browser on the right. In one: players and chat left, the tabs right.
     Box mainRow, idleLeft, inLeft, idleRight, inRight, settingsView;
     HostView hostFriends, hostPublic;
-    Flat refresh, invite, readyUp, balance, leave, close, settingsOpen, alone;
+    Flat refresh, invite, readyUp, balance, shuffle, leave, close, settingsOpen, alone;   // shuffle: SHUFFLE NOW (Lobby::ShuffleTeamsNow)
+    std::array<Flat, 1 + kWeaponTypeCount> weaponChips;   // the Weapons row's ticks: Any, then the game's types 1..7 (SettingRow::chips)
+    std::array<Box, 2> weaponChipRows;
     bool aloneArmed = false;
     std::array<Flat, kFilterChips> chips;
     Text browserCount, browserEmpty;
@@ -170,9 +185,9 @@ struct State {
     bool reportOpenNow = false;
     bool reportTyping = false;   // the report box has the keyboard (MenuTyping)
     Flat helpToggle;                         // HELP IMPROVE THE MOD: ON/OFF (SETTINGS)
-    Flat lookToggle;                         // MENU LOOK: GAME ART / DARK / CLASSIC (SETTINGS); ui_style, used from the next start
+    Flat lookToggle;                         // MENU LOOK: CLASSIC / GAME ART / DARK (SETTINGS); ui_style, used from the next start
     Text lookNote;
-    style::MenuLook look = style::MenuLook::Game; bool lookSaved = true;   // what HSMMod.ini will say at the next start; written
+    style::MenuLook look = style::MenuLook::Classic; bool lookSaved = true;   // what HSMMod.ini will say at the next start; written
     mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
@@ -188,6 +203,11 @@ struct State {
     Flat pwSet, pwClear;
     Text pwHostNote;
     bool pwHostFocused = false, pwHostEnterDown = false;
+    NameRow lobbyName;                       // the host's lobby name row in the lobby (SET / CLEAR); only the host sees it
+    NameRow nickname;                        // SETTINGS: the nickname the other players see instead of the Steam name
+    Flat hideToggle;                         // SETTINGS: HIDE PLAYER NAMES: ON/OFF
+    Text hideNote;
+    Flat regionPick;                         // the region picker at the top right of the page: Auto, NA East ...
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
     std::array<ChatRow, kChatLogLines> chatRows;
@@ -198,6 +218,7 @@ struct State {
     std::vector<BrowserView> rows;           // kBrowserRows
     std::vector<uint64_t> rowLobbies;        // the Steam lobby each shown row joins
     std::vector<MemberView> members;         // kMaxLobbyMembers
+    Fixed moreMembers;                       // the scrolling frame of the rows past kMemberRowsShown; shown in a bigger lobby only
     std::vector<steam::SteamId> memberIds;
     std::vector<Avatar> avatars;
     bool avatarFailLogged = false;
@@ -451,12 +472,15 @@ void BuildIdleRight() {
     if (title) AddToHorizontalBox(head, title, 0, 16).Align(HAlign::Left, VAlign::Center);
     g.browserCount = NewText("", 14, style::kMenuDim);
     if (g.browserCount) AddToHorizontalBox(head, g.browserCount, 1, 12).Align(HAlign::Left, VAlign::Center);
+    g.chips[kRegionChip] = MakeFlat("", 14, {12, 4, 12, 4});   // the region filter sits by REFRESH; the other chips have their own row
+    AddFlatH(head, g.chips[kRegionChip], 8);
     g.refresh = MakeFlat("REFRESH", 15, {14, 5, 14, 5});
     AddFlatH(head, g.refresh, 0);
     AddToVerticalBox(col, chips, 12);
-    for (Flat& c : g.chips) {
-        c = MakeFlat("", 14, {12, 4, 12, 4});
-        AddFlatH(chips, c, 8);
+    for (size_t i = 0; i < g.chips.size(); ++i) {
+        if (i == kRegionChip) continue;
+        g.chips[i] = MakeFlat("", 14, {12, 4, 12, 4});
+        AddFlatH(chips, g.chips[i], 8);
     }
     FillVerticalBox(col, list, 12);
     for (size_t i = 0; i < kBrowserRows; ++i) {
@@ -504,11 +528,48 @@ void BuildPasswordRow(Box& left) {
     g.pwHostBox.Show(false);
 }
 
+// A name row under `parent`: the rubric, a text box with SET and CLEAR, and a line under it. HandleNameRow runs it.
+void BuildNameRow(NameRow& r, Box& parent, const std::string& title, const std::string& hint, float padTop) {
+    r.box = g.kit.MakeColumn();
+    Box input = g.kit.MakeRow();
+    r.text = g.kit.MakeEditBox();
+    r.set = MakeFlat("SET", 15, {14, 5, 14, 5});
+    r.clear = MakeFlat("CLEAR", 15, {14, 5, 14, 5});
+    r.note = NewText("", 13, style::kMenuDim);
+    if (!r.box || !input || !r.text || !r.set.card || !r.clear.card || !r.note) {
+        HSM_LOG("ui: the %s row could not be made", title.c_str());
+        r.box = Box{};
+        return;
+    }
+    Section(r.box, title, 0);
+    r.text.Hint(hint);
+    AddToHorizontalBox(input, r.text, 1, 8).Align(HAlign::Fill, VAlign::Center);
+    AddFlatH(input, r.set, 8); AddFlatH(input, r.clear, 0);
+    AddToVerticalBox(r.box, input, 6);
+    r.note.Wrap(true);
+    AddToVerticalBox(r.box, r.note, 4);
+    AddToVerticalBox(parent, r.box, padTop);
+}
+
 // In a lobby, left: the players (the host clicks one to move them to the next team), the lobby's buttons, the chat.
 void BuildInLeft() {
     Box& col = g.inLeft;
     g.playersTitle = Section(col, "PLAYERS", 0);
+    // The first eight rows are laid out as ever. A bigger lobby (up to 20) lists the rest under them in a scrolling frame,
+    // which is hidden until a ninth player is in.
+    g.moreMembers = g.kit.MakeFixed();
+    Box moreList = g.kit.MakeScroll(), moreRows = g.kit.MakeColumn();
+    const bool more = g.moreMembers && moreList && moreRows;
+    if (!more) { g.moreMembers = Fixed{}; HSM_LOG("ui: the players list's scrolling frame could not be made; rows past eight follow the others"); }
     for (int i = 0; i < game::kMaxLobbyMembers; ++i) {
+        if (i == kMemberRowsShown && more) {
+            g.moreMembers.Height(kMoreMembersHeight);
+            g.moreMembers.Content(moreList).Align(HAlign::Fill, VAlign::Fill);
+            moreList.Add(moreRows);
+            AddToVerticalBox(col, g.moreMembers, 6);
+            g.moreMembers.Show(false);
+        }
+        Box& into = i >= kMemberRowsShown && more ? moreRows : col;
         MemberView v;
         Box row = g.kit.MakeRow();
         v.swatch = g.kit.MakeIcon(); v.avatar = g.kit.MakeIcon(); v.ready = g.kit.MakeIcon();
@@ -524,7 +585,7 @@ void BuildInLeft() {
             AddToHorizontalBox(row, v.ready, 0, 0).Align(HAlign::Left, VAlign::Center);
             v.card = MakeCard(row, {8, 5, 12, 5});
         }
-        if (v.card) { AddToVerticalBox(col, v.card.button, 6).Align(HAlign::Fill, VAlign::Fill); v.card.button.Show(false); }
+        if (v.card) { AddToVerticalBox(into, v.card.button, 6).Align(HAlign::Fill, VAlign::Fill); v.card.button.Show(false); }
         g.members.push_back(v);                 // kept even if empty: g.members[i] is the scene's roster[i]
     }
     g.memberIds.assign(g.members.size(), 0);
@@ -532,12 +593,13 @@ void BuildInLeft() {
     g.invite = MakeFlat("INVITE FRIENDS", 15, {14, 6, 14, 6});
     g.readyUp = MakeFlat("Mark me ready", 15, {14, 6, 14, 6});
     g.balance = MakeFlat("AUTO-BALANCE", 15, {14, 6, 14, 6});
+    g.shuffle = MakeFlat("SHUFFLE NOW", 15, {14, 6, 14, 6});
     g.leave = MakeFlat("LEAVE LOBBY", 15, {14, 6, 14, 6});
     if (actions1 && actions2) {
         AddToVerticalBox(col, actions1, 14);
         AddToVerticalBox(col, actions2, 8);
         AddFlatH(actions1, g.invite, 8); AddFlatH(actions1, g.readyUp, 0);
-        AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.leave, 0);
+        AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.shuffle, 8); AddFlatH(actions2, g.leave, 0);
     }
     g.classRow = g.kit.MakeRow();
     g.classRowText = NewText("", 15, style::kMenuText);
@@ -548,6 +610,8 @@ void BuildInLeft() {
         AddToVerticalBox(col, g.classRow, 14);
         g.classRow.Show(false);
     }
+    BuildNameRow(g.lobbyName, col, "LOBBY NAME", "Lobby name (up to 32 characters)", 14);
+    if (g.lobbyName.box) g.lobbyName.box.Show(false);
     BuildPasswordRow(col);
     BuildChat(col);
 }
@@ -798,6 +862,17 @@ void BuildRulesTab(Box& page) {
         else if ((LobbyRow(i) == LobbyRow::DeadWeight || LobbyRow(i) == LobbyRow::WeaponWeight) && BuildWeightValue(LobbyRow(i), valueBox)) v.value = Text{};   // the same
         else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(home, v.box, 10);
+        if (LobbyRow(i) == LobbyRow::Weapons) {   // the types to tick, in two rows of four under the row's text
+            for (size_t r = 0; r < g.weaponChipRows.size(); ++r) {
+                g.weaponChipRows[r] = g.kit.MakeRow();
+                if (g.weaponChipRows[r]) AddToVerticalBox(home, g.weaponChipRows[r], r ? 4 : 6);
+            }
+            for (size_t k = 0; k < g.weaponChips.size(); ++k) {
+                g.weaponChips[k] = MakeFlat(WeaponTypeName(uint8_t(k)), 13, {10, 4, 10, 4});
+                Box& row = g.weaponChipRows[k < 4 ? 0 : 1];
+                if (row) AddFlatH(row, g.weaponChips[k], 6);
+            }
+        }
         g.steppers.push_back(v);
     }
 }
@@ -1057,6 +1132,15 @@ void BuildSettingsView(Box& col) {
                          "crashes. Steam IDs, IPs and your Windows user name are removed; player names stay. Off unless you turn it on.",
                          14, style::kMenuDim);
     if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(col, g.helpNote, 8); }
+    // NICKNAME: what the other players see instead of the Steam name. HIDE PLAYER NAMES: what this screen shows for them.
+    BuildNameRow(g.nickname, col, "NICKNAME", "Nickname (up to 24 characters)", 28);
+    Section(col, "HIDE PLAYER NAMES", 28);
+    g.hideToggle = MakeFlat("HIDE PLAYER NAMES: OFF", 17);
+    AddFlat(col, g.hideToggle, 8);
+    g.hideNote = NewText("When on, every other player shows as Player 1, Player 2 ... on your screen only: name tags, chat, the "
+                         "scoreboard, the kill feed and the lobby page. For streams and clips. Yours is not hidden.",
+                         14, style::kMenuDim);
+    if (g.hideNote) { g.hideNote.Wrap(true); AddToVerticalBox(col, g.hideNote, 8); }
     // MENU LOOK: the game's own art (the default), dark, or the earlier look. The widgets are built once, so it takes effect at the next start.
     Section(col, "MENU LOOK", 28);
     g.look = style::CurrentMenuLook();
@@ -1136,7 +1220,9 @@ bool BuildPanel() {
     g.pillFrame.Padding({1, 1, 1, 1});
     g.pillFrame.Content(g.pill);
     AddToHorizontalBox(header, g.pillFrame, 0, 18).Align(HAlign::Left, VAlign::Center);
-    if (g.badge) AddToHorizontalBox(header, g.badge, 0, 0).Align(HAlign::Left, VAlign::Center);
+    if (g.badge) AddToHorizontalBox(header, g.badge, 0, 18).Align(HAlign::Left, VAlign::Center);
+    g.regionPick = MakeFlat("REGION: AUTO", 14, {12, 4, 12, 4});   // top right: steps Auto, NA East ... (Session::SetRegionPick)
+    AddFlatH(header, g.regionPick, 0);
     rule.Height(3);
     rule.Content(ruleLine);
     ruleLine.Color(style::kMenuAccent);
@@ -1275,14 +1361,14 @@ LobbyLocal Local(game::Lobby& lobby) {
             if (server && m.host) continue;   // role=server: the server is not a player
             LobbyPlayer p;
             p.name = m.name; p.host = m.host; p.ready = m.ready; p.me = m.id == steam::MySteamId();
-            p.team = m.team; p.hostOverride = m.hostOverride; p.build = m.build;
+            p.team = m.team; p.hostOverride = m.hostOverride; p.build = m.build; p.steamName = m.steamName;
             l.players.push_back(p);
         }
     }
     for (const game::LobbyListing& f : lobby.listings()) {
         LobbyFound o;
         o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
-        o.mods = f.mods;
+        o.mods = f.mods; o.region = f.region;
         o.switchable = f.switchable;
         if (f.switchable) o.switchTag = SwitchTag(f.plan);
         if (f.pack.any()) {   // the host's modpack, against this machine's files now (the hashes may still be running)
@@ -1314,7 +1400,13 @@ void PaintTabs() {
 // The scene's row for the i-th stepper (a LobbyRow value): the Players row is the lobby's own, not a match setting.
 const SettingRow* RowFor(const LobbyScene& s, size_t i) {
     if (i == size_t(LobbyRow::Players)) return s.hasPlayerLimit ? &s.playerLimit : nullptr;
+    if (i == size_t(LobbyRow::WinBy)) return s.hasWinBy ? &s.winBy : nullptr;           // the same
+    if (i == size_t(LobbyRow::Props)) return s.hasProps ? &s.props : nullptr;           // the same
+    if (i == size_t(LobbyRow::ClassPower)) return s.hasClassPower ? &s.classPower : nullptr;   // the same
+    if (i == size_t(LobbyRow::Strip)) return s.hasStrip ? &s.strip : nullptr;           // the same
+    if (i == size_t(LobbyRow::KeepKit)) return s.hasKeepKit ? &s.keepKit : nullptr;     // the same
     if (i == size_t(LobbyRow::Scenario)) return s.hasScenario ? &s.scenario : nullptr;   // like the player limit, apart from the match settings
+    if (i == size_t(LobbyRow::TimeOfDay)) return s.hasTimeOfDay ? &s.timeOfDay : nullptr;
     for (const SettingRow& r : s.settings) if (size_t(r.id) == i) return &r;
     return nullptr;
 }
@@ -1331,6 +1423,7 @@ void Draw(const LobbyScene& s) {
     g.pillFrame.Color(skin::Loaded(skin::Art::Card) ? kClear : style::Faded(style::OnParchment(s.pill.color), 0.7f));
     g.me.Set(s.me);
     g.badge.Set(s.badge);
+    g.regionPick.label.Set("REGION: " + s.regionButton);
     g.status.Set(s.status);
     g.status.Show(!s.status.empty());
 
@@ -1379,13 +1472,14 @@ void Draw(const LobbyScene& s) {
     }
 
     g.playersTitle.Set(skin::Title(s.playersTitle.empty() ? "PLAYERS" : s.playersTitle));
+    if (g.moreMembers) g.moreMembers.Show(s.roster.size() > size_t(kMemberRowsShown));
     for (size_t i = 0; i < g.members.size(); ++i) {
         MemberView& v = g.members[i];
         bool show = i < s.roster.size();
         v.card.button.Show(show);
         if (!show) continue;
         const RosterRow& r = s.roster[i];
-        v.name.Set(r.name);
+        v.name.Set(r.steam.empty() ? r.name : r.name + "  (" + r.steam + ")");   // the host sees the Steam name behind a nickname
         v.badge.Show(r.host);
         v.team.Set(r.team + (r.moved ? " (moved)" : ""));
         v.team.Show(!r.team.empty());
@@ -1400,8 +1494,10 @@ void Draw(const LobbyScene& s) {
     g.readyUp.label.Color(s.readyOn ? style::kMenuOk : style::kMenuText);   // the dot's green
     g.readyUp.card.selected = s.readyOn;
     g.balance.card.button.Show(s.balance);
+    if (g.shuffle.card) g.shuffle.card.button.Show(s.shuffle);
     if (g.classRow) { g.classRow.Show(!s.classLine.empty()); g.classRowText.Set(s.classLine); }
     if (g.pwHostBox) { g.pwHostBox.Show(s.hostPassword); g.pwHostNote.Set(s.passwordNote); }
+    if (g.lobbyName.box) g.lobbyName.box.Show(s.hostPassword);   // the host's rows: password and name
     g.leave.card.button.Show(s.in);
     g.alone.card.button.Show(!s.in);   // not from a lobby: quitting there would drop everyone in it
 
@@ -1428,7 +1524,25 @@ void Draw(const LobbyScene& s) {
         v.value.Set(row->value);
         v.hint.Set(row->hint);
         v.hint.Show(!row->hint.empty());
-        for (Flat* f : {&v.prev, &v.next}) Live(f->card, row->enabled, 0.3f);
+        for (Flat* f : {&v.prev, &v.next}) {
+            Live(f->card, row->enabled, 0.3f);
+            if (f->card) f->card.button.Show(row->chips.empty());   // a row of chips is changed by its chips, not the arrows
+        }
+    }
+    {
+        const SettingRow* w = nullptr;
+        for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Weapons) w = &r;
+        const bool show = w && !w->chips.empty();
+        for (Box& b : g.weaponChipRows) if (b) b.Show(show);
+        for (size_t k = 0; k < g.weaponChips.size(); ++k) {
+            Flat& c = g.weaponChips[k];
+            if (!c.card) continue;
+            const bool on = show && k < w->chips.size() && w->chips[k].on;
+            if (show && k < w->chips.size()) c.label.Set(w->chips[k].label);
+            c.label.Color(on ? style::kMenuAccentInk : style::kMenuText);
+            c.card.selected = on;
+            Live(c.card, show && w->enabled, 0.3f);
+        }
     }
     for (size_t sct = 0; sct < kSectionCount; ++sct) {   // a section the mode has no rows in is not shown
         if (g.sectionTitles[sct]) g.sectionTitles[sct].Show(used[sct]);
@@ -1618,7 +1732,12 @@ void UpdatePanel(Session& session) {
     game::Lobby& lobby = session.lobby();
     LobbyLocal local = Local(lobby);
     local.filter = g.filter;
+    local.regionPick = session.RegionPick(); local.regionGuess = session.RegionGuessed();
+    local.filter.mine = EffectiveRegion(local.regionPick, local.regionGuess);   // "my region" in the browser
+    if (!session.Nickname().empty()) local.myName = session.Nickname();
+    if (session.HideNames()) for (LobbyPlayer& p : local.players) p.steamName.clear();   // no Steam name beside "Player 2"
     if (lobby.InClassesLobby()) local.myClass = session.ClassesOff() ? std::string(kHseClassName) : session.ClassLabel(session.ClassName());
+    local.classBudget = lobby.InClassesLobby() && !lobby.InUnrestrictedLobby();
     const LobbyScene scene = BuildLobbyScene(local);
     // Each shown row joins the listing it came from (the filters and the sort reorder them).
     const auto& list = lobby.listings();
@@ -1808,6 +1927,31 @@ void HandlePassword(Session& session, bool host) {
     }
 }
 
+// A name row's polls: SET (or Enter in the box) saves what is typed, CLEAR saves an empty name. `current` is the saved name, which
+// the box shows until the player types over it; `idle` is the line under the box. `save` answers "" when it took the text, else why
+// not (a name with a slur in it). While the box has the keyboard the game's hotkeys stay off, as in the chat box.
+template <class Save>
+void HandleNameRow(NameRow& r, bool shown, const std::string& current, const std::string& idle, Save save) {
+    const bool enter = mp::KeyDown(VK_RETURN);
+    const bool enterEdge = enter && !r.enterDown;
+    r.enterDown = enter;
+    if (!r.box || !shown) { r.focused = false; return; }
+    const bool focused = r.text.Focused();
+    const bool set = Clicked(r.set.card) || (enterEdge && (focused || r.focused));
+    const bool clear = Clicked(r.clear.card);
+    r.focused = focused;
+    if (focused) SetLobbyTyping(true);          // after HandleChat's own call: either box keeps the hotkeys off
+    Paint(r.set.card); Paint(r.clear.card);
+    if (set || clear) {
+        r.refused = save(clear ? std::string() : r.text.Value());
+        if (clear && r.refused.empty()) r.text.Clear();
+        g.nextText = 0;
+    }
+    if (!focused && r.filled != current) { r.filled = current; r.text.Set(current); }
+    r.note.Set(r.refused.empty() ? idle : r.refused);
+    r.note.Color(r.refused.empty() ? style::kMenuDim : style::kMenuWarn);
+}
+
 // START: the game's red button, brighter under the mouse (without the art: the accent face, a little toward its ink).
 void PaintStart() {
     if (!g.start) return;
@@ -1974,10 +2118,15 @@ void HandleClicks(Session& session) {
     g.helpToggle.card.selected = help;
     if (act(Clicked(g.updateNow.card), update::CanInstall())) update::StartInstall();
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
+    const bool hide = session.HideNames();
+    g.hideToggle.label.Set(hide ? "HIDE PLAYER NAMES: ON" : "HIDE PLAYER NAMES: OFF");
+    g.hideToggle.label.Color(hide ? style::kMenuOk : style::kMenuText);
+    g.hideToggle.card.selected = hide;
+    if (act(Clicked(g.hideToggle.card), g.settingsShown)) session.SetHideNames(!hide);
+    if (act(Clicked(g.regionPick.card), true)) session.SetRegionPick(NextRegion(session.RegionPick()));
     if (g.lookToggle.card) {
         if (act(Clicked(g.lookToggle.card), g.settingsShown)) {
-            g.look = g.look == style::MenuLook::Game ? style::MenuLook::Dark
-                   : g.look == style::MenuLook::Dark ? style::MenuLook::Classic : style::MenuLook::Game;
+            g.look = style::NextMenuLook(g.look);
             g.lookSaved = SaveUiStyle(g.look);
             HSM_LOG("ui: menu look set to %s for the next start%s", UiStyleName(g.look), g.lookSaved ? "" : " (HSMMod.ini could not be written)");
         }
@@ -1986,8 +2135,8 @@ void HandleClicks(Session& session) {
         const bool pending = g.look != style::CurrentMenuLook();
         g.lookNote.Set(!g.lookSaved ? "HSMMod.ini could not be written, so this will not stick. Set ui_style in it by hand."
                        : pending ? "Restart the game to see it."
-                                 : "Game art: the game's own parchment and lettering. Dark: that art, darkened. Classic: the "
-                                   "earlier look.");
+                                 : "Classic: the mod's own dark look (the default). Game art: the game's own parchment "
+                                   "and lettering. Dark: that art, darkened.");
         g.lookNote.Color(!g.lookSaved || pending ? style::kMenuWarn : style::kMenuDim);
     }
     // MODS: the checkboxes for this machine's lobbies, while that tab is what's on screen.
@@ -2093,7 +2242,7 @@ void HandleClicks(Session& session) {
         ClassSheet sheet = session.ClassValue();
         const ClassBars bars = ClassBarsFor(sheet);
         if (g.classBudget) {
-            const ClassBudgetView budget = ClassBudget(sheet, unrestricted);
+            const ClassBudgetView budget = ClassBudget(sheet, unrestricted, session.ClassPowerLimit());
             g.classBudget.Set(budget.text);
             g.classBudget.Color(budget.over ? style::kMenuAccentInk : style::kMenuText);
         }
@@ -2132,6 +2281,12 @@ void HandleClicks(Session& session) {
     if (g.settingsShown) g.voice.Tick(session);
     HandleChat(session, s.in && !g.settingsShown);
     HandlePassword(session, s.hostPassword && !g.settingsShown);
+    HandleNameRow(g.lobbyName, s.hostPassword && !g.settingsShown, session.LobbyName(),
+                  session.LobbyName().empty() ? "Empty: the list shows \"your name's fight\". Seen in the public list." : "Seen in the public list.",
+                  [&](const std::string& typed) { return session.SetLobbyName(typed); });
+    HandleNameRow(g.nickname, g.settingsShown, session.Nickname(),
+                  "Seen by the other players instead of your Steam name; the host also sees your Steam name. Empty: your Steam name.",
+                  [&](const std::string& typed) { return session.SetNickname(typed); });
     HandleDamage(lobby, s, acted);               // after the two boxes: its own text box keeps the hotkeys off too
     HandleWeights(lobby, s, acted);
     if (ClassesOpen(s) && g.classNameBox && g.classNameBox.Focused()) SetLobbyTyping(true);   // and the class name's, after all of them
@@ -2141,7 +2296,11 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.hostPublic.card), s.idle)) lobby.Host(steam::LobbyType::Public);
     if (act(Clicked(g.refresh.card), s.idle)) lobby.RefreshList();
     for (size_t i = 0; i < g.chips.size(); ++i)
-        if (act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) g.filter = ToggleFilter(g.filter, i);
+        if (act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) {
+            const LobbyDistance was = DistanceFor(g.filter);
+            g.filter = ToggleFilter(g.filter, i);
+            if (DistanceFor(g.filter) != was) { lobby.SetListDistance(DistanceFor(g.filter)); lobby.RefreshList(); }   // Steam looks farther (or not): ask again
+        }
     for (size_t i = 0; i < g.rows.size(); ++i)
         if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) {
             if (s.browser[i].locked) lobby.AskPassword(g.rowLobbies[i]);   // the question opens next frame; JOIN there joins
@@ -2152,6 +2311,7 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.invite.card), s.in)) lobby.Invite();
     if (act(Clicked(g.readyUp.card), s.ready)) lobby.SetReady(!s.readyOn);
     if (act(Clicked(g.balance.card), s.balance)) lobby.ClearOverrides();
+    if (act(Clicked(g.shuffle.card), s.shuffle)) lobby.ShuffleTeamsNow();
     if (act(Clicked(g.leave.card), s.in)) lobby.Leave();
     for (size_t i = 0; i < kTabCount; ++i) if (act(Clicked(g.tabs[i].card), s.in)) g.tab = i;
 
@@ -2190,6 +2350,15 @@ void HandleClicks(Session& session) {
             lobby.SetConfig(c);
         }
     }
+    {   // the Weapons row's chips: Any clears the ticks, a type toggles (match/hsm_match.h ToggleWeaponType)
+        const SettingRow* w = RowFor(s, size_t(LobbyRow::Weapons));
+        for (size_t k = 0; k < g.weaponChips.size(); ++k) {
+            if (!act(Clicked(g.weaponChips[k].card), g.tab == 1 && w && w->enabled && k < w->chips.size())) continue;
+            c.weapons = ToggleWeaponType(c.weapons, uint8_t(k));
+            lobby.SetConfig(c);
+            HSM_LOG("lobby: weapons row: %s", WeaponMaskName(c.weapons).c_str());
+        }
+    }
     for (size_t i = 0; i < kModRuleRows; ++i) {   // MODS: the host's rule steppers; written to HSMMod.ini [mod]
         StepperView& v = g.modRules[i];
         if (!v.box) continue;
@@ -2225,8 +2394,9 @@ void HandleClicks(Session& session) {
     }
 
     // Paint after the polls (a card's Hovered() is the one its Clicked() just saw).
-    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.leave, &g.close, &g.settingsOpen, &g.alone, &g.reportOpen,
-                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.lookToggle, &g.updateNow}) Paint(f->card);
+    for (Flat& f : g.weaponChips) Paint(f.card);
+    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.shuffle, &g.leave, &g.close, &g.settingsOpen, &g.alone, &g.reportOpen,
+                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.lookToggle, &g.updateNow, &g.hideToggle, &g.regionPick}) Paint(f->card);
     for (Flat& f : g.chips) Paint(f.card);
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Paint(h->card);
     for (BrowserView& v : g.rows) Paint(v.card);

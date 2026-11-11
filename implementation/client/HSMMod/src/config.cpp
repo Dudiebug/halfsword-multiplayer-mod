@@ -4,6 +4,8 @@
 #include "match/hsm_match.h"
 #include "match/hsm_roles.h"
 #include "session/hsm_cmdline.h"
+#include "session/hsm_player_names.h"
+#include "session/hsm_region.h"
 #include "session/hsm_roster.h"
 #include "session/hsm_ue4ss.h"
 #include "util/hsm_ini.h"
@@ -23,6 +25,17 @@ constexpr char kDefaultIni[] =
     "[net]\n"
     "role=steam\n"
     "name=Player\n"
+    "; what other players see instead of your Steam name (24 characters; empty: your Steam name). The SETTINGS box on the\n"
+    "; multiplayer page sets it.\n"
+    "nickname=\n"
+    "; 1: show every other player as Player 1, Player 2 ... on this screen only (name tags, chat, scores, kill feed, lobby\n"
+    "; page), for streams and clips; 0: their names. The SETTINGS page has the switch.\n"
+    "hide_names=0\n"
+    "; the name of the lobby you host (32 characters; empty: \"<your name>'s fight\"). The lobby page sets it.\n"
+    "lobby_name=\n"
+    "; your region for the lobby browser: auto (guessed from the nearest Steam relay), na-east, na-west, south-america,\n"
+    "; europe, asia or oceania. The picker at the top right of the multiplayer page sets it.\n"
+    "region=auto\n"
     "snapshot_hz=30\n"
     "input_hz=60\n"
     "; 1: skip unused input messages in owner mode with hand-off off; 0: always send (comparison/rollback)\n"
@@ -46,10 +59,14 @@ constexpr char kDefaultIni[] =
     "class_tags=1\n"
     "; 1: in a Classes lobby, each fighter's muscles show their class's Strength, on every screen; 0: the game's own look\n"
     "class_look=1\n"
+    "; 1: in Tag, whoever is \"it\" runs and walks faster by the lobby's Tagger speed row (the machine that runs their fighter applies it); 0: off\n"
+    "tagger_speed=1\n"
     "; 1: a small notice in the top-left corner of a match names each player, their build and their UE4SS mods; 0: off\n"
     "build_cards=1\n"
     "; 1: a short sound from the game's menus when a player joins your lobby or session; 0: off\n"
     "join_sound=1\n"
+    "; 1: in a multiplayer match Esc opens the mod's own pause menu, with every menu button of the game in one place, and the game's pause menu is not used; 0: the game's pause menu with the mod's buttons over it\n"
+    "mod_pause=1\n"
     "; 1: leave custom maps named as a test (Test_Arena, MapTest, test01) out of the map picker; 0: list them too\n"
     "hide_test_maps=1\n"
     "; 1: other players see your Half Wolverine claws and you see theirs, if you both have LoganClaws_P.pak; 0: off\n"
@@ -66,6 +83,12 @@ constexpr char kDefaultIni[] =
     "paint_defer=1\n"
     "; the Juggernaut's body size (1.0 = the biggest stock fighter, up to 1.6). Every player needs the same value.\n"
     "juggernaut_scale=1.35\n"
+    "; host: 1 kills a wave bot that fell through the floor or stood still for 90 s with no player near, and the bots left of a\n"
+    "; wave in which nothing spawned or died for 5 minutes, so a stuck bot cannot hold a wave for ever; 0: off\n"
+    "bot_watchdog=1\n"
+    "; client: 1 removes the foes only this machine sees (the level starts its own on every machine) every frame for the first\n"
+    "; seconds of a level, and in a lobby between matches too; 0: once a second, and only while a match is running\n"
+    "purge_early=1\n"
     "; competitive netcode (on by default). competitive=1 sets every key below to its competitive value; a key you\n"
     ";   uncomment still wins. competitive=0 goes back to the netcode before protocol rev 42.\n"
     "competitive=1\n"
@@ -97,10 +120,11 @@ constexpr char kDefaultIni[] =
     "; the same switch. 0: off (default). help_improve_asked=1: the one-time question on the multiplayer page was answered.\n"
     "help_improve=0\n"
     "help_improve_asked=0\n"
-    "; the look of the mod's menus and HUD: game (the game's own art and typefaces, the default), dark (that art shaded\n"
-    "; dark, light text) or classic (the earlier dark look). The SETTINGS page on the multiplayer page switches it; it is\n"
-    "; used from the next start of the game.\n"
-    "ui_style=game\n"
+    "; the look of the mod's menus and HUD: classic (the dark look from before 0.8.0-pre43, the default), game (the game's\n"
+    "; own art and typefaces) or dark (that art shaded dark, light text). The SETTINGS page on the multiplayer page\n"
+    "; switches it; it is used from the next start of the game.\n"
+    "ui_style=classic\n"
+    "ui_style_moved=1\n"
     "; the opacity of the match HUD, the chat and the fighter card: 0.3 (faint) to 1 (solid, the default).\n"
     "hud_opacity=1\n"
     "; voice chat (the multiplayer page and the Esc menu in a match change these). voice=1 turns it on for you (0, the\n"
@@ -171,7 +195,10 @@ constexpr char kDefaultIni[] =
 
     "block_hse=1\n"
     "mod_official=0\n"
-    "mod_allow=\n";
+    "mod_allow=\n"
+    "; hse_share_keys=1: HS Enhancer and HSMMod take the keyboard in turns. While an HSMMod text box (the chat) is open, HS Enhancer gets no\n"
+    "; input; while HS Enhancer's menu is open (0.6 on), HSMMod's chat and hotkeys wait. 0: both read every key, as before.\n"
+    "hse_share_keys=1\n";
 
 std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[256];
@@ -181,6 +208,23 @@ std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* 
     char out[3 * 256 + 1];                                   // every UTF-16 unit fits in at most 3 UTF-8 bytes
     if (!WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, sizeof out, nullptr, nullptr)) return def;
     return out;
+}
+// A name typed on the multiplayer page (nickname, lobby name). SaveIniValues writes its UTF-8 bytes; GetPrivateProfileString
+// would read them back in the system code page, so these are read as the file's bytes (util::GetIniValue). A UTF-16 file
+// (a Notepad "Unicode" save) goes through GetPrivateProfileString instead.
+std::string ReadUtf8String(const std::wstring& ini, const char* key) {
+    std::string text;
+    if (FILE* f = _wfopen(ini.c_str(), L"rb")) {
+        char buf[4096];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        std::fclose(f);
+    }
+    if (text.size() >= 2 && (text.compare(0, 2, "\xFF\xFE") == 0 || text.compare(0, 2, "\xFE\xFF") == 0)) {
+        const std::string k(key);
+        return ReadString(ini, std::wstring(k.begin(), k.end()).c_str(), "");
+    }
+    std::string out;
+    return util::GetIniValue(text, "net", key, out) ? out : std::string();
 }
 std::string ReadModString(const std::wstring& ini, const wchar_t* key, const char* def) {
     wchar_t buf[64], wdef[64];
@@ -239,7 +283,7 @@ bool SaveHelpImprove(bool on) { return SaveIniValues({{"help_improve", on ? "1" 
 const char* UiStyleName(style::MenuLook look) {
     return look == style::MenuLook::Classic ? "classic" : look == style::MenuLook::Game ? "game" : "dark";
 }
-bool SaveUiStyle(style::MenuLook look) { return SaveIniValues({{"ui_style", UiStyleName(look)}}); }
+bool SaveUiStyle(style::MenuLook look) { return SaveIniValues({{"ui_style", UiStyleName(look)}, {"ui_style_moved", "1"}}); }
 
 void ReadModRuleKeys(Config& c) {
     const std::wstring ini = ModFilePath(L"HSMMod.ini");
@@ -267,6 +311,18 @@ Config LoadConfig() {
     c.role = ParseRole(role, "role");
     if (!ReadString(ini, L"server_transport", "").empty()) HSM_LOG("config: server_transport is ignored: direct IP was removed in 0.8.0, servers use a public Steam lobby");
     c.playerName = ReadString(ini, L"name", "Player").substr(0, 32);
+    c.nickname = UsableNickname(ReadUtf8String(ini, "nickname"));
+    c.lobbyName = UsableLobbyName(ReadUtf8String(ini, "lobby_name"));
+    c.hideNames = ReadString(ini, L"hide_names", "0") == "1";
+    {
+        const std::string r = ReadString(ini, L"region", "auto");
+        if (!ParseRegion(r, c.region)) {
+            c.region = Region::Auto;
+            HSM_LOG("config: region=%s is not auto, na-east, na-west, south-america, europe, asia or oceania; using auto", r.c_str());
+        }
+    }
+    HSM_LOG("config: nickname=%s lobby_name=%s hide_names=%d region=%s", c.nickname.empty() ? "(none)" : c.nickname.c_str(),
+            c.lobbyName.empty() ? "(none)" : c.lobbyName.c_str(), c.hideNames ? 1 : 0, RegionKey(c.region));
     c.snapshotHz = Clamp(std::atoi(ReadString(ini, L"snapshot_hz", "30").c_str()), 5, 120);
     c.inputHz = Clamp(std::atoi(ReadString(ini, L"input_hz", "60").c_str()), 10, 240);
     c.inputOnDemand = ReadString(ini, L"input_on_demand", "1") != "0";
@@ -298,6 +354,8 @@ Config LoadConfig() {
     c.standInPartsOff = ReadString(ini, L"standin_parts_off", "0") == "1";
     c.standInBoxFix = ReadString(ini, L"standin_box_fix", "1") != "0";
     c.fenceFix = ReadString(ini, L"fence_fix", "1") != "0";
+    c.botWatchdog = ReadString(ini, L"bot_watchdog", "1") != "0";
+    c.purgeEarly = ReadString(ini, L"purge_early", "1") != "0";
     c.stuckArmorGate = ReadString(ini, L"stuck_armor_gate", "1") != "0";
     c.detour = ReadString(ini, L"detour", "1") != "0";
     c.peerPing = ReadString(ini, L"peer_ping", "1") != "0";
@@ -357,8 +415,10 @@ Config LoadConfig() {
     c.nameTags = ReadString(ini, L"name_tags", "1") != "0";
     c.classTags = ReadString(ini, L"class_tags", "1") != "0";
     c.classLook = ReadString(ini, L"class_look", "1") != "0";
+    c.taggerSpeed = ReadString(ini, L"tagger_speed", "1") != "0";
     c.buildCards = ReadString(ini, L"build_cards", "1") != "0";
     c.joinSound = ReadString(ini, L"join_sound", "1") != "0";
+    c.modPause = ReadString(ini, L"mod_pause", "1") != "0";
     c.hideTestMaps = ReadString(ini, L"hide_test_maps", "1") != "0";
     c.clawMirror = ReadString(ini, L"claw_mirror", "1") != "0";
     c.className = ReadString(ini, L"class", "");
@@ -383,9 +443,13 @@ Config LoadConfig() {
     c.helpImprove = ReadString(ini, L"help_improve", "0") == "1";
     c.helpImproveAsked = c.helpImprove || ReadString(ini, L"help_improve_asked", "0") == "1";
     {
-        const std::string look = ReadString(ini, L"ui_style", "game");
-        c.uiLook = look == "classic" ? style::MenuLook::Classic : look == "dark" ? style::MenuLook::Dark : style::MenuLook::Game;
-        if (look != "dark" && look != "game" && look != "classic") HSM_LOG("config: ui_style=%s is not game, dark or classic; using game", look.c_str());
+        const std::string look = ReadString(ini, L"ui_style", "classic");
+        const style::StartLook start = style::ReadStartLook(look, ReadString(ini, L"ui_style_moved", "0") == "1");
+        c.uiLook = start.look;
+        if (!start.known) HSM_LOG("config: ui_style=%s is not classic, game or dark; using classic", look.c_str());
+        if (start.moveToClassic)   // the pre43 to pre49 template's ui_style=game: classic is the default again (once)
+            HSM_LOG("config: ui_style=game moved to classic, the default again%s",
+                    SaveUiStyle(c.uiLook) ? "" : " (HSMMod.ini could not be written; this start only)");
         HSM_LOG("config: ui_style=%s", UiStyleName(c.uiLook));
     }
     c.hudOpacity = hsm::style::SaneHudOpacity(std::atof(ReadString(ini, L"hud_opacity", "1").c_str()));
@@ -414,6 +478,7 @@ Config LoadConfig() {
     c.modPack = ReadModString(ini, L"pack", "");
     c.modRules = ReadModString(ini, L"mod_rules", "1") != "0";
     c.modChallenge = ReadModString(ini, L"mod_challenge", "1") != "0";
+    c.hseShareKeys = ReadModString(ini, L"hse_share_keys", "1") != "0";
     ReadModRuleKeys(c);
     c.record = ReadModString(ini, L"record", "0") != "0";
     if (c.record) HSM_LOG("config: record=1: fight levels are recorded to HSMRec-*.hsmrec next to this log");
@@ -433,7 +498,8 @@ Config LoadConfig() {
     HSM_LOG("config: role=%s snapshot_hz=%d input_hz=%d input_on_demand=%d sync_mode=%s chat_key=%s standin_grip=%s standin_two_hand_pose=%d standin_two_hand_lock=%d allow_build_mismatch=%d", RoleName(c.role),
             c.snapshotHz, c.inputHz, c.inputOnDemand ? 1 : 0, c.hostPhysics ? "host" : "owner", ChatKeyName(c.chatKey), c.standInGripLock ? "lock" : "free",
             c.standInTwoHandPose ? 1 : 0, c.standInTwoHandLock ? 1 : 0, c.allowBuildMismatch ? 1 : 0);
-    HSM_LOG("config: class_tags=%d class_look=%d", c.classTags ? 1 : 0, c.classLook ? 1 : 0);
+    HSM_LOG("config: class_tags=%d class_look=%d tagger_speed=%d bot_watchdog=%d purge_early=%d hse_share_keys=%d", c.classTags ? 1 : 0, c.classLook ? 1 : 0,
+            c.taggerSpeed ? 1 : 0, c.botWatchdog ? 1 : 0, c.purgeEarly ? 1 : 0, c.hseShareKeys ? 1 : 0);
     HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d sync_structures=%s structure_follow_broken=%d structure_share_held_breaks=%d structure_follow_moving=%d prop_census_snapshot=%d structure_rest_lock=%d structure_bridges_follow=%d structure_game_break=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
             c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0,
             StructureModeName(c.syncStructures), c.structureFollowBroken ? 1 : 0, c.structureShareHeld ? 1 : 0,

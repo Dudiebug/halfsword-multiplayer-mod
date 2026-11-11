@@ -56,13 +56,13 @@ static void TestRows() {
     using R = LobbyRow;
     const LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     // no limit (one round a fight) and no time limit (a bracket has no clock); the rest as every round format
-    CHECK((Ids(t) == std::vector<LobbyRow>{R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
+    CHECK((Ids(t) == std::vector<LobbyRow>{R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Bodies, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
     CHECK(RowOf(t, R::Limit) == nullptr);
     bool oneRound = false;
     for (const ModeCard& m : t.modes) if (m.format == Format::Tournament) oneRound = m.description.find("One round a fight") != std::string::npos;
     CHECK(oneRound);
     const LobbyScene p = BuildLobbyScene(InLobby(Format::PitBridgeDuel));
-    CHECK((Ids(p) == std::vector<LobbyRow>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
+    CHECK((Ids(p) == std::vector<LobbyRow>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Bodies, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
     const SettingRow* win = RowOf(p, R::Limit);
     CHECK(win && win->label == "Wins to take the match" && win->value == "5");
     // random gear adds the Weapons row, as everywhere
@@ -100,7 +100,7 @@ static void TestMaps() {
     for (const MapCard& m : BuildLobbyScene(mod).maps) if (m.modded) CHECK(!m.allowed);
     LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     for (const MapCard& m : t.maps) if (!m.allowed) CHECK(m.reason == "Tournament needs an arena");
-    CHECK(BrowserModes().size() == 16 && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels");
+    CHECK(BrowserModes().size() == 20 && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels" && BrowserModes()[13] == "Chaos" && BrowserModes()[14] == "One crossbow" && BrowserModes()[15] == "Roulette" && BrowserModes()[16] == "Hide and seek" && BrowserModes()[17] == "Brawl");
     CHECK(ModeMatches("Tournament", BrowserModes()[11]) && ModeMatches("Pit bridge duels", BrowserModes()[12]));
 }
 
@@ -132,6 +132,11 @@ static void TestBracketLine() {
     m.fightWinsA = 1;
     CHECK(QueueLine(m).find(" - first to 2 (1-0)   Next: ") != std::string::npos);
     CHECK(QueueStage(m) == "Quarter-final 1/4");
+    // #1429: a place of the next game whose player left reads "open place"
+    MatchInfo o = m;
+    std::erase_if(o.fighters, [&](const FighterEntry& f) { return f.entity == next.b; });
+    CHECK(QueueLine(o).find(std::string("Next: ") + names[next.a] + " vs open place") != std::string::npos);
+    CHECK(PlaceName(o, next.a) == names[next.a] && PlaceName(o, next.b) == "open place" && PlaceName(m, next.b) == names[next.b]);
     // later: the final alone has no number and no next
     MatchInfo f = Tourney(4, 2);
     CHECK(QueueStage(f) == "Final" && QueueFinal(f));

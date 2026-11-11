@@ -143,8 +143,9 @@ public:
     void MapReset(double nowMs, uint8_t flags);
     // /clear rocks (session/hsm_ground_clear.h ClearableProp): destroy this machine's copy of every level prop that has been moved
     // and every object spawned since the match began, a few a frame like a map reset's destroys. Loose armour, held props,
-    // detached bodies and structures stay. Returns how many were queued.
-    size_t ClearMovedProps(double nowMs);
+    // detached bodies and structures stay. Returns how many were queued. propsOff (the Props row Off, PropsOffClears):
+    // every level prop, moved or not, and quiet when there is nothing left to clear.
+    size_t ClearMovedProps(double nowMs, bool propsOff = false);
     // The ground clear keeps these: a weapon MarkBaseline recorded that still lies within a metre and a half of its spot.
     // False for any other weapon, and for a level weapon that was picked up and put down elsewhere (it is a drop then).
     bool IsLevelWeaponAtStart(ue::UObject* actor);

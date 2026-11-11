@@ -97,12 +97,18 @@ static void TestHseStartOff() {
         "[SpeedMultiplier]\r\nkey=80\r\nenabled=true  \r\nrun_speed_multiplier = 3.000000\r\n; enabled = true\r\n"
         "[UE]\r\nconsole_enabled = true\r\n[Graphics]\r\napply_on_startup = true\r\nfog = 0\r\n[Discord]\r\nenabled = true\r\n"
         "[Notifications]\r\nenabled = true\r\n[Jump]\r\nenabled = false\r\n";
-    CHECK(HseStartOffProblems(real).size() == 4);
+    CHECK(HseStartOffProblems(real).size() == 3);   // the two features and the console; not [Graphics]
     const std::string off = HseStartOffIni(real);
     CHECK(HseStartOffProblems(off).empty());
-    // Only the features, the console and graphics at start: keys, the menu key, params, comments, CRLF all as they were
-    CHECK(off == Swap(Swap(Swap(Swap(real, "key = 73\r\nenabled = true", "key = 73\r\nenabled = false"), "enabled=true  ", "enabled=false  "),
-                           "console_enabled = true", "console_enabled = false"), "apply_on_startup = true", "apply_on_startup = false"));
+    // Only the features and the console: keys, the menu key, params, comments, CRLF all as they were
+    CHECK(off == Swap(Swap(Swap(real, "key = 73\r\nenabled = true", "key = 73\r\nenabled = false"), "enabled=true  ", "enabled=false  "),
+                      "console_enabled = true", "console_enabled = false"));
+    // #2974: [Graphics] is the player's own, so graphics at start stays as they set it (it was turned off at every restart)
+    CHECK(RuleIniValue(off, "Graphics", "apply_on_startup") == "true" && RuleIniValue(off, "Graphics", "fog") == "0");
+    CHECK(HseStartOffIni("[Graphics]\r\napply_on_startup = true\r\n") == "[Graphics]\r\napply_on_startup = true\r\n");
+    CHECK(HseStartOffIni("[Graphics]\napply_on_startup=true\nenabled = true\n[Jump]\nenabled = true\n") ==
+          "[Graphics]\napply_on_startup=true\nenabled = true\n[Jump]\nenabled = false\n");   // the whole section, whatever its keys
+    CHECK(HseStartOffProblems("[Graphics]\r\napply_on_startup = true\r\nenabled = true\r\n").empty());
     CHECK(RuleIniValue(off, "Keybinds", "toggle_gui_key") == "45" && RuleIniValue(off, "InfiniteStamina", "key") == "73");
     CHECK(RuleIniValue(off, "Discord", "enabled") == "true" && RuleIniValue(off, "Notifications", "enabled") == "true");
     CHECK(off.find("; enabled = true\r\n") != std::string::npos);
@@ -111,7 +117,7 @@ static void TestHseStartOff() {
     CHECK(HseStartOffIni("[A]\nenabled =\n") == "[A]\nenabled =false\n");   // no value: one
     CHECK(HseStartOffIni("enabled = true\n") == "enabled = false\n");   // before any section: off too
     CHECK(HseStartOffIni("[UE]\nconsole_enabled = true\n[Other]\nconsole_enabled = true\napply_on_startup = true\n") ==
-          "[UE]\nconsole_enabled = false\n[Other]\nconsole_enabled = true\napply_on_startup = true\n");   // those two only where HSE reads them
+          "[UE]\nconsole_enabled = false\n[Other]\nconsole_enabled = true\napply_on_startup = true\n");   // the console only where HSE reads it
 
     // Each thing still on, named; anything but "false" is on (HSE reads 1, yes and on as true)
     const auto one = [](const std::string& text, const char* problem) {
@@ -121,7 +127,6 @@ static void TestHseStartOff() {
     CHECK(one(Swap(off, "key = 73\r\nenabled = false", "key = 73\r\nenabled = 1"), "[InfiniteStamina] is on"));
     CHECK(one(Swap(off, "enabled=false  ", "enabled=yes"), "[SpeedMultiplier] is on"));
     CHECK(one(Swap(off, "console_enabled = false", "console_enabled = on"), "the console is on"));
-    CHECK(one(Swap(off, "apply_on_startup = false", "apply_on_startup = true"), "graphics commands run at start"));
     CHECK(HseStartOffProblems("\xEF\xBB\xBF[Discord]\r\nenabled = true\r\n").empty());   // Discord first, after a mark: still Discord
     CHECK(HseStartOffProblems("").empty() && HseStartOffProblems("[A]\r\nkey = 73\r\n").empty());   // keys are held, not checked
 

@@ -112,6 +112,14 @@ private:
     std::set<uint8_t> living_;
 };
 
+// The Tagger speed row (#1408): the multiplier on a fighter's run and walk speed in a Tag match. Whoever is "it" in a round in play
+// (`it` is that fighter's entity, 0 when no round runs) gets the row's percent; everyone else, "it" with the row on 100, and every
+// other format get 1.0, the game's own speed. Passing the fuse moves `it`, so the bonus goes with it. The machine that runs the
+// tagger's body applies it (gameplay/session.cpp, through the class stats).
+inline double TaggerSpeedMultiplier(Format f, uint8_t it, uint8_t entity, uint8_t speedPct) {
+    return IsTag(f) && it != 0 && entity == it && ValidTaggerSpeedPct(speedPct) ? double(speedPct) / 100.0 : 1.0;
+}
+
 // ---------------------------------------------------------------- Infection
 // Patient zeros for `players` fighters: 2..5 one, 6 or more two; never all of them, none for a lone fighter.
 inline int PatientZeroCount(int players) {
@@ -166,11 +174,189 @@ inline std::string InfectedTraitLine(const std::string& name, bool zombieFlag, i
 // Crossbow TDM hands everyone a crossbow when the game has the classes; without them it is Teams, and the host says so once.
 inline constexpr const char* kCrossbowTdmMissingLine = "crossbow: Crossbow TDM without crossbows (class missing)";
 inline constexpr const char* kCrossbowRowMissingLine = "crossbow: the Crossbows row has no effect in this match (the crossbow or its bolt class is missing)";
+inline constexpr const char* kOneCrossbowMissingLine = "crossbow: One Crossbow without its crossbow (class missing): the rounds are fist fights";
 inline uint8_t EffectiveCrossbows(const MatchConfig& c, bool classesPresent) {
     if (IsCrossbowTdm(c.format)) return classesPresent ? uint8_t(Crossbows::All) : uint8_t(Crossbows::Off);
+    if (IsOneCrossbow(c.format)) return classesPresent ? uint8_t(Crossbows::One) : uint8_t(Crossbows::Off);
     return c.crossbows;
 }
-inline const char* CrossbowMissingLine(Format f) { return IsCrossbowTdm(f) ? kCrossbowTdmMissingLine : kCrossbowRowMissingLine; }
+inline const char* CrossbowMissingLine(Format f) { return IsCrossbowTdm(f) ? kCrossbowTdmMissingLine : IsOneCrossbow(f) ? kOneCrossbowMissingLine : kCrossbowRowMissingLine; }
+
+// ---------------------------------------------------------------- One Crossbow
+// Endless bolts: in One Crossbow whoever holds the crossbow wears a quiver that never runs out. Each machine keeps its own
+// fighter's: a quiver under kEndlessBoltFloor is filled back up to `full` (so a reload always finds a bolt), any other
+// count is left alone. Nothing happens in another format or in a hand without the crossbow.
+inline constexpr int kEndlessBoltFloor = 2;
+inline bool EndlessBoltsFor(Format f, bool matchRuns, bool alive, bool holdsCrossbow) { return IsOneCrossbow(f) && matchRuns && alive && holdsCrossbow; }
+inline int EndlessBolts(int inQuiver, int full) { return inQuiver < kEndlessBoltFloor && full > inQuiver ? full : inQuiver; }
+
+// ---------------------------------------------------------------- Roulette
+// Roulette (#836): the host hands one crossbow from fighter to fighter. It is a six-chamber cylinder with one live
+// chamber: every pull moves on to the next chamber, so the odds rise from 1 in 6 until it fires, and then it is spun
+// again. The holder pulls on themself or on another living fighter:
+//   a blank on yourself: a point (the caller's), and the crossbow stays;
+//   a blank on someone else: the crossbow is theirs;
+//   the live chamber on yourself: out for the round (the caller's), and the next fighter holds the crossbow;
+//   the live chamber on someone else: the crossbow is loaded for real. Once the shot is fired (OnFired) and has had
+//   kRouletteLandMs to land, or was not fired for kRouletteShotMs, the crossbow goes to the fighter it was pulled on,
+//   or to the next one when that fighter died.
+// A holder that died or left hands on to the next fighter in id order. Fewer than two standing: nobody holds it.
+constexpr uint8_t kRouletteChambers = 6;
+constexpr uint32_t kRoulettePullGapMs = 800;    // between two pulls: a held key does not empty the cylinder
+constexpr uint32_t kRouletteShotMs = 20000;     // a live round not shot by then is wasted
+constexpr uint32_t kRouletteLandMs = 1500;      // after the shot the bolt lands before the crossbow moves on
+
+class RouletteGame {
+public:
+    enum class Pull : uint8_t { Refused, BlankSelf, LiveSelf, BlankOther, LiveOther };
+    struct Step { bool moved = false, wasted = false; };   // Update: the crossbow changed hands; a live round was never shot
+
+    // A new match: forget everything; the seed starts the rotation of first holders and the cylinder.
+    void Reset(uint32_t seed) { seed_ = seed; spins_ = rounds_ = 0; EndRound(); }
+    // A round starts: the first holder is picked among the living (everybody's turn comes) and the cylinder is spun.
+    void BeginRound(const std::vector<uint8_t>& living, uint32_t nowMs) {
+        active_ = true; living_ = Set(living); loaded_ = false; nextPullAt_ = nowMs;
+        holder_ = living_.size() >= 2 ? PickIt(living, seed_, rounds_++) : 0;
+        Spin();
+    }
+    void EndRound() { active_ = false; holder_ = 0; loaded_ = false; }
+    bool active() const { return active_; }
+    uint8_t holder() const { return holder_; }
+    bool loaded() const { return loaded_; }                // a live chamber came up on someone else: the holder has a real bolt
+    uint8_t target() const { return loaded_ ? target_ : 0; }
+    uint8_t pulls() const { return pulls_; }               // blanks since the spin: the next pull is live one time in (6 - pulls)
+
+    Pull OnPull(uint8_t who, uint8_t target, uint32_t nowMs) {
+        if (!holder_ || who != holder_ || loaded_ || int32_t(nowMs - nextPullAt_) < 0) return Pull::Refused;   // no round: no holder
+        const bool self = target == who;
+        if (!self && !living_.count(target)) return Pull::Refused;
+        nextPullAt_ = nowMs + kRoulettePullGapMs;
+        const bool live = pulls_ == live_;
+        if (live) Spin(); else ++pulls_;
+        if (self) {
+            if (!live) return Pull::BlankSelf;
+            living_.erase(who);
+            holder_ = living_.size() >= 2 ? NextAfter(who) : 0;
+            return Pull::LiveSelf;
+        }
+        if (!live) { holder_ = target; return Pull::BlankOther; }
+        loaded_ = true; fired_ = false; target_ = target; passAt_ = nowMs + kRouletteShotMs;
+        return Pull::LiveOther;
+    }
+    // The holder's live round left the crossbow. True the first time.
+    bool OnFired(uint8_t who, uint32_t nowMs) {
+        if (!loaded_ || fired_ || who != holder_) return false;
+        fired_ = true; passAt_ = nowMs + kRouletteLandMs;
+        return true;
+    }
+    // Each tick of a round in play, with every fighter standing.
+    Step Update(const std::vector<uint8_t>& living, uint32_t nowMs) {
+        Step s;
+        if (!active_) return s;
+        living_ = Set(living);
+        const uint8_t before = holder_;
+        if (living_.size() < 2) { holder_ = 0; loaded_ = false; }
+        else if (!living_.count(holder_)) { holder_ = NextAfter(before); loaded_ = false; }   // gone (or nobody held it)
+        else if (loaded_ && int32_t(nowMs - passAt_) >= 0) {
+            s.wasted = !fired_;
+            loaded_ = false;
+            holder_ = living_.count(target_) ? target_ : NextAfter(before);
+        }
+        s.moved = holder_ != before;
+        return s;
+    }
+
+private:
+    static std::set<uint8_t> Set(const std::vector<uint8_t>& v) { return {v.begin(), v.end()}; }
+    void Spin() { pulls_ = 0; live_ = uint8_t(modes_detail::Mix(seed_ + 0x9E3779B9u * ++spins_) % kRouletteChambers); }
+    uint8_t NextAfter(uint8_t e) const {                   // the next living fighter in id order, round the ring
+        if (living_.empty()) return 0;
+        const auto it = living_.upper_bound(e);
+        return it != living_.end() ? *it : *living_.begin();
+    }
+    bool active_ = false, loaded_ = false, fired_ = false;
+    uint8_t holder_ = 0, target_ = 0, pulls_ = 0, live_ = 0;
+    uint32_t seed_ = 0, spins_ = 0, rounds_ = 0, nextPullAt_ = 0, passAt_ = 0;
+    std::set<uint8_t> living_;
+};
+
+// What every machine shows of the cylinder, kept from the host's mode events (protocol ModeEventKind RouletteClick and
+// RouletteBang) and the MatchInfo: the blanks since the spin, and whether the holder has a live round. A new round
+// starts with a fresh spin; the crossbow in another hand has no live round.
+struct RouletteView {
+    uint8_t pulls = 0; bool loaded = false;
+    uint16_t round = 0; uint8_t holder = 0;
+    void OnClick() { if (pulls + 1 < kRouletteChambers) ++pulls; }
+    void OnBang(bool onThemself) { pulls = 0; loaded = !onThemself; }
+    void OnInfo(uint16_t infoRound, uint8_t infoHolder) {
+        if (infoRound != round) { pulls = 0; loaded = false; }
+        if (infoHolder != holder) loaded = false;
+        round = infoRound; holder = infoHolder;
+    }
+    int OneIn() const { return int(kRouletteChambers) - int(pulls); }
+};
+
+// Who the holder faces (the C key): `eye` is the camera and `body` the holder, so ahead is from the camera through the
+// body, on the ground plane. Of the marks within reach and within the cone, the one closest to straight ahead; 0 when
+// there is none, or when the camera sits on the body and ahead is unknown.
+struct AimMark { uint8_t entity = 0; double x = 0, y = 0; };
+constexpr double kRouletteReachCm = 3000.0;
+constexpr double kRouletteAimCos = 0.9;         // within about 25 degrees of straight ahead
+inline uint8_t FacedFighter(double eyeX, double eyeY, double bodyX, double bodyY, const std::vector<AimMark>& marks) {
+    const double fx = bodyX - eyeX, fy = bodyY - eyeY, fl = std::sqrt(fx * fx + fy * fy);
+    if (fl < 1.0) return 0;
+    uint8_t best = 0; double bestCos = kRouletteAimCos;
+    for (const AimMark& k : marks) {
+        const double vx = k.x - bodyX, vy = k.y - bodyY, vl = std::sqrt(vx * vx + vy * vy);
+        if (!k.entity || vl < 1.0 || vl > kRouletteReachCm) continue;
+        const double c = (fx * vx + fy * vy) / (fl * vl);
+        if (best ? c > bestCos : c >= bestCos) { best = k.entity; bestCos = c; }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- Hide and Seek
+// Hide and Seek (#1082): the round's seekers (dealt by the roles) stand still and see nothing for the Hide time while the
+// hiders run; then they hunt for the Seek time. The round is the seekers' when no hider is standing, and the hiders'
+// when the Seek time runs out or no seeker is standing. The winners are the ones of that side still standing (nobody
+// standing at all: a round without a winner).
+class HideSeekGame {
+public:
+    enum class Phase : uint8_t { Off, Hiding, Seeking };
+    enum class Outcome : uint8_t { None, Seekers, Hiders };
+    struct Step { bool released = false; Outcome outcome = Outcome::None; std::vector<uint8_t> winners; };
+
+    void BeginRound(const std::vector<uint8_t>& seekers, uint32_t nowMs, uint8_t hideS, uint16_t seekS) {
+        seekers_ = {seekers.begin(), seekers.end()};
+        phase_ = Phase::Hiding; hideEnd_ = nowMs + uint32_t(hideS) * 1000u; seekEnd_ = hideEnd_ + uint32_t(seekS) * 1000u;
+    }
+    void EndRound() { phase_ = Phase::Off; seekers_.clear(); }
+    Phase phase() const { return phase_; }
+    bool active() const { return phase_ != Phase::Off; }
+    bool IsSeeker(uint8_t e) const { return seekers_.count(e) != 0; }
+    uint8_t FirstSeeker() const { return seekers_.empty() ? uint8_t(0) : *seekers_.begin(); }
+    uint32_t HideLeftMs(uint32_t nowMs) const { return phase_ == Phase::Hiding ? Left(hideEnd_, nowMs) : 0; }
+    uint32_t RoundLeftMs(uint32_t nowMs) const { return active() ? Left(seekEnd_, nowMs) : 0; }   // the Hide and the Seek time together
+
+    // Each tick of a round in play, with every fighter standing. An outcome ends the round here (EndRound).
+    Step Update(const std::vector<uint8_t>& living, uint32_t nowMs) {
+        Step s;
+        if (!active()) return s;
+        if (phase_ == Phase::Hiding && int32_t(nowMs - hideEnd_) >= 0) { phase_ = Phase::Seeking; s.released = true; }
+        std::vector<uint8_t> seekers, hiders;
+        for (uint8_t e : living) (seekers_.count(e) ? seekers : hiders).push_back(e);
+        if (hiders.empty()) { s.outcome = Outcome::Seekers; s.winners = seekers; }
+        else if (seekers.empty() || int32_t(nowMs - seekEnd_) >= 0) { s.outcome = Outcome::Hiders; s.winners = hiders; }
+        if (s.outcome != Outcome::None) EndRound();
+        return s;
+    }
+
+private:
+    static uint32_t Left(uint32_t end, uint32_t nowMs) { const int32_t left = int32_t(end - nowMs); return left > 0 ? uint32_t(left) : 0; }
+    Phase phase_ = Phase::Off;
+    uint32_t hideEnd_ = 0, seekEnd_ = 0;
+    std::set<uint8_t> seekers_;
+};
 // A fighter that joins mid-match (or comes back from a fall) in Crossbow TDM still gets one.
 inline bool CrossbowForEveryone(Format f, bool classesPresent) { return IsCrossbowTdm(f) && classesPresent; }
 

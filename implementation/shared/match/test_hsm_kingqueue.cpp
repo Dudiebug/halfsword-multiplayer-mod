@@ -85,8 +85,12 @@ static void TestLeaversAndJoiners() {
     CHECK(!q.Report(2) && q.order() == V({4, 7, 2}));
     // full
     KingQueue full;
-    CHECK(full.Start(V{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, 1));
-    CHECK(!full.Add(17));
+    V all;
+    for (uint8_t e = 1; e <= kMaxQueuePlayers; ++e) all.push_back(e);
+    CHECK(kMaxQueuePlayers == 32 && full.Start(all, 1));
+    CHECK(!full.Add(33));
+    all.push_back(33);
+    CHECK(!KingQueue().Start(all, 1));
 }
 
 static void TestLoserGoesBehindTheWaiting() {

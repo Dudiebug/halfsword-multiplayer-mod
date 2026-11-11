@@ -3,6 +3,7 @@
 // picking, forging or hand-editing a class can't get past them. Game-independent.
 #pragma once
 #include "hsm_name_filter.h"
+#include "match/hsm_class_power.h"
 #include <cctype>
 #include <algorithm>
 #include <cstdint>
@@ -19,7 +20,7 @@ namespace hsm {
 constexpr double kRuleStatMin = 0.10, kRuleMassMin = 0.50, kRuleMassMax = 5.00, kRuleMassStep = 0.50, kRuleStatMax = 2.00;   // every multiplier in force, 1.0 being the game's own
 constexpr double kRuleEarnFloor = 0.70;                         // lowering a stat past this earns no more power
 constexpr double kRulePairGap = 0.10;                           // run and walk: how far one's lowering pays past the other
-constexpr double kRuleMaxPoints = 0.15;                         // what a class may be over budget
+constexpr double kRuleMaxPoints = 0.15;                         // what a class may be over budget: the default power limit, +15
 constexpr double kRuleJumpBase = 5000.0, kRuleJumpMin = 0.0, kRuleJumpMax = 6000.0;
 // Unrestricted lobbies have no budget, but these still hold, for everyone in the lobby: a fighter far past them can send the physics out
 // of control on other players' machines. Everyone checks them against what each player sends, as with the rules above.
@@ -85,7 +86,8 @@ inline double ClassPoints(const ClassSheet& c) {
 inline int ClassPowerShown(double points) { return int(std::ceil(points * 100.0 - 1e-6)); }
 
 // What's wrong with a class, in words for the player; empty: it may fight. Hosts run this on what each player sends.
-inline std::vector<std::string> ClassProblems(const ClassSheet& c, bool unrestricted = false) {
+// maxPoints: the lobby's power limit (hsm_class_power.h ClassPowerPoints), the usual +15 elsewhere.
+inline std::vector<std::string> ClassProblems(const ClassSheet& c, bool unrestricted = false, double maxPoints = kRuleMaxPoints) {
     std::vector<std::string> out;
     const auto in = [](double v, double lo, double hi) { return std::isfinite(v) && v >= lo - 1e-6 && v <= hi + 1e-6; };
     const struct { const char* name; double v, lo; } stats[] = {{"run", c.run, kRuleStatMin}, {"walk", c.walk, kRuleStatMin}, {"strength", c.strength, kRuleStatMin},
@@ -95,7 +97,7 @@ inline std::vector<std::string> ClassProblems(const ClassSheet& c, bool unrestri
     for (const auto& s : stats) if (!in(s.v, s.lo, s.lo == kRuleMassMin ? kRuleMassMax : statMax)) out.push_back(std::string(s.name) + " is out of range");
     if (!in(c.jump, kRuleJumpMin, unrestricted ? kHackerJumpMax : kRuleJumpMax)) out.push_back("jump is out of range");
     if (c.metalClaws && !c.claws) out.push_back("adamantium claws without claws");
-    if (!unrestricted && ClassPoints(c) > kRuleMaxPoints + 1e-6) out.push_back("the class is too strong");
+    if (!unrestricted && ClassPoints(c) > maxPoints + 1e-6) out.push_back("the class is too strong");
     return out;
 }
 
@@ -445,10 +447,10 @@ inline const char* ClassFieldInfo(int i) {
 }
 // The budget, where it's seen beside the bars. Over the limit says by how much, so the player knows what to give up.
 struct ClassBudgetView { std::string text; bool over; };
-inline ClassBudgetView ClassBudget(const ClassSheet& c, bool unrestricted) {
-    const int used = ClassPowerShown(ClassPoints(c)), limit = ClassPowerShown(kRuleMaxPoints);
+inline ClassBudgetView ClassBudget(const ClassSheet& c, bool unrestricted, double maxPoints = kRuleMaxPoints) {
+    const int used = ClassPowerShown(ClassPoints(c)), limit = ClassPowerShown(maxPoints);
     if (unrestricted) return {"POWER " + std::string(used > 0 ? "+" : "") + std::to_string(used) + "  (Unrestricted: no limit)", false};
-    const bool over = ClassPoints(c) > kRuleMaxPoints + 1e-6;
+    const bool over = ClassPoints(c) > maxPoints + 1e-6;
     return {"POWER " + std::string(used > 0 ? "+" : "") + std::to_string(used) + " OF +" + std::to_string(limit) + (over ? "  OVER BY " + std::to_string(used - limit) : ", " + std::to_string(limit - used) + " LEFT"), over};
 }
 
@@ -526,10 +528,10 @@ struct ClassReloadGate {
 inline bool ClassRunsOnMyFighter(bool hostPhysics, bool isHost, bool handedToAnother) { return (!hostPhysics || isHost) && !handedToAnother; }
 // Under host physics the host simulates every guest's real fighter, so it applies their classes: the same stats, from what each guest reports. What a
 // guest's class can't do from there (Half Wolverine's parts, which run on their own machine) is said to them. Empty: the plain fighter.
-inline std::optional<ClassSheet> GuestClassOnHost(std::string_view reported, bool classesLobby, bool unrestricted) {
+inline std::optional<ClassSheet> GuestClassOnHost(std::string_view reported, bool classesLobby, bool unrestricted, double maxPoints = kRuleMaxPoints) {
     if (!classesLobby) return std::nullopt;
     const std::optional<ClassSheet> sheet = DecodeClass(reported);
-    if (!sheet || !ClassProblems(*sheet, unrestricted).empty()) return std::nullopt;   // what a player sends is untrusted
+    if (!sheet || !ClassProblems(*sheet, unrestricted, maxPoints).empty()) return std::nullopt;   // what a player sends is untrusted
     return sheet;
 }
 inline bool ClassLosesPartsOnGuest(const ClassSheet& c) { return ClassNeedsWolverine(c); }
@@ -559,6 +561,13 @@ inline bool ClassAppliesHere(bool inLobby, bool classesLobby) { return !inLobby 
 // a fighter who has anything else there, class aside, had them changed by something else. The class's multiplier goes on top.
 constexpr double kGameMusclePower = 35.0, kGameRunRate = 2.0;
 inline bool ClassBasesFair(double strengthBase, double runBase) { return std::abs(strengthBase - kGameMusclePower) < 1e-3 && std::abs(runBase - kGameRunRate) < 1e-3; }
+
+// A sheet with an extra speed multiplier on top of its run and walk (Tag's Tagger speed): the class's own stay, scaled. 1.0 changes nothing.
+inline ClassSheet ClassWithSpeed(ClassSheet c, double multiplier) {
+    c.run *= multiplier;
+    c.walk *= multiplier;
+    return c;
+}
 
 // One value on the fighter. The game can change it (a new life, armour), so whatever differs from what was last written becomes
 // the new base, and the multiplier goes on top of that. Never compounds, and 1.0 leaves the game's own value alone.

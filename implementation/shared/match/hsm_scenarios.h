@@ -1,23 +1,28 @@
-// Combat scenarios per map (0.9.0, lobby row Scenario in RULES > WORLD, lobby key hsm_scen): which world settings the host
-// can set for the map it picked, through the fields the mod already knows on the game instance (GI_Settings_C).
+// Combat scenarios per map (0.9.0, lobby row Scenario in RULES > WORLD, lobby key hsm_scen): what the host's pick does to the
+// match on the map it picked. Every machine reads the pick from the lobby (hsm_scen), so no wire field is needed.
 //
 // The game's own Free Mode has BP_CombatEvent_{Alley,Cellar,Forest,Hall,Pit,Slums,Yard,Tourney,TourneyBaron}_C, each with a
-// Scenario Name, Available Combat Modes, Available Lose Conditions and a Combatants Amount. What the mod can set from them
-// today is only what it already copies to the clients at a travel (client/gameplay/travel.cpp kSettings), so a scenario is
-// just a set of those fields and no wire field is needed:
+// Scenario Name, Available Combat Modes, Available Lose Conditions and a Combatants Amount. The game's Free Mode switches for
+// Carnage ("Free Mode Carnage": Current Combat Mode 3) and Brawling ("Free Mode Brawling": Start in Pants) only steer the game's
+// own computer-fighter spawners (decomp BP_LevelManager Clean_Up_and_Spawn_Actors, BP_SpawnerPoint_Willies), and a lobby match
+// turns those off (Session::StopStockFoes), so setting them did nothing (public issue #1407). The mod does the effects itself:
 //   Standard      nothing: the host's Free Mode setup stays as it is (today's behaviour).
-//   Fenced ring   "Current Lose Condition" = 3. The level scripts of the Pit, Yard and Cellar spawn BP_Fence_Bags for it
-//                 (audit item 39); no other map reads it, so only those three offer it.
-//   Carnage       "Free Mode Carnage" on: the level manager's carnage combat mode (Current Combat Mode 3; Adapter::
-//                 PrepareFreeModeFight maps the one to the other). A global GI toggle, so every arena offers it.
-//   Brawling      "Free Mode Brawling" on: the game's brawling toggle, also a global GI field.
+//   Fenced ring   "Current Lose Condition" = 3 on the game instance (ScenarioWorld, carried by the Travel). The level scripts
+//                 of the Pit, Yard and Cellar spawn BP_Fence_Bags for it (audit item 39); no other map reads it, so only
+//                 those three offer it. Its behaviour is unchanged; the DLL only logs what the game does (session.cpp).
+//   Carnage       the host adds 3 to 5 computer fighters (CarnageBotCount) at the start of a free-for-all round, on no team,
+//                 as Survival's host bots (ScenarioEffects::carnageBots). They score nothing.
+//   Brawling      every body spawns bare: no armour, no weapons (ScenarioEffects::bare), as the Brawl card's Fists gear does.
 // The time of day (Day Time / Current FreeMode Time) is left out on purpose: its enum values are unknown (audit 0.7.0 #2).
 // The Abyss (Zombies) and modded maps are not combat-event arenas and offer Standard only. The client logs the game's actual
 // combat-event objects at each level load ("scenario: map ..."), the spike output this table is extended from.
 // Game-independent and unit-tested (test_hsm_scenarios.cpp).
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -27,23 +32,51 @@ enum class Scenario : uint8_t { Standard, FencedRing, Carnage, Brawling };
 constexpr uint8_t kScenarioCount = 4;
 inline bool ValidScenario(uint8_t s) { return s < kScenarioCount; }
 
-// The settings a scenario sets on the game instance before the travel. loseCondition < 0: left as it is.
+// The setting a scenario sets on the game instance before the travel (the Travel carries it to every client). loseCondition <
+// 0: left as it is. Carnage and Brawling set nothing here: the game's switches for them do nothing in a lobby match.
 struct ScenarioWorld {
     int loseCondition = -1;     // "Current Lose Condition" (Enum_CombatEvent_LoseConditions)
-    bool carnage = false;       // "Free Mode Carnage" on
-    bool brawling = false;      // "Free Mode Brawling" on
 };
 constexpr int kLoseConditionFence = 3;   // BP_Fence_Bags in the Pit, Yard and Cellar (travel.cpp)
 
 inline ScenarioWorld WorldOf(Scenario s) {
     ScenarioWorld w;
+    if (s == Scenario::FencedRing) w.loseCondition = kLoseConditionFence;
+    return w;
+}
+
+// What a match format lets a scenario do. Plain bools: hsm_match.h includes this header, so the Format enum is not known here
+// (ScenarioFormatOf in hsm_match.h fills it).
+struct ScenarioFormat {
+    bool freeForAll = true;     // plain free-for-all: every fighter for himself
+    bool botFormat = false;     // Survival, Zombies: the host's wave bots fight the players
+};
+// false: the scenario does nothing in this format and the match plays as Standard (the row says so).
+inline bool ScenarioApplies(Scenario s, const ScenarioFormat& f) {
     switch (s) {
-        case Scenario::FencedRing: w.loseCondition = kLoseConditionFence; break;
-        case Scenario::Carnage: w.carnage = true; break;
-        case Scenario::Brawling: w.brawling = true; break;
+        case Scenario::Carnage: return f.freeForAll;
+        case Scenario::Brawling: return !f.botFormat;
+        case Scenario::FencedRing:
         case Scenario::Standard: break;
     }
-    return w;
+    return true;
+}
+
+// Carnage's computer fighters: one more than the players, 3 to 5.
+constexpr int kCarnageBotsMin = 3, kCarnageBotsMax = 5;
+inline int CarnageBotCount(int players) { return std::clamp(players + 1, kCarnageBotsMin, kCarnageBotsMax); }
+
+// What the mod itself does for a scenario in a match of `players` humans; the DLL only applies it.
+struct ScenarioEffects {
+    bool bare = false;          // every body spawns with no armour and no weapons (Brawling)
+    int carnageBots = 0;        // computer fighters the host adds when the round goes live, on no team (Carnage); 0 = none
+};
+inline ScenarioEffects EffectsOf(Scenario s, const ScenarioFormat& f, int players) {
+    ScenarioEffects e;
+    if (!ScenarioApplies(s, f)) return e;
+    if (s == Scenario::Brawling) e.bare = true;
+    if (s == Scenario::Carnage) e.carnageBots = CarnageBotCount(players);
+    return e;
 }
 
 inline const char* ScenarioName(Scenario s) {
@@ -55,14 +88,22 @@ inline const char* ScenarioName(Scenario s) {
     }
     return "Standard";
 }
+// What the row says a scenario does. It only promises what the mod does (EffectsOf); the Fenced ring is the game's own fence and
+// lose condition, which a test run is still checking.
 inline const char* ScenarioHint(Scenario s) {
     switch (s) {
-        case Scenario::FencedRing: return "Sandbag fences close the ring (the game's own lose condition for this map).";
-        case Scenario::Carnage: return "The game's carnage combat mode, set for everyone from the start. Experimental.";
-        case Scenario::Brawling: return "The game's brawling setting, set for everyone from the start. Experimental.";
+        case Scenario::FencedRing: return "Sandbag fences close the ring. Experimental: leaving the ring should put you out.";
+        case Scenario::Carnage: return "3 to 5 computer fighters join the arena and attack everyone, you included. They score nothing. Free-for-all only.";
+        case Scenario::Brawling: return "Everyone starts every round in pants with no weapons. Not used in Survival or Zombies.";
         case Scenario::Standard: break;
     }
     return "The map as the game's Free Mode setup has it.";
+}
+// The row's hint for a format: where the scenario does nothing, it says so instead of promising its effect.
+inline std::string ScenarioHintFor(Scenario s, const ScenarioFormat& f) {
+    if (ScenarioApplies(s, f)) return ScenarioHint(s);
+    return s == Scenario::Carnage ? "Carnage works in Free-for-all only. In this mode the match plays as Standard."
+                                  : "Brawling does not work in Survival or Zombies. Here the match plays as Standard.";
 }
 
 namespace scenario_detail {
@@ -145,6 +186,20 @@ inline bool FencePlacementFor(std::string_view mapPath, FencePlacement& out) {
     const std::string_view t = scenario_detail::Tail(mapPath);
     for (const auto& r : scenario_detail::kFenceRows) if (scenario_detail::SameNoCase(r.shortName, t)) { out = r.p; return true; }
     return false;
+}
+
+// The bags BP_Fence_Bags builds round a ring of this Radius (cm): Round(2 * pi * Radius * 0.01 / 0.8), one every 0.8 m of the
+// circle (decomp Assets/Props/Fence/Blueprints/BP_Fence_Bags.cpp). The DLL logs it beside what it counted, so a short fence shows.
+inline int FenceBagsFor(double radius) {
+    if (!(radius > 0)) return 0;
+    return int(std::floor(2.0 * 3.14159265358979323846 * radius * 0.01 / 0.8 + 0.5));
+}
+// Outside the ring's lose volume: BP_Fence_Bags' Sphere has the Radius * 0.95 and its EndOverlap calls "Event Lose Match" on the
+// fighter that left. (x, y, z) in cm, the level's own coordinates.
+constexpr double kFenceSphereScale = 0.95;
+inline bool OutsideFence(const FencePlacement& p, double x, double y, double z) {
+    const double dx = x - p.x, dy = y - p.y, dz = z - p.z, r = p.radius * kFenceSphereScale;
+    return dx * dx + dy * dy + dz * dz > r * r;
 }
 
 // The lobby key hsm_scen: the scenario's number as text. A value that is no number or no scenario reads Standard.

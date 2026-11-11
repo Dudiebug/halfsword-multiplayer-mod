@@ -12,7 +12,7 @@
 
 namespace hsm {
 
-constexpr size_t kMaxQueuePlayers = 16;
+constexpr size_t kMaxQueuePlayers = 32;
 
 class KingQueue {
 public:

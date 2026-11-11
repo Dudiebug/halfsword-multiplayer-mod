@@ -6,6 +6,7 @@
 //   RegearFor     - which respawns bring a new generated loadout
 //   PartitionSides / PickRespawn - team spawn sides and respawn points
 #pragma once
+#include "match/hsm_class_power.h"
 #include "match/hsm_bracket.h"
 #include "match/hsm_crossbow.h"
 #include "match/hsm_damage.h"
@@ -18,6 +19,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace hsm {
@@ -32,35 +34,70 @@ namespace hsm {
 // is "it" and carries a fuse; no teams), Infection (survivors against the infected: two fixed teams, the infected respawn),
 // Crossbow TDM (Teams with a crossbow for everyone). Tournament (14): a 1v1 bracket over everybody, the pairing being fought
 // and the rest on the bench (match/hsm_bracket.h). PitBridgeDuel (15): the Pit's bridge, the winner stays and the loser goes
-// to the back of the queue (match/hsm_kingqueue.h). Both are round formats with a bench: IsQueueFormat.
+// to the back of the queue (match/hsm_kingqueue.h). Both are round formats with a bench: IsQueueFormat. Chaos (16): Last Man
+// Standing's rounds, each fighter dealt a new rank of gear, weapon type, height and weight every round and the round its own
+// damage and weights (match/hsm_roles.h).
 enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5, LastManStanding = 6,
                               TeamDuel = 7, Riot = 8, Juggernaut = 9, CaptureTheFlag = 10, Tag = 11, Infection = 12, CrossbowTDM = 13,
-                              Tournament = 14, PitBridgeDuel = 15 };
-constexpr uint8_t kFormatCount = 16;
+                              Tournament = 14, PitBridgeDuel = 15, Chaos = 16, OneCrossbow = 17, Roulette = 18, HideSeek = 19 };
+constexpr uint8_t kFormatCount = 20;
 constexpr int kMinTeams = 2, kMaxTeams = 4;
 // PvP gear: own loadout / random by tier / everyone identical / Fists: nobody wears or holds anything (the Brawl card,
-// free-for-all only). Fists is no choice of the Gear row (kGearRowCount): the mode card sets it.
-enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3 };
-constexpr uint8_t kGearCount = 4, kGearRowCount = 3;
-// The Weapons row: which weapons the generated gear (RandomTier, Mirror) may hold, by the game's own weapon-type filter
-// (GameWeaponTypeByte). Any leaves the game's fields alone.
-enum class WeaponFilter : uint8_t { Any = 0, Swords1H = 1, Swords2H = 2, Polearms = 3, AxesMaces = 4 };
-constexpr uint8_t kWeaponFilterCount = 5;
-// Our filter -> the value the game's weapon-type field takes (GI "Free Mode Opponents Weapons Type", an
-// Enum_WeaponType_Specific). The values are the game's own, from the switch in BP_Generator_Weapons_Random's Generate
-// Weapon that picks the type's data asset: 0 any, 1 swords 1H, 2 swords 2H, 3 maces 1H, 4 maces 2H, 5 hafted 1H (axes,
-// hammers), 6 hafted 2H, 7 polearms. The game has no one type for "Axes & maces": that filter is one of its four (maces
-// and hafted, one- and two-handed), by `roll`, one per generated loadout; four rolls in a row give all four.
+// free-for-all only) / HostKit: everyone in the loadout the host built (#777). Fists is no choice of the Gear row
+// (kGearRow): the mode card sets it.
+enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3, HostKit = 4 };
+constexpr uint8_t kGearCount = 5;
+inline constexpr Gear kGearRow[] = {Gear::Own, Gear::RandomTier, Gear::Mirror, Gear::HostKit};   // the Gear row's stops, in order
+constexpr uint8_t kGearRowCount = sizeof(kGearRow) / sizeof(kGearRow[0]);
+// Gear the host rolls within the tier's budget: the Tier row's budget and the Weapons row are for it only.
+inline bool GearRolled(Gear g) { return g == Gear::RandomTier || g == Gear::Mirror; }
+// The Weapons row: which weapon types the generated gear (RandomTier, Mirror) may hold. A set of the game's own weapon types
+// (GameWeaponTypeByte), one bit each, that the host ticks in the lobby. Nothing ticked is Any: the game's fields stay alone.
+// Lobby key hsm_wpm holds the mask; hsm_wpn, the key of the earlier one-of-five filter, is still read (WeaponMaskFromKeys).
+using WeaponMask = uint8_t;
+// The game's weapon-type field (GI "Free Mode Opponents Weapons Type", an Enum_WeaponType_Specific). The values are the game's
+// own, from the switch in BP_Generator_Weapons_Random's Generate Weapon that picks the type's data asset: 0 any, 1 swords 1H,
+// 2 swords 2H, 3 maces 1H, 4 maces 2H, 5 hafted 1H (axes, hammers), 6 hafted 2H, 7 polearms. Bit N-1 of a mask is type N.
 inline constexpr uint8_t kGameWeaponTypeCount = 8;
-inline constexpr uint8_t kAxesMacesTypes[4] = {3, 5, 4, 6};
-inline uint8_t GameWeaponTypeByte(WeaponFilter w, uint32_t roll = 0) {
-    switch (w) {
-        case WeaponFilter::Swords1H: return 1;
-        case WeaponFilter::Swords2H: return 2;
-        case WeaponFilter::Polearms: return 7;
-        case WeaponFilter::AxesMaces: return kAxesMacesTypes[roll % 4];
+inline constexpr uint8_t kWeaponTypeCount = 7;
+inline constexpr WeaponMask kWeaponMaskAll = 0x7F;
+// The mask bit of a game type (1..7); 0 for any (0) and for a byte the game does not have.
+inline constexpr WeaponMask WeaponBit(uint8_t gameByte) {
+    return gameByte >= 1 && gameByte <= kWeaponTypeCount ? WeaponMask(1u << (gameByte - 1)) : WeaponMask(0);
+}
+inline constexpr bool WeaponMaskHas(WeaponMask m, uint8_t gameByte) { return (m & WeaponBit(gameByte)) != 0; }
+// A mask from any number (a lobby key): only the seven types count.
+inline constexpr WeaponMask CleanWeaponMask(unsigned m) { return WeaponMask(m & kWeaponMaskAll); }
+// The types ticked.
+inline int WeaponTypesTicked(WeaponMask m) {
+    int n = 0;
+    for (uint8_t t = 1; t <= kWeaponTypeCount; ++t) n += WeaponMaskHas(m, t) ? 1 : 0;
+    return n;
+}
+// The value the game's weapon-type field takes for one generated loadout: the `roll`-th ticked type, counted up from swords
+// 1H. One ticked type is always that one; several rotate with `roll` (consecutive rolls give every ticked type); none (Any): 0.
+inline uint8_t GameWeaponTypeByte(WeaponMask m, uint32_t roll = 0) {
+    const int n = WeaponTypesTicked(m);
+    if (n == 0) return 0;
+    int skip = int(roll % uint32_t(n));
+    for (uint8_t t = 1; t <= kWeaponTypeCount; ++t)
+        if (WeaponMaskHas(m, t) && skip-- == 0) return t;
+    return 0;
+}
+// The mask a lobby from before the ticks meant by its hsm_wpn value: 0 any, 1 swords 1H, 2 swords 2H, 3 polearms, 4 axes & maces
+// (maces and hafted, one- and two-handed). Anything else: any.
+inline WeaponMask WeaponMaskFromOldFilter(int oldFilter) {
+    switch (oldFilter) {
+        case 1: return WeaponBit(1);
+        case 2: return WeaponBit(2);
+        case 3: return WeaponBit(7);
+        case 4: return WeaponMask(WeaponBit(3) | WeaponBit(4) | WeaponBit(5) | WeaponBit(6));
         default: return 0;
     }
+}
+// The Weapons row from the lobby's keys: hsm_wpm when the host wrote it (hasMask), else the old hsm_wpn filter.
+inline WeaponMask WeaponMaskFromKeys(bool hasMask, int mask, int oldFilter) {
+    return hasMask ? CleanWeaponMask(unsigned(std::clamp(mask, 0, 255))) : WeaponMaskFromOldFilter(oldFilter);
 }
 // The game's type by its value, for the log.
 inline const char* GameWeaponTypeName(uint8_t gameByte) {
@@ -68,19 +105,35 @@ inline const char* GameWeaponTypeName(uint8_t gameByte) {
                                                                  "maces 2H", "hafted 1H", "hafted 2H", "polearms"};
     return gameByte < kGameWeaponTypeCount ? kNames[gameByte] : "?";
 }
-inline const char* WeaponFilterName(WeaponFilter w) {
-    switch (w) {
-        case WeaponFilter::Swords1H: return "1H swords";
-        case WeaponFilter::Swords2H: return "2H swords";
-        case WeaponFilter::Polearms: return "Polearms";
-        case WeaponFilter::AxesMaces: return "Axes & maces";
-        default: return "Any";
-    }
+// A type's name on its lobby chip (hafted is the game's word for axes and hammers).
+inline const char* WeaponTypeName(uint8_t gameByte) {
+    static constexpr const char* kNames[kGameWeaponTypeCount] = {"Any",      "1H swords", "2H swords", "1H maces",
+                                                                 "2H maces", "1H axes",   "2H axes",   "Polearms"};
+    return gameByte < kGameWeaponTypeCount ? kNames[gameByte] : "?";
+}
+// The Weapons row's value and the summary line: Any, the ticked types by name (up to three), else how many.
+inline std::string WeaponMaskName(WeaponMask m) {
+    const int n = WeaponTypesTicked(m);
+    if (n == 0) return "Any";
+    if (n > 3) return std::to_string(n) + " weapon types";
+    std::string s;
+    for (uint8_t t = 1; t <= kWeaponTypeCount; ++t)
+        if (WeaponMaskHas(m, t)) s += (s.empty() ? "" : " / ") + std::string(WeaponTypeName(t));
+    return s;
+}
+// A tick on a type's chip (1..7) flips that type. The chip for Any (0) clears every tick.
+inline WeaponMask ToggleWeaponType(WeaponMask m, uint8_t gameByte) {
+    return gameByte == 0 ? WeaponMask(0) : WeaponMask((m ^ WeaponBit(gameByte)) & kWeaponMaskAll);
 }
 // The Team colours row: what takes the team's colour on every machine's own copy of a fighter (match/hsm_team_kit.h).
 // Tabard: the tabard only. Full: clothes, tabard, plate (darkened), shield and grips; blades stay steel. Off: nothing.
 enum class TeamKit : uint8_t { Off = 0, Tabard = 1, Full = 2 };
 constexpr uint8_t kTeamKitCount = 3;
+// The Shuffle teams row (the formats whose teams the lobby picks, PicksTeams): when the teams are dealt again, at random and
+// balanced (ShuffleTeams, ShuffleDue). Off: only at the start, from the picks and the host's moves (ResolveTeams). Each match:
+// the start and every rematch. Each round: also every new round of the team rounds. Lobby key hsm_shuf.
+enum class TeamShuffle : uint8_t { Off = 0, EachMatch = 1, EachRound = 2 };
+constexpr uint8_t kTeamShuffleCount = 3;
 // A team's name on the HUD (RED, BLUE, GREEN, GOLD; "-" for none).
 inline std::string TeamName(int team) {
     static const char* kNames[] = {"RED", "BLUE", "GREEN", "GOLD"};
@@ -106,6 +159,12 @@ inline uint8_t WeightFromSlider(float at) {
 }
 inline std::string WeightLabel(uint8_t pct) { return std::to_string(pct) + "%" + (pct == kWeightStockPct ? " (stock)" : ""); }
 
+// The Tagger speed row (Tag): whoever is "it" runs and walks this percent of their normal speed while they carry the fuse
+// (lobby key hsm_tspd; gameplay/session.cpp applies it through the class stats). 100 is no bonus.
+inline constexpr uint8_t kTaggerSpeedOptions[3] = {100, 110, 120};
+inline constexpr uint8_t kTaggerSpeedDefault = 110;
+inline bool ValidTaggerSpeedPct(int pct) { return pct == kTaggerSpeedOptions[0] || pct == kTaggerSpeedOptions[1] || pct == kTaggerSpeedOptions[2]; }
+
 struct MatchConfig {
     Format format = Format::FreeForAll;
     uint8_t teams = 2;                // the TwoTeams format: how many teams, kMinTeams..kMaxTeams (Sanitize)
@@ -116,22 +175,47 @@ struct MatchConfig {
     Gear gear = Gear::Own;
     uint8_t tier = 2;                 // Enum_Ranks 0..7: random gear tier, and the starting bot tier
     uint8_t crossbows = 0;            // hsm::Crossbows: how many random players get a crossbow at each spawn (lobby key hsm_xbow; experimental)
-    WeaponFilter weapons = WeaponFilter::Any;   // random / identical gear only: the weapon types it may roll (lobby key hsm_wpn); host-side, never on the wire
+    WeaponMask weapons = 0;           // random / identical gear only: the weapon types it may roll, one bit per game type (lobby key hsm_wpm); 0 = any; host-side, never on the wire
     TeamKit teamKit = TeamKit::Full;  // team formats: what takes the team colour (lobby key hsm_kit, MatchInfo.teamKit); every machine tints its own copies
+    TeamShuffle shuffle = TeamShuffle::Off;   // the formats that pick teams: deal them again at random each match / round (lobby key hsm_shuf); host-side, never on the wire
     uint8_t fuseS = 30;               // Tag: the fuse "it" carries, seconds (kFuseMinS..kFuseMaxS, lobby key hsm_fuse); host-side, never on the wire
+    uint8_t taggerSpeedPct = kTaggerSpeedDefault;   // Tag: the run and walk speed of whoever is "it", percent (kTaggerSpeedOptions, lobby key hsm_tspd); host-side, never on the wire
     uint16_t damagePct = kDamageStock;   // the Player Damage Rate every machine runs in the session (hsm_damage.h)
     uint8_t deadWeightPct = kWeightDefaultPct;     // the Dead weight row (lobby key hsm_dwt): Dead Weight Scale for everyone, percent of 1.0
     uint8_t weaponWeightPct = kWeightDefaultPct;   // the Weapon weight row (lobby key hsm_wwt): Weapon Weight Scale for everyone, percent of 1.0
     uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
     uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
     bool freeCam = true;              // dead players may fly a free camera (F, lobby key hsm_fcam); false: they only follow the living (MatchInfo.freeCam)
+    uint8_t classPower = kClassPowerDefault;   // the class power limit where the lobby uses classes (#2125, lobby key hsm_cpow): match/hsm_class_power.h; never a wire field
+    bool stripOff = false;            // the Stripping row Off (#1931, lobby key hsm_strip): a downed fighter's armour cannot be pulled off (match/hsm_strip.h); never a wire field
+    bool ownBodies = false;           // the Bodies row Own (#1410, lobby key hsm_body): with own loadouts every player keeps their own character's build, not the tier's (ForcesBuild); MatchInfo.forceStrength carries the outcome
+    bool keepKit = false;             // the Loadouts row (#2112, lobby key hsm_keep): a Tournament with random loadouts keeps each player's first one for the bracket (match/hsm_kept_kit.h); never a wire field
     uint8_t scenario = 0;             // hsm::Scenario: the world settings for the picked map (lobby key hsm_scen); host-side, the clients get the settings with the Travel, never a wire field
+    uint8_t timeOfDay = 0;            // hsm::TimeOfDay: the lighting of an arena with a day cycle (lobby key hsm_tod); host-side like the scenario, the Travel carries it
+    uint8_t winBy = 0;                // hsm::WinBy (match/hsm_win_by.h): what loses a round besides death (lobby key hsm_winby); every machine reads it from the lobby, never a wire field
+    bool propsOff = false;            // the Props row Off (#1252, lobby key hsm_props): every machine removes the map's loose props during the match (PropsOffClears); never a wire field
     bool hostPhysics = false;         // 0.9.0: the host runs every fighter's physics and every screen shows its copy (SyncMode::Host); false: each player its own (SyncMode::Owner)
 };
 inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
 inline constexpr uint8_t kClearGroundOptions[4] = {0, 2, 3, 5};       // minutes, 0 = off
 inline bool ValidWaveBreakS(uint16_t s) { return s == 0 || s == 10 || s == 30 || s == 60 || s == 120; }
 inline bool ValidClearGroundMin(uint8_t m) { return m == 0 || m == 2 || m == 3 || m == 5; }
+// The Time of day row (#2): the lighting an arena with a day cycle loads. The game keeps it in GI_Settings "Current FreeMode
+// Time", an Enum_DayTime (0 morning, 1 day, 2 evening, 3 night); each such arena picks its lighting level and ambience from it
+// when Free Mode is on (decomp Map_Arena_Pit and the others). Map: the host's own Free Mode time, untouched.
+enum class TimeOfDay : uint8_t { Map = 0, Morning = 1, Day = 2, Evening = 3, Night = 4 };
+inline constexpr uint8_t kTimeOfDayCount = 5;
+// The game's Enum_DayTime byte for a pick; -1 for Map and for a value past the last (nothing is set).
+inline int GameDayTime(uint8_t t) { return t >= 1 && t < kTimeOfDayCount ? int(t) - 1 : -1; }
+inline const char* TimeOfDayName(uint8_t t) {
+    switch (TimeOfDay(t)) {
+        case TimeOfDay::Morning: return "Morning";
+        case TimeOfDay::Day: return "Day";
+        case TimeOfDay::Evening: return "Evening";
+        case TimeOfDay::Night: return "Night";
+        default: return "Map's own";
+    }
+}
 // Brawl: free-for-all where every fighter spawns bare (no armour, no weapons) and fights with fists. A mode card, not a
 // Format: the rules are free-for-all's.
 inline bool IsBrawl(Format f, Gear g) { return f == Format::FreeForAll && g == Gear::Fists; }
@@ -156,6 +240,11 @@ inline double TierWeight(int tier) { return kTierWeight[std::clamp(tier, 0, 7)];
 // The Weight every player is forced to: the tier's (Brawl is always kBrawlTier).
 inline double ForcedWeight(Format, Gear, int tier) { return TierWeight(tier); }
 inline double ForcedWeight(const MatchConfig& c) { return ForcedWeight(c.format, c.gear, c.tier); }
+// The Bodies row (#1410). Own: every player keeps the build of their own character. It is a choice of own loadouts only:
+// rolled, dealt and the host's gear always come with the tier's build. ForcesBuild: whether a match builds every player
+// for the tier (the host's force_strength, unless the bodies are the players' own).
+inline bool BodiesOwn(const MatchConfig& c) { return c.gear == Gear::Own && c.ownBodies; }
+inline bool ForcesBuild(bool forceStrength, const MatchConfig& c) { return forceStrength && !BodiesOwn(c); }
 // The Weight a fighter spawns with. on: exactly `forced` (up or down; whatever the passport holds, NaN too). off (a bot, or
 // force_strength=0): their own, clamped to 0..1 so an out-of-range passport cannot spawn a stronger body; NaN: the default.
 inline double BuildWeight(double own, double forced, bool on) {
@@ -167,9 +256,14 @@ inline double MassScaleFor(double weight) { return 1.0 + 0.25 * weight; }
 inline double GripScaleFor(double weight) { return 1.0 + 0.5 * weight; }
 
 inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Format::Zombies; }
+// The scenario row (hsm_scenarios.h) for a match: what the format lets it do, and what it does on this map for `players` humans.
+inline ScenarioFormat ScenarioFormatOf(Format f) { return {f == Format::FreeForAll, IsBotFormat(f)}; }
+inline ScenarioEffects ScenarioEffectsFor(const MatchConfig& c, std::string_view mapPath, int players) {
+    return EffectsOf(EffectiveScenario(mapPath, c.scenario), ScenarioFormatOf(c.format), players);
+}
 // The gear settings a format takes: own / random by tier / identical anywhere (Survival and Zombies too, 0.8.0-pre20);
 // Fists only for the Brawl card (free-for-all) and Tag.
-inline bool GearAllowed(Format f, Gear g) { return g == Gear::Fists ? f == Format::FreeForAll || f == Format::Tag : uint8_t(g) < kGearCount; }
+inline bool GearAllowed(Format f, Gear g) { return g == Gear::Fists ? f == Format::Roulette || f == Format::FreeForAll || f == Format::Tag || f == Format::OneCrossbow : uint8_t(g) < kGearCount; }
 // Tournament and Pit Bridge Duels: two fighters fight at a time, everyone else sits on the bench (no body, spectating).
 inline bool IsQueueFormat(Format f) { return f == Format::Tournament || f == Format::PitBridgeDuel; }
 // Rounds between teams: the last team standing takes the round (Team Duel, Riot, Juggernaut).
@@ -181,8 +275,29 @@ inline bool IsInfection(Format f) { return f == Format::Infection; }
 inline bool IsCrossbowTdm(Format f) { return f == Format::CrossbowTDM; }
 constexpr int8_t kSurvivorTeam = 0, kInfectedTeam = 1;   // Infection
 constexpr int kInfectedKitTeam = 6;                      // TeamColor / the team kit's colour index of the infected: a dark green of their own (hsm_team_kit.h KitTeamFor)
-// Riot and Juggernaut give each fighter a role (match/hsm_roles.h): the role sets its gear, tier, build and team.
-inline bool HasRoles(Format f) { return f == Format::Riot || f == Format::Juggernaut; }
+inline bool IsChaos(Format f) { return f == Format::Chaos; }
+// One Crossbow (17, #778): Last Man Standing's rounds between unarmed peasants (gear Fists at kOneCrossbowTier); one of
+// them, drawn anew each round, starts with a crossbow (Crossbows::One), and whoever holds it has endless bolts
+// (match/hsm_modes.h EndlessBolts). It falls with its holder and is the next one's to pick up.
+inline bool IsOneCrossbow(Format f) { return f == Format::OneCrossbow; }
+inline constexpr uint8_t kOneCrossbowTier = 1;      // Peasant: every build Weight 0.15
+// Roulette (18, #836): rounds between unarmed peasants (gear Fists at kOneCrossbowTier) and one crossbow the host hands
+// from fighter to fighter (match/hsm_modes.h RouletteGame). The holder pulls the trigger on themself or on another
+// fighter. A blank on yourself is a point (Match::AwardPoint), and so is the round for the last one standing; the first
+// to the limit takes the match.
+inline bool IsRoulette(Format f) { return f == Format::Roulette; }
+// Hide and Seek (19, #1082): rounds of seekers against hiders, dealt anew each round by the roles (match/hsm_roles.h
+// kRoleSeeker and kRoleHider; no teams). The hiders, unarmed, have the Hide time (MatchConfig::fuseS) while the seekers
+// stand still and see nothing; then the seekers hunt for the Seek time (MatchConfig::timeLimitS: a round's clock here,
+// not the match's). The host's game rule ends the round (match/hsm_modes.h HideSeekGame, Match::AwardRound), not the
+// last one standing.
+inline bool IsHideSeek(Format f) { return f == Format::HideSeek; }
+constexpr uint8_t kHideMinS = 15, kHideMaxS = 60;
+constexpr uint16_t kSeekMinS = 120, kSeekMaxS = 600, kSeekDefaultS = 300;
+// Riot and Juggernaut give each fighter a role (match/hsm_roles.h): the role sets its gear, tier, build and team (two fixed
+// teams: HasRoleTeams). Chaos deals every fighter a role of its own each round, and has no teams.
+inline bool HasRoleTeams(Format f) { return f == Format::Riot || f == Format::Juggernaut; }
+inline bool HasRoles(Format f) { return HasRoleTeams(f) || IsChaos(f) || IsHideSeek(f); }
 // The formats with teams: Teams (ThreeTeams is the old value of 3 teams, which still counts so a stale one cannot lose its
 // colours) and the team rounds.
 inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::ThreeTeams || IsTeamRound(f) || IsCrossbowTdm(f) || IsInfection(f); }
@@ -190,20 +305,20 @@ inline bool HasTeams(Format f) { return f == Format::TwoTeams || f == Format::Th
 inline bool PicksTeams(Format f) { return HasTeams(f) && !HasRoles(f) && !IsInfection(f); }
 // The Duel rules: rounds, the last one standing takes the round (Duel for two fighters, Last Man Standing for any number;
 // the team rounds count the last team).
-inline bool IsRoundFormat(Format f) { return f == Format::Duel || f == Format::LastManStanding || IsTag(f) || IsTeamRound(f) || IsQueueFormat(f); }
+inline bool IsRoundFormat(Format f) { return IsRoulette(f) || f == Format::Duel || f == Format::LastManStanding || IsChaos(f) || IsOneCrossbow(f) || IsTag(f) || IsTeamRound(f) || IsQueueFormat(f) || IsHideSeek(f); }
 // Scores kept per fighter (free-for-all, Duel, Last Man Standing) rather than per team.
 inline bool ScoresPerFighter(Format f) { return f == Format::FreeForAll || (IsRoundFormat(f) && !IsTeamRound(f)); }
 // Teams in a match: `teams` (2..4) for Teams, Team Duel and Crossbow TDM, 3 for the old ThreeTeams value, 2 for Riot, Juggernaut,
 // Infection and the bot formats, else 0.
 inline int TeamCount(Format f, int teams) {
     return f == Format::TwoTeams || f == Format::TeamDuel || IsCrossbowTdm(f) ? std::clamp(teams, kMinTeams, kMaxTeams) : f == Format::ThreeTeams ? 3
-         : HasRoles(f) || IsInfection(f) || IsBotFormat(f) ? 2 : 0;
+         : HasRoleTeams(f) || IsInfection(f) || IsBotFormat(f) ? 2 : 0;
 }
 constexpr uint8_t kFuseMinS = 10, kFuseMaxS = 60, kFuseDefaultS = 30;   // Tag's fuse, seconds
 constexpr uint16_t kInfectionDefaultTimeS = 300;                          // Infection: the survivors win when this runs out (0 is no choice)
 // The score limit is the rounds to win a fight (Tournament: always 1, one round a fight since 0.8.0-pre26), the wins to take
 // the match (Pit Bridge Duels), else rounds or kills.
-inline uint16_t DefaultScoreLimit(Format f) { return f == Format::FreeForAll || f == Format::PitBridgeDuel ? 5 : f == Format::Tournament ? 1 : IsRoundFormat(f) ? 3 : 10; }
+inline uint16_t DefaultScoreLimit(Format f) { return IsRoulette(f) || f == Format::FreeForAll || f == Format::PitBridgeDuel ? 5 : f == Format::Tournament ? 1 : IsRoundFormat(f) ? 3 : 10; }
 // The lobby key a format keeps its limit under, and the value the key holds: Tournament's "Rounds per fight" (hsm_trnr: 1, 3 or
 // 5; the limit is the rounds to win), Pit Bridge Duels' "Wins to take the match" (hsm_pbwin), else hsm_lim.
 inline const char* LimitKeyFor(Format f) { return f == Format::Tournament ? "hsm_trnr" : f == Format::PitBridgeDuel ? "hsm_pbwin" : "hsm_lim"; }
@@ -229,6 +344,15 @@ inline bool HitAllowed(bool victimOwnedHere, int8_t attackerTeam, int8_t victimT
 
 struct TeamRequest { uint8_t slot = 0; int8_t pick = kNoTeam; int8_t hostOverride = kNoTeam; };
 std::map<uint8_t, int8_t> ResolveTeams(const std::vector<TeamRequest>& members, Format f, int teams);
+// Deals the teams again at random and balanced, for the Shuffle teams row: the picks are ignored; a member with a valid
+// hostOverride keeps that team (a lock), the rest are dealt to a smallest team in a random order, so with no locks the team
+// sizes differ by at most one. The same members and seed give the same deal. Formats that do not pick teams: ResolveTeams.
+std::map<uint8_t, int8_t> ShuffleTeams(const std::vector<TeamRequest>& members, Format f, int teams, uint32_t seed);
+// Whether a respawn of this cause deals the teams again under the row: Each match at a rematch, Each round also at a round
+// reset. The start of a match is dealt by StartMatch, whatever the cause.
+inline bool ShuffleDue(TeamShuffle s, RespawnCause cause) {
+    return (s != TeamShuffle::Off && cause == RespawnCause::Rematch) || (s == TeamShuffle::EachRound && cause == RespawnCause::RoundReset);
+}
 
 struct Rgba { float r = 0, g = 0, b = 0, a = 0; };
 Rgba TeamColor(int team);             // a == 0: no tint (free-for-all keeps players' own colours)
@@ -254,6 +378,12 @@ inline bool GaveUpDeath(uint32_t markedAtMs, uint32_t nowMs) {
 }
 
 enum class MatchPhase : uint8_t { Idle = 0, Countdown = 1, Live = 2, SuddenDeath = 3, Results = 4 };
+// The host is about to build a fighter's body in a running match: does the slot need a deal first? Yes when the fighter
+// is new to the match (JoinRegearFor), and, in a match that deals its gear, when the slot's loadout `slotBlob` is not
+// the one the match dealt (`dealtBlob`, 0 for none): the player's own upload came in since. A player who left and came
+// back, or who loaded the level after the start, uploads again, and 0.8.0-pre49 built that body from the upload: their
+// own Free Mode loadout in a random-gear match, for the whole match with Everyone identical.
+bool NeedsDealtGear(const MatchConfig& c, MatchPhase phase, bool inMatch, uint32_t slotBlob, uint32_t dealtBlob);
 inline bool CombatPhase(MatchPhase phase) { return phase == MatchPhase::Live || phase == MatchPhase::SuddenDeath; }   // blows count
 
 // id: the player's stable identity (SteamID; 0 = none: bots, direct-IP peers), which keeps their score across a leave and
@@ -320,12 +450,21 @@ public:
     uint8_t PairB() const { return pair_[1]; }
     int PairingWins(uint8_t e) const { auto it = pairWins_.find(e); return pairingOver_ || it == pairWins_.end() ? 0 : it->second; }   // 0 once the fight is decided (the bracket shows the next one)
     const Bracket& bracket() const { return bracket_; }
+    // Tournament (#1429): the place of this leaver is open (a newcomer who joins before his fight is due takes it).
+    bool Vacant(uint8_t e) const { return std::find(vacant_.begin(), vacant_.end(), e) != vacant_.end(); }
     const KingQueue& queue() const { return queue_; }
     void SetBracketSeed(uint32_t seed) { bracketSeed_ = seed; }
     void OnDeath(uint8_t victim, uint8_t killer, uint32_t nowMs);   // killer 0 = no attributable attacker
     // Duel: the fighter gives up the round being fought (held G); it goes as if they had fallen, with no kill credited.
     // False, and no effect, outside Duel, outside a fought round (countdown, round gap, results) or for a downed fighter.
     bool Forfeit(uint8_t entity, uint32_t nowMs);
+    // Roulette: a blank the crossbow's holder pulled on themself is a point, and the limit reached ends the match.
+    // False, and no effect, in another format, outside a fought round or for a fighter that is down.
+    bool AwardPoint(uint8_t entity, uint32_t nowMs);
+    // Hide and Seek: the round is over and goes to `winners` (a point each; nobody: a round without one). The limit
+    // reached ends the match for the one ahead; a tie at the top plays on. False, and no effect, in another format or
+    // outside a fought round.
+    bool AwardRound(const std::vector<uint8_t>& winners, uint32_t nowMs);
     // Players vs bots (Progression co-op): a living human gives up the fight (held G), as if they had fallen. With every
     // human down that way the bots win and the match ends. False, and no effect, in a PvP format, outside a fought phase,
     // for a bot or for a fighter already dead.
@@ -382,6 +521,9 @@ private:
     void ResolveQueueRound(uint8_t winner, uint32_t nowMs);   // a round ended: 0 = drawn
     void FinishPairing(uint8_t winner, uint32_t nowMs); // Tournament: the winner takes the fight
     void QueueLeft(uint8_t entity, uint32_t nowMs);     // a fighter left: out of the bracket (a forfeit in the fight) / the queue
+    bool Vacate(uint8_t entity);                        // Tournament (#1429): a leaver's place stays open until his fight is due
+    void SettleVacant();                                // open places in the game to fight now: byes (the opponent advances)
+    void FillVacant(uint8_t entity);                    // a newcomer takes an open place
     void EndQueueMatch(uint32_t nowMs);                 // nobody left to fight (the bracket decided, the queue down to one)
     bool PairMissing() const;
     void End(int winnerKey, uint32_t nowMs);
@@ -418,6 +560,8 @@ private:
     Bracket bracket_;
     KingQueue queue_;
     uint32_t bracketSeed_ = 1;
+    std::vector<uint8_t> vacant_;                       // Tournament: open places (the leavers' entities), first left first
+    std::set<uint64_t> leftIds_;                        // Tournament: ids of players who left this one (back, they wait for the next)
     uint8_t pair_[2] = {0, 0};
     std::map<uint8_t, int> pairWins_;                   // Tournament: rounds each fighter of the pairing has won
     bool pairingOver_ = false;                          // Tournament: the fight is decided; the next round reset seats the next pairing
@@ -436,21 +580,21 @@ private:
     float progress_ = 0.0f;
 };
 
-// Generated loadouts made ahead, for one (tier, weapon filter) at a time: another tier or filter empties it.
+// Generated loadouts made ahead, for one (tier, weapon mask) at a time: another tier or mask empties it.
 // Before the match starts, while its fighters come in: how many loadouts its start will generate for `humans` players
 // (the start regears like a rematch, RegearFor), so the host can make them ahead in that wait.
 size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans);
 
 class GearPool {
 public:
-    bool Wants(uint8_t tier, WeaponFilter weapons, size_t ahead);                 // true while it holds fewer than `ahead` for `tier` under `weapons`
-    void Put(uint8_t tier, WeaponFilter weapons, std::vector<uint8_t> blob);      // an empty blob (a failed generation) is not kept
-    std::vector<uint8_t> Take(uint8_t tier, WeaponFilter weapons);                // the oldest one made for them; empty when none
+    bool Wants(uint8_t tier, WeaponMask weapons, size_t ahead);                 // true while it holds fewer than `ahead` for `tier` under `weapons`
+    void Put(uint8_t tier, WeaponMask weapons, std::vector<uint8_t> blob);      // an empty blob (a failed generation) is not kept
+    std::vector<uint8_t> Take(uint8_t tier, WeaponMask weapons);                // the oldest one made for them; empty when none
     size_t size() const { return blobs_.size(); }
 private:
-    void Use(uint8_t tier, WeaponFilter weapons);
+    void Use(uint8_t tier, WeaponMask weapons);
     uint8_t tier_ = 0xFF;
-    WeaponFilter weapons_ = WeaponFilter::Any;
+    WeaponMask weapons_ = 0;
     std::vector<std::vector<uint8_t>> blobs_;
 };
 

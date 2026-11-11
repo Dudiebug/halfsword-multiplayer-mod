@@ -109,7 +109,9 @@ static void TestRejectsBadStarts() {
     CHECK(!b.Start({1, 1}, 0) && !b.valid());
     CHECK(!b.Start({0, 2}, 0));
     CHECK(!b.Start({1, kBracketEmpty}, 0));
-    CHECK(!b.Start(Players(17), 0));
+    CHECK(!b.Start(Players(33), 0));
+    CHECK(b.Start(Players(32), 0) && b.Rounds() == 5 && b.StageName(0) == "Round of 32");
+    CHECK(b.Start(Players(20), 0) && b.Rounds() == 5);       // a full lobby: twelve byes in the first round
     CHECK(b.Start(Players(16), 0) && b.Rounds() == 4);
     // one player is the champion at once; none has no champion
     Bracket one, none;
@@ -193,6 +195,53 @@ static void TestForfeitsEverywhere() {
     CHECK(e.Remove(1) && e.Done() && e.Champion() == 2);
 }
 
+static bool InCurrent(const Bracket& b, uint8_t e) { Bracket::Game g; return b.Current(g) && (g.a == e || g.b == e); }
+
+static void TestReplaceSeat() {
+    // #1429: a newcomer takes the whole seat of one who has not won a fight; the bracket still holds together on the wire.
+    Bracket b;
+    CHECK(b.Start(Players(4), 11));
+    const std::vector<uint8_t> s = b.seeds();
+    CHECK(b.Unfought(s[2]) && b.Unfought(s[0]) && !b.Unfought(99));
+    CHECK(b.Replace(s[2], 9));
+    CHECK(b.seeds()[2] == 9 && b.Contains(9) && b.InRunning(9) && !b.Contains(s[2]));
+    CHECK(!b.Replace(9, s[0]) && !b.Replace(9, 0) && !b.Replace(9, kBracketEmpty) && !b.Replace(77, 10));
+    CHECK(b.Replace(9, 9) && b.seeds()[2] == 9);           // his own seat: nothing moves
+    Bracket w;
+    CHECK(w.Restore(b.seeds(), b.GameWinners()) && w.Contains(9));
+    // a fight won: the seat is his (it would rewrite a game somebody played); the loser is out
+    CHECK(b.Report(s[0]));
+    CHECK(!b.Unfought(s[0]) && !b.Replace(s[0], 10) && !b.Unfought(s[3]) && !b.Replace(s[3], 10));
+    Bracket::Game g;
+    CHECK(b.Current(g) && (g.a == 9 || g.b == 9) && !InCurrent(b, s[0]));
+    CHECK(b.Report(9) && b.Current(g) && g.round == 1 && (g.a == 9 || g.b == 9) && InCurrent(b, s[0]));
+    CHECK(b.Report(9) && b.Done() && !InCurrent(b, 9) && !b.Unfought(s[1]));
+}
+
+static void TestReplaceAfterByes() {
+    // 3 players: the top seed's bye is no fight, so his seat (already in the final) can change hands.
+    Bracket b;
+    CHECK(b.Start(Players(3), 7));
+    const std::vector<uint8_t> s = b.seeds();
+    CHECK(b.Unfought(s[0]) && b.Replace(s[0], 9));
+    Bracket w;
+    CHECK(w.Restore(b.seeds(), b.GameWinners()));
+    Bracket::Game g;
+    CHECK(b.Current(g) && g.round == 0 && g.a != 9 && g.b != 9);
+    CHECK(b.Report(g.a) && b.Current(g) && g.round == 1 && (g.a == 9 || g.b == 9));
+    // 5 players in a bracket of 8: seed 3 leaves, so seed 2 reaches the final on two byes; his seat can change hands
+    Bracket e;
+    CHECK(e.Start(Players(5), 3));
+    const std::vector<uint8_t> t = e.seeds();
+    CHECK(e.Remove(t[2]) && e.Unfought(t[1]) && e.Replace(t[1], 9));
+    CHECK(!e.Contains(t[1]) && e.InRunning(9));
+    Bracket x;
+    CHECK(x.Restore(e.seeds(), e.GameWinners()) && x.InRunning(9));
+    // seed 1 beats a player: no longer
+    while (e.Current(g) && g.a != t[0] && g.b != t[0]) CHECK(e.Report(g.a));
+    CHECK(e.Unfought(t[0]) && e.Current(g) && e.Report(t[0]) && !e.Unfought(t[0]));
+}
+
 static void TestAllLeaveBeforeTheFirstGame() {
     for (int n = 2; n <= 8; ++n) {
         Bracket b;
@@ -260,7 +309,7 @@ static void TestWireValidation() {
     CHECK(!ValidBracketWire({1, 2, 3}, {0, 0, kBracketEmpty}));
     CHECK(!ValidBracketWire({1, 2, 3}, {3, 0, 0}));               // a bye goes to the player behind it, nobody else
     // too many seeds, a winner list of the wrong size
-    CHECK(!ValidBracketWire(Players(17), std::vector<uint8_t>(31, 0)));
+    CHECK(!ValidBracketWire(Players(33), std::vector<uint8_t>(63, 0)));
     CHECK(!ValidBracketWire(Players(5), std::vector<uint8_t>(6, 0)));
     CHECK(ValidBracketWire(Players(5), std::vector<uint8_t>(7, 0)));
     // a bracket decided all the way to the champion
@@ -294,6 +343,8 @@ int main() {
     TestForfeitBeforeAPairing();
     TestForfeitDuringAPairing();
     TestForfeitsEverywhere();
+    TestReplaceSeat();
+    TestReplaceAfterByes();
     TestAllLeaveBeforeTheFirstGame();
     TestWireRoundTrip();
     TestWireValidation();

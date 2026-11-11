@@ -3,6 +3,7 @@
 // Game-independent.
 #pragma once
 #include "match/hsm_hud_style.h"
+#include "match/hsm_roles.h"
 #include <algorithm>
 #include <string>
 
@@ -33,6 +34,8 @@ inline Rgba NameTagInk(Format format, int team, bool it) {
     return TeamCount(format, kMinTeams) >= 2 && team >= 0 ? style::TeamInk(team) : style::kBone;
 }
 
+// Hide and Seek: a hider's name tag would give its place away, so nobody is shown it.
+inline bool NameTagHidden(Format format, uint8_t roleId) { return IsHideSeek(format) && roleId == kRoleHider; }
 inline constexpr float kNameTagFarCm = 4000.f, kNameTagNearCm = 600.f;
 
 // projectedOk: ProjectWorldLocationToScreen found the point in front of the camera. sx/sy are viewport pixels.

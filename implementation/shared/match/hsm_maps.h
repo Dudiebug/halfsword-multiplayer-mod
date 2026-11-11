@@ -79,19 +79,36 @@ inline const MapInfo* FindMap(std::string_view pathOrShortName) {
     return nullptr;
 }
 
+// The arenas whose lighting follows the time of day (the Time of day row): their level Blueprint sets "Day Time" from GI
+// "Current FreeMode Time" and streams the lighting level for it (decomp Map_Arena_Alley, _EastTower, _Ambush_Test (Forest),
+// _Pit, _Slums, _Yard). The Cellar and the Lords Hall have one lighting; the Abyss and a modded map are not arenas of the game's.
+inline bool MapHasDayTime(std::string_view pathOrShortName) {
+    const MapInfo* m = FindMap(pathOrShortName);
+    if (!m) return false;
+    for (const char* p : {"/Game/Maps/Arenas/Map_Arena_Alley", "/Game/Maps/Arenas/Map_Arena_EastTower", "/Game/Maps/Arenas/Map_Arena_Ambush_Test",
+                          "/Game/Maps/Arenas/Map_Arena_Pit", "/Game/Maps/Arenas/Map_Arena_Slums", "/Game/Maps/Arenas/Map_Arena_Yard"})
+        if (std::string_view(m->path) == p) return true;
+    return false;
+}
+
 // Pit Bridge Duels are fought on the Pit's bridge and nowhere else.
 inline constexpr const char* kPitMapPath = "/Game/Maps/Arenas/Map_Arena_Pit";
+inline constexpr const char* kSlumsMapPath = "/Game/Maps/Arenas/Map_Arena_Slums";   // Hide and Seek's only stock map (custom maps are every format's)
 
 inline bool MapAllowsFormat(const MapInfo& m, Format f) {
     switch (f) {
         case Format::Zombies: return m.abyss;
         case Format::Infection: return m.arena || m.bigArena || m.abyss;
         case Format::PitBridgeDuel: return map_detail::EqualsNoCase(m.path, kPitMapPath);
+        case Format::HideSeek: return map_detail::EqualsNoCase(m.path, kSlumsMapPath);
         case Format::Tournament:
         case Format::Duel: return m.arena;
         case Format::CaptureTheFlag: return false;   // removed in 0.8.0 (Sanitize turns it into Teams)
         case Format::FreeForAll:
         case Format::LastManStanding:
+        case Format::Chaos:
+        case Format::OneCrossbow:
+        case Format::Roulette:
         case Format::TwoTeams:
         case Format::TeamDuel:
         case Format::Riot:

@@ -5,6 +5,7 @@
 #include "match/hsm_online_rules.h"
 #include "match/hsm_lobby_mods.h"
 #include "match/hsm_mp_scene.h"
+#include "session/hsm_region.h"
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ public:
     virtual void DeleteClass() = 0;                                       // empties the picked slot and goes back to the plain fighter
     virtual bool ClassesUnrestricted() const = 0;                         // the class limits here: this lobby's, or the ones this machine's lobbies will have
     virtual bool CanSetUnrestricted() const = 0;                          // not a guest: the host decides
+    virtual double ClassPowerLimit() const = 0;                           // the class budget here: this lobby's Class power, else the usual +15
     virtual void SetClassesUnrestricted(bool on) = 0;                     // this machine's lobbies, the one it's hosting included
     virtual bool AllowHse() const = 0;                                    // HS Enhancer is allowed: in this lobby, or this machine's lobbies
     virtual bool ClassesOff() const = 0;                                  // HS Enhancer is on and allowed here, so this player has no class
@@ -43,6 +45,18 @@ public:
     virtual bool HelpImprove() const = 0;                            // help_improve in HSMMod.ini: also send the log when someone in the lobby files a report
     virtual void SetHelpImprove(bool on) = 0;                        // also written back to HSMMod.ini (and marks the question answered)
     virtual bool HelpImproveAsked() const = 0;                       // the one-time question on the first MULTIPLAYER click was answered
+    // Names and region (HSMMod.ini nickname, hide_names, lobby_name, region; session/hsm_player_names.h, session/hsm_region.h).
+    // A setter cleans what it gets, writes the INI and tells the lobby. The string setters answer "" when the text was taken, else
+    // the line to show (a name with a slur in it is refused).
+    virtual std::string Nickname() const = 0;                        // what the other players see instead of the Steam name ("": the Steam name)
+    virtual std::string SetNickname(const std::string& typed) = 0;
+    virtual bool HideNames() const = 0;                              // HIDE PLAYER NAMES: every other player shows as "Player N" on this screen
+    virtual void SetHideNames(bool on) = 0;
+    virtual std::string LobbyName() const = 0;                       // the name of the lobby this player hosts ("": "<name>'s fight")
+    virtual std::string SetLobbyName(const std::string& typed) = 0;  // host (also kept for the next lobby)
+    virtual Region RegionPick() const = 0;                           // the picker: Auto or a region
+    virtual void SetRegionPick(Region r) = 0;
+    virtual Region RegionGuessed() const = 0;                        // what Auto found out (Auto: nothing yet, or unclear)
     virtual bool RestartGame(bool modOff) = 0;                       // starts a new copy of the game (mod off for that launch only), then quits this one
 
     // The multiplayer menus (the page's voice block, the in-match Esc menu). Voice settings are written to HSMMod.ini.

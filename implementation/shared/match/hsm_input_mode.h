@@ -46,4 +46,74 @@ inline PauseScreen PauseScreenOf(std::string_view cls) {
     return PauseScreen::None;
 }
 
+// Who owns the Esc key in a multiplayer session match (mod_pause=1). The game's own Esc pause toggle is blocked there, so
+// the key is the mod's: it opens the mod's pause panel, unless something else on screen already uses Esc. The caller fills
+// the context (the busy flags OR'd with their value one tick earlier, so the press that closes the chat or a screen does
+// not also open the panel) and acts on the answer. Outside a session match, or with mod_pause=0, nothing changes: the
+// game's own Esc applies and the mod does not log.
+struct EscContext {
+    bool sessionMatch = false;     // joined a session and on a match level (the game's own pause toggle is blocked there)
+    bool modPause = true;          // mod_pause=1
+    bool chatOpen = false;         // a chat line is being typed: Esc cancels it
+    bool textFocused = false;      // some other text box has the keyboard (report box, lobby password): Esc leaves it
+    bool fetchMenu = false;        // Fetch's own menu is up and uses Esc
+    bool lobbyPage = false;        // the mod's multiplayer lobby page is open: Esc closes that
+    bool settingsScreen = false;   // one of the game's settings screens is up (opened from the panel): Esc goes back
+    bool panelOpen = false;        // the mod's pause panel is open
+};
+enum class EscOwner : uint8_t {
+    Game,        // not ours: the game's own Esc handling applies
+    Chat,        // the chat closes itself
+    TextBox,     // a text box lets go of the keyboard
+    Fetch,       // Fetch's menu closes itself
+    Lobby,       // the multiplayer page closes itself
+    Settings,    // the game's settings screen goes back (to the pause class, which the Construct hook swallows)
+    ClosePanel,  // the pause panel closes: resume
+    OpenPanel,   // the pause panel opens
+};
+inline EscOwner EscOwnerOf(const EscContext& c) {
+    if (!c.sessionMatch || !c.modPause) return EscOwner::Game;
+    if (c.chatOpen) return EscOwner::Chat;
+    if (c.textFocused) return EscOwner::TextBox;
+    if (c.fetchMenu) return EscOwner::Fetch;
+    if (c.lobbyPage) return EscOwner::Lobby;
+    if (c.settingsScreen) return EscOwner::Settings;
+    if (c.panelOpen) return EscOwner::ClosePanel;
+    return EscOwner::OpenPanel;
+}
+// The log line for one Esc press, "pause: Esc -> <this>". Game has no line: the mod does nothing then.
+inline const char* EscOwnerText(EscOwner o) {
+    switch (o) {
+        case EscOwner::Chat: return "chat (it closes)";
+        case EscOwner::TextBox: return "text box (it lets go)";
+        case EscOwner::Fetch: return "Fetch's menu (it closes)";
+        case EscOwner::Lobby: return "multiplayer page (it closes)";
+        case EscOwner::Settings: return "game settings screen (it goes back)";
+        case EscOwner::ClosePanel: return "mod panel closes";
+        case EscOwner::OpenPanel: return "mod panel";
+        default: return "";
+    }
+}
+
+// One Esc press, seen two ways: the key going down (read from the OS, so it works with the game's own Esc blocked) and the
+// game's blocked pause event (which also comes from P and the gamepad's Start). The key and the event of one press land a
+// frame or two apart; kEscGapMs merges them. A held key counts once, and a press right after another (for example the one
+// that came back from the game's settings screen) is not taken for a second.
+constexpr uint32_t kEscGapMs = 250;
+class EscPress {
+public:
+    bool Step(bool keyDown, bool pauseEvent, uint32_t nowMs) {
+        const bool edge = keyDown && !keyWas_;
+        keyWas_ = keyDown;
+        if (!edge && !pauseEvent) return false;
+        if (started_ && uint32_t(nowMs - last_) < kEscGapMs) return false;
+        started_ = true;
+        last_ = nowMs;
+        return true;
+    }
+private:
+    bool keyWas_ = false, started_ = false;
+    uint32_t last_ = 0;
+};
+
 }  // namespace hsm

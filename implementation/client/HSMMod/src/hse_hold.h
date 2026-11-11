@@ -17,6 +17,10 @@ void Tick();                    // game thread, each frame: takes HSE's place wh
 bool Ready();                   // HSMMod sits in HSE's place, and knows where HSE passes things on: Set works
 void Set(bool on);              // on: HSE gets no keyboard, mouse or raw input (game thread)
 bool On();                      // Ready and Set(true)
+// #1290: HSMMod's text boxes and HS Enhancer's menu take the keyboard in turns (session/hsm_hse_keys.h).
+void Share(bool on);            // hse_share_keys (default on): off, neither rule applies
+void Typing(bool typing);       // game thread, each tick: an HSMMod text box is open: HSE gets no input (releases still), until it closes
+bool MenuOpen();                // HSE's menu is open, and this HSE says so (0.6 on; 0.5.3 can't): HSMMod's chat and hotkeys wait
 void MenuKey(int vk);           // HSE's menu key (match/hsm_online_rules.h HseMenuKey): a hold lets it through to HSE
 void CloseAtStart(int vk);      // a locked game: HSE's menu, open, closed once with this key (its menu key, which no key sends)
 }  // namespace hsm::enhancer::hold

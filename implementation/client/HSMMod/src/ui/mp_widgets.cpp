@@ -258,8 +258,9 @@ void VoiceBlock::Tick(Session& session) {
 
 // ---------------------------------------------------------------- the Esc menu
 
-bool EscPanel::Build(Kit& kit, Canvas root) {
+bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
     m_ = Maker(&kit);
+    layout_ = layout;
     panel_ = kit.MakePanel();
     Panel sheet = kit.MakePanel();
     Box page = kit.MakeColumn(), header = kit.MakeRow(), tabs = kit.MakeRow(), body = kit.MakeScroll(), footer = kit.MakeRow();
@@ -372,7 +373,11 @@ bool EscPanel::Build(Kit& kit, Canvas root) {
     report_ = m_.MakeFlat("REPORT A BUG", 18);
     help_ = m_.MakeFlat("HELP IMPROVE THE MOD: OFF", 18);
     leave_ = m_.MakeFlat("LEAVE SESSION", 18);
-    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_}) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
+    back_ = m_.MakeFlat("BACK", 18);
+    // The pause panel's page: BACK to its list and CHANGE LOADOUT. The rest of the footer is the pause panel's own buttons.
+    const std::vector<Flat*> footerButtons = layout == Layout::Pause ? std::vector<Flat*>{&back_, &loadout_}
+        : std::vector<Flat*>{&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_};
+    for (Flat* f : footerButtons) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
     panel_.Show(false);
     return true;
 }
@@ -483,8 +488,9 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (!nextData_ || int32_t(now - nextData_) >= 0) { nextData_ = now + 250; Refresh(session); }
     if (tab_ == 1) voice_.Tick(session);
 
-    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_}) Paint(f->card);
-    if (report_.card) report_.card.button.Show(reportOn);
+    const bool pausePage = layout_ == Layout::Pause;
+    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_, &back_}) if (!pausePage || f == &back_ || f == &loadout_) Paint(f->card);
+    if (report_.card && !pausePage) report_.card.button.Show(reportOn);
     // CHANGE LOADOUT: only in a match; dimmed, with the reason under the buttons, while the rule says no. A click re-reads the
     // passport (edited in the game's own menu) and asks the host for the new kit; the answer shows in the same line.
     if (loadout_.card) {
@@ -498,7 +504,7 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
             if (lv.shown && !text.empty()) loadoutNote_.Set(text);
         }
     }
-    if (help_.card) {                           // the multiplayer page's switch: on gets the blood frame and a green label
+    if (help_.card && !pausePage) {             // the multiplayer page's switch: on gets the blood frame and a green label
         const bool help = session.HelpImprove();
         help_.card.button.Show(reportOn);
         help_.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
@@ -506,6 +512,7 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
         help_.card.selected = help;
         if (reportOn && Clicked(help_.card)) { session.SetHelpImprove(!help); nextData_ = 0; }
     }
+    if (pausePage) return Clicked(back_.card) ? Action::Back : Action::None;
     const bool resume = Clicked(resume_.card), game = Clicked(gameMenu_.card), report = Clicked(report_.card), leave = Clicked(leave_.card);
     if (leaveArmedAt_ && now - leaveArmedAt_ >= kConfirmMs) leaveArmedAt_ = 0;
     if (leave_.card) {

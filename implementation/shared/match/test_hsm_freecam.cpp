@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
@@ -265,7 +266,75 @@ static void TestSwallowLookOnDeadBodyOnly() {
     CHECK(!SwallowLook(true, nullptr, nullptr));
 }
 
+// The living player's free camera (#2624): on only while the fighter lives in a running match with the host's Free cam
+// row on; the key always ends it, and so does the end of any of those; H hides the HUD only while it flies.
+static LiveCamWorld Live() { LiveCamWorld w; w.matchLevel = w.fighting = w.alive = w.allowed = true; return w; }
+static void TestLiveCam() {
+    const Bounds b = Box();
+    Pose p; p.pos = {500, 500, 50}; p.yaw = 190; p.pitch = 120;
+    CHECK(LiveCamMay(Live()));
+    for (int i = 0; i < 4; ++i) {                                    // each condition on its own
+        LiveCamWorld w = Live();
+        (i == 0 ? w.matchLevel : i == 1 ? w.fighting : i == 2 ? w.alive : w.allowed) = false;
+        CHECK(!LiveCamMay(w));
+        LiveCam c;
+        CHECK(c.Toggle(w, p, b) == (i < 2 ? LiveCamAnswer::NoMatch : i == 2 ? LiveCamAnswer::Dead : LiveCamAnswer::NotAllowed) && !c.on());
+        CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && c.on());
+        CHECK(c.Keep(Live()) && c.on());                             // nothing changed: it flies on
+        c.ToggleHud();
+        CHECK(c.hudHidden() && !c.Keep(w) && !c.on() && !c.hudHidden());   // the condition ended: so does the flight, once
+        CHECK(c.Keep(w) && !c.on());
+    }
+    { LiveCamWorld w = Live(); w.alive = false; w.fighting = false; LiveCam c; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::NoMatch); }   // no match first
+    { LiveCamWorld w = Live(); w.alive = false; w.allowed = false; LiveCam c; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::Dead); }       // then the death
+    LiveCam c;
+    CHECK(!c.on() && !c.hudHidden());
+    c.ToggleHud(); CHECK(!c.hudHidden());                            // H does nothing on the ground
+    c.Look(100, 100); c.Fly({1, 0, 0}, false, 0.1, b);
+    CHECK(Near(c.pose().pos.x, 0) && Near(c.pose().yaw, 0));         // nor do the mouse and the keys
+    // a flight: from where the camera is, the view wrapped and clamped, inside the box
+    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && Near(c.pose().yaw, -170) && Near(c.pose().pitch, kFreePitchLimit) && Near(c.pose().pos.x, 500));
+    Pose far = p; far.pos = {99999, -99999, 99999};
+    { LiveCam f; CHECK(f.Toggle(Live(), far, b) == LiveCamAnswer::On && Near(f.pose().pos.x, b.max.x) && Near(f.pose().pos.y, b.min.y) && Near(f.pose().pos.z, b.max.z)); }
+    const double yaw0 = c.pose().yaw;
+    c.Look(10, 0);
+    CHECK(Near(c.pose().yaw, yaw0 + 10 * kSensitivity));
+    c.Fly({0, 0, 1}, false, 0.1, b);
+    CHECK(c.pose().pos.z > 50 && c.pose().pos.z <= b.max.z);
+    for (int i = 0; i < 1000; ++i) c.Fly({1, 1, 1}, true, 0.1, b);
+    CHECK(c.pose().pos.x <= b.max.x && c.pose().pos.y <= b.max.y && c.pose().pos.z <= b.max.z && c.pose().pos.x >= b.min.x);
+    c.ToggleHud(); CHECK(c.hudHidden());
+    c.ToggleHud(); CHECK(!c.hudHidden() && c.on());
+    c.ToggleHud();
+    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::Off && !c.on() && !c.hudHidden());   // the key ends it, whatever the world says
+    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && !c.hudHidden());               // a new flight shows the HUD again
+    { LiveCamWorld w = Live(); w.allowed = false; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::Off); }   // off always works
+    // no camera to start from, or no box: refused
+    Pose bad = p; bad.yaw = kNaN;
+    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera && !c.on());
+    bad = p; bad.pos.x = kInf;
+    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera);
+    bad = p; bad.pitch = kNaN;
+    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera);
+    CHECK(c.Toggle(Live(), p, Bounds{}) == LiveCamAnswer::NoCamera && !c.on());
+    c.Toggle(Live(), p, b); c.End();
+    CHECK(!c.on());
+    // what the player is told: every answer but the dead player's (the spectator's camera has its own F)
+    for (LiveCamAnswer a : {LiveCamAnswer::On, LiveCamAnswer::Off, LiveCamAnswer::NoMatch, LiveCamAnswer::NotAllowed, LiveCamAnswer::NoCamera}) CHECK(*LiveCamLine(a));
+    CHECK(!*LiveCamLine(LiveCamAnswer::Dead) && std::string(LiveCamLine(LiveCamAnswer::Off)) == "Free camera off");
+    CHECK(std::string(LiveCamLine(LiveCamAnswer::On)).find("H hides the HUD") != std::string::npos);
+    CHECK(std::string(LiveCamLine(LiveCamAnswer::NotAllowed)).find("host") != std::string::npos && std::string(LiveCamLine(LiveCamAnswer::NoMatch)).find("match") != std::string::npos);
+}
+
+// The body's own input while the camera flies: axes read zero, presses are dropped, releases pass; all of it passes on the ground.
+static void TestLiveCamInput() {
+    CHECK(LiveCamInput(true, true, false) == HeldInput::Zero && LiveCamInput(true, true, true) == HeldInput::Zero);
+    CHECK(LiveCamInput(true, false, true) == HeldInput::Drop && LiveCamInput(true, false, false) == HeldInput::Pass);
+    for (bool axis : {false, true}) for (bool pressed : {false, true}) CHECK(LiveCamInput(false, axis, pressed) == HeldInput::Pass);
+}
+
 int main() {
+    TestLiveCam(); TestLiveCamInput();
     TestSwallowLookOnDeadBodyOnly();
     TestYawWraps();
     TestPitchClamp();

@@ -14,7 +14,7 @@
 
 namespace hsm {
 
-inline constexpr size_t kModSlots = 16;          // SessionMods masks: bit = slot
+inline constexpr size_t kModSlots = 32;          // SessionMods masks: bit = slot
 inline constexpr size_t kModHolderNames = 3;     // names on a row before "+N"
 
 // Host only: a player its rule is still checking, or one that no longer fits and is counting down.
@@ -35,7 +35,7 @@ struct LobbyModsLocal {
     ModChoice chosen;            // host: what it chose
     SessionModsMsg mods;
     std::array<std::string, kModSlots> names;   // by slot, empty when unknown
-    uint16_t present = 0;        // the slots in the session (bit = slot)
+    uint32_t present = 0;        // the slots in the session (bit = slot)
     std::vector<ModPending> pending;            // host only
 };
 
@@ -84,7 +84,7 @@ inline std::string ModSlotName(const LobbyModsLocal& l, size_t slot) {
 }
 
 // "Ann, Bob, Cy +2" in slot order, at most kModHolderNames names.
-inline std::string ModSlotList(const LobbyModsLocal& l, uint16_t mask) {
+inline std::string ModSlotList(const LobbyModsLocal& l, uint32_t mask) {
     std::string s;
     size_t shown = 0, more = 0;
     for (size_t slot = 0; slot < kModSlots; ++slot) {
@@ -97,14 +97,14 @@ inline std::string ModSlotList(const LobbyModsLocal& l, uint16_t mask) {
     return s;
 }
 
-inline size_t ModSlotCount(uint16_t mask) {
+inline size_t ModSlotCount(uint32_t mask) {
     size_t n = 0;
-    for (; mask; mask = uint16_t(mask & (mask - 1))) ++n;
+    for (; mask; mask &= mask - 1) ++n;
     return n;
 }
 
 // Who runs it: "everyone" when every player in the session does (two or more of them), else their names.
-inline std::string ModHolders(const LobbyModsLocal& l, uint16_t mask) {
+inline std::string ModHolders(const LobbyModsLocal& l, uint32_t mask) {
     if (ModSlotCount(l.present) >= 2 && (mask & l.present) == l.present) return "everyone";
     return ModSlotList(l, mask);
 }
@@ -189,7 +189,7 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
             r.refused = !r.note.empty();
             r.tone = ModToneOf(hse, e.item.kind, r.refused);
             if (!r.refused && live && (l.rule.preset == ModPreset::Bundle || l.rule.preset == ModPreset::Custom)) {
-                const uint16_t lacking = uint16_t(l.present & ~e.slots);
+                const uint32_t lacking = l.present & ~e.slots;
                 for (const ModAllow& a : l.rule.list)
                     if (a.required && lacking && AllowMatches(a, e.item)) { r.note = "required: missing for " + ModSlotList(l, lacking); r.tone = ModTone::Warn; break; }
             }

@@ -153,12 +153,193 @@ static void TestTournamentWaitingPlayerLeavesIsABye() {
     r.Fall(waiting1);                                    // a benched fighter's "death" is ignored
     CHECK(r.m.phase() == MatchPhase::Live && r.m.roundWinner() == 0 && r.m.RoundInPlay());
     CHECK(!r.m.Leave(waiting1, r.now));                  // not alive: nothing falls
-    CHECK(!r.m.bracket().InRunning(waiting1));
+    CHECK(r.m.Vacant(waiting1) && r.m.bracket().InRunning(waiting1));   // #1429: his place is open until his fight is due
     r.Win(a);
+    CHECK(!r.m.Vacant(waiting1) && !r.m.bracket().InRunning(waiting1)); // due now, nobody took it: a bye
     r.Gap();
     // the other semi-final's place is a bye now: a meets waiting2 in the final
     CHECK((r.m.PairA() == a && r.m.PairB() == waiting2) || (r.m.PairA() == waiting2 && r.m.PairB() == a));
     CHECK(b != 0);
+}
+
+// #1429: the place of a waiting player who left goes to a newcomer who joins before that fight is due.
+static bool InCurrent(const Match& m, uint8_t e) { Bracket::Game g; return m.bracket().Current(g) && (g.a == e || g.b == e); }
+static void Waiting(const Rig& r, uint8_t& w1, uint8_t& w2) {
+    w1 = w2 = 0;
+    for (uint8_t e = 1; e <= 4; ++e) if (e != r.m.PairA() && e != r.m.PairB()) (w1 ? w2 : w1) = e;
+}
+static void TestTournamentNewcomerTakesAnOpenPlace() {
+    Rig r(Cfg(Format::Tournament, 1), 4);
+    const uint8_t a = r.m.PairA();
+    uint8_t w1, w2; Waiting(r, w1, w2);
+    r.m.Leave(w1, r.now);
+    r.m.RemoveFighter(w1);                               // the reservation ran out: still open
+    CHECK(r.m.Vacant(w1) && r.m.bracket().InRunning(w1));
+    r.m.AddFighter({7, kNoTeam, true, 107});
+    CHECK(!r.m.Vacant(w1) && r.m.bracket().InRunning(7) && !r.m.bracket().Contains(w1) && r.m.bracket().seeds().size() == 4);
+    CHECK(r.m.Benched(7) && !r.m.Alive(7));              // he waits for his fight
+    r.Win(a);
+    r.Gap();
+    CHECK((r.m.PairA() == 7 && r.m.PairB() == w2) || (r.m.PairA() == w2 && r.m.PairB() == 7));
+    CHECK(r.m.Alive(7) && !r.m.Benched(7));
+    r.Win(7);
+    r.Gap();
+    CHECK((r.m.PairA() == a && r.m.PairB() == 7) || (r.m.PairA() == 7 && r.m.PairB() == a));
+}
+static void TestTournamentOpenPlacesFirstLeftFirst() {
+    Rig r(Cfg(Format::Tournament, 1), 4);
+    uint8_t w1, w2; Waiting(r, w1, w2);
+    r.m.Leave(w2, r.now); r.m.RemoveFighter(w2);
+    r.m.Leave(w1, r.now); r.m.RemoveFighter(w1);
+    CHECK(r.m.Vacant(w1) && r.m.Vacant(w2));
+    r.m.AddFighter({7, kNoTeam, true, 107});
+    CHECK(!r.m.Vacant(w2) && r.m.Vacant(w1) && r.m.bracket().Contains(7));
+    r.m.AddFighter({8, kNoTeam, true, 108});
+    CHECK(!r.m.Vacant(w1) && r.m.bracket().Contains(8));
+    // a newcomer on a reused slot takes that slot's own place, wherever it is in the line
+    Rig q(Cfg(Format::Tournament, 1), 4);
+    Waiting(q, w1, w2);
+    q.m.Leave(w1, q.now); q.m.RemoveFighter(w1);
+    q.m.Leave(w2, q.now); q.m.RemoveFighter(w2);
+    q.m.AddFighter({w2, kNoTeam, true, 300});
+    CHECK(!q.m.Vacant(w2) && q.m.Vacant(w1) && q.m.bracket().InRunning(w2) && q.m.Benched(w2));
+}
+static void TestTournamentLeaverBackWaitsForTheNext() {
+    // back on another slot (known by his id): no place for him, and his old one stays open for somebody else
+    Rig r(Cfg(Format::Tournament, 1), 4);
+    uint8_t w1, w2; Waiting(r, w1, w2);
+    r.m.Leave(w1, r.now); r.m.RemoveFighter(w1);
+    r.m.AddFighter({7, kNoTeam, true, uint64_t(100 + w1)});
+    CHECK(r.m.Vacant(w1) && !r.m.bracket().Contains(7) && r.m.Benched(7));
+    // back on his own slot within the reservation: benched, his place still open, a bye when due
+    Rig q(Cfg(Format::Tournament, 1), 4);
+    const uint8_t qa = q.m.PairA();
+    Waiting(q, w1, w2);
+    q.m.Leave(w1, q.now);
+    q.m.Return(w1);
+    CHECK(q.m.Benched(w1) && q.m.Vacant(w1));
+    q.Win(qa);
+    q.Gap();
+    CHECK(!q.m.bracket().InRunning(w1) && q.m.PairA() != w1 && q.m.PairB() != w1 && q.m.Alive(w2));
+    // left in the countdown (no Leave, the slot just went): his id counts too
+    std::vector<FighterInfo> f;
+    for (int e = 1; e <= 4; ++e) f.push_back({uint8_t(e), kNoTeam, true, uint64_t(100 + e)});
+    Match m;
+    m.SetBracketSeed(5);
+    m.Start(Cfg(Format::Tournament, 1), f, 0);
+    uint8_t c = 0;
+    for (uint8_t e = 1; e <= 4 && !c; ++e) if (!InCurrent(m, e)) c = e;
+    m.RemoveFighter(c);
+    CHECK(m.Vacant(c) && m.bracket().InRunning(c));
+    m.AddFighter({9, kNoTeam, true, uint64_t(100 + c)});
+    CHECK(m.Vacant(c) && !m.bracket().Contains(9));
+    m.AddFighter({10, kNoTeam, true, 0});                // no id: a newcomer
+    CHECK(!m.Vacant(c) && m.bracket().Contains(10));
+    // players with no id: one who leaves does not make every newcomer with no id "back"
+    std::vector<FighterInfo> z;
+    for (int e = 1; e <= 4; ++e) z.push_back({uint8_t(e), kNoTeam, true, 0});
+    Match n;
+    n.SetBracketSeed(5);
+    n.Start(Cfg(Format::Tournament, 1), z, 0);
+    c = 0;
+    for (uint8_t e = 1; e <= 4 && !c; ++e) if (!InCurrent(n, e)) c = e;
+    n.RemoveFighter(c);
+    n.AddFighter({9, kNoTeam, true, 0});
+    CHECK(!n.Vacant(c) && n.bracket().Contains(9));
+}
+static void TestTournamentNoOpenPlaceOnceDueOrWon() {
+    // a winner who leaves before his next fight: a bye at once (his seat has a fight behind it); nobody takes it
+    Rig r(Cfg(Format::Tournament, 1), 4);
+    const uint8_t a = r.m.PairA();
+    r.Win(a);
+    r.Gap();
+    CHECK(r.m.PairA() != a && r.m.PairB() != a);
+    r.m.Leave(a, r.now);
+    CHECK(!r.m.Vacant(a) && !r.m.bracket().InRunning(a));
+    r.m.AddFighter({7, kNoTeam, true, 107});
+    CHECK(!r.m.bracket().Contains(7));
+    // one of the next fight who leaves in the gap before it, either side of it: a bye at once
+    uint8_t w1, w2;
+    for (int side = 0; side < 2; ++side) {
+        Rig q(Cfg(Format::Tournament, 1), 4);
+        const uint8_t qa = q.m.PairA();
+        Waiting(q, w1, w2);
+        q.Win(qa);                                       // the gap: the other semi-final is the fight to come
+        Bracket::Game g;
+        CHECK(q.m.bracket().Current(g));
+        const uint8_t gone = side ? g.b : g.a, stays = side ? g.a : g.b;
+        q.m.Leave(gone, q.now);
+        CHECK(!q.m.Vacant(gone) && !q.m.bracket().InRunning(gone) && q.m.bracket().InRunning(stays));
+        q.Gap();
+        CHECK((q.m.PairA() == qa && q.m.PairB() == stays) || (q.m.PairA() == stays && q.m.PairB() == qa));
+    }
+    // one of the fight who leaves while down between its rounds: a forfeit, his place a bye at once
+    Rig d(Cfg(Format::Tournament, 2), 4);
+    const uint8_t da = d.m.PairA(), db = d.m.PairB();
+    d.Win(da);                                           // 1-0, the gap: db is down
+    CHECK(!d.m.Leave(db, d.now));
+    CHECK(!d.m.Vacant(db) && !d.m.bracket().InRunning(db) && d.m.bracket().InRunning(da));
+    // both of a game gone and nobody came: the last one takes the tournament when the fight before ends
+    Rig e(Cfg(Format::Tournament, 1), 4);
+    const uint8_t ea = e.m.PairA();
+    Waiting(e, w1, w2);
+    e.m.Leave(w1, e.now); e.m.Leave(w2, e.now);
+    CHECK(e.m.Vacant(w1) && e.m.Vacant(w2) && e.m.phase() == MatchPhase::Live);
+    e.Win(ea);
+    CHECK(e.m.phase() == MatchPhase::Results && e.m.winner() == int(ea));
+    // the rematch starts with no open place
+    Match::Events ev;
+    for (int i = 0; i < 3 && !ev.rematch; ++i) ev = e.Tick(Match::kResultsMs);
+    CHECK(ev.rematch && !e.m.Vacant(w1) && !e.m.Vacant(w2));
+}
+
+static void TestTournamentOpenPlaceDueAfterAForfeit() {
+    // a forfeit in the fight makes the open place's fight the next one: a bye at once, the final is up
+    Rig r(Cfg(Format::Tournament, 1), 4);
+    const uint8_t a = r.m.PairA(), b = r.m.PairB();
+    uint8_t w1, w2; Waiting(r, w1, w2);
+    r.m.Leave(w1, r.now);
+    CHECK(r.m.Vacant(w1));
+    r.m.Leave(a, r.now);                                 // a forfeits: b takes the semi-final
+    CHECK(!r.m.Vacant(w1) && !r.m.bracket().InRunning(w1) && r.m.bracket().InRunning(w2));
+    Bracket::Game g;
+    CHECK(r.m.bracket().Current(g) && g.round == 1 && ((g.a == b && g.b == w2) || (g.a == w2 && g.b == b)));
+    // the same when the slot of one of the fight goes in the countdown
+    std::vector<FighterInfo> f;
+    for (int e = 1; e <= 4; ++e) f.push_back({uint8_t(e), kNoTeam, true, uint64_t(100 + e)});
+    Match m;
+    m.SetBracketSeed(5);
+    m.Start(Cfg(Format::Tournament, 1), f, 0);
+    CHECK(m.bracket().Current(g));
+    const uint8_t first = g.a;
+    uint8_t c = 0;
+    for (uint8_t e = 1; e <= 4 && !c; ++e) if (!InCurrent(m, e)) c = e;
+    m.RemoveFighter(c);
+    CHECK(m.Vacant(c));
+    m.RemoveFighter(first);
+    CHECK(!m.Vacant(c) && !m.bracket().InRunning(c) && m.bracket().Current(g) && g.round == 1);
+}
+static void TestTournamentRestartClearsOpenPlaces() {
+    // the host starts again: no open place is left over, and one who left the last one is a newcomer again
+    std::vector<FighterInfo> f;
+    for (int e = 1; e <= 4; ++e) f.push_back({uint8_t(e), kNoTeam, true, uint64_t(100 + e)});
+    Match m;
+    m.SetBracketSeed(5);
+    m.Start(Cfg(Format::Tournament, 1), f, 0);
+    uint8_t c = 0;
+    for (uint8_t e = 1; e <= 4 && !c; ++e) if (!InCurrent(m, e)) c = e;
+    m.RemoveFighter(c);
+    CHECK(m.Vacant(c));
+    std::vector<FighterInfo> three;
+    for (const FighterInfo& x : f) if (x.entity != c) three.push_back(x);
+    m.Start(Cfg(Format::Tournament, 1), three, 0);
+    CHECK(!m.Vacant(c) && !m.bracket().Contains(c) && m.bracket().seeds().size() == 3);
+    const uint8_t top = m.bracket().seeds()[0];          // three players: the top seed's bye, not in the first fight
+    CHECK(!InCurrent(m, top));
+    m.RemoveFighter(top);
+    CHECK(m.Vacant(top));
+    m.AddFighter({c, kNoTeam, true, uint64_t(100 + c)});
+    CHECK(!m.Vacant(top) && m.bracket().InRunning(c));
 }
 
 static void TestTournamentEveryoneLeavesButOne() {
@@ -376,7 +557,7 @@ static void TestLoadoutsAheadInTheGap() {
 }
 
 static void TestFormatHelpers() {
-    CHECK(uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15 && kFormatCount == 16);
+    CHECK(uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15 && kFormatCount == 20);
     CHECK(IsQueueFormat(Format::Tournament) && IsQueueFormat(Format::PitBridgeDuel) && !IsQueueFormat(Format::Duel));
     CHECK(IsRoundFormat(Format::Tournament) && IsRoundFormat(Format::PitBridgeDuel) && ScoresPerFighter(Format::Tournament) && ScoresPerFighter(Format::PitBridgeDuel));
     CHECK(!HasTeams(Format::Tournament) && !IsTeamRound(Format::PitBridgeDuel) && !IsBotFormat(Format::Tournament));
@@ -399,6 +580,12 @@ int main() {
     TestTournamentForfeitAfterTheRoundWasWon();
     TestTournamentForfeitAfterADraw();
     TestTournamentWaitingPlayerLeavesIsABye();
+    TestTournamentNewcomerTakesAnOpenPlace();
+    TestTournamentOpenPlacesFirstLeftFirst();
+    TestTournamentLeaverBackWaitsForTheNext();
+    TestTournamentNoOpenPlaceOnceDueOrWon();
+    TestTournamentOpenPlaceDueAfterAForfeit();
+    TestTournamentRestartClearsOpenPlaces();
     TestTournamentEveryoneLeavesButOne();
     TestTournamentLateJoinerWaitsForTheNext();
     TestTournamentCountdownJoinerIsBenchedToo();

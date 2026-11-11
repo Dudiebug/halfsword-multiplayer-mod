@@ -14,19 +14,19 @@ static void TestJoinOrderAndLimit() {
         auto slot = r.Add(k, "p" + std::to_string(k));
         CHECK(slot.has_value() && *slot == k - 100);
     }
-    CHECK(r.size() == kMaxPlayers && kMaxPlayers == 8 && kMaxFighters == 9);
-    CHECK(!r.Add(999, "ninth").has_value());            // 9th member rejected: slot 8 stays empty with a host fighter
-    CHECK(!r.BySlot(8));
+    CHECK(r.size() == kMaxPlayers && kMaxPlayers == 20 && kMaxFighters == 21);
+    CHECK(!r.Add(999, "one more").has_value());         // a 21st member rejected: slot 20 stays empty with a host fighter
+    CHECK(!r.BySlot(20) && r.BySlot(19));
     std::set<uint8_t> entities;
     for (const RosterMember& m : r.members()) { entities.insert(m.entity); CHECK(m.entity == m.slot + 1); }
-    CHECK(entities.size() == kMaxPlayers);                 // unique entities 1..8
-    CHECK(r.Remove(103) && *r.Add(998, "late") == 3);      // a freed slot is reused, never slot 8
+    CHECK(entities.size() == kMaxPlayers);                 // unique entities 1..20
+    CHECK(r.Remove(103) && *r.Add(998, "late") == 3);      // a freed slot is reused, never slot 20
 }
 
 static void TestServerSeatsEight() {
     Roster r; r.ReserveHostSlot(true);
     for (uint64_t k = 1; k <= uint64_t(kMaxPlayers); ++k) CHECK(r.Add(k, "c") == std::optional<uint8_t>(uint8_t(k)));
-    CHECK(r.size() == 8 && r.BySlot(8) && r.ByEntity(9) && !r.BySlot(0));
+    CHECK(r.size() == 20 && r.BySlot(20) && r.ByEntity(21) && !r.BySlot(0));
     CHECK(!r.Add(99, "ninth").has_value());
     CHECK(r.Remove(8) && *r.Add(99, "ninth") == 8);
 }

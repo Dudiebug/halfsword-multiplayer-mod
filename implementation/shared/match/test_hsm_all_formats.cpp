@@ -32,7 +32,7 @@ static bool HasCard(Format f) {
 }
 
 static void TestTables() {
-    CHECK(kFormatCount == 16 && uint8_t(Format::CaptureTheFlag) == 10 && uint8_t(Format::Tag) == 11 && uint8_t(Format::Infection) == 12 &&
+    CHECK(kFormatCount == 20 && uint8_t(Format::Chaos) == 16 && uint8_t(Format::OneCrossbow) == 17 && uint8_t(Format::Roulette) == 18 && uint8_t(Format::HideSeek) == 19 && uint8_t(Format::CaptureTheFlag) == 10 && uint8_t(Format::Tag) == 11 && uint8_t(Format::Infection) == 12 &&
           uint8_t(Format::CrossbowTDM) == 13 && uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15);
     // One card per format but ThreeTeams (the Teams card's 3 teams) and CaptureTheFlag (removed), none twice; then Brawl and Progression.
     CHECK(kModeOrderCount == kFormatCount - 2 && kModeCardCount == kModeOrderCount + 2);
@@ -76,9 +76,10 @@ static void TestTables() {
         MatchConfig c; c.format = f; c.scoreLimit = DefaultScoreLimit(f);
         const std::vector<LobbyRow> rows = SettingsFor(c);
         CHECKF(!rows.empty() && rows.back() == LobbyRow::Sync, i);
-        {   // Player damage, Dead weight and Weapon weight in every format, in that order
+        {   // Player damage, Dead weight and Weapon weight in every format, in that order; Chaos deals all three each round, so has none
             const auto d = std::find(rows.begin(), rows.end(), LobbyRow::Damage);
-            CHECKF(d != rows.end() && rows.end() - d >= 3 && d[1] == LobbyRow::DeadWeight && d[2] == LobbyRow::WeaponWeight, i);
+            if (IsChaos(f)) CHECKF(d == rows.end() && !std::count(rows.begin(), rows.end(), LobbyRow::DeadWeight) && !std::count(rows.begin(), rows.end(), LobbyRow::WeaponWeight), i);
+            else CHECKF(d != rows.end() && rows.end() - d >= 3 && d[1] == LobbyRow::DeadWeight && d[2] == LobbyRow::WeaponWeight, i);
         }
         std::set<uint8_t> seen;
         const LobbyLocal l = InLobby(f, 4);
@@ -94,7 +95,8 @@ static void TestTables() {
         CHECKF(san.scoreLimit >= 1, i);
         // Table consistency: teams, rounds, scoring.
         if (HasTeams(f) || IsBotFormat(f)) CHECKF(TeamCount(f, 3) >= 2, i); else CHECKF(TeamCount(f, 3) == 0, i);
-        if (IsTeamRound(f) || HasRoles(f)) CHECKF(HasTeams(f), i);
+        if (IsTeamRound(f) || HasRoleTeams(f)) CHECKF(HasTeams(f), i);
+        if (HasRoleTeams(f) || IsChaos(f) || IsHideSeek(f)) CHECKF(HasRoles(f), i); else CHECKF(!HasRoles(f), i);
         if (IsQueueFormat(f) || IsTag(f)) CHECKF(IsRoundFormat(f) && !HasTeams(f) && ScoresPerFighter(f), i);
         if (IsInfection(f)) CHECKF(HasTeams(f) && !ScoresPerFighter(f) && TeamCount(f, 3) == 2, i);
         CHECKF(!(ScoresPerFighter(f) && HasTeams(f)), i);
@@ -170,7 +172,8 @@ static void TestServerFormat() {
                        {"teamduel", Format::TeamDuel, 2}, {"riot", Format::Riot, 2}, {"juggernaut", Format::Juggernaut, 2},
                        {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
                        {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2}, {"pitbridge", Format::PitBridgeDuel, 2},
-                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2}, {"PitBridge", Format::PitBridgeDuel, 2}};
+                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2}, {"PitBridge", Format::PitBridgeDuel, 2},
+                       {"chaos", Format::Chaos, 2}, {"onecrossbow", Format::OneCrossbow, 2}, {"roulette", Format::Roulette, 2}, {"hideseek", Format::HideSeek, 2}};
     for (const W& w : words) {
         Format f = Format::FreeForAll; int teams = 0;
         CHECK(ParseServerFormat(w.word, &f, &teams) && f == w.f && teams == w.teams);

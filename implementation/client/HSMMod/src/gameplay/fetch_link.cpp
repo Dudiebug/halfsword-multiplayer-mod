@@ -1,4 +1,5 @@
 #include "gameplay/fetch_link.h"
+#include "hse_hold.h"
 #include "log.h"
 #include <windows.h>
 #include <string>
@@ -11,6 +12,7 @@ bool g_tried = false;
 interop::LinkWatch g_watch;   // Fetch's half
 interop::LinkNotes g_notes;
 bool g_held = false;
+bool g_hseMenu = false;        // HS Enhancer's menu is open and has the keyboard (hse_hold.h MenuOpen)
 int g_replaying = 0;          // Replaying guards alive
 
 // Either mod may make the page; the other opens the same one (CreateFileMappingW returns it with ERROR_ALREADY_EXISTS).
@@ -37,6 +39,13 @@ uint8_t* Page() {
 }  // namespace
 
 void Tick(const interop::HsmFacts& facts, uint32_t dtMs) {
+    // Before the page: HS Enhancer's menu holds the keys with or without Fetch (#1290).
+    const bool hse = enhancer::hold::MenuOpen();
+    if (hse != g_hseMenu) {
+        g_hseMenu = hse;
+        if (hse) HSM_LOG("enhancer: HS Enhancer's menu is open: HSMMod's keys held back until it closes");
+        else HSM_LOG("enhancer: HS Enhancer's menu closed: HSMMod's keys back");
+    }
     uint8_t* page = Page();
     if (!page) return;
     const interop::HsmState mine = interop::HsmLinkState(facts);
@@ -50,7 +59,7 @@ void Tick(const interop::HsmFacts& facts, uint32_t dtMs) {
     if (n.gone) HSM_LOG("fetch link: Fetch is gone (its half stopped for %u ms)", unsigned(interop::kLinkStaleMs));
 }
 
-bool KeysHeld() { return g_held; }
+bool KeysHeld() { return g_held || g_hseMenu; }
 
 Replaying::Replaying() {
     if (g_replaying++ != 0) return;

@@ -96,9 +96,11 @@ static void TestStepSetting() {
     CHECK(StepSetting(r, LobbyRow::Respawn, 1).respawnDelayS == 3);
 
     MatchConfig g;                                       // own gear
-    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::Mirror);
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::HostKit);
     g.gear = Gear::Mirror;
-    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::Own && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::RandomTier);
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::HostKit && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::RandomTier);
+    g.gear = Gear::HostKit;                              // the last stop: on to Own, back to Everyone identical
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::Own && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::Mirror);
     g.gear = Gear(7);                                    // out of range from the lobby: steps as if own
     CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier);
 
@@ -322,7 +324,7 @@ static void TestPasswordFilter() {
     LobbyFound noName; noName.players = 1; noName.compatible = true; noName.locked = true;
     l.found = {open, lockedL, noName};
     LobbyScene s = BuildLobbyScene(l);
-    CHECK(s.browser.size() == 3 && s.filters.size() == 5 && kFilterChips == 5);
+    CHECK(s.browser.size() == 3 && s.filters.size() == 6 && kFilterChips == 6);
     if (s.browser.size() == 3) {
         CHECK(s.browser[0].name == "Open" && !s.browser[0].locked);
         CHECK(s.browser[1].name == std::string(kLockedMarker) + "Private" && s.browser[1].locked && s.browser[1].joinable && s.browser[1].note.text == "Join");
@@ -390,22 +392,22 @@ static void TestHostAgainstMember() {
 static void TestRowsPerFormat() {
     using V = std::vector<LobbyRow>;
     using enum LobbyRow;
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));   // 0.8.0-pre20: the tier is strength, own gear too
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, ClearGround, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(Teamed(true, 3, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(Teamed(false, 4))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));   // Duel's rows
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TwoTeams))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Shuffle, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(true, 3, Gear::Mirror))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Shuffle, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(Teamed(false, 4))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, ClearGround, MyTeam, TeamKit, Shuffle, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));   // Duel's rows
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::LastManStanding, Gear::RandomTier))) == Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Duel, Gear::RandomTier))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, FreeCam, Gear, Tier, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots))) == (V{Time, FreeCam, Gear, Tier, Bodies, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Zombies, Gear::RandomTier))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));   // 0.8.0-pre20: the bot formats take a gear setting
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::PlayersVsBots, Gear::Mirror))) == (V{Time, FreeCam, Gear, Tier, Weapons, WaveBreak, FriendlyFire, Damage, DeadWeight, WeaponWeight, Crossbows, Sync}));
     // Wave 2 integration: the team rounds and the role formats take every row that fits them. Team Duel is Duel's rows with the team rows; Riot and
     // Juggernaut deal gear, tier, build and team by role, so only the match rules, Free camera, Team colours and Crossbows remain.
-    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TeamDuel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, MyTeam, TeamKit, Crossbows, Sync}));
+    CHECK(Ids(BuildLobbyScene(InLobby(true, Format::TeamDuel))) == (V{Limit, Time, Respawn, FreeCam, Gear, Tier, Bodies, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, MyTeam, TeamKit, Shuffle, Crossbows, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Riot))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, DeadWeight, WeaponWeight, TeamKit, Crossbows, Sync}));
     CHECK(Ids(BuildLobbyScene(InLobby(true, Format::Juggernaut))) == (V{Limit, Time, Respawn, FreeCam, FriendlyFire, Damage, DeadWeight, WeaponWeight, TeamKit, Crossbows, Sync}));
     for (Format f : {Format::TwoTeams, Format::TeamDuel, Format::Riot, Format::Juggernaut}) { MatchConfig c; c.format = f; CHECK(HasTeams(f)); bool k = false; for (LobbyRow r : SettingsFor(c)) k = k || r == TeamKit; CHECK(k); }
@@ -424,26 +426,41 @@ static void TestWeaponsRow() {
     }
     MatchConfig br; br.gear = Gear::Fists; CHECK(!has(br, LobbyRow::Weapons));
     CHECK(SectionOf(LobbyRow::Weapons) == LobbySection::Gear);
-    CHECK(std::string(WeaponFilterName(WeaponFilter::Any)) == "Any" && std::string(WeaponFilterName(WeaponFilter::Swords1H)) == "1H swords" &&
-          std::string(WeaponFilterName(WeaponFilter::Swords2H)) == "2H swords" && std::string(WeaponFilterName(WeaponFilter::Polearms)) == "Polearms" &&
-          std::string(WeaponFilterName(WeaponFilter::AxesMaces)) == "Axes & maces");
+    // The row is chips the host ticks: the Any chip first, then the seven game types; a step by the arrows changes nothing.
     MatchConfig c; c.gear = Gear::RandomTier;
-    const WeaponFilter fwd[] = {WeaponFilter::Swords1H, WeaponFilter::Swords2H, WeaponFilter::Polearms, WeaponFilter::AxesMaces, WeaponFilter::Any};
-    for (WeaponFilter w : fwd) { c = StepSetting(c, LobbyRow::Weapons, 1); CHECK(c.weapons == w); }
-    CHECK(StepSetting(c, LobbyRow::Weapons, -1).weapons == WeaponFilter::AxesMaces);   // Any steps back to the last
-    MatchConfig o = StepSetting(c, LobbyRow::Weapons, 1);
-    CHECK(o.gear == c.gear && o.tier == c.tier && o.format == c.format);                // a step changes its own setting alone
-    CHECK(StepSetting(MatchConfig{}, LobbyRow::Weapons, 1).weapons == WeaponFilter::Swords1H);
+    CHECK(StepSetting(c, LobbyRow::Weapons, 1).weapons == 0 && StepSetting(c, LobbyRow::Weapons, -1).weapons == 0);
+    c.weapons = WeaponBit(2);
+    CHECK(StepSetting(c, LobbyRow::Weapons, 1).weapons == WeaponBit(2) && StepSetting(c, LobbyRow::Weapons, -1).weapons == WeaponBit(2));
     LobbyLocal l = InLobby(true, Format::FreeForAll, Gear::RandomTier);
-    l.config.weapons = WeaponFilter::Polearms;
+    {
+        const LobbyScene anyScene = BuildLobbyScene(l);
+        const SettingRow& any = Need(anyScene, LobbyRow::Weapons);
+        CHECK(any.value == "Any" && any.chips.size() == 8 && any.chips[0].label == "Any" && any.chips[0].on);
+        for (size_t i = 1; i < any.chips.size(); ++i) CHECK(!any.chips[i].on && any.chips[i].label == WeaponTypeName(uint8_t(i)));
+    }
+    l.config.weapons = WeaponBit(7);
     const LobbyScene sc = BuildLobbyScene(l);
     const SettingRow& r = Need(sc, LobbyRow::Weapons);
     CHECK(r.label == "Weapons" && r.value == "Polearms" && r.enabled && !r.hint.empty());
+    CHECK(r.chips.size() == 8 && !r.chips[0].on && r.chips[7].on && r.chips[7].label == "Polearms" && !r.chips[1].on);
     CHECK(BuildLobbyScene(l).summary.find(", Polearms") != std::string::npos);
-    l.config.weapons = WeaponFilter::Any;
+    l.config.weapons = WeaponMask(WeaponBit(1) | WeaponBit(2) | WeaponBit(5));
+    {
+        const LobbyScene threeScene = BuildLobbyScene(l);
+        const SettingRow& three = Need(threeScene, LobbyRow::Weapons);
+        CHECK(three.value == "1H swords / 2H swords / 1H axes" && !three.chips[0].on && three.chips[1].on && three.chips[2].on && !three.chips[3].on && three.chips[5].on);
+        CHECK(BuildLobbyScene(l).summary.find(", 1H swords / 2H swords / 1H axes") != std::string::npos);
+        // A click on chip i flips game type i; the Any chip clears all.
+        MatchConfig k = l.config;
+        k.weapons = ToggleWeaponType(k.weapons, 2); CHECK(k.weapons == WeaponMask(WeaponBit(1) | WeaponBit(5)));
+        k.weapons = ToggleWeaponType(k.weapons, 7); CHECK(k.weapons == WeaponMask(WeaponBit(1) | WeaponBit(5) | WeaponBit(7)));
+        k.weapons = ToggleWeaponType(k.weapons, 0); CHECK(k.weapons == 0);
+    }
+    l.config.weapons = 0;
     CHECK(Need(BuildLobbyScene(l), LobbyRow::Weapons).value == "Any" && BuildLobbyScene(l).summary.find("Any") == std::string::npos);
     l.host = false; l.players = {Player("Ann", true, false), Player("Bob", false, true)};
     CHECK(!Need(BuildLobbyScene(l), LobbyRow::Weapons).enabled);
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Weapons).chips.size() == 8);               // members read the chips too
 }
 
 // The Crossbows row (rev 36): in every format but Brawl, steps Off / 1 / 2 / Half / All, the host's alone, marked experimental.
@@ -482,14 +499,14 @@ static void TestLabelsAndValues() {
     CHECK(Need(s, LobbyRow::Time).label == "Time limit" && Need(s, LobbyRow::Time).value == "off");
     CHECK(Need(s, LobbyRow::Respawn).label == "Respawn delay" && Need(s, LobbyRow::Respawn).value == "10 s");
     CHECK(Need(s, LobbyRow::Gear).label == "Gear" && Need(s, LobbyRow::Gear).value == "Random by tier");
-    CHECK(Need(s, LobbyRow::Tier).label == "Gear tier" && Need(s, LobbyRow::Tier).value == "tier 3 " + kDot + " budget 100");
+    CHECK(Need(s, LobbyRow::Tier).label == "Gear tier" && Need(s, LobbyRow::Tier).value == "Militia " + kDot + " budget 100");
     l.config.timeLimitS = 600; l.config.gear = Gear::Mirror; l.config.tier = 7;
     s = BuildLobbyScene(l);
     CHECK(Need(s, LobbyRow::Time).value == "10 min" && Need(s, LobbyRow::Gear).value == "Everyone identical");
-    CHECK(Need(s, LobbyRow::Tier).value == "tier 7 " + kDot + " budget 888");
+    CHECK(Need(s, LobbyRow::Tier).value == "Knight " + kDot + " budget 888");
     l.config.gear = Gear::Own;
     CHECK(Need(BuildLobbyScene(l), LobbyRow::Gear).value == "Own loadouts");
-    CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).value == "tier 7");                       // own gear: a strength, no gear budget
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).value == "Knight");                       // own gear: a strength, no gear budget
     // 0.9.0: the sync row, per player (owner sync) by default; a step flips it either way.
     CHECK(Need(BuildLobbyScene(l), LobbyRow::Sync).label == "Sync" && Need(BuildLobbyScene(l), LobbyRow::Sync).value == "Per player");
     CHECK(StepSetting(l.config, LobbyRow::Sync, 1).hostPhysics && StepSetting(l.config, LobbyRow::Sync, -1).hostPhysics);
@@ -515,7 +532,7 @@ static void TestLabelsAndValues() {
     LobbyLocal b = InLobby(true, Format::PlayersVsBots);
     b.config.tier = 4;
     s = BuildLobbyScene(b);
-    CHECK(Need(s, LobbyRow::Tier).label == "Starting tier" && Need(s, LobbyRow::Tier).value == "tier 4");
+    CHECK(Need(s, LobbyRow::Tier).label == "Starting tier" && Need(s, LobbyRow::Tier).value == "Soldier");
     CHECK(Need(s, LobbyRow::FriendlyFire).label == "Friendly fire" && Need(s, LobbyRow::FriendlyFire).value == "Off");
     b.config.friendlyFire = true;
     CHECK(Need(BuildLobbyScene(b), LobbyRow::FriendlyFire).value == "On");
@@ -526,6 +543,65 @@ static void TestLabelsAndValues() {
 }
 
 static std::string GearHint(Format f, Gear g) { return Need(BuildLobbyScene(InLobby(true, f, g)), LobbyRow::Gear).hint; }
+
+// Host's loadout (#777): its own name and hint; no budget beside the tier and no Weapons row (nothing is rolled); the
+// summary names it without a tier.
+static void TestHostKitRows() {
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::TwoTeams, Format::PlayersVsBots}) {
+        CHECK(GearHint(f, Gear::HostKit) == "Everyone fights in the host's own loadout.");
+        const LobbyScene s = BuildLobbyScene(InLobby(true, f, Gear::HostKit));
+        CHECK(Need(s, LobbyRow::Gear).value == "Host's loadout");
+        CHECK(Need(s, LobbyRow::Tier).value.find("budget") == std::string::npos && Need(s, LobbyRow::Tier).hint.find("random gear") == std::string::npos);
+        bool weapons = false;
+        for (const SettingRow& r : s.settings) weapons = weapons || r.id == LobbyRow::Weapons;
+        CHECK(!weapons);
+        CHECK(s.summary.find("Host's loadout") != std::string::npos && s.summary.find("Host's loadout,") == std::string::npos);
+        LobbyLocal ticked = InLobby(true, f, Gear::HostKit); ticked.config.weapons = WeaponBit(1);
+        CHECK(BuildLobbyScene(ticked).summary == s.summary);                           // a ticked weapon type is for rolled gear only
+        const LobbyScene rolled = BuildLobbyScene(InLobby(true, f, Gear::Mirror));
+        CHECK(Need(rolled, LobbyRow::Tier).value.find("budget") != std::string::npos && rolled.summary.find("Everyone identical, ") != std::string::npos);
+        const LobbyScene own = BuildLobbyScene(InLobby(true, f, Gear::Own));
+        CHECK(Need(own, LobbyRow::Tier).value.find("budget") == std::string::npos && own.summary.find("Own loadouts,") == std::string::npos);
+        CHECK(Need(own, LobbyRow::Tier).hint == Need(s, LobbyRow::Tier).hint);       // the tier is the strength only, as with own gear
+    }
+    CHECK(std::string(GearName(Gear::HostKit)) == "Host's loadout" && std::string(GearName(Gear::Fists)) == "Own loadouts");
+}
+
+// The Bodies row (#1410): with own loadouts, after the Gear tier: every player built for the tier (as before) or as their
+// own character is. Not with rolled, dealt or the host's gear, which come with the tier's build.
+static void TestBodiesRow() {
+    auto has = [](const MatchConfig& c) { const auto v = SettingsFor(c); return std::count(v.begin(), v.end(), LobbyRow::Bodies) == 1; };
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Tournament,
+                     Format::PitBridgeDuel, Format::Infection, Format::CrossbowTDM, Format::PlayersVsBots, Format::Zombies}) {
+        MatchConfig c; c.format = f; c = Sanitize(c);
+        CHECK(c.gear == Gear::Own && has(c));
+        const auto v = SettingsFor(c);
+        const auto tier = std::find(v.begin(), v.end(), LobbyRow::Tier);
+        CHECK(tier != v.end() && tier + 1 != v.end() && tier[1] == LobbyRow::Bodies);          // right after the Gear tier
+        for (Gear g : {Gear::RandomTier, Gear::Mirror, Gear::HostKit}) { MatchConfig o = c; o.gear = g; CHECK(!has(o)); }
+        MatchConfig own = c; own.ownBodies = true;
+        CHECK(has(own) && SettingsFor(own) == v);                                              // the row's value does not move the rows
+    }
+    for (Format f : {Format::Riot, Format::Juggernaut, Format::Chaos}) { MatchConfig c; c.format = f; CHECK(!has(Sanitize(c))); }   // the roles build the bodies
+    { MatchConfig c; c.gear = Gear::Fists; CHECK(!has(Sanitize(c))); }                         // Brawl
+    MatchConfig c;
+    CHECK(!c.ownBodies && StepSetting(c, LobbyRow::Bodies, 1).ownBodies && StepSetting(c, LobbyRow::Bodies, -1).ownBodies);
+    CHECK(!StepSetting(StepSetting(c, LobbyRow::Bodies, 1), LobbyRow::Bodies, 1).ownBodies);
+    CHECK(SectionOf(LobbyRow::Bodies) == LobbySection::Gear && size_t(LobbyRow::KeepKit) + 1 == size_t(LobbyRow::Bodies) && size_t(LobbyRow::Bodies) < size_t(LobbyRow::Sync));
+    LobbyLocal l = InLobby(true, Format::FreeForAll);
+    const LobbyScene same = BuildLobbyScene(l);
+    CHECK(Need(same, LobbyRow::Bodies).label == "Bodies" && Need(same, LobbyRow::Bodies).value == "Same for all" && Need(same, LobbyRow::Bodies).enabled);
+    CHECK(Need(same, LobbyRow::Bodies).hint == "Every player is built for the Gear tier: the same muscle and grip.");
+    CHECK(Need(same, LobbyRow::Tier).hint == "Sets every player's strength (muscle and grip).");
+    l.config.ownBodies = true;
+    const LobbyScene own = BuildLobbyScene(l);
+    CHECK(Need(own, LobbyRow::Bodies).value == "Own" && Need(own, LobbyRow::Bodies).hint == "Every player keeps the build of their own character (its Weight).");
+    CHECK(Need(own, LobbyRow::Tier).hint == "The players' strength is their own (the Bodies row).");
+    l.config.gear = Gear::RandomTier;                    // rolled gear: the flag is kept but does nothing, and the tier's hint is the rolled one
+    CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).hint.find("random gear") != std::string::npos);
+    LobbyLocal guest = InLobby(false, Format::FreeForAll);
+    CHECK(!Need(BuildLobbyScene(guest), LobbyRow::Bodies).enabled);
+}
 
 static void TestGearHint() {
     for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::Duel, Format::LastManStanding})
@@ -670,10 +746,10 @@ static void TestModes() {
     CHECK(s.modes.size() == kModeCardCount);
     const Format order[] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Riot,
                             Format::Juggernaut, Format::Tag, Format::Infection, Format::CrossbowTDM, Format::Tournament, Format::PitBridgeDuel,
-                            Format::PlayersVsBots, Format::Zombies};
+                            Format::Chaos, Format::OneCrossbow, Format::Roulette, Format::HideSeek, Format::PlayersVsBots, Format::Zombies};
     const char* names[] = {"FREE-FOR-ALL", "DUEL", "LAST MAN STANDING", "TEAMS", "TEAM DUEL", "RIOT", "JUGGERNAUT", "TAG", "INFECTION",
-                           "CROSSBOW TDM", "TOURNAMENT", "PIT BRIDGE DUELS", "SURVIVAL", "ZOMBIES"};
-    CHECK(kModeOrderCount == 14 && kModeCardCount == 16);
+                           "CROSSBOW TDM", "TOURNAMENT", "PIT BRIDGE DUELS", "CHAOS", "ONE CROSSBOW", "ROULETTE", "HIDE AND SEEK", "SURVIVAL", "ZOMBIES"};
+    CHECK(kModeOrderCount == 18 && kModeCardCount == 20);
     for (size_t i = 0; i < s.modes.size() && i < kModeOrderCount; ++i) {
         CHECK(s.modes[i].format == order[i] && s.modes[i].name == names[i] && !s.modes[i].description.empty());
         CHECK(s.modes[i].selected == (order[i] == Format::Duel));
@@ -723,9 +799,15 @@ static void TestBrawl() {
     CHECK(SelectMode(c, Format::Duel, false).gear == Gear::Mirror);                                                                    // as SelectFormat
     // The Gear row never lands on Fists, whichever way it is stepped.
     MatchConfig g; g.gear = Gear::Mirror;
-    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::Own && StepSetting(StepSetting(g, LobbyRow::Gear, -1), LobbyRow::Gear, -1).gear == Gear::Own);
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::HostKit && StepSetting(StepSetting(g, LobbyRow::Gear, -1), LobbyRow::Gear, -1).gear == Gear::Own);
     g.gear = Gear::Fists;
-    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::Mirror);
+    CHECK(StepSetting(g, LobbyRow::Gear, 1).gear == Gear::RandomTier && StepSetting(g, LobbyRow::Gear, -1).gear == Gear::HostKit);
+    g.gear = Gear::Own;                                  // all the way round, both ways: four stops, never Fists
+    for (int dir : {1, -1}) {
+        MatchConfig w = g; std::set<uint8_t> seen;
+        for (int i = 0; i < 4; ++i) { w = StepSetting(w, LobbyRow::Gear, dir); seen.insert(uint8_t(w.gear)); }
+        CHECK(w.gear == Gear::Own && seen.size() == 4 && !seen.count(uint8_t(Gear::Fists)));
+    }
 }
 
 static size_t IndexOf(const char* display) { for (size_t i = 0; i < MapCount(); ++i) if (std::string(kMaps[i].display) == display) return i; return MapCount(); }
@@ -937,7 +1019,7 @@ static void TestSummary() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::TwoTeams, Gear::RandomTier));
     CHECK(s.summary.rfind("TEAMS (2) " + kDot + " ", 0) == 0);
     CHECK(BuildLobbyScene(Teamed(true, 4)).summary.rfind("TEAMS (4) " + kDot + " ", 0) == 0);
-    CHECK(s.summary.find("Random by tier, tier ") != std::string::npos);
+    CHECK(s.summary.find("Random by tier, Commoner") != std::string::npos);
     LobbyScene own = BuildLobbyScene(InLobby(true));
     CHECK(own.summary.find("Own loadouts") != std::string::npos && own.summary.find("tier") == std::string::npos);
     LobbyScene brawl = BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Fists));
@@ -1068,6 +1150,106 @@ static void TestTeamKitRow() {
         CHECK(RowOf(BuildLobbyScene(InLobby(true, f)), LobbyRow::TeamKit) == nullptr);   // team formats only
 }
 
+// Tiers read by the game's own names (Enum_Ranks), never as "tier N": the Tier row and the summary line.
+static void TestTierNames() {
+    const char* const names[] = {"Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-Arms", "Knight", "Lord"};
+    for (int t = 0; t < 9; ++t) CHECK(std::string(TierName(t)) == names[t]);
+    CHECK(std::string(TierName(-1)) == "Beggar" && std::string(TierName(9)) == "Lord" && std::string(TierName(255)) == "Lord");
+    for (int t = 0; t <= 7; ++t) {
+        LobbyLocal l = InLobby(true, Format::FreeForAll, Gear::RandomTier);
+        l.config.tier = uint8_t(t);
+        const LobbyScene s = BuildLobbyScene(l);
+        CHECK(Need(s, LobbyRow::Tier).value == std::string(names[t]) + " " + kDot + " budget " + std::to_string(kTierBudget[t]));
+        CHECK(s.summary.find(std::string(", ") + names[t]) != std::string::npos && s.summary.find("tier " + std::to_string(t)) == std::string::npos);
+        l.config.gear = Gear::Own;
+        CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).value == names[t]);
+        l.config.format = Format::Zombies; l.config.gear = Gear::Mirror;
+        CHECK(Need(BuildLobbyScene(l), LobbyRow::Tier).label == "Starting tier" && Need(BuildLobbyScene(l), LobbyRow::Tier).value.rfind(names[t], 0) == 0);
+    }
+    LobbyLocal own = InLobby(true, Format::FreeForAll, Gear::Own);
+    own.config.tier = 4;
+    CHECK(BuildLobbyScene(own).summary.find("Soldier") == std::string::npos);                 // own gear: no tier in the summary
+}
+
+// The Shuffle teams row: Off / Each match / Each round (the team rounds only), in the TEAMS section, for the formats that pick teams.
+static void TestShuffleRow() {
+    using R = LobbyRow;
+    MatchConfig c; c.format = Format::TwoTeams;
+    CHECK(c.shuffle == TeamShuffle::Off && SectionOf(R::Shuffle) == LobbySection::Teams);
+    CHECK(StepSetting(c, R::Shuffle, 1).shuffle == TeamShuffle::EachMatch && StepSetting(c, R::Shuffle, -1).shuffle == TeamShuffle::EachMatch);   // two stops
+    c.shuffle = TeamShuffle::EachMatch;
+    CHECK(StepSetting(c, R::Shuffle, 1).shuffle == TeamShuffle::Off && StepSetting(c, R::Shuffle, -1).shuffle == TeamShuffle::Off);
+    MatchConfig d; d.format = Format::TeamDuel;
+    CHECK(StepSetting(d, R::Shuffle, 1).shuffle == TeamShuffle::EachMatch && StepSetting(d, R::Shuffle, -1).shuffle == TeamShuffle::EachRound);
+    d.shuffle = TeamShuffle::EachMatch;
+    CHECK(StepSetting(d, R::Shuffle, 1).shuffle == TeamShuffle::EachRound && StepSetting(d, R::Shuffle, -1).shuffle == TeamShuffle::Off);
+    d.shuffle = TeamShuffle::EachRound;
+    CHECK(StepSetting(d, R::Shuffle, 1).shuffle == TeamShuffle::Off && StepSetting(d, R::Shuffle, -1).shuffle == TeamShuffle::EachMatch);
+    const MatchConfig only = StepSetting(d, R::Shuffle, 1);
+    CHECK(only.teams == d.teams && only.teamKit == d.teamKit && only.tier == d.tier && only.scoreLimit == d.scoreLimit && only.friendlyFire == d.friendlyFire);
+    auto has = [](const MatchConfig& m, LobbyRow r) { for (LobbyRow x : SettingsFor(m)) if (x == r) return true; return false; };
+    for (int i = 0; i < kFormatCount; ++i) {
+        MatchConfig m; m.format = Format(i);
+        CHECK(has(m, R::Shuffle) == PicksTeams(Format(i)));
+    }
+    CHECK(has(c, R::Shuffle) && has(d, R::Shuffle));
+    MatchConfig cx; cx.format = Format::CrossbowTDM; CHECK(has(cx, R::Shuffle));
+    LobbyLocal l = Teamed(true, 2);
+    const SettingRow row = Need(BuildLobbyScene(l), R::Shuffle);
+    CHECK(row.label == "Shuffle teams" && row.value == "Off" && row.enabled && !row.hint.empty() && row.chips.empty());
+    l.config.shuffle = TeamShuffle::EachMatch;
+    const SettingRow each = Need(BuildLobbyScene(l), R::Shuffle);
+    CHECK(each.value == "Each match" && each.hint != row.hint && each.hint.find("Picks are ignored") != std::string::npos);
+    CHECK(each.hint.find("later shuffle clears them") != std::string::npos && each.hint.find("every new round") == std::string::npos);
+    LobbyLocal t = InLobby(true, Format::TeamDuel);
+    t.config.shuffle = TeamShuffle::EachRound;
+    const SettingRow rnd = Need(BuildLobbyScene(t), R::Shuffle);
+    CHECK(rnd.value == "Each round" && rnd.hint != each.hint && rnd.hint.find("every new round") != std::string::npos);
+    CHECK(!Need(BuildLobbyScene(Teamed(false, 2)), R::Shuffle).enabled);                  // members see it, the host sets it
+    // SHUFFLE NOW: the host, in the formats that pick teams.
+    CHECK(BuildLobbyScene(Teamed(true, 2)).shuffle && !BuildLobbyScene(Teamed(false, 2)).shuffle);
+    CHECK(BuildLobbyScene(InLobby(true, Format::TeamDuel)).shuffle && BuildLobbyScene(InLobby(true, Format::CrossbowTDM)).shuffle);
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::Riot, Format::Juggernaut, Format::Infection, Format::Tag, Format::PlayersVsBots})
+        CHECK(!BuildLobbyScene(InLobby(true, f)).shuffle);
+    // My team: the pick is ignored while shuffling (the host's move still reads as it was).
+    LobbyLocal m = Teamed(false, 2);
+    CHECK(Need(BuildLobbyScene(m), R::MyTeam).hint == "Auto puts you on the smallest team.");
+    m.config.shuffle = TeamShuffle::EachMatch;
+    CHECK(Need(BuildLobbyScene(m), R::MyTeam).hint == "Your pick is ignored while Shuffle teams is on.");
+    for (LobbyPlayer& p : m.players) if (p.me) p.hostOverride = 1;
+    CHECK(Need(BuildLobbyScene(m), R::MyTeam).hint == "The host moved you to Blue.");
+}
+
+// The Tagger speed row (Tag): 100 / 110 / 120 percent, default 110.
+static void TestTaggerSpeedRow() {
+    using R = LobbyRow;
+    MatchConfig c; c.format = Format::Tag;
+    CHECK(c.taggerSpeedPct == 110 && kTaggerSpeedDefault == 110 && SectionOf(R::TaggerSpeed) == LobbySection::Match);
+    CHECK(StepSetting(c, R::TaggerSpeed, 1).taggerSpeedPct == 120 && StepSetting(c, R::TaggerSpeed, -1).taggerSpeedPct == 100);
+    c.taggerSpeedPct = 120; CHECK(StepSetting(c, R::TaggerSpeed, 1).taggerSpeedPct == 100 && StepSetting(c, R::TaggerSpeed, -1).taggerSpeedPct == 110);
+    c.taggerSpeedPct = 100; CHECK(StepSetting(c, R::TaggerSpeed, 1).taggerSpeedPct == 110 && StepSetting(c, R::TaggerSpeed, -1).taggerSpeedPct == 120);
+    c.taggerSpeedPct = 105; CHECK(StepSetting(c, R::TaggerSpeed, 1).taggerSpeedPct == 100 && StepSetting(c, R::TaggerSpeed, -1).taggerSpeedPct == 120);   // unknown: like the other steppers
+    c.taggerSpeedPct = 110;
+    CHECK(SettingsFor(c) == (std::vector<R>{R::Limit, R::Respawn, R::Fuse, R::TaggerSpeed, R::FreeCam, R::Damage, R::DeadWeight, R::WeaponWeight, R::Sync}));
+    for (int i = 0; i < kFormatCount; ++i) {
+        if (Format(i) == Format::Tag) continue;
+        MatchConfig m; m.format = Format(i);
+        for (R r : SettingsFor(m)) CHECK(r != R::TaggerSpeed);                              // Tag only
+    }
+    LobbyLocal l = InLobby(true, Format::Tag);
+    const SettingRow row = Need(BuildLobbyScene(l), R::TaggerSpeed);
+    CHECK(row.label == "Tagger speed" && row.value == "110%" && row.enabled && !row.hint.empty());
+    l.config.taggerSpeedPct = 120;
+    const SettingRow fast = Need(BuildLobbyScene(l), R::TaggerSpeed);
+    CHECK(fast.value == "120%" && fast.hint != row.hint && fast.hint.find("120%") != std::string::npos);
+    l.config.taggerSpeedPct = 100;
+    const SettingRow stock = Need(BuildLobbyScene(l), R::TaggerSpeed);
+    CHECK(stock.value == "100%" && stock.hint == "\"It\" runs and walks at normal speed.");
+    CHECK(!Need(BuildLobbyScene(InLobby(false, Format::Tag)), R::TaggerSpeed).enabled);
+    const MatchConfig only = StepSetting(c, R::TaggerSpeed, 1);
+    CHECK(only.fuseS == c.fuseS && only.scoreLimit == c.scoreLimit && only.damagePct == c.damagePct);
+}
+
 // Duel is for 2 players, Last Man Standing for 2 or more (the host's count).
 static void TestModeAvailability() {
     for (int n : {0, 1, 3, 4, 8}) {
@@ -1138,7 +1320,7 @@ static void TestDuelOutgrown() {
 // Capture the flag was removed in 0.8.0: no card, no browser chip, no rows; a stale Format 10 (an old lobby) plays Teams.
 // Forest, once its only map, is an arena like the others and is offered to every arena format.
 static void TestCaptureTheFlagRemoved() {
-    CHECK(uint8_t(Format::CaptureTheFlag) == 10 && kFormatCount == 16);              // the number stays taken
+    CHECK(uint8_t(Format::CaptureTheFlag) == 10 && kFormatCount == 20);              // the number stays taken
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::TwoTeams));
     for (const ModeCard& m : s.modes) CHECK(m.format != Format::CaptureTheFlag && m.name != "CAPTURE THE FLAG");
     for (size_t i = 0; i < kModeOrderCount; ++i) CHECK(kModeOrder[i] != Format::CaptureTheFlag);
@@ -1169,6 +1351,100 @@ static void TestCaptureTheFlagRemoved() {
     CHECK(!Card(s, forest)->allowed && Card(s, forest)->reason == "Zombies needs the Abyss");
 }
 
+// The region chip, the region on a browser row, the picker's button text, how far Steam is asked to look, and the host's view
+// of a player's Steam name beside a nickname.
+static void TestRegion() {
+    LobbyLocal l; l.phase = LobbyPhase::Idle; l.version = "0.2.0";
+    LobbyFound eu; eu.name = "EU"; eu.players = 2; eu.compatible = true; eu.region = Region::Europe; eu.map = "Yard"; eu.mode = "Duel";
+    LobbyFound us; us.name = "US"; us.players = 1; us.compatible = true; us.region = Region::NaEast;
+    LobbyFound none; none.name = "None"; none.players = 3; none.compatible = true;
+    l.found = {eu, us, none};
+
+    // The chip is last, reads "My region" first, and steps through any region and the six regions back to mine.
+    LobbyScene s = BuildLobbyScene(l);
+    CHECK(kRegionChip == kFilterChips - 1 && s.filters.size() == kFilterChips);
+    CHECK(s.filters[kRegionChip].label == "My region" && !s.filters[kRegionChip].on);
+    BrowserFilter f;
+    std::vector<std::string> seen;
+    for (size_t i = 0; i < size_t(kRegionFilterStates); ++i) { seen.push_back(FilterChips(f)[kRegionChip].label); f = ToggleFilter(f, kRegionChip); }
+    CHECK(f.region == 0 && seen.size() == 8);
+    CHECK(seen[0] == "My region" && seen[1] == "Any region" && seen[2] == "NA East" && seen[3] == "NA West" && seen[4] == "South America");
+    CHECK(seen[5] == "Europe" && seen[6] == "Asia" && seen[7] == "Oceania");
+    CHECK(ToggleFilter(BrowserFilter{}, kRegionChip).region == 1 && FilterChips(ToggleFilter(BrowserFilter{}, kRegionChip))[kRegionChip].on);
+    CHECK(std::string(RegionFilterLabel(kRegionFilterStates)) == "My region");                 // out of range: mine
+    CHECK(RegionFilterAt(0) == Region::Auto && RegionFilterAt(1) == Region::Auto && RegionFilterAt(2) == Region::NaEast);
+    CHECK(RegionFilterAt(7) == Region::Oceania && RegionFilterAt(kRegionFilterStates) == Region::Auto);
+
+    // How far Steam looks: only my region keeps Steam's own idea of near.
+    BrowserFilter d;
+    CHECK(DistanceFor(d) == LobbyDistance::Default);
+    d.region = 1; CHECK(DistanceFor(d) == LobbyDistance::Worldwide);
+    d.region = 5; CHECK(DistanceFor(d) == LobbyDistance::Worldwide);
+
+    // My region: a lobby of another region is hidden, a lobby that did not say stays, and with no region of mine nothing is hidden.
+    l.filter = {}; l.filter.mine = Region::Europe;
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 2 && s.browser[0].name == "EU" && s.browser[1].name == "None");
+    CHECK(s.browserCount == "2 of 3 lobbies shown");
+    l.filter.mine = Region::Auto;
+    CHECK(BuildLobbyScene(l).browser.size() == 3);
+    // Any region: all of them.
+    l.filter.mine = Region::Europe; l.filter.region = 1;
+    CHECK(BuildLobbyScene(l).browser.size() == 3);
+    // One region: only the lobbies that say they are in it, whatever my own region is.
+    l.filter.region = 2;                                                                       // NA East
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 1 && s.browser[0].name == "US" && s.filters[kRegionChip].label == "NA East" && s.filters[kRegionChip].on);
+    l.filter.region = 5;                                                                       // Europe
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 1 && s.browser[0].name == "EU");
+    l.filter.region = 3;                                                                       // NA West: none
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.empty() && s.browserEmpty == "No lobby matches these filters.");
+    // The other chips still work with it.
+    l.filter = {}; l.filter.region = 5; l.filter.hasRoom = true;
+    CHECK(BuildLobbyScene(l).browser.size() == 1);
+    l.filter.mode = uint8_t(std::find(BrowserModes().begin(), BrowserModes().end(), "Free-for-all") - BrowserModes().begin());
+    CHECK(BuildLobbyScene(l).browser.empty());
+
+    // The row names the region first, then the map, the mode: "Europe · Yard · Duel". No region said: as before.
+    l.filter = {};
+    s = BuildLobbyScene(l);
+    CHECK(s.browser.size() == 3);
+    if (s.browser.size() == 3) {
+        CHECK(s.browser[0].detail == "Europe " + kDot + " Yard " + kDot + " Duel");
+        CHECK(s.browser[1].detail == "NA East");
+        CHECK(s.browser[2].detail.empty());
+    }
+
+    // The picker's button text.
+    l.regionPick = Region::Auto; l.regionGuess = Region::Auto;
+    CHECK(BuildLobbyScene(l).regionButton == "Auto (unknown)");
+    l.regionGuess = Region::Asia;
+    CHECK(BuildLobbyScene(l).regionButton == "Auto (Asia)");
+    l.regionPick = Region::Oceania;
+    CHECK(BuildLobbyScene(l).regionButton == "Oceania");
+
+    // The host sees a player's Steam name beside their nickname; a member does not, and neither does the host beside their own row.
+    LobbyLocal h = InLobby(true);
+    LobbyPlayer ann = Player("Ann", true, true); ann.steamName = "AnnSteam";
+    LobbyPlayer bob = Player("Bobby"); bob.steamName = "bob_steam";
+    LobbyPlayer cy = Player("Cy"); cy.steamName = "Cy";                                         // the same name: nothing to add
+    LobbyPlayer di = Player("Di");                                                              // no Steam name known
+    h.players = {ann, bob, cy, di};
+    LobbyScene hs = BuildLobbyScene(h);
+    CHECK(hs.roster.size() == 4);
+    if (hs.roster.size() == 4) {
+        CHECK(hs.roster[0].steam.empty() && hs.roster[1].steam == "bob_steam" && hs.roster[2].steam.empty() && hs.roster[3].steam.empty());
+    }
+    LobbyLocal m = InLobby(false);
+    m.players = {ann, bob};
+    m.players[0].me = false; m.players[1].me = true;
+    LobbyScene ms = BuildLobbyScene(m);
+    CHECK(ms.roster.size() == 2);
+    if (ms.roster.size() == 2) CHECK(ms.roster[0].steam.empty() && ms.roster[1].steam.empty());
+}
+
 int main() {
     TestPrevNext();
     TestStepSetting();
@@ -1186,13 +1462,16 @@ int main() {
     TestHostPassword();
     TestTeamsRow();
     TestTeamKitRow();
+    TestTierNames();
+    TestShuffleRow();
+    TestTaggerSpeedRow();
     TestModeAvailability();
     TestDuelOutgrown();
     TestOutOfLobby();
     TestHostAgainstMember();
     TestRowsPerFormat();
     TestLabelsAndValues();
-    TestGearHint();
+    TestGearHint(); TestHostKitRows(); TestBodiesRow();
     TestOtherHints();
     TestMyTeam();
     TestRoster();
@@ -1208,6 +1487,7 @@ int main() {
     TestClassLine();
     TestSummary();
     TestFilters();
+    TestRegion();
     TestCaptureTheFlagRemoved();
     if (g_fail) { std::printf("%d lobby scene checks failed\n", g_fail); return 1; }
     std::printf("all lobby scene tests passed\n");

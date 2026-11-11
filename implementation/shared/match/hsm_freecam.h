@@ -219,4 +219,75 @@ private:
     Pose pose_;
 };
 
+// ------------------------------------------------------------------ the living player's free camera (#2624)
+// The game's photo mode pauses the world, which stalls a session, so its key stays blocked there. In a running match the
+// same key flies this camera instead, while the player's fighter lives and the host's Free cam row is on. The body's own
+// input is held meanwhile (LiveCamInput), the mouse and W A S D fly inside the dead player's box, and H hides the mod's
+// HUD for a clean shot. The key ends it, and so does anything that ends its condition (LiveCamMay).
+struct LiveCamWorld {
+    bool matchLevel = false;    // a session match's level
+    bool fighting = false;      // a match runs (not the lobby, not the results)
+    bool alive = false;         // my fighter lives (a dead player has the spectator's camera)
+    bool allowed = false;       // the host's Free cam row
+};
+inline bool LiveCamMay(const LiveCamWorld& w) { return w.matchLevel && w.fighting && w.alive && w.allowed; }
+enum class LiveCamAnswer : uint8_t { On, Off, NoMatch, Dead, NotAllowed, NoCamera };
+// What the player is told (empty: nothing; a dead player has the spectator's camera and its F key).
+inline const char* LiveCamLine(LiveCamAnswer a) {
+    switch (a) {
+        case LiveCamAnswer::On: return "Free camera on: the mouse and W A S D fly, H hides the HUD, the photo mode key ends it";
+        case LiveCamAnswer::Off: return "Free camera off";
+        case LiveCamAnswer::NoMatch: return "The free camera works during a match";
+        case LiveCamAnswer::Dead: return "";
+        case LiveCamAnswer::NotAllowed: return "The host turned free cameras off for this match";
+        case LiveCamAnswer::NoCamera: return "The free camera could not start here";
+    }
+    return "";
+}
+class LiveCam {
+public:
+    bool on() const { return on_; }
+    bool hudHidden() const { return on_ && hudHidden_; }
+    const Pose& pose() const { return pose_; }
+
+    // The photo mode key. Off always works; on starts the flight at `current` (where the camera is now) when the world
+    // allows it and the box is usable, with the HUD shown.
+    LiveCamAnswer Toggle(const LiveCamWorld& w, const Pose& current, const Bounds& bounds) {
+        if (on_) { End(); return LiveCamAnswer::Off; }
+        if (!w.matchLevel || !w.fighting) return LiveCamAnswer::NoMatch;
+        if (!w.alive) return LiveCamAnswer::Dead;
+        if (!w.allowed) return LiveCamAnswer::NotAllowed;
+        if (!bounds.valid || !Finite(current.pos) || !Finite(current.yaw) || !Finite(current.pitch)) return LiveCamAnswer::NoCamera;
+        pose_ = current;
+        pose_.yaw = WrapYaw(pose_.yaw);
+        pose_.pitch = std::clamp(pose_.pitch, -kFreePitchLimit, kFreePitchLimit);
+        pose_.pos = Clamp(pose_.pos, bounds);
+        on_ = true;
+        hudHidden_ = false;
+        return LiveCamAnswer::On;
+    }
+    // Every frame. False when the flight had to end: the fighter died, the match or the level ended, the host turned it off.
+    bool Keep(const LiveCamWorld& w) {
+        if (!on_ || LiveCamMay(w)) return true;
+        End();
+        return false;
+    }
+    void ToggleHud() { hudHidden_ = !hudHidden_; }   // read through hudHidden(): only a flight hides the HUD, and each one starts with it shown
+    void Look(double dx, double dy, double sensitivity = kSensitivity) { if (on_) pose_ = ApplyLook(pose_, dx, dy, sensitivity); }
+    void Fly(FreeInput in, bool fast, double dtSeconds, const Bounds& bounds) { if (on_) pose_ = StepFree(pose_, in, fast, dtSeconds, bounds); }
+    void End() { on_ = false; }
+
+private:
+    bool on_ = false, hudHidden_ = false;
+    Pose pose_;
+};
+
+// The living body's own input while the camera flies: an axis reads zero (so nothing stays pushed), a press is dropped, a
+// release passes (a key held when the flight began lets go as usual).
+enum class HeldInput : uint8_t { Pass, Zero, Drop };
+inline HeldInput LiveCamInput(bool flying, bool isAxis, bool pressed) {
+    if (!flying) return HeldInput::Pass;
+    return isAxis ? HeldInput::Zero : pressed ? HeldInput::Drop : HeldInput::Pass;
+}
+
 }  // namespace hsm::freecam

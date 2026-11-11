@@ -80,11 +80,14 @@ inline std::vector<Point3> SpreadPositions(const std::vector<Point3>& candidates
     return out;
 }
 
-// A measured stand height (the host's actor z minus the floor traced under it) fit for every spawn. Negative (the
-// trace hit something above the floor: test 5's Abyss read -96 cm) or not finite: kStandDefaultCm, so a spawn is never
-// lowered into the floor; above kStandMaxCm: kStandMaxCm.
+// A measured stand height (the host's actor z minus the floor traced under it) fit for every spawn. Below
+// kStandDefaultCm or not finite: kStandDefaultCm, so a spawn is never lowered into the floor. The height is read once
+// per level from the host's body as it is at that moment, and the reading stays for every spawn of the level: 0.8.0-pre49
+// hosts read 86 to 95 cm in 13 of 375 levels (Yard, Slums, Alley, Cellar, East Tower, Abyss; a standing body reads 110
+// to 123), and every fighter of those levels came up 25 to 35 cm in the floor. Test 5's Abyss read -96 cm (the trace
+// hit something above the floor). Above kStandMaxCm: kStandMaxCm.
 inline double SaneStandOffset(double raw) {
-    if (!std::isfinite(raw) || raw < 0) return kStandDefaultCm;
+    if (!std::isfinite(raw) || raw < kStandDefaultCm) return kStandDefaultCm;
     return raw > kStandMaxCm ? kStandMaxCm : raw;
 }
 

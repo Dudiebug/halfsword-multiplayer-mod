@@ -67,6 +67,26 @@ int main() {
     ClassStatTrack same;
     CHECK(same.Next(100, 1.0) == 100 && same.Next(100, 1.0) == 100);
 
+    // Tag's Tagger speed rides the class stats: it multiplies the class's run and walk and nothing else, and when the tag is passed the
+    // game's own value comes back.
+    {
+        const ClassSheet plain;
+        const ClassSheet fast = ClassWithSpeed(plain, 1.1);
+        CHECK(std::abs(fast.run - 1.1) < 1e-12 && std::abs(fast.walk - 1.1) < 1e-12);
+        ClassSheet rest = fast; rest.run = rest.walk = 1;
+        CHECK(rest == plain);                                          // nothing else changed
+        CHECK(ClassWithSpeed(plain, 1.0) == plain);
+        ClassSheet runner; runner.run = 1.2; runner.walk = 0.9; runner.strength = 1.1;
+        const ClassSheet both = ClassWithSpeed(runner, 1.1);
+        CHECK(std::abs(both.run - 1.32) < 1e-9 && std::abs(both.walk - 0.99) < 1e-9 && both.strength == runner.strength && both.grip == runner.grip);
+        ClassStatTrack run;
+        CHECK(std::abs(run.Next(2.0, fast.run) - 2.2) < 1e-9);
+        CHECK(std::abs(run.Next(2.2, fast.run) - 2.2) < 1e-9);          // again: no compounding
+        CHECK(std::abs(run.Next(2.2, plain.run) - 2.0) < 1e-9);         // the tag passed: the game's own value is back
+        CHECK(std::abs(run.Next(2.0, plain.run) - 2.0) < 1e-9);
+        CHECK(std::abs(run.Next(2.0, fast.run) - 2.2) < 1e-9);          // and it again when it comes back
+    }
+
     // The picker walks every class and wraps.
     CHECK(ClassNameStep("Man-at-Arms", 1) == "Revenant" && ClassNameStep("Man-at-Arms", -1) == "Custom 8" && ClassNameStep("Flagellant", 1) == "Landsknecht" && ClassNameStep("Custom 3", 1) == "Custom 4" && ClassNameStep("Custom 8", 1) == "Man-at-Arms" && ClassNameStep("nonsense", 1) == "Revenant");
     CHECK(ClassPickCount() == 28 && ClassPickName(0) == "Man-at-Arms" && ClassPickName(20) == "Custom 1" && ClassPickName(27) == "Custom 8");

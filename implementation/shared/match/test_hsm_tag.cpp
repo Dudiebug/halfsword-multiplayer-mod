@@ -244,7 +244,7 @@ static void TestWire() {
     e = {ModeEventKind::Infected, 2, 0}; eb = Encode(e); CHECK(!Decode(eb.data(), eb.size(), eo));
     e = {ModeEventKind::TagPass, uint8_t(kMaxWillies + 1), 2}; eb = Encode(e); CHECK(!Decode(eb.data(), eb.size(), eo));
     eb = Encode(ModeEventMsg{ModeEventKind::TagPass, 1, 2}); eb[4] = 0; CHECK(!Decode(eb.data(), eb.size(), eo));    // kind 0
-    eb[4] = 4; CHECK(!Decode(eb.data(), eb.size(), eo));                                                              // kind 4
+    eb[4] = 8; CHECK(!Decode(eb.data(), eb.size(), eo));                                                              // kind 8 (4..7 are Roulette's)
 }
 
 static MatchInfo TagInfo(uint8_t it, uint16_t fuseMs) {
@@ -310,7 +310,7 @@ static void TestLobby() {
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) card = &m;
     CHECK(card && card->name == "TAG" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // bare fists: no gear rows
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // bare fists: no gear rows
     for (const SettingRow& r : s.settings) {
         if (r.id == LobbyRow::Fuse) CHECK(r.label == "Fuse time" && r.value == "30 s" && r.enabled && !r.hint.empty());
         if (r.id == LobbyRow::Limit) CHECK(r.label == "Rounds to win");
@@ -318,7 +318,7 @@ static void TestLobby() {
     }
     LobbyLocal rolled = InLobby(Format::Tag); rolled.config.gear = Gear::RandomTier;
     s = BuildLobbyScene(rolled);
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // a stale gear changes nothing
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // a stale gear changes nothing
     CHECK(!ModeAvailable(Format::Tag, 1).ok && ModeAvailable(Format::Tag, 2).ok && ModeAvailable(Format::Tag, 8).ok);
     s = BuildLobbyScene(InLobby(Format::FreeForAll, 1));
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) CHECK(!m.enabled && !m.hint.empty());
@@ -336,9 +336,49 @@ static void TestLobby() {
     CHECK(ModeMatches("Tag", "Tag") && !ModeMatches("Team duel (2)", "Tag"));
 }
 
+// Criterion (#1408): whoever is "it" in a round in play runs and walks at the Tagger speed row's percent; nobody else does, and no
+// other format; passing the fuse takes the bonus off the old "it" and puts it on the new one. The row is 100 / 110 / 120, default 110.
+static void TestTaggerSpeed() {
+    CHECK(kTaggerSpeedDefault == 110 && MatchConfig{}.taggerSpeedPct == 110);
+    CHECK(kTaggerSpeedOptions[0] == 100 && kTaggerSpeedOptions[1] == 110 && kTaggerSpeedOptions[2] == 120);
+    for (int pct = 0; pct < 256; ++pct) {
+        MatchConfig c; c.format = Format::Tag; c.taggerSpeedPct = uint8_t(pct);
+        const bool valid = pct == 100 || pct == 110 || pct == 120;
+        CHECK(ValidTaggerSpeedPct(pct) == valid);
+        CHECK(Sanitize(c).taggerSpeedPct == (valid ? pct : 110));
+    }
+    MatchConfig other; other.format = Format::FreeForAll; other.taggerSpeedPct = 120;
+    CHECK(Sanitize(other).taggerSpeedPct == 120);                        // another mode's lobby keeps the row for when Tag is picked
+
+    // The rule.
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 3, 3, 110) == 1.1);
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 3, 3, 120) == 1.2);
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 3, 3, 100) == 1.0);          // the row on 100: no bonus
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 3, 4, 110) == 1.0);          // somebody else
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 0, 4, 110) == 1.0 && TaggerSpeedMultiplier(Format::Tag, 0, 0, 110) == 1.0);   // no round in play: nobody is "it"
+    CHECK(TaggerSpeedMultiplier(Format::Tag, 3, 3, 105) == 1.0 && TaggerSpeedMultiplier(Format::Tag, 3, 3, 0) == 1.0);     // not a stop of the row
+    for (int i = 0; i < kFormatCount; ++i)
+        if (Format(i) != Format::Tag) CHECK(TaggerSpeedMultiplier(Format(i), 3, 3, 120) == 1.0);
+
+    // Following a real game: the bonus is on "it" alone, and moves with the fuse.
+    TagGame g; g.Reset(11, 30);
+    const std::vector<uint8_t> all = {1, 2, 3};
+    auto mults = [&](uint8_t e) { return TaggerSpeedMultiplier(Format::Tag, g.active() ? g.it() : uint8_t(0), e, 110); };
+    CHECK(mults(1) == 1.0 && mults(2) == 1.0 && mults(3) == 1.0);        // before the round
+    g.BeginRound(all, 0);
+    const uint8_t a = g.it(), b = a == 1 ? 2 : 1;
+    int boosted = 0;
+    for (uint8_t e : all) boosted += mults(e) == 1.1 ? 1 : 0;
+    CHECK(boosted == 1 && mults(a) == 1.1 && mults(b) == 1.0);
+    CHECK(g.OnHit(a, b, 10000));
+    CHECK(mults(a) == 1.0 && mults(b) == 1.1);                           // passed: off the old, on the new
+    g.EndRound();
+    CHECK(mults(1) == 1.0 && mults(2) == 1.0 && mults(3) == 1.0);        // the round is over
+}
+
 int main() {
     TestPick(); TestRoundStart(); TestPass(); TestNoTagBack(); TestPassFloor(); TestExpiry(); TestItLeaves(); TestRotation(); TestRounds();
-    TestConfig(); TestBare(); TestWire(); TestHud(); TestLobby();
+    TestConfig(); TestBare(); TestWire(); TestHud(); TestLobby(); TestTaggerSpeed();
     if (g_fail) { std::printf("%d check(s) failed\n", g_fail); return 1; }
     std::printf("tag tests passed\n");
     return 0;

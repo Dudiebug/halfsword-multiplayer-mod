@@ -311,7 +311,7 @@ static void TestLobby() {
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Infection) card = &m;
     CHECK(card && card->name == "INFECTION" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));
+    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::Bodies, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));
     for (const SettingRow& r : s.settings) {
         if (r.id == LobbyRow::Time) CHECK(r.label == "Time limit" && r.value == "5 min" && Has(r.hint, "survivors"));
         if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay" && Has(r.hint, "infected"));

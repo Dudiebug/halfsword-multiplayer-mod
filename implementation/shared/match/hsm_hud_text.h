@@ -19,6 +19,12 @@ inline std::string NameOf(const MatchInfo& m, uint8_t entity) {
     return "#" + std::to_string(entity);
 }
 
+// A Tournament place: its fighter's name, or "open place" for a leaver's seat a newcomer can still take (#1429).
+inline std::string PlaceName(const MatchInfo& m, uint8_t entity) {
+    for (const FighterEntry& f : m.fighters) if (f.entity == entity) return NameOf(m, entity);
+    return "open place";
+}
+
 inline int ScoreOf(const MatchInfo& m, int key) {
     for (const ScoreEntry& s : m.scores) if (s.key == key) return s.score;
     return 0;
@@ -93,7 +99,7 @@ inline std::string QueueLine(const MatchInfo& m) {
     if (m.format != uint8_t(Format::Tournament) || !br.Restore(m.queueOrder, m.bracketWinners) || !br.Current(g)) return {};
     std::string s = QueueStage(m) + ": " + NameOf(m, g.a) + " vs " + NameOf(m, g.b) + " - first to " + std::to_string(m.scoreLimit);
     if (m.fightWinsA || m.fightWinsB) s += " (" + std::to_string(m.fightWinsA) + "-" + std::to_string(m.fightWinsB) + ")";
-    if (br.NextGame(next)) s += "   Next: " + NameOf(m, next.a) + " vs " + NameOf(m, next.b);
+    if (br.NextGame(next)) s += "   Next: " + PlaceName(m, next.a) + " vs " + PlaceName(m, next.b);
     return s;
 }
 
@@ -198,7 +204,7 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFigh
         if (IsQueueFormat(f)) s = QueueLine(m);
         else
         s = f == Format::Duel ? "Rounds   " + scores + "   (best of " + std::to_string(2 * m.scoreLimit - 1) + ")"
-          : f == Format::LastManStanding ? "Rounds   " + scores + "   " + limit : scores + "   " + limit;   // more than two fighters: no "best of"
+          : f == Format::LastManStanding || IsChaos(f) || IsOneCrossbow(f) ? "Rounds   " + scores + "   " + limit : scores + "   " + limit;   // more than two fighters: no "best of"
     } else s = (IsTeamRound(f) ? "Rounds   " : "") + TeamScores(m) + (IsInfection(f) ? std::string() : "   " + limit);   // Infection has no score limit
     if (IsTag(f) && m.tagIt) s += "   " + TagLine(m, myEntity);
     if (m.timeLeftMs) s += "   " + Clock(m.timeLeftMs);
@@ -230,6 +236,9 @@ inline std::string ModeEventLine(const MatchInfo& m, const ModeEventMsg& e) {
         case ModeEventKind::TagPass: return NameOf(m, e.a) + " tagged " + NameOf(m, e.b);
         case ModeEventKind::TagBurn: return NameOf(m, e.a) + " burned out";
         case ModeEventKind::Infected: return e.a ? NameOf(m, e.a) + " infected " + NameOf(m, e.b) : NameOf(m, e.b) + " was infected";
+        case ModeEventKind::RouletteClick: return e.a == e.b ? NameOf(m, e.a) + " pulled the trigger: click  +1" : NameOf(m, e.a) + " pulled on " + NameOf(m, e.b) + ": click";
+        case ModeEventKind::RouletteBang: return e.a == e.b ? NameOf(m, e.a) + " pulled the trigger: BANG" : NameOf(m, e.a) + " has a live round for " + NameOf(m, e.b);
+        case ModeEventKind::RoulettePull: case ModeEventKind::RouletteFired: break;   // a client's asks: never shown
     }
     return {};
 }
@@ -273,6 +282,10 @@ inline std::string FormatName(Format f) {
         case Format::CrossbowTDM: return "Crossbow TDM";
         case Format::Tournament: return "Tournament";
         case Format::PitBridgeDuel: return "Pit bridge duels";
+        case Format::Chaos: return "Chaos";
+        case Format::OneCrossbow: return "One crossbow";
+        case Format::Roulette: return "Roulette";
+        case Format::HideSeek: return "Hide and seek";
         default: return "Free-for-all";
     }
 }
@@ -299,11 +312,55 @@ inline std::string TeamLabel(int team) {
 inline std::string GearLabel(Gear g, Format f) {
     if (!GearAllowed(f, g)) return "Own loadouts";
     if (g == Gear::Fists) return "Bare fists";
+    if (g == Gear::HostKit) return "The host's loadout";
     if (IsBotFormat(f)) return g == Gear::RandomTier ? "Random by tier, kept all run" : g == Gear::Mirror ? "Everyone identical, kept all run" : "Own loadouts";
     if (g == Gear::RandomTier) return IsRoundFormat(f) ? "Random by tier, new each round" : "Random by tier, new each life";
     if (g == Gear::Mirror) return IsRoundFormat(f) ? "Everyone identical, new each round" : "Everyone identical";
     return "Own loadouts";
 }
 inline std::string TimeLabel(uint16_t seconds) { return seconds ? std::to_string(seconds / 60) + " min" : "off"; }
+// A tier by the game's own name for it (Enum_Ranks: 0 Beggar ... 8 Lord; the mod's tiers run 0..7). Every place the player
+// reads a tier uses this, never "tier N". A number past the last is Lord.
+inline const char* TierName(int tier) {
+    static constexpr const char* kNames[] = {"Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-Arms", "Knight", "Lord"};
+    return kNames[std::clamp(tier, 0, int(sizeof(kNames) / sizeof(kNames[0])) - 1)];
+}
+
+// Chaos: what a fighter was dealt this round, for the FIGHT banner ("TALL, HEAVY, KNIGHT GEAR"; a plain height or weight is left
+// out), and what the round runs at, for the line under the pill ("Damage 150%   Dead weight 20%   Weapon weight 80%").
+inline std::string ChaosRoleLine(uint8_t roleId) {
+    if (!IsChaosRole(roleId)) return {};
+    const ChaosBuild b = ChaosBuildOf(roleId);
+    std::string s = b.height == 0 ? "SHORT, " : b.height == 2 ? "TALL, " : "";
+    s += b.weight == 0 ? "LIGHT, " : b.weight == 2 ? "HEAVY, " : "";
+    return s + Upper(TierName(b.tier)) + " GEAR";
+}
+inline std::string ChaosLine(const MatchInfo& m) {
+    if (!IsChaos(Format(m.format)) || m.phase == uint8_t(MatchPhase::Idle)) return {};
+    auto pct = [](float scale) { return std::to_string(int(scale * 100.f + 0.5f)) + "%"; };
+    std::string s = "Damage " + (m.damagePct == kDamageStock ? std::string("stock") : std::to_string(m.damagePct) + "%");
+    if (m.physics[kPinnedDeadWeight] >= 0) s += "   Dead weight " + pct(m.physics[kPinnedDeadWeight]);
+    if (m.physics[kPinnedWeaponWeight] >= 0) s += "   Weapon weight " + pct(m.physics[kPinnedWeaponWeight]);
+    return s;
+}
+// Hide and Seek: what the round pill adds. While the hiders hide (MatchInfo.fuseLeftMs runs the Hide time): "WAIT 23 s"
+// for a seeker and "HIDE 23 s" for a hider; then "SEEK" and "STAY HIDDEN". Whoever only watches reads "HIDING 23 s"
+// and "SEEKING".
+inline std::string HideSeekLine(const MatchInfo& m, uint8_t myEntity) {
+    if (!IsHideSeek(Format(m.format)) || !CombatPhase(MatchPhase(m.phase))) return {};
+    uint8_t role = kRoleFighter; bool alive = false;
+    for (const FighterEntry& f : m.fighters) if (f.entity == myEntity) { role = f.role; alive = f.alive; }
+    const bool seeker = alive && role == kRoleSeeker, hider = alive && role == kRoleHider;
+    if (m.fuseLeftMs) return std::string(seeker ? "WAIT " : hider ? "HIDE " : "HIDING ") + Seconds(m.fuseLeftMs) + " s";
+    return seeker ? "SEEK" : hider ? "STAY HIDDEN" : "SEEKING";
+}
+// Roulette: the line under the round pill. The holder reads the two keys, everyone the odds of the next pull (`oneIn`:
+// live one time in that many); with a live round in the crossbow it says that instead.
+inline std::string RouletteLine(const MatchInfo& m, uint8_t myEntity, int oneIn, bool loaded) {
+    if (!IsRoulette(Format(m.format)) || !m.tagIt || !CombatPhase(MatchPhase(m.phase))) return {};
+    const std::string odds = "1 in " + std::to_string(std::clamp(oneIn, 1, 6));
+    if (m.tagIt == myEntity) return loaded ? std::string("LIVE ROUND: SHOOT") : "YOUR TURN   X: on yourself   C: on the fighter you face   " + odds;
+    return NameOf(m, m.tagIt) + (loaded ? std::string(" has a live round") : " holds the crossbow   " + odds);
+}
 
 }  // namespace hsm

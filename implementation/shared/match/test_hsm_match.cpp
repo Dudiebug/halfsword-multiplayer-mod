@@ -32,37 +32,56 @@ static void TestSanitize() {
     // The old "3 teams" mode (lobby data hsm_fmt=2, server_format=teams3) loads as Teams with 3 teams.
     c = Cfg(Format::ThreeTeams, 7); CHECK(Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3 && Sanitize(c).scoreLimit == 7);
     c.teams = 4; CHECK(Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3);
-    c = Cfg(Format::LastManStanding, 250); CHECK(Sanitize(c).format == Format::LastManStanding && Sanitize(c).scoreLimit == 100 && kFormatCount == 16);
+    c = Cfg(Format::LastManStanding, 250); CHECK(Sanitize(c).format == Format::LastManStanding && Sanitize(c).scoreLimit == 100 && kFormatCount == 20);
     CHECK(DefaultScoreLimit(Format::LastManStanding) == 3 && IsRoundFormat(Format::Duel) && IsRoundFormat(Format::LastManStanding) && !IsRoundFormat(Format::FreeForAll));
     c = Cfg(Format::LastManStanding, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);   // like Duel: cleared each round
     CHECK(DefaultScoreLimit(Format::FreeForAll) == 5 && DefaultScoreLimit(Format::TwoTeams) == 10);
-    // The weapon filter: in range stays, out of range falls back to Any.
-    c = MatchConfig{}; CHECK(c.weapons == WeaponFilter::Any);
-    for (uint8_t w = 0; w < kWeaponFilterCount; ++w) { c.weapons = WeaponFilter(w); CHECK(Sanitize(c).weapons == WeaponFilter(w)); }
-    c.weapons = WeaponFilter(kWeaponFilterCount); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
-    c.weapons = WeaponFilter(255); CHECK(Sanitize(c).weapons == WeaponFilter::Any);
-    // The game's own type values: swords 1H 1, swords 2H 2, polearms 7 (3 is one-handed maces: Polearms sent it before).
-    // Axes & maces is one of maces 1H 3, maces 2H 4, hafted 1H 5, hafted 2H 6 by the roll; any four rolls in a row give
-    // all four. The roll changes nothing else.
-    CHECK(GameWeaponTypeByte(WeaponFilter::Any) == 0);
-    CHECK(GameWeaponTypeByte(WeaponFilter::Swords1H) == 1);
-    CHECK(GameWeaponTypeByte(WeaponFilter::Swords2H) == 2);
-    CHECK(GameWeaponTypeByte(WeaponFilter::Polearms) == 7);
-    CHECK(GameWeaponTypeByte(WeaponFilter(200)) == 0);
+    // The Weapons row is a set of the game's types, one bit each: bit N-1 is game type N. Sanitize keeps the seven bits.
+    c = MatchConfig{}; CHECK(c.weapons == 0);
+    CHECK(WeaponBit(0) == 0 && WeaponBit(1) == 1 && WeaponBit(2) == 2 && WeaponBit(3) == 4 && WeaponBit(7) == 64 && WeaponBit(8) == 0 && WeaponBit(255) == 0);
+    CHECK(kWeaponMaskAll == 0x7F && kWeaponTypeCount == 7);
+    for (unsigned w = 0; w < 256; ++w) { c.weapons = WeaponMask(w); CHECK(Sanitize(c).weapons == (w & 0x7F)); }
+    CHECK(WeaponTypesTicked(0) == 0 && WeaponTypesTicked(1) == 1 && WeaponTypesTicked(0x7F) == 7 && WeaponTypesTicked(0x80) == 0 && WeaponTypesTicked(0x55) == 4);
+    // The game's own type values: swords 1H 1, swords 2H 2, polearms 7 (3 is one-handed maces: Polearms sent it before). None
+    // ticked is 0 (any). One ticked is that type whatever the roll. Several rotate by the roll, counted up from type 1; any
+    // run of rolls as long as the ticked types gives all of them.
+    CHECK(GameWeaponTypeByte(0) == 0 && GameWeaponTypeByte(0, 5) == 0 && GameWeaponTypeByte(0x80) == 0);
+    for (uint8_t t = 1; t <= kWeaponTypeCount; ++t)
+        for (uint32_t roll : {0u, 1u, 6u, 0xFFFFFFFFu}) CHECK(GameWeaponTypeByte(WeaponBit(t), roll) == t);
+    const WeaponMask axesMaces = WeaponMask(WeaponBit(3) | WeaponBit(4) | WeaponBit(5) | WeaponBit(6));
     for (uint32_t start : {0u, 1u, 6u, 0xFFFFFFFEu}) {
         unsigned seen = 0;
         for (uint32_t i = 0; i < 4; ++i) {
-            const uint32_t roll = start + i;
-            const uint8_t t = GameWeaponTypeByte(WeaponFilter::AxesMaces, roll);
+            const uint8_t t = GameWeaponTypeByte(axesMaces, start + i);
             CHECK(t >= 3 && t <= 6);
             seen |= 1u << t;
-            CHECK(GameWeaponTypeByte(WeaponFilter::Any, roll) == 0 && GameWeaponTypeByte(WeaponFilter::Swords1H, roll) == 1);
-            CHECK(GameWeaponTypeByte(WeaponFilter::Swords2H, roll) == 2 && GameWeaponTypeByte(WeaponFilter::Polearms, roll) == 7);
-            CHECK(GameWeaponTypeByte(WeaponFilter(200), roll) == 0);
         }
         CHECK(seen == 0x78);   // 3, 4, 5 and 6
     }
-    for (uint8_t w = 0; w < kWeaponFilterCount; ++w) CHECK(GameWeaponTypeByte(WeaponFilter(w)) < kGameWeaponTypeCount);
+    CHECK(GameWeaponTypeByte(axesMaces, 0) == 3 && GameWeaponTypeByte(axesMaces, 1) == 4 && GameWeaponTypeByte(axesMaces, 2) == 5 &&
+          GameWeaponTypeByte(axesMaces, 3) == 6 && GameWeaponTypeByte(axesMaces, 4) == 3);
+    const WeaponMask swordsPole = WeaponMask(WeaponBit(2) | WeaponBit(7));
+    CHECK(GameWeaponTypeByte(swordsPole, 0) == 2 && GameWeaponTypeByte(swordsPole, 1) == 7 && GameWeaponTypeByte(swordsPole, 2) == 2 && GameWeaponTypeByte(swordsPole, 3) == 7);
+    CHECK(GameWeaponTypeByte(WeaponMask(0xFF), 3) == 4);   // the unticked eighth bit counts for nothing: seven types
+    for (unsigned w = 0; w < 256; ++w) CHECK(GameWeaponTypeByte(WeaponMask(w), w) < kGameWeaponTypeCount);
+    // A tick on a chip flips that type; the Any chip clears all; an unknown chip changes nothing.
+    CHECK(ToggleWeaponType(0, 3) == 4 && ToggleWeaponType(4, 3) == 0 && ToggleWeaponType(5, 1) == 4 && ToggleWeaponType(5, 0) == 0);
+    CHECK(ToggleWeaponType(5, 8) == 5 && ToggleWeaponType(0x7F, 7) == 0x3F && ToggleWeaponType(0, 7) == 64);
+    // An earlier host's hsm_wpn filter (0 any, 1 swords 1H, 2 swords 2H, 3 polearms, 4 axes & maces) becomes a mask; hsm_wpm wins when it is there.
+    CHECK(WeaponMaskFromOldFilter(0) == 0 && WeaponMaskFromOldFilter(1) == WeaponBit(1) && WeaponMaskFromOldFilter(2) == WeaponBit(2));
+    CHECK(WeaponMaskFromOldFilter(3) == WeaponBit(7) && WeaponMaskFromOldFilter(4) == axesMaces);
+    CHECK(WeaponMaskFromOldFilter(5) == 0 && WeaponMaskFromOldFilter(-1) == 0 && WeaponMaskFromOldFilter(255) == 0);
+    CHECK(WeaponMaskFromKeys(true, 5, 3) == 5 && WeaponMaskFromKeys(true, 0, 3) == 0);     // a new host's key, even an explicit Any
+    CHECK(WeaponMaskFromKeys(false, 99, 3) == WeaponBit(7) && WeaponMaskFromKeys(false, 99, 4) == axesMaces && WeaponMaskFromKeys(false, 99, 0) == 0);
+    CHECK(WeaponMaskFromKeys(true, 0xFF, 0) == 0x7F && WeaponMaskFromKeys(true, 300, 0) == 0x7F && WeaponMaskFromKeys(true, -5, 0) == 0);
+    // Names: the chips, the row's value and the summary line.
+    CHECK(std::string(WeaponTypeName(0)) == "Any" && std::string(WeaponTypeName(1)) == "1H swords" && std::string(WeaponTypeName(2)) == "2H swords" &&
+          std::string(WeaponTypeName(3)) == "1H maces" && std::string(WeaponTypeName(4)) == "2H maces" && std::string(WeaponTypeName(5)) == "1H axes" &&
+          std::string(WeaponTypeName(6)) == "2H axes" && std::string(WeaponTypeName(7)) == "Polearms" && std::string(WeaponTypeName(8)) == "?");
+    CHECK(WeaponMaskName(0) == "Any" && WeaponMaskName(WeaponBit(1)) == "1H swords" && WeaponMaskName(WeaponBit(7)) == "Polearms");
+    CHECK(WeaponMaskName(WeaponMask(WeaponBit(1) | WeaponBit(2))) == "1H swords / 2H swords");
+    CHECK(WeaponMaskName(WeaponMask(WeaponBit(1) | WeaponBit(3) | WeaponBit(7))) == "1H swords / 1H maces / Polearms");
+    CHECK(WeaponMaskName(axesMaces) == "4 weapon types" && WeaponMaskName(kWeaponMaskAll) == "7 weapon types");
     CHECK(std::string(GameWeaponTypeName(0)) == "any" && std::string(GameWeaponTypeName(7)) == "polearms");
     CHECK(std::string(GameWeaponTypeName(3)) == "maces 1H" && std::string(GameWeaponTypeName(6)) == "hafted 2H");
     CHECK(std::string(GameWeaponTypeName(kGameWeaponTypeCount)) == "?" && std::string(GameWeaponTypeName(255)) == "?");
@@ -99,6 +118,139 @@ static void TestResolveTeams() {
     for (auto& [s, t] : ResolveTeams(m, Format::Duel, 2)) CHECK(t == kNoTeam);
     for (auto& [s, t] : ResolveTeams(m, Format::LastManStanding, 2)) CHECK(t == kNoTeam);
     CHECK(ffa.size() == 6 && pvb.size() == 6);
+}
+
+// Shuffle teams (#772): the teams dealt again at random and balanced. The picks are ignored, a host move is a lock, the same seed
+// deals the same, and the formats that pick no teams are left to ResolveTeams.
+static std::vector<int> TeamSizes(const std::map<uint8_t, int8_t>& deal, int teams) {
+    std::vector<int> n(size_t(teams), 0);
+    for (const auto& [slot, team] : deal) {
+        CHECK(team >= 0 && team < teams);
+        if (team >= 0 && team < teams) ++n[size_t(team)];
+    }
+    return n;
+}
+static int Spread(const std::vector<int>& n) { return *std::max_element(n.begin(), n.end()) - *std::min_element(n.begin(), n.end()); }
+
+static void TestShuffleTeams() {
+    std::vector<TeamRequest> eight;
+    for (uint8_t i = 0; i < 8; ++i) eight.push_back({i, 0, -1});             // everybody picked team 0
+    // Balanced for every head count and team count, whatever the picks: the sizes differ by at most one.
+    for (int teams = 2; teams <= 4; ++teams)
+        for (size_t n = 0; n <= 8; ++n)
+            for (uint32_t seed : {0u, 1u, 7u, 12345u, 0xFFFFFFFFu}) {
+                const std::vector<TeamRequest> m(eight.begin(), eight.begin() + long(n));
+                const auto deal = ShuffleTeams(m, Format::TwoTeams, teams, seed);
+                CHECK(deal.size() == n && Spread(TeamSizes(deal, teams)) <= 1);
+            }
+    // The picks do not count: ResolveTeams would put all eight on team 0.
+    CHECK(Spread(TeamSizes(ResolveTeams(eight, Format::TwoTeams, 2), 2)) == 8);
+    CHECK(TeamSizes(ShuffleTeams(eight, Format::TwoTeams, 2, 5), 2) == (std::vector<int>{4, 4}));
+    CHECK(TeamSizes(ShuffleTeams(eight, Format::TeamDuel, 4, 5), 4) == (std::vector<int>{2, 2, 2, 2}));
+    CHECK(TeamSizes(ShuffleTeams(eight, Format::CrossbowTDM, 3, 5), 3).size() == 3);
+    {
+        const auto three = ShuffleTeams(eight, Format::TwoTeams, 3, 9);
+        const std::vector<int> n = TeamSizes(three, 3);
+        CHECK(n[0] + n[1] + n[2] == 8 && Spread(n) == 1);                  // 3 + 3 + 2 in some order
+        const auto old = ShuffleTeams(eight, Format::ThreeTeams, 2, 9);     // the old value is 3 teams whatever the count
+        CHECK(old == three);
+    }
+    // Random: seeds give different deals, and every fighter can land on every team.
+    std::set<std::map<uint8_t, int8_t>> deals;
+    for (uint32_t seed = 0; seed < 64; ++seed) deals.insert(ShuffleTeams(eight, Format::TwoTeams, 2, seed));
+    CHECK(deals.size() > 8);
+    for (uint8_t slot = 0; slot < 8; ++slot) {
+        bool on[4] = {false, false, false, false};
+        for (uint32_t seed = 0; seed < 200; ++seed) on[ShuffleTeams(eight, Format::TwoTeams, 4, seed).at(slot)] = true;
+        CHECK(on[0] && on[1] && on[2] && on[3]);
+    }
+    // No fixed pairing: any two fighters land together on some deals and apart on others (dealing in slot order would always split slots 0 and 1).
+    for (uint8_t a = 0; a < 8; ++a)
+        for (uint8_t b = uint8_t(a + 1); b < 8; ++b) {
+            bool together = false, apart = false;
+            for (uint32_t seed = 0; seed < 200; ++seed) {
+                const auto deal = ShuffleTeams(eight, Format::TwoTeams, 2, seed);
+                (deal.at(a) == deal.at(b) ? together : apart) = true;
+            }
+            CHECK(together && apart);
+        }
+    // An odd head count: either team can be the bigger one.
+    {
+        const std::vector<TeamRequest> three(eight.begin(), eight.begin() + 3);
+        bool big0 = false, big1 = false;
+        for (uint32_t seed = 0; seed < 100; ++seed) {
+            const std::vector<int> n = TeamSizes(ShuffleTeams(three, Format::TwoTeams, 2, seed), 2);
+            big0 = big0 || n[0] == 2;
+            big1 = big1 || n[1] == 2;
+        }
+        CHECK(big0 && big1);
+    }
+    // The same members and seed give the same deal, whatever the order of the list or the slot numbers.
+    CHECK(ShuffleTeams(eight, Format::TwoTeams, 3, 99) == ShuffleTeams(eight, Format::TwoTeams, 3, 99));
+    std::vector<TeamRequest> backwards(eight.rbegin(), eight.rend());
+    CHECK(ShuffleTeams(backwards, Format::TwoTeams, 3, 99) == ShuffleTeams(eight, Format::TwoTeams, 3, 99));
+    const std::vector<TeamRequest> sparse = {{3, -1, -1}, {7, -1, -1}, {9, -1, -1}, {200, -1, -1}};
+    const auto sp = ShuffleTeams(sparse, Format::TwoTeams, 2, 4);
+    CHECK(sp.size() == 4 && sp.count(3) && sp.count(7) && sp.count(9) && sp.count(200) && TeamSizes(sp, 2) == (std::vector<int>{2, 2}));
+    CHECK(ShuffleTeams({}, Format::TwoTeams, 2, 1).empty());
+    // A host move is a lock: that fighter stays, the rest are dealt around it.
+    {
+        std::vector<TeamRequest> m = eight;
+        m[0].hostOverride = 1; m[1].hostOverride = 1;
+        for (uint32_t seed = 0; seed < 50; ++seed) {
+            const auto deal = ShuffleTeams(m, Format::TwoTeams, 2, seed);
+            CHECK(deal.at(0) == 1 && deal.at(1) == 1 && TeamSizes(deal, 2) == (std::vector<int>{4, 4}));
+        }
+        std::vector<TeamRequest> heavy = eight;
+        for (int i = 0; i < 4; ++i) heavy[size_t(i)].hostOverride = 0;       // four locked on team 0
+        for (uint32_t seed = 0; seed < 50; ++seed) {
+            const auto deal = ShuffleTeams(heavy, Format::TwoTeams, 2, seed);
+            CHECK(deal.at(0) == 0 && deal.at(3) == 0 && deal.at(4) == 1 && deal.at(7) == 1 && TeamSizes(deal, 2) == (std::vector<int>{4, 4}));
+        }
+        std::vector<TeamRequest> lopsided = eight;
+        for (int i = 0; i < 6; ++i) lopsided[size_t(i)].hostOverride = 1;    // six locked on team 1: the two others fill team 0, the spread is the locks'
+        for (uint32_t seed = 0; seed < 20; ++seed) {
+            const auto deal = ShuffleTeams(lopsided, Format::TwoTeams, 2, seed);
+            CHECK(deal.at(6) == 0 && deal.at(7) == 0 && TeamSizes(deal, 2) == (std::vector<int>{2, 6}));
+        }
+        std::vector<TeamRequest> bad = eight;
+        bad[0].hostOverride = 5; bad[1].hostOverride = 2;                    // a team that is not there is no lock (2 teams)
+        for (uint32_t seed = 0; seed < 20; ++seed) CHECK(Spread(TeamSizes(ShuffleTeams(bad, Format::TwoTeams, 2, seed), 2)) == 0);
+    }
+    // The formats that pick no teams are not shuffled: ResolveTeams' answer.
+    std::vector<TeamRequest> mixed = {{0, -1, -1}, {1, 1, -1}, {2, -1, 0}, {3, 0, -1}};
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::PlayersVsBots, Format::Zombies, Format::Tag, Format::Tournament,
+                     Format::PitBridgeDuel, Format::Riot, Format::Juggernaut, Format::Infection})
+        CHECK(ShuffleTeams(mixed, f, 2, 77) == ResolveTeams(mixed, f, 2));
+
+    // When it is due: Each match at a rematch, Each round also at a round reset; the others never.
+    using C = RespawnCause;
+    for (C cause : {C::Individual, C::RoundReset, C::WaveCleared, C::Rematch}) CHECK(!ShuffleDue(TeamShuffle::Off, cause));
+    CHECK(ShuffleDue(TeamShuffle::EachMatch, C::Rematch) && !ShuffleDue(TeamShuffle::EachMatch, C::RoundReset));
+    CHECK(!ShuffleDue(TeamShuffle::EachMatch, C::Individual) && !ShuffleDue(TeamShuffle::EachMatch, C::WaveCleared));
+    CHECK(ShuffleDue(TeamShuffle::EachRound, C::Rematch) && ShuffleDue(TeamShuffle::EachRound, C::RoundReset));
+    CHECK(!ShuffleDue(TeamShuffle::EachRound, C::Individual) && !ShuffleDue(TeamShuffle::EachRound, C::WaveCleared));
+
+    // The row survives Sanitize only where it means something.
+    MatchConfig c;
+    CHECK(c.shuffle == TeamShuffle::Off && kTeamShuffleCount == 3);
+    for (Format f : {Format::TwoTeams, Format::TeamDuel, Format::CrossbowTDM}) {
+        c = MatchConfig{}; c.format = f;
+        c.shuffle = TeamShuffle::EachMatch; CHECK(Sanitize(c).shuffle == TeamShuffle::EachMatch);
+        c.shuffle = TeamShuffle::EachRound; CHECK(Sanitize(c).shuffle == (f == Format::TeamDuel ? TeamShuffle::EachRound : TeamShuffle::EachMatch));
+        c.shuffle = TeamShuffle::Off; CHECK(Sanitize(c).shuffle == TeamShuffle::Off);
+        c.shuffle = TeamShuffle(3); CHECK(Sanitize(c).shuffle == TeamShuffle::Off);
+        c.shuffle = TeamShuffle(255); CHECK(Sanitize(c).shuffle == TeamShuffle::Off);
+    }
+    for (int i = 0; i < kFormatCount; ++i) {
+        c = MatchConfig{}; c.format = Format(i);
+        for (TeamShuffle s : {TeamShuffle::EachMatch, TeamShuffle::EachRound}) {
+            c.shuffle = s;
+            const MatchConfig out = Sanitize(c);                                 // the old Three teams and Capture the flag come out as Teams
+            if (!PicksTeams(out.format)) CHECK(out.shuffle == TeamShuffle::Off);
+            else CHECK(out.shuffle != TeamShuffle::Off);
+        }
+    }
 }
 
 static void TestColors() {
@@ -165,13 +317,13 @@ static void TestForcedBuild() {
 static void TestBotFormatGear() {
     using C = RespawnCause;
     for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
-        for (Gear g : {Gear::Own, Gear::RandomTier, Gear::Mirror}) {
+        for (Gear g : {Gear::Own, Gear::RandomTier, Gear::Mirror, Gear::HostKit}) {
             MatchConfig c = Cfg(f, 10); c.gear = g; c.tier = 4;
             CHECK(GearAllowed(f, g) && Sanitize(c).gear == g && Sanitize(c).tier == 4);
             for (C cause : {C::Individual, C::RoundReset, C::WaveCleared}) CHECK(RegearFor(c, cause) == Regear::None);   // the run's loadout stays
-            CHECK(RegearFor(c, C::Rematch) == (g == Gear::Own ? Regear::None : g == Gear::Mirror ? Regear::Shared : Regear::Each));
+            CHECK(RegearFor(c, C::Rematch) == (g == Gear::Own ? Regear::None : g == Gear::RandomTier ? Regear::Each : Regear::Shared));
             CHECK(JoinRegearFor(c) == (g == Gear::RandomTier ? Regear::Each : Regear::None));
-            CHECK(StartLoadoutsAhead(c, 3) == (g == Gear::Own ? 0u : g == Gear::Mirror ? 1u : 3u));
+            CHECK(StartLoadoutsAhead(c, 3) == (g == Gear::RandomTier ? 3u : g == Gear::Mirror ? 1u : 0u));   // the host's loadout is not rolled
         }
         MatchConfig fists = Cfg(f, 10); fists.gear = Gear::Fists;
         CHECK(!GearAllowed(f, Gear::Fists) && Sanitize(fists).gear == Gear::Own);              // Brawl is free-for-all's
@@ -179,11 +331,32 @@ static void TestBotFormatGear() {
         CHECK(Sanitize(odd).gear == Gear::Own);
     }
     CHECK(GearAllowed(Format::FreeForAll, Gear::Fists) && !GearAllowed(Format::Duel, Gear::Fists) && !GearAllowed(Format::TwoTeams, Gear::Fists));
-    CHECK(GearAllowed(Format::Duel, Gear::Mirror) && !GearAllowed(Format::Duel, Gear(4)));
+    CHECK(GearAllowed(Format::Duel, Gear::Mirror) && GearAllowed(Format::Duel, Gear::HostKit) && !GearAllowed(Format::Duel, Gear(5)));
     MatchConfig pvp = Cfg(Format::Duel, 3); pvp.gear = Gear::RandomTier;
     CHECK(JoinRegearFor(pvp) == Regear::Each);                                                 // PvP joiners: as before
     pvp.gear = Gear::Fists; pvp.format = Format::FreeForAll;
     CHECK(JoinRegearFor(pvp) == Regear::None);
+
+    // 0.8.0-pre49 (report 2JP4Nyb2Hm): a player who left a random-gear match and came back uploaded their loadout
+    // again; it replaced the dealt one and they fought three lives in their own Free Mode kit.
+    const uint32_t dealt = 0x02000002u, upload = 0x02000003u;
+    for (Gear g : {Gear::RandomTier, Gear::Mirror, Gear::HostKit}) {
+        MatchConfig c = Cfg(Format::FreeForAll, 10); c.gear = g;
+        CHECK(NeedsDealtGear(c, MatchPhase::Live, true, upload, dealt));          // the upload replaced the deal
+        CHECK(!NeedsDealtGear(c, MatchPhase::Live, true, dealt, dealt));          // still the deal: nothing to do
+        CHECK(NeedsDealtGear(c, MatchPhase::Live, true, upload, 0));              // never dealt (it loaded after the start)
+        CHECK(NeedsDealtGear(c, MatchPhase::Live, true, 0, 0));
+        CHECK(NeedsDealtGear(c, MatchPhase::Countdown, true, upload, dealt) && NeedsDealtGear(c, MatchPhase::Results, true, upload, dealt));
+        CHECK(!NeedsDealtGear(c, MatchPhase::Idle, true, upload, dealt) && !NeedsDealtGear(c, MatchPhase::Idle, false, upload, dealt));
+        CHECK(NeedsDealtGear(c, MatchPhase::Live, false, dealt, dealt));          // new to the match: as before
+    }
+    for (Gear g : {Gear::Own, Gear::Fists}) {                                     // nothing is dealt: the upload is the loadout
+        MatchConfig c = Cfg(Format::FreeForAll, 10); c.gear = g;
+        CHECK(!NeedsDealtGear(c, MatchPhase::Live, true, upload, dealt) && !NeedsDealtGear(c, MatchPhase::Live, true, upload, 0));
+        CHECK(NeedsDealtGear(c, MatchPhase::Live, false, upload, 0));             // a joiner still goes through JoinerGear (a no-op there)
+    }
+    MatchConfig wave = Cfg(Format::PlayersVsBots, 10); wave.gear = Gear::RandomTier;   // the run's loadout: a returning player gets one again
+    CHECK(NeedsDealtGear(wave, MatchPhase::Live, true, upload, dealt) && !NeedsDealtGear(wave, MatchPhase::Live, true, dealt, dealt));
 }
 
 static std::vector<FighterInfo> Teams2() { return {{1, 0, true}, {2, 1, true}, {3, 0, true}, {4, 1, true}}; }
@@ -254,6 +427,54 @@ static void TestFreeForAll() {
     CHECK(m.Score(3) == 1 && m.Score(1) == -1 && m.phase() == MatchPhase::Live);
     m.MarkRespawned(2); m.OnDeath(2, 3, t + 3);
     CHECK(m.phase() == MatchPhase::Results && m.winner() == 3);
+}
+
+// Carnage (match/hsm_scenarios.h): computer fighters in a free-for-all. Points move between players only; the bots take part in
+// the fight (a player they kill is dead and respawns) but never score, never lose a point and never lead.
+static void TestCarnageBots() {
+    const uint8_t bot = 40, bot2 = 41;
+    {
+        Match m; m.Start(Cfg(Format::FreeForAll, 2), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+        m.Tick(Match::kCountdownMs);
+        const uint32_t t = Match::kCountdownMs;
+        m.AddFighter({bot, kBotTeam, false}); m.AddFighter({bot2, kBotTeam, false});
+        m.OnDeath(bot, 1, t + 1);                                              // a player fells a bot: no point, no kill on the board
+        CHECK(m.Score(1) == 0 && m.Kills(1) == 0 && !m.Alive(bot) && m.phase() == MatchPhase::Live);
+        for (int i = 0; i < 5; ++i) { m.OnDeath(2, bot2, t + 2 + uint32_t(i)); m.MarkRespawned(2); }   // a bot fells a player, five times
+        CHECK(m.Score(bot2) == 0 && m.Score(2) == 0 && m.Deaths(2) == 5 && m.Kills(bot2) == 0 && m.phase() == MatchPhase::Live);
+        m.OnDeath(bot2, bot2, t + 10);                                          // a bot falls by itself: nothing
+        CHECK(m.Score(bot2) == 0 && m.phase() == MatchPhase::Live);
+        m.OnDeath(1, 1, t + 11);                                                // a player's own fall still costs the point
+        CHECK(m.Score(1) == -1);
+        m.MarkRespawned(1); m.OnDeath(2, 1, t + 12);                            // players against each other still score
+        CHECK(m.Score(1) == 0 && m.Kills(1) == 1);
+        m.MarkRespawned(2); m.OnDeath(1, 2, t + 13); m.MarkRespawned(1); m.OnDeath(1, 2, t + 14);
+        CHECK(m.Score(2) == 2 && m.phase() == MatchPhase::Results && m.winner() == 2);   // the limit is reached by players
+        CHECK(m.StaleBotCorpses(t + 1 + Match::kCorpseMs, Match::kCorpseMs).size() == 1);
+    }
+    {   // The clock: two players level below the bots' 0 do not hand the match to a bot.
+        Match m; m.Start(Cfg(Format::FreeForAll, 5, 10), {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+        m.Tick(Match::kCountdownMs);
+        const uint32_t t = Match::kCountdownMs;
+        m.AddFighter({bot, kBotTeam, false});
+        m.OnDeath(1, 1, t + 1); m.OnDeath(2, 2, t + 2); m.MarkRespawned(1); m.MarkRespawned(2);
+        m.Tick(t + 10000);
+        CHECK(m.phase() == MatchPhase::SuddenDeath && m.winner() == Match::kNoWinner);
+        m.OnDeath(2, 1, t + 10001);                                             // the next kill decides it, for a player
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 1);
+    }
+    {   // Two deaths in one tick at the limit: a bot's kill does not count in the second.
+        Match m; m.Start(Cfg(Format::FreeForAll, 1), {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+        m.Tick(Match::kCountdownMs);
+        const uint32_t t = Match::kCountdownMs;
+        m.AddFighter({bot, kBotTeam, false});
+        m.OnDeath(2, 1, t + 1);
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 1);
+        m.OnDeath(3, bot, t + 1);
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 1 && m.Score(bot) == 0 && m.Deaths(3) == 1);
+        m.OnDeath(bot, 1, t + 1);                                               // and a bot's fall gives the winner nothing more
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 1 && m.Score(1) == 1);
+    }
 }
 
 // Spec revision (V2-P3B, user answers): players-vs-bots is now Survival - endless waves scored by waves cleared,
@@ -501,6 +722,53 @@ static void TestLoadoutsAhead() {
     CHECK(ffaOwn.LoadoutsAhead() == 0);                                         // own gear: nothing generated
 }
 
+// Host's loadout (#777): everyone in the loadout the host built. It is handed out when everybody starts together (the
+// match's start, a rematch) and kept at every other respawn; nothing is rolled, so nothing is made ahead.
+static void TestHostKit() {
+    CHECK(uint8_t(Gear::HostKit) == 4 && kGearCount == 5 && kGearRowCount == 4);
+    CHECK(kGearRow[0] == Gear::Own && kGearRow[1] == Gear::RandomTier && kGearRow[2] == Gear::Mirror && kGearRow[3] == Gear::HostKit);
+    CHECK(GearRolled(Gear::RandomTier) && GearRolled(Gear::Mirror) && !GearRolled(Gear::Own) && !GearRolled(Gear::HostKit) && !GearRolled(Gear::Fists));
+    for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Tournament, Format::PlayersVsBots}) {
+        MatchConfig c = Cfg(f, 3); c.gear = Gear::HostKit;
+        CHECK(Sanitize(c).gear == Gear::HostKit && StartLoadoutsAhead(c, 4) == 0 && JoinRegearFor(c) == Regear::None);
+    }
+    { MatchConfig c = Cfg(Format::Riot, 3); c.gear = Gear::HostKit; CHECK(Sanitize(c).gear == Gear::RandomTier); }   // the roles deal the gear
+    MatchConfig c = Cfg(Format::Duel, 2); c.gear = Gear::HostKit;
+    Match m; m.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    const uint32_t t = Match::kCountdownMs;
+    m.Tick(t);
+    m.OnDeath(2, 1, t + 1);
+    CHECK(m.LoadoutsAhead() == 0);                                              // the round gap: nothing to make
+    const auto reset = m.Tick(t + 1 + 5000);
+    CHECK(reset.roundReset && reset.regear == Regear::None);                    // the next round: everyone keeps the host's loadout
+    m.OnDeath(2, 1, t + 6000);
+    CHECK(m.phase() == MatchPhase::Results && m.LoadoutsAhead() == 0);
+    const auto again = m.Tick(t + 6000 + Match::kResultsMs);
+    CHECK(again.rematch && again.regear == Regear::Shared);                     // the rematch: handed out again (the host may have changed it)
+    MatchConfig fc = c; fc.format = Format::FreeForAll;
+    Match ffa; ffa.Start(fc, {{1, kNoTeam, true}, {2, kNoTeam, true}}, 0);
+    ffa.Tick(t);
+    ffa.OnDeath(2, 1, t + 1);
+    CHECK(ffa.LoadoutsAhead() == 0);                                            // a fallen fighter comes back in the same loadout
+}
+
+// The Bodies row (#1410): Own leaves every player's build their own character's, with own loadouts only; the host's
+// force_strength=0 still turns the forced build off for every gear.
+static void TestBodiesOwn() {
+    MatchConfig c;
+    CHECK(!c.ownBodies && !BodiesOwn(c) && ForcesBuild(true, c) && !ForcesBuild(false, c));
+    c.ownBodies = true;
+    CHECK(BodiesOwn(c) && !ForcesBuild(true, c) && !ForcesBuild(false, c));
+    for (Gear g : {Gear::RandomTier, Gear::Mirror, Gear::Fists, Gear::HostKit}) {
+        MatchConfig o = c; o.gear = g;
+        CHECK(!BodiesOwn(o) && ForcesBuild(true, o) && !ForcesBuild(false, o));
+    }
+    MatchConfig s = c; s.format = Format::Duel;
+    CHECK(Sanitize(s).ownBodies && BodiesOwn(Sanitize(s)));                     // Sanitize keeps the choice
+    s.format = Format::Riot;
+    CHECK(!BodiesOwn(Sanitize(s)));                                             // the roles deal the gear: the tier's build
+}
+
 static void TestStartLoadoutsAhead() {
     MatchConfig c = Cfg(Format::Duel, 2); c.gear = Gear::RandomTier;
     CHECK(StartLoadoutsAhead(c, 2) == 2);                                       // one each, made while they come in
@@ -517,7 +785,7 @@ static void TestStartLoadoutsAhead() {
 }
 
 static void TestGearPool() {
-    const WeaponFilter any = WeaponFilter::Any;
+    const WeaponMask any = 0;
     GearPool p;
     CHECK(p.Wants(4, any, 2) && p.size() == 0 && p.Take(4, any).empty());
     p.Put(4, any, {1});
@@ -533,17 +801,20 @@ static void TestGearPool() {
     p.Put(6, any, {6});
     p.Put(7, any, {7});
     CHECK(p.size() == 1 && p.Take(7, any) == std::vector<uint8_t>({7}));
-    // Keyed by the weapon filter too: a roll made under one filter is never served under another.
+    // Keyed by the weapon mask too: a roll made under one mask is never served under another.
+    const WeaponMask pole = WeaponBit(7), swords2 = WeaponBit(2), axes = WeaponMask(WeaponBit(3) | WeaponBit(4) | WeaponBit(5) | WeaponBit(6));
     GearPool w;
-    w.Put(3, WeaponFilter::Polearms, {9});
-    CHECK(w.size() == 1 && !w.Wants(3, WeaponFilter::Polearms, 1));
-    CHECK(w.Wants(3, WeaponFilter::Swords2H, 1) && w.size() == 0);              // the filter changed: emptied
-    w.Put(3, WeaponFilter::Swords2H, {8});
+    w.Put(3, pole, {9});
+    CHECK(w.size() == 1 && !w.Wants(3, pole, 1));
+    CHECK(w.Wants(3, swords2, 1) && w.size() == 0);                             // the mask changed: emptied
+    w.Put(3, swords2, {8});
     CHECK(w.Take(3, any).empty() && w.size() == 0);
-    w.Put(3, WeaponFilter::AxesMaces, {7});
-    CHECK(w.Take(3, WeaponFilter::Polearms).empty());
-    w.Put(3, WeaponFilter::AxesMaces, {6});
-    CHECK(w.Take(3, WeaponFilter::AxesMaces) == std::vector<uint8_t>({6}));
+    w.Put(3, axes, {7});
+    CHECK(w.Take(3, pole).empty());
+    w.Put(3, axes, {6});
+    CHECK(w.Take(3, axes) == std::vector<uint8_t>({6}));
+    w.Put(3, WeaponMask(pole | swords2), {4});
+    CHECK(w.Take(3, WeaponMask(pole | swords2)) == std::vector<uint8_t>({4}));  // a mask of two types is one key
 }
 
 // Spec revision (user, 2026-10-25): what clears the dropped weapons and loose armour differs per format. Duel: each new
@@ -755,6 +1026,7 @@ static void TestRegear() {
         for (C cause : {C::Individual, C::RoundReset, C::WaveCleared, C::Rematch}) {
             ++cells;
             CHECK(R(f, Gear::Own, cause) == Regear::None);
+            CHECK(R(f, Gear::HostKit, cause) == (cause == C::Rematch ? Regear::Shared : Regear::None));   // handed out when everybody starts together
             if (IsBotFormat(f)) {                                               // the run's loadout lasts: only a (re)start rolls it
                 CHECK(R(f, Gear::RandomTier, cause) == (cause == C::Rematch ? Regear::Each : Regear::None));
                 CHECK(R(f, Gear::Mirror, cause) == (cause == C::Rematch ? Regear::Shared : Regear::None));
@@ -1052,9 +1324,9 @@ int main() {
     TestWaveBreakAndClearSettings();
     TestHitAllowed();
     TestZeroScoreBeatsNegative(); TestEndedSurvivesLateTick();
-    TestSanitize(); TestResolveTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
-    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestFourTeams(); TestLastManStanding(); TestDuelBench(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
-    TestForcedBuild(); TestBotFormatGear(); TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestGearPool();
+    TestSanitize(); TestResolveTeams(); TestShuffleTeams(); TestColors(); TestKillLog(); TestTeamScoringAndLimit(); TestRespawnSchedule();
+    TestTimeLimitAndSuddenDeath(); TestFreeForAll(); TestCarnageBots(); TestSurvivalWaves(); TestSurvivalAliveCap(); TestDuelRounds(); TestFourTeams(); TestLastManStanding(); TestDuelBench(); TestHasAndFinish(); TestWavePacing(); TestWaves(); TestSides();
+    TestForcedBuild(); TestBotFormatGear(); TestRegear(); TestRegearEvents(); TestSuddenDeathEnds(); TestDuelForfeit(); TestGiveUpFight(); TestDuelDraw(); TestGiveUpHold(); TestDropClearFor(); TestDropClearWatch(); TestWaveBreakSkip(); TestLootPicks(); TestLoadoutsAhead(); TestStartLoadoutsAhead(); TestHostKit(); TestBodiesOwn(); TestGearPool();
     std::printf(g_fail ? "%d FAILED\n" : "all match tests passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

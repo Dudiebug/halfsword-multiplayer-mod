@@ -6,10 +6,10 @@
 // The numbers are one machine's own legitimate traffic times a margin of 2 or more. A machine owns one fighter, so
 // toward the host a client sends at most: Pose + Vitals about 60 Hz each, BodyState for the bodies it leases (up to ~20
 // at 60 Hz), claims bounded by physics contacts, PaintFx at most 6 kinds x 30/s (the sender's own FxLimiter). The host
-// relays every fighter's streams to a client (8 fighters + up to 10 bots, kMaxWillies), so a client's budget for what
+// relays every fighter's streams to a client (20 fighters + up to 10 bots, kMaxWillies), so a client's budget for what
 // the HOST sends is the per-peer one times kMaxWillies (MsgBudget(kMaxWillies)). Classes that carry setup or are
 // already bounded elsewhere (Hello's own repeat gate, Chat's ChatRateLimiter, Travel, Spawn, MatchInfo, Event, ...) are
-// not budgeted here (BudgetClass::Free). Normal play, a full 8-fighter lobby with 10 bots and many props, stays far
+// not budgeted here (BudgetClass::Free). Normal play, a full 20-fighter lobby with 10 bots and many props, stays far
 // below every limit; only a flood reaches one.
 #pragma once
 #include "hsm_protocol.h"

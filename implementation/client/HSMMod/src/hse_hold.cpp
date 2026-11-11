@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include "log.h"
+#include "session/hsm_hse_keys.h"
 
 namespace hsm::enhancer::hold {
 namespace {
@@ -21,6 +22,10 @@ std::atomic<HWND> g_window{nullptr};                              // the window 
 std::atomic<WNDPROC> g_hse{nullptr}, g_below{nullptr};            // HSE's WndProc, and what it passes things on to
 std::atomic<bool> g_installed{false}, g_ansi{false};              // HSMMod's procedure is in HSE's place, and as which kind
 std::atomic<bool> g_hold{false};
+// An HSMMod text box is open (the chat, the lobby chat box, a text field of its menus): HSE gets no input meanwhile, but key
+// and button releases (session/hsm_hse_keys.h). Apart from g_hold, which is a lobby's rule and feeds On() and the build card.
+std::atomic<bool> g_chat{false}, g_share{true};
+std::atomic<uint32_t> g_chatHeld{0};   // messages the chat held back from HSE since it opened (logged when it closes)
 std::atomic<int> g_menuKey{0};        // let through a hold: HSE's menu can still close (and open, uselessly: nothing reaches it)
 // A locked game's menu: open at the start (Gui::isVisible starts true, every version). Closed by HSMMod once, on the
 // window's thread (a registered message), with the key the lock gave it. From 0.6 HSE keeps raw input (WM_INPUT) to
@@ -28,6 +33,7 @@ std::atomic<int> g_menuKey{0};        // let through a hold: HSE's menu can stil
 // keep it so). 0.5.3 passes WM_INPUT on either way: one close, and the menu counts as closed.
 std::atomic<int> g_closeKey{0};
 std::atomic<bool> g_menuShown{true}, g_inputTells{false};
+std::atomic<bool> g_keptInput{false};   // HSE kept the latest raw input it was given: its menu is open (false until it has been given one)
 std::atomic<UINT> g_closeMsg{0};
 ULONGLONG g_nextClose = 0;
 thread_local bool t_inputPassed = false;   // HSE passed this WM_INPUT on
@@ -43,6 +49,26 @@ bool InHse(const void* p) {
 // Keyboard, mouse buttons, wheel and moves, and raw input: everything HSE reads a key from (KeybindManager, ImGui).
 bool IsInput(UINT msg) {
     return msg == WM_INPUT || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST);
+}
+
+// A key or mouse button going up (the plain messages; a raw input packet is looked into).
+bool IsRelease(UINT msg, LPARAM l) {
+    switch (msg) {
+        case WM_KEYUP: case WM_SYSKEYUP: case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP: return true;
+        case WM_INPUT: {
+            RAWINPUT ri;
+            UINT size = sizeof(ri);
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(l), RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) == UINT(-1)) return false;
+            if (ri.header.dwType == RIM_TYPEKEYBOARD) return (ri.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+            if (ri.header.dwType == RIM_TYPEMOUSE) {
+                const USHORT up = RI_MOUSE_LEFT_BUTTON_UP | RI_MOUSE_RIGHT_BUTTON_UP | RI_MOUSE_MIDDLE_BUTTON_UP | RI_MOUSE_BUTTON_4_UP | RI_MOUSE_BUTTON_5_UP;
+                const USHORT down = RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_BUTTON_4_DOWN | RI_MOUSE_BUTTON_5_DOWN;
+                return (ri.data.mouse.usButtonFlags & up) != 0 && (ri.data.mouse.usButtonFlags & down) == 0;
+            }
+            return false;
+        }
+        default: return false;
+    }
 }
 
 template <bool A> LRESULT CallProc(WNDPROC p, HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -61,6 +87,7 @@ template <bool A> void CloseMenu(HWND h, WNDPROC hse) {
     CallProc<A>(hse, h, WM_KEYDOWN, WPARAM(key), 1 | scan);
     t_closing = false;
     g_menuShown.store(false);
+    g_keptInput.store(false);
     HSM_LOG("enhancer: HS Enhancer is locked and its menu was open: closed for you");
 }
 
@@ -69,11 +96,26 @@ template <bool A> LRESULT CALLBACK HoldProc(HWND h, UINT m, WPARAM w, LPARAM l) 
     if (m != 0 && m == g_closeMsg.load(std::memory_order_relaxed)) { CloseMenu<A>(h, hse); return 0; }
     const int key = g_menuKey.load(std::memory_order_relaxed);
     const bool menuKey = key > 0 && int(w) == key && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN);
-    if (below && (!hse || (g_hold.load(std::memory_order_relaxed) && IsInput(m) && !menuKey))) return CallProc<A>(below, h, m, w, l);
+    if (below) {
+        HseHolds holds;
+        holds.lobby = g_hold.load(std::memory_order_relaxed);
+        holds.typing = g_chat.load(std::memory_order_relaxed);
+        const HseMsg kind = !IsInput(m) ? HseMsg::Other : IsRelease(m, l) ? HseMsg::Release : HseMsg::Input;
+        const bool gets = HseGetsMessage(holds, kind, menuKey);
+        if (!hse || !gets) {
+            if (hse && holds.typing) {   // held by the chat: would a lobby hold alone have held it?
+                HseHolds lobbyOnly = holds;
+                lobbyOnly.typing = false;
+                if (HseGetsMessage(lobbyOnly, kind, menuKey)) g_chatHeld.fetch_add(1, std::memory_order_relaxed);
+            }
+            return CallProc<A>(below, h, m, w, l);
+        }
+    }
     if (hse && m == WM_INPUT && g_inputTells.load(std::memory_order_relaxed)) {
         t_inputPassed = false;
         const LRESULT r = CallProc<A>(hse, h, m, w, l);
         g_menuShown.store(!t_inputPassed, std::memory_order_relaxed);
+        g_keptInput.store(!t_inputPassed, std::memory_order_relaxed);
         return r;
     }
     return CallProc<A>(hse ? hse : below, h, m, w, l);
@@ -243,6 +285,33 @@ void Tick() {
 
 bool Ready() { return g_installed.load() && g_hse.load() && g_below.load(); }
 void Set(bool on) { g_hold.store(on, std::memory_order_relaxed); }
+
+void Share(bool on) { g_share.store(on, std::memory_order_relaxed); }
+
+void Typing(bool typing) {
+    if (!g_attached) return;
+    const bool on = typing && g_share.load(std::memory_order_relaxed);
+    if (on == g_chat.load(std::memory_order_relaxed)) return;
+    g_chat.store(on, std::memory_order_relaxed);
+    if (on) {
+        g_chatHeld.store(0, std::memory_order_relaxed);
+        if (Ready()) HSM_LOG("enhancer: an HSMMod text box is open: HS Enhancer gets no keyboard or mouse input until it closes");
+        else HSM_LOG("enhancer: an HSMMod text box is open, but HSMMod is not in HS Enhancer's window hook: its keys can't be held (typing may reach it)");
+    } else if (Ready()) {
+        HSM_LOG("enhancer: the HSMMod text box closed: HS Enhancer gets input again (%u message(s) held back from it)",
+                unsigned(g_chatHeld.load(std::memory_order_relaxed)));
+    }
+}
+
+bool MenuOpen() {
+    HseMenuFacts f;
+    f.share = g_share.load(std::memory_order_relaxed);
+    f.ready = Ready();
+    f.reports = g_inputTells.load(std::memory_order_relaxed);
+    f.keptInput = g_keptInput.load(std::memory_order_relaxed);
+    f.held = g_hold.load(std::memory_order_relaxed) || g_chat.load(std::memory_order_relaxed);
+    return HseMenuHasKeys(f);
+}
 void MenuKey(int vk) { g_menuKey.store(vk); }
 void CloseAtStart(int vk) { g_closeKey.store(vk); }
 bool On() { return g_hold.load(std::memory_order_relaxed) && Ready(); }

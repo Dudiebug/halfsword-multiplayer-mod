@@ -2,7 +2,8 @@
 // mapping per game process (shared/interop/hsm_mod_link.h is the contract; shared/interop/hsm_link_hsm.h what this side
 // writes). HSMMod publishes its half once per game tick, in solo play and the menus too, and reads Fetch's. While Fetch's
 // menu has the keyboard HSMMod's own hotkeys do nothing (KeysHeld); with no live Fetch half every answer here is as if
-// the link were not there. A page that cannot be mapped is logged once and the mod carries on without it. Game thread only.
+// the link were not there. HS Enhancer's menu is held the same way (no link needed: hse_hold.h MenuOpen, read here so
+// every KeysHeld place gets it). A page that cannot be mapped is logged once and the mod carries on without it. Game thread only.
 #pragma once
 #include "interop/hsm_link_hsm.h"
 #include <cstdint>
@@ -13,9 +14,9 @@ namespace hsm::game::fetchlink {
 // `facts` and reads Fetch's. `dtMs`: the tick's length.
 void Tick(const interop::HsmFacts& facts, uint32_t dtMs);
 
-// Fetch's menu has the keyboard (its half live, its menu open or a name being typed in it): the chat key,
-// the build card, push to talk, G, Tab, the spectate keys and the rest are Fetch's until it closes. Always false
-// without a live Fetch.
+// Fetch's menu has the keyboard (its half live, its menu open or a name being typed in it), or HS Enhancer's does (hse_share_keys,
+// HS Enhancer 0.6 on): the chat key, the build card, push to talk, G, Tab, the spectate keys and the rest are theirs until it
+// closes. False without a live Fetch or an open HS Enhancer menu.
 bool KeysHeld();
 
 // While one lives, HSMMod is playing held-back keys of this player's again (host input delay, the match input delay, the

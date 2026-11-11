@@ -2,6 +2,7 @@
 // The game already calls SteamAPI_Init; we only look up interfaces, register callbacks and poll call results.
 // Callbacks may fire on any thread; they are copied into a queue that the game thread drains with Poll().
 #pragma once
+#include "session/hsm_region.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -68,7 +69,9 @@ std::string MemberData(SteamId lobby, SteamId user, const std::string& key);
 std::vector<SteamId> LobbyMembers(SteamId lobby);
 SteamId LobbyOwner(SteamId lobby);
 bool SendLobbyChat(SteamId lobby, const std::string& text);
-void RequestLobbyList(const std::string& filterKey, const std::string& filterValue);
+// distance: ELobbyDistanceFilter (hsm::LobbyDistance: 0 close, 1 default, 2 far, 3 worldwide); -1: not set, Steam's default.
+// Without the optional export the filter is skipped.
+void RequestLobbyList(const std::string& filterKey, const std::string& filterValue, int distance = -1);
 void InviteOverlay(SteamId lobby);
 void SetRichPresence(const std::string& key, const std::string& value);
 
@@ -88,6 +91,9 @@ bool DecompressVoice(const uint8_t* data, size_t size, uint32_t sampleRate, std:
 
 // Networking (ISteamNetworkingMessages; relayed, NAT-traversing)
 void InitRelay();
+// The relay data centres Steam knows ("fra", "sgp1") with the direct ping to each in ms, -1 when it has no measurement yet.
+// Empty without the optional exports or before the relay network is up. For the region guess (session/hsm_region.h).
+std::vector<hsm::PopPing> RelayPings();
 bool Send(SteamId to, int channel, const void* data, uint32_t size, int flags);
 size_t Receive(int channel, std::vector<Message>& out, int max = 64);
 void AcceptSession(SteamId user);

@@ -77,4 +77,30 @@ inline std::string SetIniValue(const std::string& text, std::string_view section
     return out;
 }
 
+// The value of `key` under `[section]` as the file's bytes: matched like SetIniValue (names without case, the key's first line
+// there, spaces and tabs dropped at both ends of the value), no quotes or escapes read. GetPrivateProfileString reads a file
+// without a byte-order mark in the system code page, so a UTF-8 name saved by SetIniValue (a nickname) would come back
+// garbled; this keeps the bytes. False when the section or the key is not there: `out` stays.
+inline bool GetIniValue(const std::string& text, std::string_view section, std::string_view key, std::string& out) {
+    using namespace ini_detail;
+    bool inSection = false;
+    for (size_t pos = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0; pos < text.size();) {
+        const size_t nl = text.find('\n', pos);
+        const size_t next = nl == std::string::npos ? text.size() : nl + 1;
+        const std::string_view t = Trim(std::string_view(text.data() + pos, (nl == std::string::npos ? text.size() : nl) - pos));
+        if (!t.empty() && t.front() == '[') {
+            const size_t close = t.find(']');
+            inSection = close != std::string_view::npos && SameAscii(Trim(t.substr(1, close - 1)), section);
+        } else if (inSection && !t.empty()) {   // a comment line never has the key before its first '='
+            const size_t eq = t.find('=');
+            if (eq != std::string_view::npos && SameAscii(Trim(t.substr(0, eq)), key)) {
+                out = std::string(Trim(t.substr(eq + 1)));
+                return true;
+            }
+        }
+        pos = next;
+    }
+    return false;
+}
+
 }  // namespace hsm::util

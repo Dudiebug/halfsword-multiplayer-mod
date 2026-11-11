@@ -8,9 +8,12 @@
 #include "session/hsm_build.h"
 #include "session/hsm_global_bans.h"
 #include "session/hsm_password.h"
+#include "session/hsm_version_refusal.h"
 #include "session/hsm_player_limit.h"
+#include "session/hsm_player_names.h"
 #include "ue/engine.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -86,7 +89,9 @@ void Lobby::Tick() {
                 steam::SetLobbyData(e.lobby, "hsm_proto", ProtocolStr());
                 steam::SetLobbyData(e.lobby, "hsm_build", BuildKeyHex());
                 steam::SetLobbyData(e.lobby, "hsm_ver", kModVersion);
-                steam::SetLobbyData(e.lobby, "name", kLobbyNamePrefix + steam::PersonaName(steam::MySteamId()) + "'s fight");
+                steam::SetLobbyData(e.lobby, "name", LobbyTitleNow());
+                if (RegionKnown(region_)) steam::SetLobbyData(e.lobby, "hsm_region", RegionKey(region_));
+                HSM_LOG("lobby: created as \"%s\" region=%s", LobbyTitleNow().c_str(), RegionKey(region_));
                 steam::SetLobbyData(e.lobby, "state", "menu");
                 steam::SetLobbyData(e.lobby, "hsm_srv", server_ ? "1" : "0");
                 steam::SetLobbyData(e.lobby, "hsm_max", std::to_string(maxPlayers_));
@@ -163,6 +168,7 @@ void Lobby::Tick() {
 LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     LobbyListing l; l.id = lobby;
     l.name = steam::LobbyData(lobby, "name"); l.map = steam::LobbyData(lobby, "map"); l.mode = steam::LobbyData(lobby, "mode");
+    l.region = LobbyRegion(steam::LobbyData(lobby, "hsm_region"));   // peer-written: only a region this build lists counts
     const std::vector<steam::SteamId> members = steam::LobbyMembers(lobby);
     const bool server = steam::LobbyData(lobby, "hsm_srv") == "1";
     l.players = int(members.size()) - (server && !members.empty() ? 1 : 0);
@@ -171,7 +177,7 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     l.banned = GloballyBanned(steam::LobbyOwner(lobby));   // Steam names the owner once the lobby is joined, and often in the list
     if (proto.empty()) l.reason = "not a HalfSwordMP lobby";
     else if (l.banned) l.reason = "the host is banned from HalfSwordMP";
-    else if (proto != ProtocolStr()) l.reason = "different mod version (host " + steam::LobbyData(lobby, "hsm_ver") + ", you " + kModVersion + ")";
+    else if (proto != ProtocolStr()) l.reason = VersionLobbyReason(steam::LobbyData(lobby, "hsm_ver"), kModVersion);   // who is behind (#3073)
     else if (build != BuildKeyHex()) l.reason = "different game version";
     else if (LobbyIsFull(l.players, l.maxPlayers) && std::find(members.begin(), members.end(), steam::MySteamId()) == members.end())
         l.reason = "lobby full";   // a full lobby we are already in is not full to us
@@ -202,7 +208,7 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
 }
 
 void Lobby::Host(steam::LobbyType type, bool server) {
-    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostPreset, modrules::HostRule(*this).blockHse); !why.empty()) { SetStatus(why); return; }
+    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostPreset, modrules::HostRule(*this).blockHse, ClassPowerPoints(kClassPowerDefault)); !why.empty()) { SetStatus(why); return; }
     if (state_ != State::Idle) return;
     password_.clear(); passwordLobby_ = 0; askLobby_ = 0; askNote_.clear();
     type_ = type; server_ = server; state_ = State::Creating; SetStatus("Creating lobby...");
@@ -307,7 +313,8 @@ void Lobby::Join(steam::SteamId lobby, const std::string& password) {
         // A lobby that blocks HS Enhancer: once in, Describe offers the restart that locks it (LobbyEntered). Refused
         // here only where none comes: the lobby this game restarted for already, or no pre-check (mod_rules=0).
         const bool lockLater = modrules::Enabled() && lobby != rejoinLobby_;
-        if (const std::string why = onlineBlock(r.preset, r.blockHse && !lockLater); !why.empty()) { SetStatus(why); return; }
+        const double power = ClassPowerPoints(IntOr(steam::LobbyData(lobby, "hsm_cpow"), kClassPowerDefault));   // the host's class power limit
+        if (const std::string why = onlineBlock(r.preset, r.blockHse && !lockLater, power); !why.empty()) { SetStatus(why); return; }
     }
     password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby;
     askLobby_ = 0; askNote_.clear();
@@ -319,6 +326,7 @@ void Lobby::Enter(steam::SteamId lobby) {
     lobby_ = lobby; state_ = State::InLobby; owner_ = steam::LobbyOwner(lobby);
     steam::SetMemberData(lobby_, "hsm_ver", kModVersion);
     steam::SetMemberData(lobby_, "hsm_mod", ModBuild());   // the lobby names every other player on another build
+    steam::SetMemberData(lobby_, "hsm_nick", nickname_);   // "": no nickname, the Steam name shows
     if (onEnterCard) onEnterCard();
     if (myCard) steam::SetMemberData(lobby_, "hsm_card", myCard());
     if (myRuleSheet) steam::SetMemberData(lobby_, "hsm_sheet", myRuleSheet());
@@ -361,10 +369,23 @@ MatchConfig Lobby::config() const {
     c.friendlyFire = steam::LobbyData(lobby_, "hsm_ff") == "1";
     c.gear = Gear(IntOr(steam::LobbyData(lobby_, "hsm_gear"), 0));
     c.tier = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tier"), 2), 0, 7));
-    c.weapons = WeaponFilter(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wpn"), 0), 0, int(kWeaponFilterCount) - 1));   // none: Any
+    {
+        // hsm_wpm is the ticked weapon types; an older host wrote hsm_wpn, one of five filters (WeaponMaskFromKeys). None: Any.
+        const std::string wpm = steam::LobbyData(lobby_, "hsm_wpm");
+        c.weapons = WeaponMaskFromKeys(!wpm.empty(), IntOr(wpm, 0), IntOr(steam::LobbyData(lobby_, "hsm_wpn"), 0));
+    }
     c.teamKit = TeamKit(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_kit"), int(TeamKit::Full)), 0, int(kTeamKitCount) - 1));   // none: Full kit
     c.crossbows = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_xbow"), 0), 0, int(kCrossbowModeCount) - 1));   // none: Off
     c.fuseS = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_fuse"), kFuseDefaultS), int(kFuseMinS), int(kFuseMaxS)));   // none: 30 s (Tag)
+    c.taggerSpeedPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tspd"), kTaggerSpeedDefault), 0, 255));   // none: 110% (Sanitize snaps it to a stop)
+    c.shuffle = TeamShuffle(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_shuf"), 0), 0, 255));   // none: Off (Sanitize)
+    c.timeOfDay = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tod"), 0), 0, 255));          // none: the map's own (Sanitize)
+    c.winBy = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_winby"), 0), 0, 2));                     // none: Death
+    c.propsOff = steam::LobbyData(lobby_, "hsm_props") == "0";                                              // none: On
+    c.classPower = SnapClassPower(IntOr(steam::LobbyData(lobby_, "hsm_cpow"), kClassPowerDefault));   // none: +15
+    c.stripOff = steam::LobbyData(lobby_, "hsm_strip") == "0";                                              // none: On
+    c.ownBodies = steam::LobbyData(lobby_, "hsm_body") == "1";                                             // none: Same for all
+    c.keepKit = steam::LobbyData(lobby_, "hsm_keep") == "1";                                               // none: New each fight
     c.scenario = ScenarioFromKey(steam::LobbyData(lobby_, "hsm_scen"));                              // none: Standard
     c.damagePct = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dmg"), kDamageStock), 0, int(kDamageStock)));   // none: stock
     c.deadWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));     // none: 50%
@@ -387,11 +408,20 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_ff", c.friendlyFire ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_gear", std::to_string(int(c.gear)));
     steam::SetLobbyData(lobby_, "hsm_tier", std::to_string(int(c.tier)));
-    steam::SetLobbyData(lobby_, "hsm_wpn", std::to_string(int(c.weapons)));
+    steam::SetLobbyData(lobby_, "hsm_wpm", std::to_string(int(c.weapons)));
     steam::SetLobbyData(lobby_, "hsm_kit", std::to_string(int(c.teamKit)));
     steam::SetLobbyData(lobby_, "hsm_xbow", std::to_string(c.crossbows));
     steam::SetLobbyData(lobby_, "hsm_fuse", std::to_string(c.fuseS));
+    steam::SetLobbyData(lobby_, "hsm_tspd", std::to_string(c.taggerSpeedPct));
+    steam::SetLobbyData(lobby_, "hsm_shuf", std::to_string(int(c.shuffle)));
+    steam::SetLobbyData(lobby_, "hsm_cpow", std::to_string(c.classPower));
+    steam::SetLobbyData(lobby_, "hsm_strip", c.stripOff ? "0" : "1");
+    steam::SetLobbyData(lobby_, "hsm_keep", c.keepKit ? "1" : "0");
+    steam::SetLobbyData(lobby_, "hsm_body", c.ownBodies ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_scen", std::to_string(c.scenario));
+    steam::SetLobbyData(lobby_, "hsm_tod", std::to_string(c.timeOfDay));
+    steam::SetLobbyData(lobby_, "hsm_winby", std::to_string(c.winBy));
+    steam::SetLobbyData(lobby_, "hsm_props", c.propsOff ? "0" : "1");
     steam::SetLobbyData(lobby_, "hsm_dmg", std::to_string(c.damagePct));
     steam::SetLobbyData(lobby_, "hsm_dwt", std::to_string(c.deadWeightPct));
     steam::SetLobbyData(lobby_, "hsm_wwt", std::to_string(c.weaponWeightPct));
@@ -443,6 +473,23 @@ void Lobby::SetOverride(steam::SteamId member, int team) {
 
 void Lobby::ClearOverrides() { for (const LobbyMember& m : members_) SetOverride(m.id, -1); }
 
+// SHUFFLE NOW: deal everyone in the room to a team at random, balanced, and show it as the host's moves. They hold for the next
+// START MATCH (StartMatch honours the host's moves) and a later shuffle clears them. Nobody's own pick counts.
+void Lobby::ShuffleTeamsNow() {
+    const MatchConfig c = config();
+    if (!IsHost() || !PicksTeams(c.format)) return;
+    std::vector<TeamRequest> req;
+    std::vector<steam::SteamId> who;
+    for (const LobbyMember& m : members_) {
+        if (who.size() >= 255 || (m.host && ServerLobby())) continue;   // a dedicated server's owner plays no team
+        TeamRequest r; r.slot = uint8_t(who.size());
+        req.push_back(r); who.push_back(m.id);
+    }
+    const auto deal = ShuffleTeams(req, c.format, c.teams, uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()));
+    for (size_t i = 0; i < who.size(); ++i) SetOverride(who[i], deal.at(uint8_t(i)));
+    HSM_LOG("lobby: shuffled %zu players into %d teams", who.size(), TeamCount(c.format, c.teams));
+}
+
 bool Lobby::BlockHse() const { return InLobby() ? RoomRule().blockHse : modrules::Chosen().blockHse; }
 bool Lobby::InUnrestrictedLobby() const { return InLobby() && steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Unrestricted)); }
 bool Lobby::InClassesLobby() const { return InLobby() && (InUnrestrictedLobby() || steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Classes))); }
@@ -467,7 +514,41 @@ void Lobby::SetPublicState(const std::string& state, const std::string& map, con
 void Lobby::RefreshList() {
     if (state_ == State::Offline) return;
     SetStatus("Searching lobbies...");
-    steam::RequestLobbyList("hsm_proto", ProtocolStr());
+    steam::RequestLobbyList("hsm_proto", ProtocolStr(), listDistance_ == LobbyDistance::Default ? -1 : int(listDistance_));   // Default: Steam's own
+}
+
+std::string Lobby::LobbyTitleNow() const {
+    return kLobbyNamePrefix + LobbyTitle(lobbyName_, OwnName(nickname_, steam::PersonaName(steam::MySteamId())));
+}
+void Lobby::SetName(const std::string& lobbyName) {
+    lobbyName_ = UsableLobbyName(lobbyName);
+    if (!IsHost()) return;
+    steam::SetLobbyData(lobby_, "name", LobbyTitleNow());
+    HSM_LOG("lobby: name is now \"%s\"", LobbyTitleNow().c_str());
+}
+void Lobby::SetRegion(Region region) {
+    if (region == region_) return;
+    region_ = region;
+    if (!IsHost()) return;
+    steam::SetLobbyData(lobby_, "hsm_region", RegionKnown(region_) ? RegionKey(region_) : "");
+    HSM_LOG("lobby: region is now %s", RegionKey(region_));
+}
+void Lobby::SetListDistance(LobbyDistance d) { listDistance_ = d; }
+void Lobby::SetNickname(const std::string& nickname) {
+    nickname_ = UsableNickname(nickname);
+    if (!InLobby()) return;
+    steam::SetMemberData(lobby_, "hsm_nick", nickname_);
+    if (IsHost()) steam::SetLobbyData(lobby_, "name", LobbyTitleNow());   // "<you>'s fight" follows the name others see
+    RefreshMembers();
+}
+void Lobby::SetHideNames(bool on) {
+    if (on == hideNames_) return;
+    hideNames_ = on;
+    HSM_LOG("lobby: hide_names=%d", on ? 1 : 0);
+    if (!InLobby()) return;
+    if (onEnterCard) onEnterCard();                 // the cards already queued carry the old names
+    for (LobbyMember& m : members_) m.card.clear();   // so every card counts as new in the refresh and is queued again
+    RefreshMembers();
 }
 
 void Lobby::RefreshMembers() {
@@ -490,14 +571,25 @@ void Lobby::RefreshMembers() {
         if (onPresence) onPresence(m.name, false);
     }
     std::vector<LobbyMember> next;
+    const bool serverLobby = ServerLobby();
+    int nextSlot = 1;   // slots as a match numbers them: the host's fighter is 0, the others follow (a role=server lobby has no slot 0)
     for (steam::SteamId id : ids) {
         if (!id) continue;
-        LobbyMember m; m.id = id; m.name = steam::PersonaName(id); m.host = id == owner_;
+        LobbyMember m; m.id = id; m.steamName = steam::PersonaName(id); m.host = id == owner_;
+        // Shown name: their nickname (peer-written, cleaned again here) or their Steam name; HIDE PLAYER NAMES makes everyone but us
+        // (and a server, which is no player) "Player N".
+        const std::string nick = id == steam::MySteamId() ? nickname_ : CleanPeerName(steam::MemberData(lobby_, id, "hsm_nick"));
+        const bool isServer = serverLobby && m.host;
+        const int slot = isServer ? -1 : m.host ? 0 : nextSlot++;
+        m.name = DisplayName(hideNames_ && !isServer, id == steam::MySteamId(), slot, nick.empty() ? SanitizeChat(m.steamName) : nick);
+        m.steamName = SanitizeChat(m.steamName);   // no emoji or control characters; a Steam name is not cut at 32 bytes here
         m.ready = steam::MemberData(lobby_, id, "ready") == "1";
         m.build = steam::MemberData(lobby_, id, "hsm_mod").substr(0, kMaxModBuild);   // peer-written
         m.card = steam::MemberData(lobby_, id, "hsm_card").substr(0, kMaxCardValue);   // peer-written; decoded by hsm_build_card.h
         auto was = std::find_if(members_.begin(), members_.end(), [&](const LobbyMember& o) { return o.id == id; });
-        if (!m.card.empty() && onBuildCard && (was == members_.end() || was->card != m.card)) onBuildCard(m.name, m.card);
+        if (!m.card.empty() && onBuildCard && (was == members_.end() || was->card != m.card || was->name != m.name)) onBuildCard(m.name, m.card);
+        if (id != steam::MySteamId() && !nick.empty() && nick != m.steamName && (was == members_.end() || was->name != m.name))
+            HSM_LOG("lobby: %s is %s on Steam%s", nick.c_str(), m.steamName.c_str(), (hideNames_ ? " (shown as " + m.name + ")" : std::string()).c_str());
         auto team = [](int t) { return t >= -1 && t <= 3 ? t : -1; };   // peer-written; later narrowed to int8_t
         m.team = team(IntOr(steam::MemberData(lobby_, id, "hsm_team"), -1));
         m.hostOverride = team(IntOr(steam::LobbyData(lobby_, "hsm_ovr_" + std::to_string(id)), -1));

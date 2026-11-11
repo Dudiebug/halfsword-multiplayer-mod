@@ -103,6 +103,7 @@ inline std::string FightSub(const MatchInfo& m, uint8_t me) {
     const std::string round = IsRoundFormat(Format(m.format)) ? RoundName(m) : std::string();
     const FighterEntry* f = FighterOf(m, me);
     std::string role = f ? RoleLine(f->role) : std::string();
+    if (f && IsChaosRole(f->role)) role = ChaosRoleLine(f->role);
     if (IsInfection(Format(m.format)) && f) role = f->team == kInfectedTeam ? "YOU ARE A PATIENT ZERO" : "SURVIVE";
     return role.empty() ? round : round.empty() ? role : round + " \xC2\xB7 " + role;
 }
@@ -210,6 +211,16 @@ inline FeedRow MakeModeFeedRow(const MatchInfo& m, const ModeEventMsg& e, uint8_
             if (e.a) r.spans = {a, {" infected ", style::kIron}, b};
             else r.spans = {b, {" was infected", style::kIron}};
             break;
+        case ModeEventKind::RouletteClick:
+            if (e.a == e.b) r.spans = {a, {" pulled the trigger: click  +1", style::kIron}};
+            else r.spans = {a, {" pulled on ", style::kIron}, b, {": click", style::kIron}};
+            break;
+        case ModeEventKind::RouletteBang:
+            if (e.a == e.b) r.spans = {a, {" pulled the trigger: BANG", style::kBloodInk}};
+            else r.spans = {a, {" has a live round for ", style::kBloodInk}, b};
+            break;
+        case ModeEventKind::RoulettePull: case ModeEventKind::RouletteFired:   // a client's asks: never shown
+            break;
     }
     return r;
 }
@@ -228,8 +239,11 @@ struct LocalHud {
     std::vector<FeedItem> feed;      // oldest first
     bool giveUpWait = false;         // G is held with nothing to give up (dead, or waiting for the next round)
     float giveUp = 0;                // how far the G hold is (GiveUpHold::progress), 0 = not held
+    int rouletteOneIn = 6;           // Roulette: the next pull is live one time in this many (RouletteView::OneIn)
+    bool rouletteLoaded = false;     // Roulette: the holder has a live round in the crossbow
     uint8_t watching = 0;            // dead: the fighter the camera follows, 0 = none (the F key needs one)
     bool flying = false;             // dead: the free camera is on
+    bool hidden = false;             // the living player's free camera hid the HUD (H; #2624): nothing is drawn, the name tags neither
 };
 
 struct SceneText { bool visible = false; std::string text; Rgba color = style::kBone; float opacity = 1, scale = 1; };
@@ -237,7 +251,7 @@ struct ScoreBlock { std::string label; int score = 0; Rgba color = style::kBone;
 struct FeedView { FeedRow row; float opacity = 1; };
 struct DeadPanel { bool visible = false; std::string title, detail, hint; bool bar = false; float barFrac = 0; };
 struct BoardRow {
-    enum class Kind : uint8_t { Band, Fighter };
+    enum class Kind : uint8_t { Band, Fighter, Stage, Game };   // Stage, Game: the Tournament bracket's lines (no columns)
     Kind kind = Kind::Fighter;
     std::string name;
     Rgba swatch = style::kIron, ink = style::kBone;
@@ -246,8 +260,14 @@ struct BoardRow {
     bool host = false, local = false, dead = false;
     bool down = false;               // alive, and the host's draw check has it down (Duel)
     std::string tag;                 // the fighter's special role (hsm_roles.h RoleTag), shown beside its name; empty for the rest
+    bool played = false;             // a bracket game already fought ("Ann beat Bo"): the first to go when the board is full
 };
-struct Board { bool visible = false; std::string title, footer; std::vector<BoardRow> rows; };
+// The board's lines: twenty fighters and four team bands, or a Tournament's fighters and as much of its bracket as fits.
+constexpr size_t kBoardRowBudget = 26;
+// results: the match is over and this is the results board (not the Tab scoreboard): the HUD puts it in a corner and shrinks the
+// banner (#3056), so the winner and the last blows stay in view.
+struct Board { bool visible = false, results = false; std::string title, footer; std::vector<BoardRow> rows;
+               std::vector<BoardRow> bracket; };   // the Tab board's Tournament bracket, under the fighters (BracketRows)
 // The G hold, in the middle of the screen (the top pill was covered by the game's own text in the pre1 test).
 struct HoldView { bool visible = false; std::string text; Rgba color = style::kBloodInk; bool bar = false; float frac = 0; };
 
@@ -301,6 +321,7 @@ inline SceneText Pill(const MatchInfo& m, uint8_t me, bool oneFight) {
             p.text = m.tagIt == me ? TagLine(m, me) : p.text + " \xC2\xB7 " + TagLine(m, me);
             if (m.tagIt == me) p.color = style::kBloodInk;
         }
+        if (const std::string hide = HideSeekLine(m, me); !hide.empty()) p.text += " \xC2\xB7 " + hide;   // "ROUND 2 \xC2\xB7 HIDE 23 s"
         return p;
     }
     if (IsInfection(f)) {
@@ -372,10 +393,64 @@ inline std::vector<FeedView> Feed(const LocalHud& l, uint32_t nowMs) {
     return v;
 }
 
+// The Tab board's Tournament bracket: a line per stage ("SEMI-FINAL"), then one per game that is no bye. A played game reads
+// "Ann beat Bo", dimmed; the game being fought "Ann vs Bo  NOW", the one after it "NEXT"; a place not decided yet reads "?",
+// a leaver's place a newcomer can still take "open place" (#1429).
+// The local player's games still to fight are framed like its own row.
+inline std::vector<BoardRow> BracketRows(const Bracket& br, const MatchInfo& m, uint8_t me) {
+    std::vector<BoardRow> v;
+    Bracket::Game cur, next;
+    const bool hasCur = br.Current(cur), hasNext = hasCur && br.NextGame(next);
+    auto place = [&](int e) { return e > 0 ? PlaceName(m, uint8_t(e)) : std::string("?"); };   // a game to fight
+    for (int r = 0; r < br.Rounds(); ++r) {
+        bool stage = false;
+        for (int g = 0; g < br.GamesInRound(r); ++g) {
+            if (br.IsBye(r, g)) continue;
+            if (!stage) {
+                BoardRow s;
+                s.kind = BoardRow::Kind::Stage; s.name = Upper(br.StageName(r)); s.swatch = style::kIron; s.ink = style::kBone;
+                v.push_back(std::move(s));
+                stage = true;
+            }
+            const Bracket::Places p = br.PlacesOf(r, g);
+            BoardRow row;
+            row.kind = BoardRow::Kind::Game;
+            if (p.winner > 0) {
+                row.name = NameOf(m, uint8_t(p.winner)) + " beat " + NameOf(m, uint8_t(p.winner == p.a ? p.b : p.a));
+                row.ink = style::kIron;
+                row.played = true;
+            } else {
+                row.name = place(p.a) + " vs " + place(p.b);
+                row.ink = p.winner == 0 ? style::kIron : style::kBone;     // 0: settled with nobody through (both left)
+                if (hasCur && cur.round == r && cur.index == g) row.tag = "NOW";
+                else if (hasNext && next.round == r && next.index == g) row.tag = "NEXT";
+                row.local = me != 0 && p.winner < 0 && (p.a == int(me) || p.b == int(me));
+            }
+            v.push_back(std::move(row));
+        }
+    }
+    return v;
+}
+
+// The bracket in `room` lines (a big Tournament): the games already fought go first, the oldest first, then a stage left
+// with no game; what still does not fit is cut at the end (the later rounds, mostly "? vs ?"), never ending on a stage.
+inline void FitBracket(std::vector<BoardRow>& v, size_t room) {
+    for (size_t i = 0; v.size() > room && i < v.size();) {
+        if (v[i].played) v.erase(v.begin() + long(i)); else ++i;
+    }
+    for (size_t i = 0; i < v.size();) {
+        const bool stage = v[i].kind == BoardRow::Kind::Stage, bare = i + 1 == v.size() || v[i + 1].kind == BoardRow::Kind::Stage;
+        if (stage && bare) v.erase(v.begin() + long(i)); else ++i;
+    }
+    if (v.size() > room) v.resize(room);
+    while (!v.empty() && v.back().kind == BoardRow::Kind::Stage) v.pop_back();
+}
+
 inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
     Board b;
     if (m.phase == uint8_t(MatchPhase::Idle) || (!l.tab && m.phase != uint8_t(MatchPhase::Results))) return b;
     b.visible = true;
+    b.results = m.phase == uint8_t(MatchPhase::Results);
     Format f = Format(m.format);
     std::string limit = f == Format::Tournament ? std::string("ONE ROUND A FIGHT")
                       : f == Format::Duel ? "BEST OF " + std::to_string(2 * m.scoreLimit - 1)
@@ -405,6 +480,7 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
         r.pingMs = e.pingMs; r.host = e.entity == l.host; r.local = e.entity == l.me; r.dead = !e.alive;
         r.down = e.alive && e.down;
         r.tag = IsTag(f) && m.tagIt == e.entity ? "IT" : RoleTag(e.role);
+        if (IsRoulette(f) && m.tagIt == e.entity) r.tag = "CROSSBOW";
         if (IsQueueFormat(f)) {                                  // on the bench is not dead; a beaten bracket player is out
             const QueueRole q = RoleInQueue(m, e.entity);
             const bool out = tournament && q == QueueRole::Out;
@@ -416,6 +492,10 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
     std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& c) {
         return a.second.score != c.second.score ? a.second.score > c.second.score : a.second.kills > c.second.kills;
     });
+    if (tournament && l.tab && m.phase != uint8_t(MatchPhase::Results)) {   // the Tab board only
+        b.bracket = BracketRows(bracket, m, l.me);
+        FitBracket(b.bracket, kBoardRowBudget > rows.size() ? kBoardRowBudget - rows.size() : 0);
+    }
     if (!HasTeams(f)) {
         for (auto& [team, r] : rows) b.rows.push_back(std::move(r));
         return b;
@@ -438,7 +518,7 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
 
 inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t nowMs) {
     HudScene s;
-    if (info.phase == uint8_t(MatchPhase::Idle)) return s;
+    if (info.phase == uint8_t(MatchPhase::Idle) || l.hidden) return s;
     const MatchInfo m = Extrapolate(info, l.infoAtMs, nowMs);
     s.visible = true;
     s.strip = hud_detail::Strip(m, l.me);
@@ -449,6 +529,8 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
     }
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
     if (const std::string line = QueueLine(m); !line.empty()) s.info = {true, line, style::kIron, 1, 1};
+    else if (const std::string chaos = ChaosLine(m); !chaos.empty()) s.info = {true, chaos, style::kIron, 1, 1};
+    else if (const std::string turn = RouletteLine(m, l.me, l.rouletteOneIn, l.rouletteLoaded); !turn.empty()) s.info = {true, turn, m.tagIt == l.me ? style::kWarn : style::kIron, 1, 1};
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
     // A Progression co-op fight has no stock give-up screen in a session: G gives the fight up (Match::GiveUpFight).

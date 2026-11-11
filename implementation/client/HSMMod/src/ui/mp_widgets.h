@@ -72,17 +72,20 @@ private:
     std::vector<int> heldAtBind_;             // keys already down when binding began (they must be let go first)
 };
 
-// The Esc menu in a multiplayer match: a full-screen panel on the stock pause menu, which GAME MENU shows again.
+// The Esc menu in a multiplayer match: a full-screen panel on the stock pause menu, which GAME MENU shows again
+// (Layout::Overlay), or the MULTIPLAYER MENU page of the mod's own pause panel (Layout::Pause, ui/pause_panel.h): the same
+// players, voice and network tabs, with BACK and CHANGE LOADOUT in the footer and the pause panel's buttons left out.
 class EscPanel {
 public:
-    enum class Action : uint8_t { None, Resume, GameMenu, ReportBug, Leave };
-    bool Build(Kit& kit, Canvas root);
+    enum class Action : uint8_t { None, Resume, GameMenu, ReportBug, Leave, Back };
+    enum class Layout : uint8_t { Overlay, Pause };
+    bool Build(Kit& kit, Canvas root, Layout layout = Layout::Overlay);
     Action Tick(Session& session, bool reportOn);   // each frame while shown
     void Show(bool on);
     bool Shown() const { return shown_; }
     explicit operator bool() const { return bool(panel_); }
 private:
-    static constexpr size_t kRows = 9;
+    static constexpr size_t kRows = 20;   // everyone in a full lobby of 20 (the page scrolls)
     struct PlayerView { Box row; Icon talk; Text name, detail, volume; Flat mute, down, up, kick, ban, vote, voteBan; };
     void Refresh(Session& session);
     void HandlePlayers(Session& session, uint32_t now);
@@ -102,7 +105,8 @@ private:
     Text alone_;
     VoiceBlock voice_;
     std::array<Text, 10> netLines_;
-    Flat resume_, loadout_, gameMenu_, report_, help_, leave_;   // loadout_: CHANGE LOADOUT (session/hsm_loadout_change.h)
+    Flat resume_, loadout_, gameMenu_, report_, help_, leave_, back_;   // loadout_: CHANGE LOADOUT (session/hsm_loadout_change.h)
+    Layout layout_ = Layout::Overlay;
     Text loadoutNote_;   // help_: HELP IMPROVE THE MOD (0.8.0-pre7)
     uint32_t nextData_ = 0, leaveArmedAt_ = 0, confirmAt_ = 0;
     int confirmRow_ = -1;

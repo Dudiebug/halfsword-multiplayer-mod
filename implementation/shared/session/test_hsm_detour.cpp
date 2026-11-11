@@ -59,10 +59,11 @@ static void TestWire() {
     auto extra = b; extra.push_back(0); CHECK(!Decode(extra.data(), extra.size(), to));
     auto bad = [&](RouteTableMsg m) { auto e = Encode(m); RouteTableMsg x; return !Decode(e.data(), e.size(), x); };
     RouteTableMsg m = t; m.keys[0].peer = 0; CHECK(bad(m));                       // the host is no pair end
-    m = t; m.keys[0].peer = 9; CHECK(bad(m));
+    m = t; m.keys[0].peer = 21; CHECK(bad(m));
+    m = t; m.keys[0].peer = 20; CHECK(!bad(m));                                   // the twentieth client
     m = t; m.keys[1].peer = 2; CHECK(bad(m));                                     // a peer twice
     m = t; m.keys[0].via = 2; CHECK(bad(m));                                      // relayed through itself
-    m = t; m.keys[0].via = 9; CHECK(bad(m));
+    m = t; m.keys[0].via = 21; CHECK(bad(m));
     m = t; m.relays[0] = {5, 2}; CHECK(bad(m));                                   // a < b
     m = t; m.relays[0] = {0, 2}; CHECK(bad(m));
     m = t; m.relays[0] = {3, 3}; CHECK(bad(m));
@@ -83,7 +84,7 @@ static void TestWire() {
     g = f; g.payload = {1, 2, 3, 4, 5}; CHECK(badF(g));                          // not a message
     g = f; g.payload.clear(); CHECK(badF(g));
     g = f; g.from = 0; CHECK(badF(g));
-    g = f; g.to = 9; CHECK(badF(g));
+    g = f; g.to = 21; CHECK(badF(g));
     g = f; g.to = 1; CHECK(badF(g));
 }
 

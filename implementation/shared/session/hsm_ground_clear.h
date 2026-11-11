@@ -93,12 +93,21 @@ struct PropCandidate {
     bool denied = false;          // held here while another machine holds it
     bool sub = false;             // a body that came off another object
     bool structure = false;       // constraint-built (bridge, chain): hsm_structure.h IsStructure
+    bool fence = false;           // Props off only: Fenced ring's fence bags, which the mod builds at Spawn Combatants
 };
 inline bool ClearableProp(const PropCandidate& c) {
     if (c.held || c.denied || c.sub || c.structure) return false;
     if (c.level) return c.haveStart && !c.unmoved;
     if (c.spawned) return c.bornInMatch;
     return false;
+}
+// The Props row set to Off (#1252, MatchConfig::propsOff): every level prop goes, moved or not, and every object spawned
+// in the match. What the level spawned at its own start-up stays (the fence bags of Fenced ring are such), and so do
+// held props, detached bodies and structures, as with /clear rocks. The fence bags stay whenever they were built.
+inline bool PropsOffClears(const PropCandidate& c) {
+    if (c.held || c.denied || c.sub || c.structure || c.fence) return false;
+    if (c.level) return true;
+    return c.spawned && c.bornInMatch;
 }
 
 }  // namespace hsm

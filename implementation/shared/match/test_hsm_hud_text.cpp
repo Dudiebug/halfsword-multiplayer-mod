@@ -152,6 +152,8 @@ static void TestRoundsText() {
 
     CHECK(GearLabel(Gear::Own, Format::Duel) == "Own loadouts" && GearLabel(Gear::Own, Format::FreeForAll) == "Own loadouts");
     CHECK(GearLabel(Gear::Mirror, Format::Duel) == "Everyone identical, new each round");
+    for (Format f : {Format::Duel, Format::FreeForAll, Format::TwoTeams, Format::Zombies}) CHECK(GearLabel(Gear::HostKit, f) == "The host's loadout");   // #777
+    CHECK(GearLabel(Gear::HostKit, Format::Riot) == "The host's loadout");            // allowed anywhere; Sanitize is what makes Riot roll by role
     CHECK(GearLabel(Gear::Mirror, Format::FreeForAll) == "Everyone identical" && GearLabel(Gear::Mirror, Format::TwoTeams) == "Everyone identical");
     CHECK(GearLabel(Gear::RandomTier, Format::Duel) == "Random by tier, new each round");
     CHECK(GearLabel(Gear::RandomTier, Format::FreeForAll) == "Random by tier, new each life");
@@ -208,8 +210,18 @@ static void TestWaveBreakText() {
     CHECK(!InWaveBreak(d) && InRoundGap(d));                                    // Duel's gap is no wave break
 }
 
+// The player reads a tier by the game's own name for it (Enum_Ranks), never as "tier N".
+static void TestTierName() {
+    const char* const names[] = {"Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-Arms", "Knight", "Lord"};
+    for (int t = 0; t < 9; ++t) CHECK(std::string(TierName(t)) == names[t]);
+    CHECK(std::string(TierName(-1)) == "Beggar" && std::string(TierName(-1000)) == "Beggar");   // below the first: the first
+    CHECK(std::string(TierName(9)) == "Lord" && std::string(TierName(255)) == "Lord" && std::string(TierName(100000)) == "Lord");   // past the last: the last
+    for (int t = 0; t < 8; ++t) CHECK(TierName(t) != TierName(t + 1));
+    CHECK(std::string(TierName(kBrawlTier)) == "Veteran" && std::string(TierName(MatchConfig{}.tier)) == "Commoner");   // Brawl's fixed tier and the default
+}
+
 int main() {
-    TestLobbyText(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
+    TestLobbyText(); TestTierName(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
     TestStatus(); TestFourTeamsAndLms(); TestKillLine(); TestScoreboard();
     std::printf(g_fail ? "%d FAILED\n" : "all hud text tests passed\n", g_fail);
     return g_fail ? 1 : 0;

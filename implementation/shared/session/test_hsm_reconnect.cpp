@@ -87,8 +87,8 @@ static void TestRejections() {
 static void TestCap() {
     ReservationTable t;
     for (uint8_t slot = 1; slot < kMaxFighters; ++slot) CHECK(t.Reserve(uint64_t(slot) * 10, slot, 0));
-    CHECK(t.size() == kMaxReservations && kMaxReservations == 8);
-    CHECK(!t.Reserve(999, 1, 0));                              // a ninth entry cannot fit (slot 1 is held too)
+    CHECK(t.size() == kMaxReservations && kMaxReservations == 20);
+    CHECK(!t.Reserve(999, 1, 0));                              // one more entry cannot fit (slot 1 is held too)
     CHECK(t.size() == kMaxReservations);
     CHECK(Got(t.Claim(30, 1)) == 3);                           // free one slot
     CHECK(t.Reserve(999, 3, 1));                               // the freed slot is reusable
@@ -100,7 +100,9 @@ static void TestLapsedEvictedByReserve() {
     for (uint8_t slot = 1; slot < kMaxFighters; ++slot) CHECK(t.Reserve(uint64_t(slot), slot, 0));
     CHECK(!t.Reserve(60, 1, kReserveMs));                       // slot 1 lapsed but Expire() has not reported it yet
     CHECK(t.size() == 0);                                      // the lapsed entries left the live table
-    CHECK(t.Expire(kReserveMs) == V({1, 2, 3, 4, 5, 6, 7, 8}));   // all eight are reported exactly once
+    V all;
+    for (uint8_t slot = 1; slot < kMaxFighters; ++slot) all.push_back(slot);
+    CHECK(t.Expire(kReserveMs) == all);                        // all twenty are reported exactly once
     CHECK(t.Reserve(60, 1, kReserveMs + 1));                    // after the report the slot is free
     CHECK(Got(t.Claim(60, kReserveMs + 2)) == 1);
 
