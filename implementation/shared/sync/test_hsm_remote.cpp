@@ -29,6 +29,18 @@ static void TestWire() {
     RemoteWriteMsg r; r.kind = RemoteKind::Revive; r.from = 1; r.target = 4;
     CHECK(RoundTrip(r, o) && o.kind == RemoteKind::Revive && o.target == 4);
     r.bone = 3; CHECK(!RoundTrip(r, o));
+    RemoteWriteMsg p; p.kind = RemoteKind::Press; p.from = 2; p.target = 5; p.bone = 18; p.vec = V3{10, -20, 30};
+    CHECK(RoundTrip(p, o) && o.kind == RemoteKind::Press && o.bone == 18 && o.vec.y == -20);
+    { RemoteWriteMsg b = p; b.vec = V3{kPressMaxOffset * 1.5, 0, 0}; CHECK(!RoundTrip(b, o)); }       // not on that bone
+    { RemoteWriteMsg b = p; b.bone = 1; CHECK(!RoundTrip(b, o)); }                                     // spine_01: no body
+    { RemoteWriteMsg b = p; b.bone = uint8_t(kPoseBones); CHECK(!RoundTrip(b, o)); }
+    RemoteWriteMsg t; t.kind = RemoteKind::Talk; t.from = 2; t.target = 11; t.vec = V3{-1, 0.25, 0};
+    CHECK(RoundTrip(t, o) && o.kind == RemoteKind::Talk && o.target == 11 && o.vec.x == -1 && o.vec.y == 0.25);
+    { RemoteWriteMsg b = t; b.vec.x = 1.5; CHECK(!RoundTrip(b, o)); }
+    { RemoteWriteMsg b = t; b.vec.y = -1.5; CHECK(!RoundTrip(b, o)); }
+    { RemoteWriteMsg b = t; b.vec.z = 0.5; CHECK(!RoundTrip(b, o)); }
+    { RemoteWriteMsg b = t; b.bone = 1; CHECK(!RoundTrip(b, o)); }
+    CHECK(kLastRemoteKind == 6);
     auto b = Encode(m); b[1] = 9; CHECK(!Decode(b.data(), b.size(), o));                               // unknown kind
     b = Encode(m); b.pop_back(); CHECK(!Decode(b.data(), b.size(), o));
 }
@@ -69,10 +81,54 @@ static void TestGate() {
     CHECK(!gate.Revive(uint8_t(kMaxWillies + 1), 5000));
 }
 
+// A hold re-taken in a struggle presses once: one message per (target, bone) per kPressEveryMs, and what is sent decodes.
+static void TestPress() {
+    PressGate g;
+    RemoteWriteMsg m, o;
+    CHECK(g.Make(2, 5, 18, V3{5, 0, -3}, 1000, m) && m.kind == RemoteKind::Press && m.from == 2 && m.target == 5 && m.bone == 18);
+    CHECK(m.vec.x == 5 && m.vec.z == -3 && RoundTrip(m, o));
+    CHECK(!g.Make(2, 5, 18, V3{5, 0, -3}, 1016, m));                    // the hold slipped and was re-taken
+    CHECK(!g.Make(2, 5, 18, V3{5, 0, -3}, 1000 + kPressEveryMs - 1, m));
+    CHECK(g.Make(2, 5, 18, V3{5, 0, -3}, 1000 + kPressEveryMs, m));
+    CHECK(g.Make(2, 5, 17, V3{5, 0, -3}, 1016 + kPressEveryMs, m));     // the other hand, on another bone
+    CHECK(g.Make(2, 6, 18, V3{5, 0, -3}, 1016 + kPressEveryMs, m));     // another fighter
+    CHECK(g.Make(3, 7, 0, V3{0, 500, 0}, 5000, m));                     // a grab point far off the bone: capped
+    CHECK(m.vec.y <= kPressMaxOffset * 1.0001 && m.vec.y > kPressMaxOffset * 0.999 && RoundTrip(m, o));
+    CHECK(!g.Make(3, 3, 0, V3{}, 9000, m));                             // itself
+    CHECK(!g.Make(0, 3, 0, V3{}, 9000, m));
+    CHECK(!g.Make(3, uint8_t(kMaxWillies + 1), 0, V3{}, 9000, m));
+    CHECK(!g.Make(3, 4, 1, V3{}, 9000, m));                             // spine_01 has no body
+    CHECK(!g.Make(3, 4, -1, V3{}, 9000, m) && !g.Make(3, 4, kPoseBones, V3{}, 9000, m));
+    CHECK(!g.Make(3, 4, 0, V3{std::numeric_limits<double>::quiet_NaN(), 0, 0}, 9000, m));
+    CHECK(g.Make(3, 4, 0, V3{}, 9000, m));                              // the refused ones did not start the wait
+    g.Clear();
+    CHECK(g.Make(2, 5, 18, V3{}, 1001 + kPressEveryMs, m));
+}
+
+// One line per speaker per kTalkEveryMs on both ends; the two values are clamped to what the wire takes.
+static void TestTalk() {
+    TalkGate g;
+    RemoteWriteMsg m, o;
+    CHECK(g.Make(2, 11, 0.5, 0.25, 1000, m) && m.kind == RemoteKind::Talk && m.from == 2 && m.target == 11);
+    CHECK(m.vec.x == 0.5 && m.vec.y == 0.25 && m.vec.z == 0 && RoundTrip(m, o));
+    CHECK(!g.Make(2, 12, -1, -1, 1200, m));                             // the same speaker, too soon
+    CHECK(g.Make(3, 11, -1, -1, 1200, m));                              // another speaker
+    CHECK(g.Make(2, 12, -1, -0.5, 1000 + kTalkEveryMs, m) && m.vec.x == -1 && m.vec.y == -0.5);
+    CHECK(g.Make(4, 11, 7, -9, 1000, m) && m.vec.x == kTalkMaxValue && m.vec.y == -kTalkMaxValue && RoundTrip(m, o));
+    CHECK(!g.Make(5, 5, 0, 0, 1000, m) && !g.Make(0, 5, 0, 0, 1000, m) && !g.Make(5, 0, 0, 0, 1000, m));
+    CHECK(!g.Make(5, 6, std::numeric_limits<double>::infinity(), 0, 1000, m));
+    CHECK(g.Make(5, 6, 0, 0, 1000, m));                                 // the refused ones did not start the wait
+    TalkGate host;                                                      // the host's side: the same wait per speaker
+    CHECK(host.Allow(2, 100) && !host.Allow(2, 300) && host.Allow(3, 300) && host.Allow(2, 100 + kTalkEveryMs));
+    CHECK(!host.Allow(0, 5000) && !host.Allow(uint8_t(kMaxWillies + 1), 5000));
+}
+
 int main() {
     TestWire();
     TestGather();
     TestGate();
+    TestPress();
+    TestTalk();
     if (g_fail == 0) std::printf("test_hsm_remote: all passed\n");
     return g_fail == 0 ? 0 : 1;
 }

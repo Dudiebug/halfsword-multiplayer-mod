@@ -366,7 +366,7 @@ bool Build() {
     g.kit = Kit(g.hud, Vis::HitTestInvisible);
     Canvas root = g.kit.Root();
     if (!root) { HSM_LOG("hud: UI_HUD root is not a CanvasPanel; match HUD disabled"); return false; }
-    if (UObject** src = Field<UObject*>(g.hud, "TextHurt"); src && *src) g.kit.FontFrom(*src, "UI_HUD.TextHurt");
+    ProbeFont(g.kit, g.hud);
     BuildTop(root);
     BuildCentre(root);
     BuildFeed(root);

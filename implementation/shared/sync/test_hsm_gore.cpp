@@ -188,9 +188,9 @@ static void TestAnyClockOrigin() {
 }
 
 static void TestConstantsPinned() {
-    // The header duplicates hsm::kCombatPartBits and the Willie_BP *_Dislocated field count by hand: pin them.
+    // The header duplicates hsm::kCombatPartBits and the count of Willie_BP joints that go loose by hand: pin them.
     CHECK(kGoreSeveredBits == 15 && kGoreSeveredMask == 0x7FFFu);    // Enum_DismembermentPart values 0..14
-    CHECK(kGoreJoints == 6 && kGoreJointMask == 0x3Fu);              // ArmR, ArmL, LegR, LegL, Neck, Spine
+    CHECK(kGoreJoints == 8 && kGoreJointMask == 0xFFu);              // ArmR, ArmL, LegR, LegL, Neck, Spine, ElbowR, ElbowL
     // The grace period has to ride out a few dropped 15 Hz Vitals samples (66.7 ms each) without leaving a
     // severed limb visibly attached for long.
     CHECK(kSeverGraceMs >= 250.0 && kSeverGraceMs <= 1000.0);

@@ -37,7 +37,8 @@ struct ResultLayout {
 
 struct State {
     bool installed = false;
-    bool off = false;                    // too many failures: the game destroys pieces as before
+    bool off = false;                    // too many failures, or the game defers the destroy itself: the game destroys pieces as before
+    bool native = false;                 // build 26568321+: Willie_BP_C has Armor Meshes Pending to Destroy; the hook is not needed
     int failures = 0;
     ResultLayout layout;
     UClass* skeletalClass = nullptr;
@@ -149,6 +150,20 @@ void Hide(UObject* piece) {
 
 bool LogThis() { return g.logged++ < kLogFirst || g.logged % 25 == 0; }
 
+// Build 26568321 moved the deferral into the game: Remove Armor / Set Up Armor add the piece to Armor Meshes Pending to Destroy
+// (Willie_BP.cpp:1403, 6762, 7304), Event Destroy Pending Armor Meshes (15599, 20193-20216) destroys it once the paint
+// tasks are done, and the GetAllVertexColorsOnly callback (10916) no longer destroys anything. This hook has nothing to
+// defer there: it disarms itself, once, and says so.
+bool GameDefersNatively(UClass* willie) {
+    return willie && FindProperty(willie, "Armor Meshes Pending to Destroy") != nullptr;
+}
+void GoNative(const char* how) {
+    if (g.native) return;
+    g.native = true;
+    g.off = true;
+    HSM_LOG("paintdefer: not needed in this build (%s): the game defers swapped-out armour itself (Armor Meshes Pending to Destroy); this guard stays off", how);
+}
+
 void Fail(const char* why) {
     ++g.n.failed;
     HSM_LOG("paintdefer: %s; the piece is destroyed as before (failure %d of %d)", why, g.failures + 1, kMaxFailures);
@@ -164,6 +179,7 @@ bool OnCallback(ScriptCall& c) {
     g.borrowed.clear();   // a stale entry (the post-hook never ran) must not be written back
     if (g.off) return false;
     UObject* owner = c.self();
+    if (owner && GameDefersNatively(ClassOf(owner))) { GoNative("seen at the first callback"); return false; }   // the class was not loaded at install
     // The callback destroys the piece only while the armour swap runs (:8009); otherwise it keeps dismember paint.
     if (!owner || !Flag(owner, "Armor Swap In Process")) { ++g.n.notSwap; return false; }
     if (!ResolveLayout()) return false;
@@ -222,13 +238,15 @@ void OnCallbackDone(ScriptCall&) {
 
 bool InstallPaintDefer() {
     if (!ScriptHookActive()) return false;
+    if (GameDefersNatively(FindClass("Willie_BP_C"))) { GoNative("Willie_BP_C has the property"); return false; }   // no hook registered
     g.installed = HookScript(kOwner, "Willie_BP_C", kCallback, OnCallback, OnCallbackDone) >= 0;
-    HSM_LOG("paintdefer: %s (%d function(s) hooked now)", g.installed ? "armed: swapped-out armour is destroyed only when no paint task reads it" : "NOT registered",
+    HSM_LOG("paintdefer: %s (%d function(s) hooked now)", g.installed ? "armed (older game: no native deferral): swapped-out armour is destroyed only when no paint task reads it" : "NOT registered",
             ResolveScriptHooks());
     return g.installed;
 }
 
 void TickPaintDefer() {
+    if (g.native && g.installed) { g.installed = false; ClearScriptHooks(kOwner); }   // found native late: give the hook slot back
     if (g.queue.Size() == 0) return;
     const double now = SteadyNowMs();
     // Pieces the game or a level change already destroyed are forgotten.

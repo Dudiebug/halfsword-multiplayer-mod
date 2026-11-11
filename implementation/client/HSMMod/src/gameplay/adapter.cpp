@@ -55,7 +55,7 @@ constexpr const char* kAxisNames[kAxisCount] = {
 constexpr const char* kActionNames[kActionCount] = {
     "Grab Left", "Grab Right", "Guard Left", "Guard Right", "Thrust", "Thrust Gamepad", "Jump", "Crouch Key",
     "Crouch Hold", "Run", "Swap Hands", "Toggle Camera Lock", "Key Forward", "Key Back", "Key Left", "Key Right",
-    "Talk", "RightMouseButton", "MiddleMouseButton",
+    "Talk", "RightMouseButton", "Chain Attack", "Undress",
 };
 // Simulated body bones (UE mannequin layout used by the Willie skeleton). Missing bones are skipped.
 constexpr const char* kBoneCandidates[] = {
@@ -64,8 +64,9 @@ constexpr const char* kBoneCandidates[] = {
     "thigh_l", "calf_l", "foot_l", "thigh_r", "calf_r", "foot_r",
 };
 constexpr const char* kPartHealth[7] = { "Head Health", "Body Upper Health", "Body Lower Health", "Arm_R Health", "Arm_L Health", "Leg_R Health", "Leg_L Health" };
-// VitalsMsg.state bit i is field i (protocol/hsm_owner.h kVitalsState*).
-constexpr const char* kStateBoolFields[] = { "Downed", "Any_Guarding", "R_Guarding", "L_Guarding", "Is Crouched",
+// VitalsMsg.state bit i is field i (protocol/hsm_owner.h kVitalsState*). Build 26568321 names: Combat Stance and the two
+// hands' own flags are what Any_Guarding and R/L_Guarding were, Is Crouched?? what Is Crouched was.
+constexpr const char* kStateBoolFields[] = { "Downed", "Combat Stance", "R Hand Active", "L Hand Active", "Is Crouched??",
                                              "R_Thrusting", "Threatening Stance", "Give Up" };
 static_assert(std::size(kStateBoolFields) == 8, "one name per state bit");
 
@@ -547,6 +548,7 @@ bool Adapter::SavePassportFrom(UObject* owner, FProperty* src, std::vector<uint8
         HSM_LOG("adapter: passport properties missing or mismatched (%s)", PropertyName(src).c_str()); return false;
     }
     CopyPropertyValue(dst, reinterpret_cast<uint8_t*>(sg) + PropertyOffset(dst), reinterpret_cast<uint8_t*>(owner) + PropertyOffset(src));
+    WholeBody(reinterpret_cast<uint8_t*>(sg) + PropertyOffset(dst), false);   // the copy that is sent goes without the saved blood and dirt
     return SaveToMemory(sg, out);
 }
 
@@ -603,7 +605,38 @@ bool Adapter::CopyPassport(UObject* willie, const SpawnOptions& o, double& heigh
             }
     ApplyBuild(willie, dst, o.bot, o.weight);
     if (bare_) StripEquipment(willie, dst);
+    if (!o.bot && !o.careerBody) WholeBody(reinterpret_cast<uint8_t*>(willie) + PropertyOffset(dst), true);
     return true;
+}
+
+// Build 26568321 keeps a fighter's body in its passport: BodyPartConditions and CharacterCondition, which the fighter puts
+// on its limbs and health one second after BeginPlay (Willie_BP.cpp:21784), where the stock spawner used to set a start
+// body. So a career fight's body rides in with the passport copy, and a fight that starts whole (session/hsm_career.h
+// CareerBodyAtSpawn) gets a whole body on the fighter's own copy here: every limb at 100, Health 100, no bleeding.
+// Always: the saved blood and dirt (a vertex-paint map) goes, which alone can outgrow what a loadout may be on the wire.
+void Adapter::WholeBody(uint8_t* passport, bool heal) {
+    UObject* st = FindObject(kPassportStruct, "UserDefinedStruct");
+    FProperty* parts = st ? FindPropertyPrefix(st, "BodyPartConditions_") : nullptr;
+    FProperty* cond = st ? FindPropertyPrefix(st, "CharacterCondition_") : nullptr;
+    UObject* partsSt = FindObject("Str_Character_Body_Condition", "UserDefinedStruct");
+    UObject* condSt = FindObject("Str_CharacterCondition", "UserDefinedStruct");
+    const auto put = [&](FProperty* in, FProperty* p, double v) {
+        if (p && PropertyType(p) == "DoubleProperty") std::memcpy(passport + PropertyOffset(in) + PropertyOffset(p), &v, sizeof v);
+    };
+    int limbs = 0;
+    if (heal && parts && partsSt)
+        for (FProperty* p : StructProperties(partsSt)) { put(parts, p, 100.0); ++limbs; }
+    if (cond && condSt) {
+        if (heal) { put(cond, FindPropertyPrefix(condSt, "Health_"), 100.0); put(cond, FindPropertyPrefix(condSt, "Bleeding_"), 0.0); }
+        if (FProperty* paint = FindPropertyPrefix(condSt, "VertexPaint_"); paint && PropertyType(paint) == "MapProperty")
+            ClearPropertyValue(paint, passport + PropertyOffset(cond) + PropertyOffset(paint));
+    }
+    static bool logged = false;
+    if (!logged && (heal || !cond || !condSt)) {
+        logged = true;
+        if (!parts || !partsSt || !cond || !condSt) HSM_LOG("adapter: the passport has no body condition to reset (a game update?); fighters start as their passport says");
+        else HSM_LOG("adapter: fighters in this fight start whole (%d limb value(s) reset on the passport copy)", limbs);
+    }
 }
 
 // Brawl: empties the maps of the passport's Equipment (armour in slots, weapons in slots, weapons in hands) on the
@@ -656,7 +689,7 @@ void Adapter::ApplyBuild(UObject* willie, FProperty* passport, bool bot, double 
         HSM_LOG("adapter: %s build kept (Weight %.3f, mass x%.2f, grip x%.2f)", name.c_str(), own, MassScaleFor(want), GripScaleFor(want));
 }
 
-// A weapon or foot's Kick Power: what the game multiplies a hit's push by (Willie_BP Deal Complex Damage). The piece a hand lets go of
+// A held weapon's Kick Power: what the game multiplies a hit's push by (Willie_BP Deal Complex Damage). The piece a hand lets go of
 // gets the game's value back, because anyone can pick it up next.
 static void ApplyPiecePower(UObject* now, double multiplier, Adapter::ClassPiece& piece) {
     if (piece.what != now) {
@@ -680,6 +713,26 @@ void Adapter::ClearPain(UObject* willie) {
     if (!willie) return;
     for (const char* name : kPainDoubleFields) if (double* p = Field<double>(willie, name)) *p = 0.0;
     SetBool(willie, "Pain Shock", false);
+}
+
+// No Dislocation, every frame. Dislocation Blocked is the one gate of Dislocate Bone (Willie_BP.cpp:3754), but the game clears
+// it itself half a second after a spawn, a grab or a stuck blade (Event Block Bone Dislocation, :15501 and :20372), so a
+// write every 100 ms leaves frames where the meters fill (up to 0.1 a frame). A meter that started to fill is emptied,
+// unless the joint is loose already (a hit broke it): that meter is what healing runs down (Restore Bone).
+void Adapter::HoldNoDislocation(UObject* willie) {
+    struct Joint { const char* meter; const char* a; const char* b; };
+    static constexpr Joint kJoints[] = {
+        { "Neck Dislocation State", "Neck Dislocated", "Neck Snapped" },  { "Arm R Dislocation State", "Arm R Dislocated", "Arm R Broken" },
+        { "Arm L Dislocation State", "Arm L Dislocated", "Arm L Broken" }, { "Back Dislocation State", "Spine Dislocated", "Back Broken" },
+        { "Leg R Dislocation State", "Leg R Dislocated", "Leg R Broken" }, { "Leg L Dislocation State", "Leg L Dislocated", "Leg L Broken" } };
+    if (!willie) return;
+    SetBool(willie, "Dislocation Blocked", true);
+    for (const Joint& j : kJoints) {
+        bool a = false, b = false;
+        GetBool(willie, j.a, a); GetBool(willie, j.b, b);
+        if (a || b) continue;
+        if (double* const meter = Field<double>(willie, j.meter)) *meter = 0.0;
+    }
 }
 
 // Strength and Muscle on this player's own fighter, from the lobby's build or their own. The same steps as the forced build (ApplyBuildLive).
@@ -769,12 +822,9 @@ void Adapter::ApplyClassStats(UObject* willie, const ClassSheet& sheet, ClassTra
         tracks = ClassTracks{};
         tracks.who = willie; tracks.loggedMissing = logged; tracks.lightenHeld = lighten;
     }
-    UObject** const footR = Field<UObject*>(willie, "Foot R Weapon");
-    UObject** const footL = Field<UObject*>(willie, "Foot L Weapon");
     UObject** const handR = Field<UObject*>(willie, "Weapon R");
     UObject** const handL = Field<UObject*>(willie, "Weapon L");
-    ApplyPiecePower(footR ? *footR : nullptr, sheet.kick, tracks.footR);
-    ApplyPiecePower(footL ? *footL : nullptr, sheet.kick, tracks.footL);
+    NoteClassKick(willie, sheet.kick);
     ApplyPiecePower(handR ? *handR : nullptr, sheet.knockback, tracks.handR);
     ApplyPiecePower(handL ? *handL : nullptr, sheet.knockback, tracks.handL);
     UObject* const held = sheet.grappler ? HeldFighterMesh(willie) : nullptr;
@@ -805,7 +855,14 @@ void Adapter::ApplyClassStats(UObject* willie, const ClassSheet& sheet, ClassTra
     if (gripR) *gripR = tracks.gripR.Next(*gripR, sheet.grip);
     if (gripL) *gripL = tracks.gripL.Next(*gripL, sheet.grip);
     if (hands) *hands = tracks.hands.Next(*hands, sheet.hands);
-    if (double* const regen = Field<double>(willie, "Regen Rate")) *regen = tracks.regen.Next(*regen, sheet.recovery);
+    // Recovery: build 26568321 heals Health and each body part a little every frame (Willie_BP ReceiveTick) and has no rate of
+    // its own left to scale (nothing reads Regen Rate), so each one's rise since the last look is scaled instead.
+    for (size_t i = 0; i < tracks.recoverLast.size(); ++i) {
+        double* const v = Field<double>(willie, i == 0 ? "Health" : i <= 7 ? kPartHealth[i - 1] : i == 8 ? "Neck Health" : "Back Health");
+        if (!v) continue;
+        if (tracks.recoverLast[i] >= 0.0) *v = ClassRecoveryNext(tracks.recoverLast[i], *v, sheet.recovery);
+        tracks.recoverLast[i] = *v;
+    }
     if (double* const stamina = Field<double>(willie, "Stamina")) {
         const double* const health = Field<double>(willie, "Health");
         if (tracks.staminaLast >= 0.0) *stamina = ClassStaminaNext(tracks.staminaLast, *stamina, ClassEnduranceNow(sheet, health ? *health : 100.0));
@@ -813,9 +870,29 @@ void Adapter::ApplyClassStats(UObject* willie, const ClassSheet& sheet, ClassTra
     }
     if (sheet.quickKicks) SetBool(willie, "Kick Cooldown", false);
     // Bone Snapping is what the game multiplies a hit by before asking whether a bone gives (Willie_BP Get Damage), so sturdier bones
-    // divide it. Block Spine Breaking is what its dislocation check looks at for every limb.
+    // divide it. No Dislocation is held every frame (HoldNoDislocation).
     if (double* const snap = Field<double>(willie, "Bone Snapping")) *snap = tracks.bones.Next(*snap, 1.0 / sheet.bones);
-    if (sheet.noDislocation) SetBool(willie, "Block Spine Breaking", true);
+}
+
+// A class's kick. Build 26568321 has no foot weapons: a body hit is the struck fighter's own Deal Complex Damage with Kick
+// Power 1, so Claims scales that call's Kick Power while the striker's leg is out (ClassKickNow). Kept per fighter, by the
+// class tick; an entry not refreshed for a second is stale (the class was switched off, or the fighter is gone).
+static double ClassClockMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+void Adapter::NoteClassKick(UObject* willie, double kick) {
+    const double now = ClassClockMs();
+    std::erase_if(classKicks_, [&](const ClassKick& k) { return k.who == willie || now - k.atMs > 1000.0; });
+    if (kick != 1.0) classKicks_.push_back({willie, ObjectIndex(willie), kick, now});
+}
+
+double Adapter::ClassKickNow(UObject* fighter) {
+    for (const ClassKick& k : classKicks_) {
+        if (k.who != fighter || ObjectAt(k.index) != fighter || ClassClockMs() - k.atMs > 1000.0) continue;
+        bool right = false, left = false;
+        GetBool(fighter, "Kicking  R", right); GetBool(fighter, "Kicking  L", left);   // the game's own spelling, two spaces
+        return right || left ? k.kick : 1.0;
+    }
+    return 1.0;
 }
 
 // The forced build on a live fighter: the game read the save's Weight at BeginPlay (Muscle Rate, UserConstructionScript)
@@ -917,16 +994,6 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
         heightLogged_ = true;
         HSM_LOG("adapter: spawned a fighter at height %.2f (scale %.3f)", height, sc);
     }
-    // The career's body as the start body, as the stock spawner sets it (BP_SpawnerPoint_Willies.cpp:144); the fighter's
-    // BeginPlay copies it onto its limbs and health (Willie_BP.cpp:14702-14710), after FinishSpawningActor below.
-    if (o.careerBody) {
-        UObject* gi = GameInstance();
-        FProperty* src = gi ? FindProperty(ClassOf(gi), "Player Body Condition") : nullptr;
-        FProperty* dst = FindProperty(ClassOf(w), "Start Body Condition");
-        if (src && dst && PropertySize(src) == PropertySize(dst) && PropertyType(src) == PropertyType(dst))
-            CopyPropertyValue(dst, reinterpret_cast<uint8_t*>(w) + PropertyOffset(dst), reinterpret_cast<const uint8_t*>(gi) + PropertyOffset(src));
-        else HSM_LOG("adapter: the career's body could not be carried into the fighter (fields missing or mismatched); it starts whole");
-    }
     // A career Brawl or Blossfechten fight: the stock spawner's kit flags, on every fighter as the stock spawner does
     // (session/hsm_career.h CareerSpawnKitFor); the fighter's BeginPlay leaves the weapons off by them.
     const hsm::CareerSpawnKit kit = hsm::CareerSpawnKitFor(FreeModeActive(), CareerCombatMode());
@@ -998,8 +1065,8 @@ bool Adapter::MouseLook(float& sensitivity, bool& invert) {
     return true;
 }
 
-// Willie_BP ReceiveTick (Willie_BP.cpp:16513): FInterpTo(Look Sensiticity, Any_Guarding ? 0.25 : 1, dt, Any_Guarding ? 0 : 5);
-// an FInterpTo at speed 0 is the target at once.
+// Willie_BP ReceiveTick (Willie_BP.cpp:24450 in build 26568321): FInterpTo(Look Sensiticity, guarding ? 0.25 : 1, dt,
+// guarding ? 0 : 5), where guarding is Combat Stance or either hand active; an FInterpTo at speed 0 is the target at once.
 std::vector<UObject*> Adapter::StuckTargets(UObject* willie) {
     std::vector<UObject*> out;
     if (!willie) return out;
@@ -1024,8 +1091,9 @@ std::vector<UObject*> Adapter::StuckTargets(UObject* willie) {
 void Adapter::TickLookSensitivity(UObject* willie, float dt) {
     double* sens = willie ? Field<double>(willie, "Look Sensiticity") : nullptr;
     if (!sens) return;
-    bool guarding = false;
-    GetBool(willie, "Any_Guarding", guarding);
+    bool stance = false, right = false, left = false;
+    GetBool(willie, "Combat Stance", stance); GetBool(willie, "R Hand Active", right); GetBool(willie, "L Hand Active", left);
+    const bool guarding = stance || right || left;
     const double target = guarding ? 0.25 : 1.0;
     if (!std::isfinite(*sens) || guarding) { *sens = target; return; }
     const double step = std::clamp(double(dt) * 5.0, 0.0, 1.0);
@@ -1086,11 +1154,10 @@ std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
     std::vector<UObject*> carried;
     for (const char* f : {"Weapon R", "Weapon L", "Attached Bolt Quiver"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p) carried.push_back(*p);
-    // Also its feet, the fists of a cut-off upper body and its sheathed weapons: actors of their own, constrained to the
-    // body, not attached (Willie_BP.cpp:18941, 18811, 7007). A slot variable can outlive its weapon's sheath, so a weapon
+    // Also the fists of a cut-off upper body and its sheathed weapons: actors of their own, constrained to the body, not
+    // attached (Willie_BP.cpp:27831; build 26568321 spawns no feet). A slot variable can outlive its weapon's sheath, so a weapon
     // is taken only while its "Parent Actor" is still this fighter.
-    for (const char* f : {"Foot R Weapon", "Foot L Weapon", "Sapwned R Hand Weapon Upper Body", "Sapwned L Hand Weapon Upper Body",
-                          "Weapon Slot R 1", "Weapon Slot R 2", "Weapon Slot Back", "Weapon Slot L 1", "Weapon Slot L 2"})
+    for (const char* f : {"Sapwned R Hand Weapon Upper Body", "Sapwned L Hand Weapon Upper Body", "Weapon Slot R 1", "Weapon Slot R 2", "Weapon Slot Back", "Weapon Slot L 1", "Weapon Slot L 2"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p)
             if (UObject** parent = Field<UObject*>(*p, "Parent Actor"); parent && *parent == willie) carried.push_back(*p);
     Call att(willie, "GetAttachedActors");
@@ -1388,17 +1455,23 @@ bool Adapter::ReadVitals(UObject* willie, uint8_t entity, VitalsMsg& out) {
     if (GetBool(willie, "DED", b) && b) out.flags |= 1;
     if (GetBool(willie, "Fallen", b) && b) out.flags |= 2;
     if (Field<double>(willie, "Consciousness") && out.consciousness <= 0.f) out.flags |= 4;
+    if (GetBool(willie, "Asleep", b) && b) out.flags |= kVitalsFlagAsleep;
+    out.neckHealth = d("Neck Health"); out.backHealth = d("Back Health");
     out.severed = ReadSeveredMask(willie);
-    // Bit per dislocatable joint, in sync/hsm_gore.h's order (Willie_BP.cpp:1250-1255): the stand-ins free that joint.
-    constexpr const char* kDislocatedBoolFields[] = { "Arm R Dislocated", "Arm L Dislocated", "Leg R Dislocated",
-                                                      "Leg L Dislocated", "Neck Dislocated", "Spine Dislocated" };
-    static_assert(std::size(kDislocatedBoolFields) == sync::kGoreJoints, "one name per gore joint bit");
+    // Bit per loose joint, in sync/hsm_gore.h's order: either flag puts that joint on the 'Broken' profile here (Dislocate
+    // Bone, Break Arm/Leg, Snap Neck), and the stand-ins do the same to theirs. A back sets only Back Broken.
+    constexpr const char* kLooseJointFields[][2] = {
+        { "Arm R Dislocated", nullptr }, { "Arm L Dislocated", nullptr },      { "Leg R Dislocated", "Leg R Broken" },
+        { "Leg L Dislocated", "Leg L Broken" }, { "Neck Dislocated", "Neck Snapped" }, { "Spine Dislocated", "Back Broken" },
+        { "Arm R Broken", nullptr },     { "Arm L Broken", nullptr } };
+    static_assert(std::size(kLooseJointFields) == sync::kGoreJoints, "one row per gore joint bit");
     for (uint32_t j = 0; j < sync::kGoreJoints; ++j)
-        if (GetBool(willie, kDislocatedBoolFields[j], b) && b) out.dislocated |= 1u << j;
+        for (const char* name : kLooseJointFields[j])
+            if (name && GetBool(willie, name, b) && b) out.dislocated |= 1u << j;
     // What other fighters' code reads on this fighter (sync audit items 1, 9, 23, 30; Willie_BP.cpp:400-1310).
     for (size_t i = 0; i < std::size(kStateBoolFields); ++i)
         if (GetBool(willie, kStateBoolFields[i], b) && b) out.state |= uint8_t(1u << i);
-    out.weaponSkill = d("Weapon Skill (Temp)"); out.tonus = d("All Body Tonus"); out.noise = d("Total Noise");
+    out.weaponSkill = d("Weapon Skill (Temp)"); out.noise = d("Total Noise"); out.noiseAgo = d("Noise Produced Second Ago");
     out.light = d("In Light Meter"); out.exhaustion = d("Exhaustion");
     if (FVector* md = Field<FVector>(willie, "Movement Dislocation")) {
         const double m = std::sqrt(md->x * md->x + md->y * md->y + md->z * md->z);
@@ -1407,40 +1480,47 @@ bool Adapter::ReadVitals(UObject* willie, uint8_t entity, VitalsMsg& out) {
     return true;
 }
 
-// The owner's state on its stand-in, for the game code that reads another fighter: the attacker's parry roll
-// (ModularWeaponBP:918 reads Weapon Skill, Fallen and Any_Guarding), bots' target choice (Fallen, Downed, Give Up), and
-// their sight and hearing (noise, light, movement, crouch). The stand-in's tick is blocked, so nothing overwrites them.
-// All Body Tonus is left out: the rig zeroes it every frame, and only the parry roll needs it (WriteParryState).
+// The owner's state on its stand-in, for the game code that reads another fighter: bots' target choice (Fallen, Downed,
+// Give Up, Asleep, the stance and hand flags), their sight and hearing (both noise values, light, movement, crouch) and the
+// voice's gates (Neck Health). The stand-in's tick is blocked, so nothing overwrites them. Build 26568321 has no parry
+// roll on the defender's tonus any more, so All Body Tonus stays the rig's.
 void Adapter::ApplyStandInVitals(UObject* willie, const VitalsMsg& v) {
     auto put = [&](const char* name, float x) { if (double* p = Field<double>(willie, name)) *p = x; };
     put("Health", v.health); put("Consciousness", v.consciousness); put("Stamina", v.stamina); put("Bleeding", v.bleeding);
     for (size_t i = 0; i < 7; ++i) put(kPartHealth[i], v.partHealth[i]);
     put("Weapon Skill (Temp)", v.weaponSkill); put("Total Noise", v.noise); put("In Light Meter", v.light);
     put("Exhaustion", v.exhaustion);
+    put("Neck Health", v.neckHealth); put("Back Health", v.backHealth); put("Noise Produced Second Ago", v.noiseAgo);
+    SetBool(willie, "Asleep", (v.flags & kVitalsFlagAsleep) != 0);
     if (FVector* md = Field<FVector>(willie, "Movement Dislocation")) *md = FVector{ v.moveDislocation, 0, 0 };   // read as VSize
     SetBool(willie, "Fallen", (v.flags & 2u) != 0);
+    // What a bot's sight divides by for a fighter on the ground (AI_BP Visual Alert Level: x0.25 at 1). The owner's tick
+    // eases it over a second (Willie_BP.cpp:26810: 0 when dead, else toward Fallen); this tick is blocked, so it is set.
+    put("Fallen Rate", (v.flags & 3u) == 2u ? 1.f : 0.f);
     for (size_t i = 0; i < std::size(kStateBoolFields); ++i) SetBool(willie, kStateBoolFields[i], (v.state >> i) & 1u);
 }
 
-// The owner's tonus as the attacker's parry roll is about to read it (ModularWeaponBP:918: Consciousness + All Body
-// Tonus >= 150; guard, skill and Fallen are already on the stand-in). The rig zeroes it again on the next frame.
-void Adapter::WriteParryTonus(UObject* willie, const VitalsMsg& v) {
-    if (double* p = Field<double>(willie, "All Body Tonus")) *p = v.tonus;
-}
-
-// Willie_BP Get_Up_Pal (W:4718), as a teammate's grab runs it on its pal: bleeding stopped, health at least 20, give-up
-// cleared, and a bot's surrender and retreat reset. Being Grabbed is GrabSync's (the hold is still on).
+// Willie_BP Get_Up_Pal (Willie_BP.cpp:5763 in build 26568321), as a teammate's grab runs it on its pal: bleeding stopped,
+// health at least 20, then what its Event Un Give Up does: unless the fighter gave up for good (Give Up 2 (Temp), the
+// event's own gate; Downed is the caller's), give-up cleared, a bot's surrender, retreat and behaviour reset, and the plead
+// and enemy-count gates re-armed. The event itself is not called: it counts the fighter back in with the game mode's
+// Plus Enemy, and a session blocks the Minus Enemy that would have counted it out (Session::GuardStockFlow).
+// Being Grabbed is GrabSync's (the hold is still on).
 void Adapter::Revive(UObject* willie) {
     if (double* p = Field<double>(willie, "Bleeding")) *p = 0;
     if (double* p = Field<double>(willie, "Health"); p && *p < 20) *p = 20;
+    bool forGood = false;
+    if (GetBool(willie, "Give Up 2 (Temp)", forGood) && forGood) return;
     SetBool(willie, "Give Up", false);
-    SetBool(willie, "Give Up 2 (Temp)", false);
     if (UObject* ai = ControllerOf(willie); ai && ObjectName(reinterpret_cast<UObject*>(ClassOf(ai))).rfind("AI_BP", 0) == 0) {
         SetBool(ai, "My Give Up", false);
         SetBool(ai, "Retreat", false);
         if (double* p = Field<double>(ai, "Give Up Meter")) *p = 0;
         if (double* p = Field<double>(ai, "Retreat Intent")) *p = 0;
+        if (uint8_t* p = Field<uint8_t>(ai, "Combat Behavior")) *p = 2;
     }
+    for (const char* gate : {"Event Reset Plead", "Event Reset Minus Enemy"})
+        if (Call c(willie, gate); c.valid()) c.invoke();
 }
 
 // Pushes are solver contact in the game (Get_Damage applies no impulse): the one the sender's stand-in took, on my body.
@@ -1448,6 +1528,38 @@ bool Adapter::Push(UObject* willie, const std::string& bone, const FVector& impu
     UObject* mesh = MeshOf(willie);
     if (!mesh || bone.empty()) return false;
     return Call(mesh, "AddImpulse").set<FVector>("Impulse", impulse).setName("BoneName", MakeName(bone)).set<bool>("bVelChange", false).invoke();
+}
+
+// What a grab runs on the fighter it holds (Willie_BP.cpp:17093): the blood fountains within 10 uu of the hand, on that
+// bone or its parent or child, stop looping. The point is the sender's grab point carried over to this body's own bone.
+bool Adapter::PressWound(UObject* willie, const char* bone, const FVector& offset) {
+    FVector at{};
+    if (!BoneLocation(willie, bone, at)) return false;
+    at.x += offset.x; at.y += offset.y; at.z += offset.z;
+    return Call(willie, "Heal and Restore")
+        .set<FVector>("Location", at)
+        .setName("Bone Name", MakeName(bone))
+        .setReal("Radius", 10.0)
+        .setReal("Heal Amount", 0.0)
+        .set<UObject*>("Saved By Willie", nullptr)
+        .set<bool>("Regenerate", false)
+        .invoke();
+}
+
+// The speaker's own function on its stand-in here, where the bots are (Willie_BP.cpp:4807). It traces from the head along
+// Current Control Rotation, which a stand-in's blocked tick never updates: for the call it looks at the fighter the
+// speaker's own trace found, then it is put back.
+bool Adapter::TalkAt(UObject* speakerStandIn, UObject* heard, double aggression, double fear) {
+    FVector head{}, at{};
+    FRotator* const look = speakerStandIn ? Field<FRotator>(speakerStandIn, "Current Control Rotation") : nullptr;
+    if (!look || !BoneLocation(speakerStandIn, "head", head) || !BoneLocation(heard, "spine_03", at)) return false;
+    const double dx = at.x - head.x, dy = at.y - head.y, dz = at.z - head.z;
+    const double kDeg = 180.0 / 3.14159265358979323846;
+    const FRotator was = *look;
+    *look = FRotator{ std::atan2(dz, std::sqrt(dx * dx + dy * dy)) * kDeg, std::atan2(dy, dx) * kDeg, 0.0 };
+    const bool ok = Call(speakerStandIn, "Func Talk to Others").setReal("Aggressionn", aggression).setReal("Fearr", fear).invoke();
+    *look = was;
+    return ok;
 }
 
 bool Adapter::PushWeapon(UObject* willie, int slot, const FVector& impulse) {
@@ -1532,13 +1644,13 @@ void Adapter::TriggerDeath(UObject* willie) { Call(willie, "Death").invoke(); }
 namespace hsm::game {
 namespace {
 constexpr const char* kWeaponClass = "ModularWeaponBP_C";
-constexpr const char* kBodyWeaponClasses[] = {"Weapon_Fists_C", "Weapon_Feet_C"};   // Willie_BP.cpp:18811, 18941
+constexpr const char* kBodyWeaponClasses[] = {"Weapon_Fists_C"};   // Willie_BP.cpp:27831 (build 26568321 spawns no Weapon_Feet)
 constexpr const char* kArmorClass = "BP_Armor_Master_C";
 constexpr const char* kArmorStruct = "Str_Passport_Armor1";
 constexpr const char* kStockScreens[] = {"UI_DED_C", "UI_DeathDoor_C", "UI_WinScreen_C", "UI_WIN_C"};
 // Owner sync only: these pause the game (UI_Lose, UI_GiveUp, UI_NextFIght all call SetGamePaused(true)), which stops
 // that player's stream, and offer "return to tavern / another fight". Host sync keeps its old list.
-constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_NextFIght_C"};
+constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_NextFIght_C", "UI_EE_C"};   // UI_EE (build 26568321) pauses too (UI_EE.cpp:19)
 bool g_suppressScreens = false;
 bool g_suppressOwnerScreens = false;
 bool g_screenHooks = false;
@@ -2153,6 +2265,14 @@ bool Adapter::CrossbowAvailable(bool log) {
     return weapon && bolt;
 }
 
+UClass* Adapter::CrossbowBoltClass() {
+    if (boltClass_ && StillValid(reinterpret_cast<UObject*>(boltClass_), boltClassIndex_)) return boltClass_;
+    boltClass_ = FindClass("BP_Weapon_Ranged_Projectle_Bolt_1_C");   // the class Event Add Bolt spawns (build 26568321)
+    if (!boltClass_) boltClass_ = FindClassLoose(kBoltClass);
+    boltClassIndex_ = boltClass_ ? ObjectIndex(reinterpret_cast<UObject*>(boltClass_)) : -1;
+    return boltClass_;
+}
+
 bool Adapter::GiveCrossbow(UObject* willie) {
     UClass* cls = willie ? FindClassLoose(kCrossbowClass) : nullptr;
     if (!cls) { HSM_LOG("crossbow: not given, the class is missing"); return false; }
@@ -2194,17 +2314,22 @@ bool Adapter::GiveCrossbow(UObject* willie) {
         if (int32_t* inQuiver = Field<int32_t>(willie, "Bolts in Quiver")) *inQuiver = bolts;
     }
 
-    // Hand it armed: "Event Add Bolt" spawns the bolt on the rails from the quiver above, "Event Load Bolt" seats it
-    // (a zero-delay latent chain) and "String Loaded" is what fire gates on. A step that fails to invoke just leaves
-    // the cocking to the game's own reload UI, which now has the quiver it needs.
+    // Hand it armed: "Event Load String" draws the string onto its peg (String Loaded, what fire and Load Bolt gate on),
+    // "Event Add Bolt" spawns the bolt and the game seats it itself a second later ("Event Load Bolt" with that bolt).
+    // String Loaded is also set directly in case the string event is missing or blocked (Block String Loading). A
+    // crossbow whose Load Bolt takes no bolt (an older game build) is seated here. A step that fails to invoke just leaves
+    // the cocking to the game's own reload, which now has the quiver it needs.
     bool armed = false;
     if (inHand && bolts > 0) {
+        Call string(x, "Event Load String");
+        if (string.valid()) string.invoke();
         Call add(x, "Event Add Bolt");
+        armed = SetBool(x, "String Loaded", true) && add.invoke();
         Call load(x, "Event Load Bolt");
-        armed = add.invoke() && load.invoke() && SetBool(x, "String Loaded", true);
+        if (armed && load.valid() && !FindProperty(load.function(), "Loaded Ammo")) armed = load.invoke();
     }
     HSM_LOG("adapter: crossbow given to %s: in hand %s, quiver %s, %d bolt(s), %s", ObjectName(willie).c_str(), inHand ? "yes" : "NO",
-            quiver && *quiver ? "yes" : "NO", bolts, armed ? "armed" : "not armed");
+            quiver && *quiver ? "yes" : "NO", bolts, armed ? "string drawn, bolt on its way" : "not armed");
     if (!inHand) DestroyActor(x);                   // never leave a loose crossbow behind a failed pick-up
     return inHand;
 }
@@ -2423,7 +2548,9 @@ bool RetintPassport(UObject* armor, FProperty* const (&colors)[3], FProperty* le
         }
         if (!mat) continue;
         Call setup(armor, "Setup Armor Material");
-        setup.set<UObject*>("AddedArmorMesh", *meshPtr).setFrom("Passport", passport).set<UObject*>("SetupArmorDynamicMaterial", mat);
+        // Core (build 26568321): true for the piece's own mesh, as the game's own call passes it (BP_Armor_Master.cpp:473):
+        // the piece's Steel Type. False is for the meshes merged onto it.
+        setup.set<UObject*>("AddedArmorMesh", *meshPtr).set<bool>("Core", true).setFrom("Passport", passport).set<UObject*>("SetupArmorDynamicMaterial", mat);
         if (setup.invoke()) ran = true;
     }
     if (ran) ++pushed;
@@ -2691,7 +2818,15 @@ UObject* Adapter::SpawnAbyssNpc(const FVector& at) {
     FTransform t; t.translation = at;
     Call c(level[0], "Spawn NPC");
     c.set("SpawnTransform", t);
-    return c.invoke() ? c.get<UObject*>("ReturnValue") : nullptr;
+    // Build 26568321 picks the class by the host's own "Disable Revenants" setting (a plain fighter when it is on). The
+    // Zombies format's waves are zombies whatever the host's setting, so it is off for this one call.
+    UObject* gi = GameInstance();
+    bool noRevenants = false;
+    const bool had = gi && GetBool(gi, "Disable Revenants", noRevenants) && noRevenants;
+    if (had) SetBool(gi, "Disable Revenants", false);
+    UObject* npc = c.invoke() ? c.get<UObject*>("ReturnValue") : nullptr;
+    if (had) SetBool(gi, "Disable Revenants", true);
+    return npc;
 }
 
 UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamInt) {
@@ -2710,7 +2845,9 @@ UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamI
     g = fin.invoke() ? fin.get<UObject*>("ReturnValue") : nullptr;
     if (!g) return nullptr;
     Call make(g, "Generate Character");
-    make.set<UClass*>("Actor Class", willie).set<uint8_t>("Nationality", 0).set<uint8_t>("Tier", uint8_t(std::clamp(rank, 0, 7)))
+    // Faction (build 26568321): 1 is the plain arena fighter, whose gear follows Tier. 0 pins the tier to 0 in the Abyss's
+    // game mode, and 4 and 5 are the generator's special kits.
+    make.set<UClass*>("Actor Class", willie).set<uint8_t>("Nationality", 0).set<uint8_t>("Faction", 1).set<uint8_t>("Tier", uint8_t(std::clamp(rank, 0, 7)))
         .set<bool>("Is Mercenary", false).set<bool>("Ignore Budget", false);
     UObject* bot = nullptr;
     if (make.invoke()) {

@@ -1,15 +1,19 @@
 // Blood and wound paint in owner sync (protocol rev 10, MsgType::PaintFx); voice lines, hit sounds, armour off and on (rev 15).
 //
 // Stand-ins carry Invulnerable, and the game's paint and blood paths start with !Invulnerable (Box Vertex Paint,
-// Willie_BP.cpp:1872; Get Damage, 3892), so a blow that lands on a stand-in shows no cut and no blood: only the
+// Willie_BP.cpp:2206; Get Damage), so a blow that lands on a stand-in shows no cut and no blood: only the
 // victim's owner, whose own fighter really takes the damage, sees them. The owner therefore reports what its own
 // fighter painted, and every other machine replays it on its stand-in of that fighter:
-//   Blood  a "Spawn Blood" call (Willie_BP.cpp:20312; only caller Get Damage, 4196): the spawn transform, rate, bone,
-//          body part, loop count, extra velocity, velocity and "Pover", plus the owner's Bleeding (Spawn Blood scales
-//          its loop count by it). Replayed as the same call on the stand-in.
+//   Blood  a "Spawn Blood" call (Willie_BP.cpp:28778) from Get Damage (5210, Skip Check false): the spawn transform, rate,
+//          bone, body part, loop count, extra velocity, velocity and "Pover", plus the owner's Bleeding (Spawn Blood scales
+//          its loop count by it). Replayed as the same call on the stand-in. Not sent: a call with Skip Check true (Dismember
+//          Function Delayed, 4204 and 4225: the stand-in's own replayed sever makes that blood, severs.cpp) and one Spawn
+//          Blood itself drops at its top gate (SpawnBloodRuns: 4 Attached Blood Emitters already, build 26568321).
 //   Wound  a wound painted by Get Damage (no Hit Box: a cube of WoundRadius at the hit) or by Box Vertex Paint (its
 //          box): a box, the bone, the body part and Damage Rate (Additional). Replayed through the stand-in's own
-//          Box Vertex Paint with Invulnerable lowered for that one call.
+//          Box Vertex Paint with Invulnerable lowered for that one call. Box Vertex Paint returns early, painting nothing,
+//          while the fighter has Dismemberment In Process, Armor Swap In Process, Setup Armor in Process or Hat Not
+//          Removable 2 set (BoxVertexPaintRuns, build 26568321): such a wound is not sent, and on a stand-in it waits.
 //   Voice     rev 15: a voice line the owner's Voice Audio just played (pain, curse, exertion, ...): bone is the cue's
 //             object name, rate its volume multiplier. Played on the stand-in's own Voice Audio.
 //   HitSound  rev 15: a blow Get Damage took (not Inside): local.pos the hit in the bone's frame, velocity.x |Impulse|,
@@ -18,8 +22,11 @@
 //             frame). Replayed through the stand-in's own Remove Armor, so its loose piece appears where the owner's did.
 //             With extraVelocity set it is a strip request instead: sent to the owner by whoever stripped its fallen
 //             fighter's stand-in; the owner removes the piece only if its fighter is fallen, and reports it as usual.
-//   ArmorOn   rev 15: "Pick Up Armor" on the owner's fighter: bone is the piece's class, local its location in the pelvis
+//   ArmorOn   rev 15: "Equip Armor" (Pick Up Armor before build 26568321) on the owner's fighter: bone is the piece's class, local its location in the pelvis
 //             frame; the receiver puts the nearest loose piece of that class on the stand-in.
+//   Crossbow  rev 43: the owner's crossbow drew its string, took a bolt or shot (combat/hsm_crossbow_fx.h): bone is the
+//             hand that holds it ("hand_r" or "hand_l"), bodyPart the CrossbowAction (1..4). Replayed through the
+//             stand-in crossbow's own Load String, Load Bolt and Shoot events.
 // Transforms and directions travel in the named bone's frame (as hit claims do), so the paint lands on the same spot of
 // the stand-in's bone even though the stand-in trails its owner. Pure types, no engine headers.
 //
@@ -28,6 +35,7 @@
 // gatePart:u8.
 #pragma once
 #include "combat/hsm_claim.h"
+#include "combat/hsm_crossbow_fx.h"
 #include "combat/hsm_sever.h"
 #include "hsm_protocol.h"
 #include "util/hsm_validate.h"
@@ -43,7 +51,7 @@
 
 namespace hsm::combat {
 
-enum class FxKind : uint8_t { Blood = 1, Wound = 2, Voice = 3, HitSound = 4, Armor = 5, ArmorOn = 6 };
+enum class FxKind : uint8_t { Blood = 1, Wound = 2, Voice = 3, HitSound = 4, Armor = 5, ArmorOn = 6, Crossbow = 7 };
 
 constexpr uint8_t kFxBodyParts = 8;                 // BodyPart_Enum 0..7 (Willie_BP.cpp:1880, the paint bone switch)
 constexpr uint8_t kFxMaxLoops = 10;                 // Get Damage clamps Spawn Blood's Loop Count to 1..10 (4197)
@@ -79,11 +87,17 @@ inline bool EndsWith(std::string_view s, std::string_view tail, bool ignoreCase)
 }
 }  // namespace detail
 
-// A SoundCue's object name as the game names them (Pain_Cue, Pain_Big_Cue, ScreamLongPain_Cue, Englishman001_De_Cue ...:
-// every one of the stock cues in the reflection index ends in "Cue"): ASCII letters, digits and underscores, at most
-// kMaxClaimString bytes, and a "Cue" ending. Anything else is never looked up (the lookup scans every loaded object).
-// An instanced copy may carry the engine's numeric suffix after it ("Pain_Cue_1").
+// The two drinking sounds Voice Audio plays since build 26568321 (VO_Gulp and VO_Spit, Willie_BP.cpp:31009, 31065) are
+// plain SoundWave assets (/Game/Sounds/Body/Eat/Gulp and Spit, each with a .ubulk in the pak), not cues: their names do
+// not end in "Cue" and they are looked up as a SoundWave, not a SoundCue. Exactly these two names, nothing like them.
+inline bool IsVoiceWaveName(std::string_view name) { return name == "Gulp" || name == "Spit"; }
+
+// A voice sound's object name as the game names them (Pain_Cue, Pain_Big_Cue, ScreamLongPain_Cue, Englishman001_De_Cue ...:
+// every one of the stock cues in the reflection index ends in "Cue"; IsVoiceWaveName's two are the only waves): ASCII
+// letters, digits and underscores, at most kMaxClaimString bytes, and a "Cue" ending. Anything else is never looked up
+// (the lookup scans every loaded object). An instanced copy may carry the engine's numeric suffix after it ("Pain_Cue_1").
 inline bool ValidVoiceCueName(std::string_view name) {
+    if (IsVoiceWaveName(name)) return true;
     if (name.empty() || name.size() > kMaxClaimString || !detail::WordChars(name)) return false;
     size_t end = name.size();
     while (end > 0 && name[end - 1] >= '0' && name[end - 1] <= '9') --end;
@@ -94,7 +108,7 @@ inline bool ValidVoiceCueName(std::string_view name) {
 // An armour piece's Blueprint class name as the game names them (BP_Armor_Head_Armet_001_C, BP_Armor_Body_Doublet_C,
 // BP_Armor_Modular_Core_Arms_Harness_001_C ...): "BP_Armor" first, "_C" last, word characters between, at most
 // kMaxClaimString bytes. The receiver walks every loaded object for a loose piece of that class and runs the stand-in's
-// Pick Up Armor on it, so a name outside this family must never get that far.
+// Equip Armor on it, so a name outside this family must never get that far.
 inline bool ValidArmorClassName(std::string_view name) {
     constexpr std::string_view kPrefix = "BP_Armor";
     return name.size() > kPrefix.size() + 2 && name.size() <= kMaxClaimString && name.substr(0, kPrefix.size()) == kPrefix &&
@@ -153,7 +167,7 @@ struct PaintFxMsg {
     bool extraVelocity = false;      // Blood
     V3 velocity, power;              // Blood: Velocity and Pover, directions in the bone's frame
     double bleeding = 0;             // Blood: the owner's Bleeding at the call
-    // Blood: Spawn Blood's own gates on the owner just before the call (Willie_BP.cpp:20328, 20368): Last Spawned Blood
+    // Blood: Spawn Blood's own gates on the owner just before the call (Willie_BP.cpp:28789-28800): Last Spawned Blood
     // Rate, Spawn Blood Sp Rate, Spawn Blood Body Part. Written onto the stand-in first, so it decides as the owner did.
     double gateLastRate = 0, gateSpRate = 0;
     uint8_t gatePart = 0;
@@ -212,7 +226,7 @@ inline bool Decode(const uint8_t* d, size_t n, PaintFxMsg& m) {
     o.gatePart = r.u8();
     if (!r.done() || !numOk) return false;
     if (o.entity < 1 || o.entity > kMaxWillies) return false;
-    if (kind < uint8_t(FxKind::Blood) || kind > uint8_t(FxKind::ArmorOn)) return false;
+    if (kind < uint8_t(FxKind::Blood) || kind > uint8_t(FxKind::Crossbow)) return false;
     if (extra > 1) return false;
     o.kind = FxKind(kind);
     o.extraVelocity = extra == 1;
@@ -221,6 +235,7 @@ inline bool Decode(const uint8_t* d, size_t n, PaintFxMsg& m) {
     // stock naming may travel (the host drops the rest before it applies or relays it).
     if (o.kind == FxKind::Voice && !ValidVoiceCueName(o.bone)) return false;
     if (o.kind == FxKind::ArmorOn && !ValidArmorClassName(o.bone)) return false;
+    if (o.kind == FxKind::Crossbow && !(IsCrossbowHand(o.bone) && o.bodyPart >= 1 && o.bodyPart <= kCrossbowActionMax)) return false;
     if (!detail::LocalXformOk(o.local)) return false;
     if (!detail::InBox(o.extent, kFxMaxExtent) || o.extent.x < 0 || o.extent.y < 0 || o.extent.z < 0) return false;
     if (o.kind == FxKind::Wound && !(o.extent.x > 0 && o.extent.y > 0 && o.extent.z > 0)) return false;
@@ -265,20 +280,40 @@ inline bool IsPassedOnDamage(const V3& location, bool hasHitBox) {
 
 inline bool IsStripRequest(const PaintFxMsg& m) { return m.kind == FxKind::Armor && m.extraVelocity; }
 
-// Get Damage's own sounds for a blow (Willie_BP.cpp:4071, 4379-4385): the blunt cue by Damage Raw Scaled at
-// clamp(|Impulse| * 0.0005 * (Lower Threshold ? 3 : 1)) when above 0.1, the bone crack at clamp(Damage Raw Scaled *
-// 0.0008 * (Lower Threshold ? 3 : 1)) from 1000 damage up; nothing when the blow went Inside. Its slash cue's volume is
-// |Impulse| * 0 * Cutting Power, never above its 0.1 gate, so there is none.
+// Spawn Blood's first gate (build 26568321, Willie_BP.cpp:28789): it returns at once unless the fighter has fewer than
+// 4 Attached Blood Emitters or the call carries Skip Check. A burst it drops shows nowhere, so it is not reported.
+constexpr int kSpawnBloodEmitterCap = 4;
+inline bool SpawnBloodRuns(int attachedEmitters, bool skipCheck) { return attachedEmitters < kSpawnBloodEmitterCap || skipCheck; }
+
+// Whether a Spawn Blood is worth reporting: it runs (SpawnBloodRuns) and is not a Skip Check call. Those are Dismember
+// Function Delayed's two bursts (Willie_BP.cpp:4204, 4225), which the stand-in's own replayed sever makes again.
+inline bool SendSpawnBlood(int attachedEmitters, bool skipCheck) { return !skipCheck && SpawnBloodRuns(attachedEmitters, skipCheck); }
+
+// Box Vertex Paint's first gate (Willie_BP.cpp:2206, build 26568321): it paints only while !Invulnerable and none of
+// Dismemberment In Process, Armor Swap In Process, Setup Armor in Process, Hat Not Removable 2 is set.
+inline bool BoxVertexPaintBusy(bool dismembering, bool armorSwap, bool settingUpArmor, bool hatNotRemovable) {
+    return dismembering || armorSwap || settingUpArmor || hatNotRemovable;
+}
+inline bool BoxVertexPaintRuns(bool invulnerable, bool dismembering, bool armorSwap, bool settingUpArmor, bool hatNotRemovable) {
+    return !invulnerable && !BoxVertexPaintBusy(dismembering, armorSwap, settingUpArmor, hatNotRemovable);
+}
+
+// Get Damage's own sounds for a blow (Willie_BP.cpp:5085, 5378-5385, build 26568321): the blunt cue by Damage Raw Scaled
+// (< 2000 light, < 4000 wet hard, else blunt hard) at clamp(|Impulse| * 0.0003 * (Lower Threshold ? 3 : 1)) when above
+// 0.1, the bone crack at clamp(Damage Raw Scaled * 0.0008 * (Lower Threshold ? 3 : 1)) from 1000 damage up (the game
+// also x10 on a zombie: not carried, a zombie's crack is quieter on a stand-in); nothing when the blow went Inside. Its slash cue's volume is
+// |Impulse| * 0 * Cutting Power, never above its 0.1 gate, so there is none. (Before build 26568321: 0.0005, tiers at
+// 1000 and 3000.)
 enum class BluntCue : uint8_t { None, Light, WetHard, BluntHard };
 struct HitSoundPlan { BluntCue blunt = BluntCue::None; double bluntVolume = 0, boneVolume = 0; };
 inline HitSoundPlan PlanHitSound(double impulseLen, double damageRawScaled, bool lowerThreshold, bool inside) {
     HitSoundPlan p;
     if (inside || !std::isfinite(impulseLen) || !std::isfinite(damageRawScaled)) return p;
     const double k = lowerThreshold ? 3.0 : 1.0;
-    const double blunt = std::clamp(impulseLen * 0.0005 * k, 0.0, 1.0);
+    const double blunt = std::clamp(impulseLen * 0.0003 * k, 0.0, 1.0);
     if (blunt > 0.1) {
         p.bluntVolume = blunt;
-        p.blunt = damageRawScaled >= 3000 ? BluntCue::BluntHard : damageRawScaled >= 1000 ? BluntCue::WetHard : BluntCue::Light;
+        p.blunt = damageRawScaled >= 4000 ? BluntCue::BluntHard : damageRawScaled >= 2000 ? BluntCue::WetHard : BluntCue::Light;
     }
     if (damageRawScaled >= 1000) p.boneVolume = std::clamp(damageRawScaled * 0.0008 * k, 0.0, 1.0);
     return p;
@@ -305,7 +340,7 @@ public:
 private:
     struct Window { double startMs = 0; int count = 0; };
     int perSecond_;
-    std::map<std::pair<uint8_t, uint8_t>, Window> windows_;   // at most kMaxWillies x 6 entries (one per kind)
+    std::map<std::pair<uint8_t, uint8_t>, Window> windows_;   // at most kMaxWillies x 7 entries (one per kind)
 };
 
 }  // namespace hsm::combat

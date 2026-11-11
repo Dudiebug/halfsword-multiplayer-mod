@@ -72,21 +72,26 @@ static_assert(sync::kPoseFrameMaxBytes <= 0xFFFF, "pose payload length is a u16"
 struct VitalsMsg {
     uint8_t entity = 0;
     uint8_t epoch = 0;                      // rev 32: the sender's hand-off epoch for entity (sync/hsm_handoff.h)
-    uint8_t flags = 0;                      // bit0 dead, bit1 fallen, bit2 knocked out
+    uint8_t flags = 0;                      // bit0 dead, bit1 fallen, bit2 knocked out, bit3 asleep (rev 44, kVitalsFlagAsleep)
     float health = 0, consciousness = 0, stamina = 0, bleeding = 0;
     std::array<float, 7> partHealth{};      // head, upper body, lower body, arm R, arm L, leg R, leg L
     uint32_t severed = 0;                   // bit per Enum_DismembermentPart value
     uint32_t dislocated = 0;                // bit per dislocatable joint (phase 4)
-    // Rev 30: the fields other fighters' code reads on this fighter's stand-in (sync audit items 1, 9, 23, 30): the
-    // attacker's parry roll, bots' target choice, sight and hearing. kVitalsState* bits, then Willie_BP values.
+    // Rev 30: the fields other fighters' code reads on this fighter's stand-in (sync audit items 1, 9, 23, 30): bots'
+    // target choice, sight and hearing. kVitalsState* bits, then Willie_BP values.
     uint8_t state = 0;
-    float weaponSkill = 0, tonus = 0;       // Weapon Skill (Temp) 0..1, All Body Tonus 0..100
+    float weaponSkill = 0;                  // Weapon Skill (Temp) 0..1
     float noise = 0, light = 0;             // Total Noise, In Light Meter
     float moveDislocation = 0;              // |Movement Dislocation|
     float exhaustion = 0;
+    // Rev 44 (game build 26568321): the neck and back have a health of their own (the voice's gates read the neck's), and
+    // bots hear Total Noise plus Noise Produced Second Ago. All Body Tonus (rev 30) is gone with the game's parry roll.
+    float neckHealth = 0, backHealth = 0, noiseAgo = 0;
 };
-constexpr uint8_t kVitalsFlagsMask = 0x07;
-constexpr uint8_t kVitalsStateDowned = 1, kVitalsStateGuarding = 2, kVitalsStateGuardR = 4, kVitalsStateGuardL = 8,
+constexpr uint8_t kVitalsFlagAsleep = 0x08;
+constexpr uint8_t kVitalsFlagsMask = 0x0F;
+// Build 26568321: the stance is Combat Stance (Any_Guarding before), the hands R/L Hand Active (R/L_Guarding before).
+constexpr uint8_t kVitalsStateDowned = 1, kVitalsStateStance = 2, kVitalsStateHandR = 4, kVitalsStateHandL = 8,
                   kVitalsStateCrouched = 16, kVitalsStateThrustR = 32, kVitalsStateThreatening = 64, kVitalsStateGiveUp = 128;
 
 inline std::vector<uint8_t> Encode(const VitalsMsg& m) {
@@ -94,7 +99,8 @@ inline std::vector<uint8_t> Encode(const VitalsMsg& m) {
     w.u8(m.entity); w.u8(m.epoch); w.u8(m.flags); w.f32(m.health); w.f32(m.consciousness); w.f32(m.stamina); w.f32(m.bleeding);
     for (float h : m.partHealth) w.f32(h);
     w.u32(m.severed); w.u32(m.dislocated);
-    w.u8(m.state); w.f32(m.weaponSkill); w.f32(m.tonus); w.f32(m.noise); w.f32(m.light); w.f32(m.moveDislocation); w.f32(m.exhaustion);
+    w.u8(m.state); w.f32(m.weaponSkill); w.f32(m.noise); w.f32(m.light); w.f32(m.moveDislocation); w.f32(m.exhaustion);
+    w.f32(m.neckHealth); w.f32(m.backHealth); w.f32(m.noiseAgo);
     return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, VitalsMsg& m) {
@@ -102,7 +108,8 @@ inline bool Decode(const uint8_t* d, size_t n, VitalsMsg& m) {
     m.entity = r.u8(); m.epoch = r.u8(); m.flags = r.u8(); m.health = r.f32(); m.consciousness = r.f32(); m.stamina = r.f32(); m.bleeding = r.f32();
     for (float& h : m.partHealth) h = r.f32();
     m.severed = r.u32(); m.dislocated = r.u32();
-    m.state = r.u8(); m.weaponSkill = r.f32(); m.tonus = r.f32(); m.noise = r.f32(); m.light = r.f32(); m.moveDislocation = r.f32(); m.exhaustion = r.f32();
+    m.state = r.u8(); m.weaponSkill = r.f32(); m.noise = r.f32(); m.light = r.f32(); m.moveDislocation = r.f32(); m.exhaustion = r.f32();
+    m.neckHealth = r.f32(); m.backHealth = r.f32(); m.noiseAgo = r.f32();
     return r.done() && m.entity >= 1 && m.entity <= kMaxWillies && (m.flags & ~kVitalsFlagsMask) == 0;
 }
 

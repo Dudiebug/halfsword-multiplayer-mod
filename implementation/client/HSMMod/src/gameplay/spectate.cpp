@@ -249,12 +249,15 @@ bool IsDeathOverlay(const std::string& squashed) {
 }
 
 // UI_HUD's Tick sets Vignette from Consciousness and Stamina, Vignette_WakeUp to 1 - Wake Up Rate and BLACK to 1 at Wake Up Rate 0
-// (0.75 at Consciousness 0) (UI_HUD.cpp:77, 86-87), and drives its pain and damage images from the same fighter every tick:
+// (0.9 at Consciousness 0) (UI_HUD.cpp:114-115), and drives its pain and damage images from the same fighter every tick:
 // Vignette_Pain from Damage Taken, HPDmg1-3 from Health, HeadDmg, ArmLDmg, ArmRDmg, LegLDmg and LegRDmg from the head and limb
-// healths (UI_HUD.cpp:78-85, 88). The death timeline drives Wake Up Rate down (Willie_BP.cpp:8265, 8351), so a dead fighter's
+// healths (UI_HUD.cpp:105-116). Build 26568321 added ArmLSta and ArmRSta (black, opacity from the hand's L/R Hand Stamina Burn
+// Rate), LowerBodySta (Stamina Burn Lower Body) and Vignette_Cold / Vignette_Hot (opacity from the fighter's Temperature)
+// (UI_HUD.cpp:30-60, Get_ArmLSta_ColorAndOpacity ... Get_Vignette_Hot_ColorAndOpacity). Fall Asleep Event (Death calls it) plays Timeline_33, which drives Wake Up Rate down (Willie_BP.cpp:16877, 30497), so a dead fighter's
 // HUD is a solid black image whichever camera is the view target, and its pain and damage overlays sit over the fight watched.
 constexpr const char* kHudDarkImages[] = {"BLACK", "Vignette_WakeUp", "Vignette", "Vignette_Pain", "HPDmg1", "HPDmg2", "HPDmg3",
-                                          "HeadDmg", "ArmLDmg", "ArmRDmg", "LegLDmg", "LegRDmg"};
+                                          "HeadDmg", "ArmLDmg", "ArmRDmg", "LegLDmg", "LegRDmg",
+                                          "ArmLSta", "ArmRSta", "LowerBodySta", "Vignette_Cold", "Vignette_Hot"};
 
 struct HiddenOverlay { UObject* w = nullptr; int32_t index = -1; uint8_t visibility = 0; };
 std::vector<HiddenOverlay> g_hidden;

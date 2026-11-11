@@ -7,7 +7,8 @@
 // its result struct: it records the piece's vertex paint (Map_Add keyed by the mesh asset) and destroys the decoy as
 // always, and the real piece, already hidden, without collision and out of "Worn Armor", is destroyed here once no task
 // references it (combat/hsm_paintdefer.h) or after 3 s. Runs for every Willie the game builds, in single player too, and
-// fails open: any step that cannot be verified lets the game destroy the piece as before. Game thread only.
+// fails open: any step that cannot be verified lets the game destroy the piece as before. Build 26568321 defers the destroy
+// itself (Armor Meshes Pending to Destroy, Willie_BP.cpp:1403/15599): there the hook is not registered at all. Game thread only.
 #pragma once
 #include <string>
 

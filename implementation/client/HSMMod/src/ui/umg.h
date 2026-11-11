@@ -296,6 +296,9 @@ private:
 // Probing the game's own widgets (to copy their look, and to log their structure once).
 std::vector<ue::UObject*> ChildrenOf(ue::UObject* widget);    // a panel's children (a Button's content too), or a user widget's root
 ue::UObject* FindTextBlock(ue::UObject* root, int depth);     // the first TextBlock at or under root, `depth` levels down
+// Gives the kit the game's typeface from a stock TextBlock member of the user widget (UI_HUD TextWin / TextWin_1: the "you win"
+// text; UI_MainMenuSNF TextFreeMode), else the font of a new TextBlock. One probe for the HUD, chat, build card and menu.
+bool ProbeFont(Kit& kit, ue::UObject* userWidget);
 std::string Describe(ue::UObject* widget);                    // "Name : Class", plus a TextBlock's font/colour/text or a Button's brushes
 
 bool InViewport(ue::UObject* userWidget);

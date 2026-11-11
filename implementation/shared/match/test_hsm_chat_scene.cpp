@@ -209,7 +209,19 @@ static void TestIdleHint() {
     CHECK(BuildChatScene(skew, kNow).idle.visible);
 }
 
+// The chat runs with the match HUD, and in a session's fight level without a match; never outside a session, in a menu
+// level or on a machine nobody plays on.
+static void TestChatRuns() {
+    CHECK(ChatRuns({true, true, true, true}));
+    CHECK(ChatRuns({true, false, false, false}));        // the match HUD alone is enough
+    CHECK(ChatRuns({false, true, true, true}));          // no match running: still in a session fight
+    CHECK(!ChatRuns({false, false, true, true}));        // solo play, no session
+    CHECK(!ChatRuns({false, true, false, true}));        // a menu level or the Progression hub
+    CHECK(!ChatRuns({false, true, true, false}));        // a role=server machine: nobody plays here
+}
+
 int main() {
+    TestChatRuns();
     TestFadeOut();
     TestCaret();
     TestKeyLabel();

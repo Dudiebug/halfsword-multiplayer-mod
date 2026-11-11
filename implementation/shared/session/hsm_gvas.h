@@ -4,7 +4,9 @@
 // instantiate any class and feed it attacker bytes (security audit 2026-10-26, H1). Only a file shaped exactly like
 // this build's own passport export passes: the header layout, the SG_GameProgress_C class path, and top-level
 // properties that are SG_GameProgress_C's own with their exact types (layout read from the game's GameProgress.sav,
-// Steam build 24185754), each at most once, then "None". Values inside those properties are not walked: the class
+// Steam build 24185754; build 26568321 checked: the struct GUIDs below are unchanged in the pak and every name is still an
+// SG_GameProgress property. A fresh save object writes only what differs from its defaults, so its new Abyss / Transform
+// fields and the renamed Free Mode Random Equipment Tier never appear in a passport export, and are not listed), each at most once, then "None". Values inside those properties are not walked: the class
 // and every top-level type are fixed, and the engine skips nested tags its structs do not have. A fresh save object
 // writes only what differs from its defaults, so any subset of the list is fine.
 #pragma once
@@ -155,11 +157,43 @@ inline bool CheckPassportSave(const uint8_t* d, size_t n, std::string* why = nul
     return true;
 }
 
+// The career block of an SG_GameProgress_C save: the fields GI_Settings' Save Game writes only while Current Play Mode is 0
+// (build 26568321, decomp Blueprints/GameInstances/GI_Settings.cpp Save_Game: the whole block is the last else of the
+// Play Mode switch; mode 1 writes just the Free Mode characters, mode 2 the Abyss fields). A save written at any other mode
+// has none of them. A fresh save object writes only what differs from its defaults, so a day-0 career with no funds omits
+// Day Count and Player Funds: any one of these names marks the block (Player Character, which Delete Save fills with
+// non-default values, is the usual one). Free Mode's names ("Free Mode Player Character 1", ...) are different properties.
+constexpr const char* kCareerBlockProperties[] = {"Player Character", "Day Count", "Player Funds", "Day Time", "Player Inventory", "Merchant Inventory"};
+
+// Walks a save's property tags to the first career field. 1: found. 0: walked to "None" without one (a save written outside
+// Play Mode 0). -1: the walk could not follow the tags (a layout this code does not know): no verdict, not a refusal.
+inline int CareerBlockState(const uint8_t* d, size_t n) {
+    gvas_detail::Cursor c{d, n};
+    if (gvas_detail::ReadSaveHeader(c)) return -1;
+    for (int props = 0; props < 512; ++props) {
+        const std::string name = c.str(256);
+        if (!c.ok) return -1;
+        if (name == "None") return 0;
+        for (const char* marker : kCareerBlockProperties) if (name == marker) return 1;
+        c.typeName();
+        const int32_t size = c.i32();
+        const uint8_t flags = c.u8();
+        if (!c.ok || size < 0 || (flags & 0x04)) return -1;     // property extensions: not written by this game
+        if (flags & 0x01) c.i32();
+        if (flags & 0x02) c.skip(16);
+        c.skip(size_t(size));
+        if (!c.ok) return -1;
+    }
+    return -1;
+}
+
 // The multiplayer career's file (session/hsm_mp_career.h): a whole SG_GameProgress_C save from this engine. This
 // machine's own game wrote it (Save Game into the slot, copied out), so only its shape is checked: the header and save
 // class, and that it ends as a save does, "None" with at most 8 zero bytes after it. That is no proof the file is whole
-// (structs inside end with "None" too); the atomic write that made it sees to that. Its properties are not walked: a
-// career carries far more than a passport (CheckPassportSave is the one for peers' bytes).
+// (structs inside end with "None" too); the atomic write that made it sees to that. Its properties are not walked to
+// check them: a career carries far more than a passport (CheckPassportSave is the one for peers' bytes). They are walked
+// for one thing, the career block (CareerBlockState): a save written outside Play Mode 0 has none, and passing it would
+// replace the career with a file that holds no career ("no career block"). A walk that cannot follow the tags does not refuse.
 constexpr size_t kMaxCareerSaveBytes = size_t(32) << 20;
 inline bool CheckCareerSave(const uint8_t* d, size_t n, std::string* why = nullptr, size_t maxBytes = kMaxCareerSaveBytes) {
     auto fail = [why](const char* w) { if (why) *why = w; return false; };
@@ -170,7 +204,8 @@ inline bool CheckCareerSave(const uint8_t* d, size_t n, std::string* why = nullp
     for (size_t zeros = 0; zeros <= 8; ++zeros) {                // the tail tried: the last `zeros` bytes, all zero
         if (zeros > 0 && d[n - zeros] != 0) break;               // the byte this try adds is not zero: nothing further back
         if (n - c.p < zeros + sizeof kNone) break;               // "None" would reach into the header
-        if (std::memcmp(d + n - zeros - sizeof kNone, kNone, sizeof kNone) == 0) return true;
+        if (std::memcmp(d + n - zeros - sizeof kNone, kNone, sizeof kNone) == 0)
+            return CareerBlockState(d, n) == 0 ? fail("no career block") : true;
     }
     return fail("no end of properties");
 }

@@ -25,7 +25,7 @@ constexpr double kLostAfterMs = 1000.0;                  // a slot weapon's cons
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1;   // ECollisionChannel (standin_rig.cpp)
 constexpr uint8_t kIgnore = 0, kBlock = 2;               // ECollisionResponse::ECR_Ignore, ECR_Block
 constexpr size_t kMemory = 64;                           // constraints / weapons remembered
-constexpr double kSheathSlackCm = 5.0;                   // the game's sheath linear limits (Willie_BP.cpp:7023-7025)
+constexpr double kSheathSlackCm = 5.0;                   // the game's sheath linear limits (24185754: Willie_BP.cpp:7023-7025; 26568321 sets the Z limit from the weapon length, :3273-3290)
 constexpr double kSnapBackCm = 15.0;                     // a waist weapon farther than this from its socket is put back first
 constexpr uint8_t kWorldSpace = 0;                       // ERelativeTransformSpace::RTS_World
 
@@ -95,7 +95,7 @@ const char* SocketOf(UObject* weapon, int slot) {
     return sheathSlot ? SlotSocket(*sheathSlot, slot) : nullptr;
 }
 
-// A weapon with SheathSlot 0 hangs in a physics scabbard (Sheathe on Spawn's scabbard branch, Willie_BP.cpp:7114-7160): both
+// A weapon with SheathSlot 0 hangs in a physics scabbard (Sheathe on Spawn's scabbard branch, Willie_BP.cpp:9936-9975; :7114-7160 up to 24185754): both
 // bodies are put at the socket's own transform, no hang.
 bool InScabbard(UObject* weapon) {
     const uint8_t* sheathSlot = weapon ? Field<uint8_t>(weapon, "SheathSlot") : nullptr;
@@ -218,7 +218,7 @@ void HoldStill(UObject* body) {
 }
 
 // Teleports the weapon body to where it hangs at the socket (HangPlace, its own scale kept), then at rest: a waist weapon
-// that fell while BoneCore had no collision, before the constraint is made again (it would keep the offset).
+// that fell before the constraint is made again (it would keep the offset).
 bool SnapToSocket(UObject* mesh, UObject* body, const char* socket, double hang) {
     Call scale(body, "K2_GetComponentScale");
     FTransform t;
@@ -246,7 +246,7 @@ bool SnapSlot(UObject* mesh, const Slot& s, const char* socket, double hang) {
 }
 
 // The sheath joint that holds a scabbard to the waist: the scabbard's first child component (the game's own lookup,
-// Willie_BP.cpp:1450 and 1499), a PhysicsConstraintComponent made as the weapon was sheathed (BoneCore 'pelvis' on the
+// Willie_BP.cpp:1716 and 1768; :1450 and :1499 up to 24185754), a PhysicsConstraintComponent made as the weapon was sheathed (Mesh 'pelvis' on the
 // other end). Null when there is none. The slot variable "Slot R 1 Constraint" etc. is the other joint, scabbard to weapon.
 UObject* ScabbardJoint(UObject* scabbard) {
     if (!ComponentLive(scabbard)) return nullptr;
@@ -369,12 +369,22 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
             SetSheathPolicy(s.body);
             if (s.scabbard) SetSheathPolicy(s.scabbard);
             // A scabbard weapon (SheathSlot 0): the weapon hangs from its scabbard by the slot constraint, and the scabbard
-            // from BoneCore by a joint of its own. That joint moves to the Mesh; the slot constraint stays as the game
+            // from the waist by a joint of its own (BoneCore up to 24185754). That joint moves to the Mesh when it is not there; the slot constraint stays as the game
             // made it. (Retargeting the slot constraint like the waist slots below pinned the weapon to a point 3 m under
             // the pelvis: it is left where the game spawned it, not at the socket, and the new joint frames came from there.)
             if (s.scabbard) {
                 UObject* joint = ScabbardJoint(s.scabbard);   // none yet: tried again on the next pass
                 if (joint && !Remembered(retargeted, joint)) {
+                    // 26568321 attaches the scabbard to the Mesh 'pelvis' itself (Willie_BP.cpp:9942, :1794, :2002): nothing to move.
+                    Call got(joint, "GetConstrainedComponents");
+                    if (got.invoke() && got.get<UObject*>("OutComponent2") == mesh) {
+                        FName bone2{};
+                        bone2 = got.get<FName>("OutBoneName2");
+                        Remember(retargeted, joint);
+                        HSM_LOG("rig: %s slot %s: scabbard joint already holds the Mesh at bone %s (%s): kept as the game made it",
+                                ObjectName(willie).c_str(), kSlotLabel[k], NameToString(bone2).c_str(), ObjectName(s.weapon).c_str());
+                        continue;
+                    }
                     const char* socket = SocketOf(s.weapon, k);
                     const double away = SlotDistance(mesh, s, socket, 0.0);
                     if (away > kSnapBackCm && SnapSlot(mesh, s, socket, 0.0) && !Remembered(snapped, s.weapon)) {
@@ -395,8 +405,9 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
                     }
                 }
             } else if (k != kBackSlot && !Remembered(retargeted, s.constraint)) {
-                // The waist slots hold BoneCore, whose collision the rig switches off; the pelvis body is the one it drives.
-                // The new constraint keeps the weapon where it is: one that fell while BoneCore had no collision (the game
+                // A waist slot whose constraint still holds something else than the Mesh (24185754 anchored it to BoneCore, whose collision
+                // the rig switches off) is moved to the pelvis body, the one the rig drives.
+                // The new constraint keeps the weapon where it is: one that fell meanwhile (the game
                 // makes the constraint a moment after spawning the weapon) goes back to its socket first.
                 const char* socket = SocketOf(s.weapon, k);
                 const double hang = HangOf(s.weapon);
@@ -405,13 +416,27 @@ void StandInSlots::Anchor(UObject* willie, bool logLost) {
                     Remember(snapped, s.weapon);
                     HSM_LOG("rig: %s slot %s snapped back from %.0fcm", ObjectName(willie).c_str(), kSlotLabel[k], away);
                 }
+                // 26568321: Create Sheath Constraint R/L already constrains the weapon to the Mesh, at the socket's own bone, with
+                // the hang point and a Z limit from the weapon length (Willie_BP.cpp:3273 / :3372, :9850); BoneCore is gone.
+                // Retargeting that to 'pelvis' would replace the socket bone and the game's frames with the waist's: such a
+                // constraint is left as the game made it.
+                Call got(s.constraint, "GetConstrainedComponents");
+                UObject* const second = got.invoke() ? got.get<UObject*>("OutComponent2") : nullptr;
+                if (second == mesh) {
+                    FName bone2{};
+                    bone2 = got.get<FName>("OutBoneName2");
+                    Remember(retargeted, s.constraint);
+                    HSM_LOG("rig: %s slot %s: sheath constraint already holds the Mesh at bone %s (%s): kept as the game made it",
+                            ObjectName(willie).c_str(), kSlotLabel[k], NameToString(bone2).c_str(), ObjectName(s.weapon).c_str());
+                    continue;
+                }
                 Call c(s.constraint, "SetConstrainedComponents");
                 c.set<UObject*>("Component1", s.body).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh)
                     .setName("BoneName2", MakeName("pelvis"));
                 if (c.invoke()) {
                     Remember(retargeted, s.constraint);
                     // SetConstrainedComponents makes the frames again from where the weapon is: the game's hang point
-                    // and slack (Willie_BP.cpp:7022-7025) go back on, or the weapon hangs by its root.
+                    // and slack (24185754: Willie_BP.cpp:7022-7025) go back on, or the weapon hangs by its root.
                     Call(s.constraint, "SetConstraintReferencePosition").set<uint8_t>("Frame", 0)
                         .set("RefPosition", FVector{0.0, 0.0, hang}).invoke();   // Frame1: the weapon
                     Call(s.constraint, "SetLinearXLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kSheathSlackCm).invoke();   // LCM_Limited

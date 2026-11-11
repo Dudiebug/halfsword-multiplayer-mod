@@ -85,7 +85,7 @@ void TestRanges() {
     { PaintFxMsg m = Blood(); m.entity = uint8_t(hsm::kMaxWillies + 1); CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Blood(); m.entity = 1; CHECK(Dec(Wire(m))); }
     CHECK(!Dec(Wire(Blood(), 0, 1)));
-    CHECK(!Dec(Wire(Blood(), 7, 1)));                          // rev 15: kinds 1..6 (3 Voice, 4 HitSound, 5 Armor, 6 ArmorOn)
+    CHECK(!Dec(Wire(Blood(), 8, 1)));                          // kinds 1..7 (rev 15: 3 Voice, 4 HitSound, 5 Armor, 6 ArmorOn; rev 43: 7 Crossbow)
     CHECK(!Dec(Wire(Blood(), 1, 2)));                          // extraVelocity is 0 or 1
     { PaintFxMsg m = Blood(); m.bone = ""; CHECK(!Dec(Wire(m))); }
     { PaintFxMsg m = Blood(); m.bone = std::string(64, 'b'); CHECK(Dec(Wire(m))); }
@@ -209,6 +209,11 @@ PaintFxMsg ArmorOn() {
     m.entity = 5; m.kind = FxKind::ArmorOn; m.seq = 12; m.bone = "BP_Armor_Helmet_C"; m.local.pos = {40, -10, 60};   // bone: the class
     return m;
 }
+PaintFxMsg Crossbow() {
+    PaintFxMsg m;
+    m.entity = 4; m.kind = FxKind::Crossbow; m.seq = 31; m.bone = "hand_l"; m.bodyPart = uint8_t(CrossbowAction::Shoot);
+    return m;
+}
 PaintFxMsg StripRequest() {
     PaintFxMsg m = Armor();
     m.extraVelocity = true;   // sent by the one who stripped the fallen fighter, to its owner
@@ -235,29 +240,53 @@ void TestSoundAndArmorKinds() {
     { PaintFxMsg m = HitSound(); m.velocity.y = -1; CHECK(!Dec(Wire(m))); }
 }
 
-// Get Damage's sounds (Willie_BP.cpp:4071, 4379-4385), none when the blow went Inside:
-//   blunt  volume clamp(|Impulse| * 0.0005 * (Lower Threshold ? 3 : 1), 0, 1), played when > 0.1; the cue by Damage
-//          Raw Scaled: < 1000 light, < 3000 wet hard, else blunt hard;
+// rev 43: a crossbow's string, bolt and shot; the hand bone and the action are the only payload.
+void TestCrossbowKind() {
+    CHECK(hsm::kProtocolRevision >= 43);
+    PaintFxMsg o;
+    CHECK(Dec(Encode(Crossbow()), o) && o.kind == FxKind::Crossbow && o.bone == "hand_l" && o.bodyPart == 3 && o.entity == 4);
+    CHECK(Dec(Wire(Crossbow())));
+    for (uint8_t a = 1; a <= kCrossbowActionMax; ++a) { PaintFxMsg m = Crossbow(); m.bodyPart = a; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Crossbow(); m.bodyPart = 0; CHECK(!Dec(Wire(m))); }                     // no action
+    { PaintFxMsg m = Crossbow(); m.bodyPart = kCrossbowActionMax + 1; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Crossbow(); m.bone = "hand_r"; CHECK(Dec(Wire(m))); }
+    { PaintFxMsg m = Crossbow(); m.bone = "pelvis"; CHECK(!Dec(Wire(m))); }                  // only a hand holds one
+    { PaintFxMsg m = Crossbow(); m.bone = "BP_Armor_Helmet_C"; CHECK(!Dec(Wire(m))); }
+    { PaintFxMsg m = Crossbow(); CHECK(!Dec(Wire(m, uint8_t(FxKind::Crossbow) + 1, 0))); }    // past the last kind
+    { PaintFxMsg m = Blood(); m.bone = "pelvis"; m.bodyPart = 0; CHECK(Dec(Wire(m))); }      // other kinds keep their own rules
+}
+
+// Get Damage's sounds (Willie_BP.cpp:5085, 5378-5385, build 26568321), none when the blow went Inside:
+//   blunt  volume clamp(|Impulse| * 0.0003 * (Lower Threshold ? 3 : 1), 0, 1), played when > 0.1; the cue by Damage
+//          Raw Scaled: < 2000 light, < 4000 wet hard, else blunt hard (builds before: 0.0005, 1000 and 3000);
 //   bone   volume clamp(Damage Raw Scaled * 0.0008 * (Lower Threshold ? 3 : 1), 0, 1), only from 1000 damage up.
 // (Its slash cue is played at |Impulse| * 0 * Cutting Power: never above the 0.1 gate, so it is not mirrored.)
 void TestHitSoundPlan() {
     HitSoundPlan p = PlanHitSound(1000, 500, false, false);
-    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 0.5) && Near(p.boneVolume, 0));
+    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 0.3) && Near(p.boneVolume, 0));
     p = PlanHitSound(1000, 500, true, false);
-    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 1.0));
+    CHECK(p.blunt == BluntCue::Light && Near(p.bluntVolume, 0.9));
+    p = PlanHitSound(1500, 500, true, false);
+    CHECK(Near(p.bluntVolume, 1.0));                                // clamped at 1
     p = PlanHitSound(300, 1000, true, false);
-    CHECK(Near(p.bluntVolume, 0.45) && Near(p.boneVolume, 1.0));   // Lower Threshold triples both (the blunt one below its clamp here)
+    CHECK(Near(p.bluntVolume, 0.27) && Near(p.boneVolume, 1.0));    // Lower Threshold triples both (the blunt one below its clamp here)
     p = PlanHitSound(300, 400, true, false);
     CHECK(Near(p.boneVolume, 0));
-    p = PlanHitSound(200, 500, false, false);
-    CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0));     // 0.1 is not above the gate
-    p = PlanHitSound(201, 500, false, false);
-    CHECK(p.blunt == BluntCue::Light);
+    p = PlanHitSound(333, 500, false, false);
+    CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0));     // 0.0999: not above the 0.1 gate
+    p = PlanHitSound(334, 500, false, false);
+    CHECK(p.blunt == BluntCue::Light && p.bluntVolume > 0.1);
     p = PlanHitSound(1000, 1000, false, false);
-    CHECK(p.blunt == BluntCue::WetHard && Near(p.boneVolume, 0.8));
+    CHECK(p.blunt == BluntCue::Light && Near(p.boneVolume, 0.8));   // the blunt tiers moved up to 2000 / 4000; the bone cue did not
     p = PlanHitSound(1000, 999.9, false, false);
     CHECK(p.blunt == BluntCue::Light && Near(p.boneVolume, 0));
-    p = PlanHitSound(1000, 3000, false, false);
+    p = PlanHitSound(1000, 1999.9, false, false);
+    CHECK(p.blunt == BluntCue::Light);
+    p = PlanHitSound(1000, 2000, false, false);
+    CHECK(p.blunt == BluntCue::WetHard && Near(p.bluntVolume, 0.3));
+    p = PlanHitSound(1000, 3999.9, false, false);
+    CHECK(p.blunt == BluntCue::WetHard);
+    p = PlanHitSound(1000, 4000, false, false);
     CHECK(p.blunt == BluntCue::BluntHard && Near(p.boneVolume, 1.0));
     p = PlanHitSound(1000, 1000, true, false);
     CHECK(Near(p.boneVolume, 1.0));
@@ -265,6 +294,25 @@ void TestHitSoundPlan() {
     CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0) && Near(p.boneVolume, 0));   // Inside: no sound
     p = PlanHitSound(std::numeric_limits<double>::quiet_NaN(), 5000, false, false);
     CHECK(p.blunt == BluntCue::None);
+}
+
+// Spawn Blood's top gate (Willie_BP.cpp:28789) and Box Vertex Paint's (2206), build 26568321: what the owner's observers
+// must not report because the game itself painted nothing, or because the stand-in's own replay makes it.
+void TestGameGates() {
+    CHECK(SpawnBloodRuns(0, false) && SpawnBloodRuns(3, false));
+    CHECK(!SpawnBloodRuns(4, false) && !SpawnBloodRuns(9, false));      // 4 emitters: the burst is dropped
+    CHECK(SpawnBloodRuns(4, true) && SpawnBloodRuns(40, true));         // Skip Check overrides the cap
+    CHECK(SendSpawnBlood(0, false) && SendSpawnBlood(3, false));
+    CHECK(!SendSpawnBlood(4, false));                                   // dropped by the game
+    CHECK(!SendSpawnBlood(0, true) && !SendSpawnBlood(4, true));        // Dismember Function Delayed's: the sever replay makes it
+    CHECK(BoxVertexPaintRuns(false, false, false, false, false));
+    CHECK(!BoxVertexPaintRuns(true, false, false, false, false));       // Invulnerable, as before
+    CHECK(!BoxVertexPaintRuns(false, true, false, false, false));       // Dismemberment In Process
+    CHECK(!BoxVertexPaintRuns(false, false, true, false, false));       // Armor Swap In Process
+    CHECK(!BoxVertexPaintRuns(false, false, false, true, false));       // Setup Armor in Process
+    CHECK(!BoxVertexPaintRuns(false, false, false, false, true));       // Hat Not Removable 2
+    CHECK(BoxVertexPaintBusy(false, false, false, true) && !BoxVertexPaintBusy(false, false, false, false));
+    CHECK(BoxVertexPaintBusy(true, false, false, false) && BoxVertexPaintBusy(false, true, false, false) && BoxVertexPaintBusy(false, false, true, false));
 }
 
 // M1/M2: only the stock naming of a cue or an armour class may travel; a lookup by name is a scan of every loaded object.
@@ -276,6 +324,14 @@ void TestNameAllowlists() {
         CHECK(!ValidVoiceCueName(bad));
     CHECK(ValidVoiceCueName(std::string(61, 'a') + "Cue") && !ValidVoiceCueName(std::string(62, 'a') + "Cue"));   // 64 bytes at most
     CHECK(!ValidVoiceCueName(std::string("Pain_Cue\0x", 10)));                                                    // an embedded NUL
+    // Build 26568321's drinking sounds are SoundWaves named Gulp and Spit (Willie_BP.cpp:31009, 31065): exactly those two.
+    for (const char* ok : {"Gulp", "Spit"}) CHECK(ValidVoiceCueName(ok) && IsVoiceWaveName(ok));
+    for (const char* bad : {"gulp", "spit", "GULP", "Gulp_1", "Spit_x", "Gulping", "Spitting", "Gulp ", " Spit", "Gulp\n", "Puke", "Bite_Man_1", "Gulp/Spit"}) {
+        CHECK(!IsVoiceWaveName(bad));
+        CHECK(!ValidVoiceCueName(bad));
+    }
+    CHECK(!IsVoiceWaveName("Pain_Cue") && ValidVoiceCueName("Spit_Cue") && !IsVoiceWaveName("Spit_Cue"));   // a cue of that kind stays a cue
+    { PaintFxMsg m = Voice(); m.bone = "Gulp"; CHECK(Dec(Wire(m))); m.bone = "Spit"; CHECK(Dec(Wire(m))); m.bone = "Burp"; CHECK(!Dec(Wire(m))); }
     for (const char* ok : {"BP_Armor_Head_Armet_001_C", "BP_Armor_Body_Doublet_C", "BP_Armor_Modular_Core_Arms_Harness_001_C", "BP_ArmorActor_C"})
         CHECK(ValidArmorClassName(ok));
     for (const char* bad : {"", "BP_Armor", "BP_Armor_C", "BP_Armor_Head", "Armor_Head_C", "BP_Weapon_C", "ModularWeaponBP_C", "bp_armor_head_c", "BP_Armor_Head-C",
@@ -339,10 +395,12 @@ void TestRxLimiter() {
 
 int main() {
     TestSoundAndArmorKinds();
+    TestCrossbowKind();
     TestNameAllowlists();
     TestNameCache();
     TestRxLimiter();
     TestHitSoundPlan();
+    TestGameGates();
     TestRoundTrip();
     TestFraming();
     TestRanges();

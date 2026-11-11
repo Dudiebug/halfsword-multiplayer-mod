@@ -56,7 +56,7 @@ public:
         bool bot = false;                             // a generated bot (SpawnBot): keeps the generator's build, clamped to 0..1, never forced
         double weight = -1.0, height = -1.0;          // a role's build (match/hsm_roles.h; Riot, Juggernaut): the passport Weight / Height this fighter spawns with, 0..1; negative: none (SetBuild's rules)
         const char* fighterClass = nullptr;           // nullptr = the stock Willie_BP_C; else the actor class to spawn as (match/hsm_fighter_class.h: the Zombies format's bots)
-        bool careerBody = false;                      // the career's Player Body Condition as the start body (the stock spawner's, session/hsm_career.h CareerBodyAtSpawn)
+        bool careerBody = false;                      // keep the body the passport carries (a career's injuries, session/hsm_career.h CareerBodyAtSpawn); off: the fighter starts whole
     };
     ue::UObject* SpawnFighter(const SpawnOptions& o);
     void KeepRemoteFighter(ue::UObject* willie, float yawDeg, float pitchDeg);   // per tick on the host
@@ -195,24 +195,28 @@ public:
     // save): passport Weight, Muscle Rate and every body's mass scale, rescaled so armour and weapon weights stay.
     void ApplyBuildLive(ue::UObject* willie);
     // A class's stats on this machine's own fighter. Called often: each value keeps the game's own as its base (match/hsm_class.h).
-    struct ClassPiece { ue::UObject* what = nullptr; int32_t index = -1; ClassStatTrack power; };   // a foot or a held weapon
+    struct ClassPiece { ue::UObject* what = nullptr; int32_t index = -1; ClassStatTrack power; };   // a held weapon
     struct ClassTracks {
         ue::UObject* who = nullptr;
-        ClassStatTrack run, walk, strength, gripR, gripL, hands, bones, regen;
+        ClassStatTrack run, walk, strength, gripR, gripL, hands, bones;
         double staminaLast = -1.0, weightSet = -1.0, rateWritten = -1.0;
+        std::array<double, 10> recoverLast = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};   // Health, the seven parts, neck, back: each as last left (Recovery)
         bool holding = false;   // Grappler: this fighter's hand is on another fighter
         // Under host physics both fighters are simulated here, so a Grappler's hold can lighten what it holds, for as long as it holds it.
         bool lightenHeld = false; ue::UObject* heldMesh = nullptr; int32_t heldIndex = -1; std::vector<std::pair<ue::FName, float>> heldScales;
         int massCheckIn = 0;    // ticks until the log says what the class's weight came to
-        ClassPiece footR, footL, handR, handL;
+        ClassPiece handR, handL;
         bool loggedMissing = false;
     };
     void ApplyClassStats(ue::UObject* willie, const ClassSheet& sheet, ClassTracks& tracks);
+    // The class's kick while `fighter`'s leg is out (its Kicking flags), else 1: what Claims multiplies a body hit's Kick Power by.
+    double ClassKickNow(ue::UObject* fighter);
     void ApplyClassWeight(ue::UObject* willie, double base, const ClassSheet& sheet, ClassTracks& tracks);   // Strength and Muscle
     ue::UObject* HeldFighterMesh(ue::UObject* willie);
     void LightenHeld(ue::UObject* target, ClassTracks& tracks);
     void ReadLiveStats(ue::UObject* willie, double& run, double& strength);   // what's on the fighter now; 0: couldn't read
     bool SetMusclesLook(ue::UObject* willie, double value);   // skin only (match/hsm_class.h ClassLookMuscles); false: no body material yet
+    void HoldNoDislocation(ue::UObject* willie);   // every frame for No Dislocation: the game clears its own block after half a second
     void ClearPain(ue::UObject* willie);   // every frame for a class that feels none: the game flinches the moment a value passes its limit
     // Brawl: every fighter spawned from now on (own body, stand-ins, whatever loadout it was sent) has no armour and
     // holds no weapon. Done on the fighter's own copy of the passport, so no save and no uploaded loadout changes.
@@ -249,6 +253,9 @@ public:
     // Hands a living fighter a crossbow: spawns the weapon actor and puts it in the right hand the way the game's own pick-up
     // does ("Set Up Right Hand Weapon"), then makes sure the quiver holds bolts. False (logged) when any step failed.
     bool GiveCrossbow(ue::UObject* willie);
+    // The crossbow's bolt class (BP_Weapon_Ranged_Projectle_Bolt_1_C), found once and kept while it stays loaded; null when
+    // no loaded asset references it. Used to seat a bolt on a stand-in's crossbow (fx_sync's crossbow replay).
+    ue::UClass* CrossbowBoltClass();
     ue::FRotator ActorRotation(ue::UObject* actor);
     // Capture the flag (match/hsm_ctf.h): each machine spawns its own two flag actors and moves them to what MatchInfo says.
     // The actor class is the first loaded one of a preference list (a long tool: Rake, Pitchfork, Shovel, Scythe, the lantern);
@@ -319,12 +326,13 @@ public:
     void NudgeTowards(ue::UObject* willie, const WillieState& target, float blend);   // blends bone velocities, keeps the local motion
     void ApplyVitals(ue::UObject* willie, const WillieState& s);
     void ApplyStandInVitals(ue::UObject* willie, const VitalsMsg& v);   // owner sync: the owner's state on its stand-in
-    void WriteParryTonus(ue::UObject* willie, const VitalsMsg& v);      // ...and its tonus, just before a parry roll
     // Sync audit T3: what another machine's Blueprint wrote onto this fighter's stand-in, made on the real one.
-    void Revive(ue::UObject* willie);                                    // Willie_BP Get_Up_Pal (W:4718)
+    void Revive(ue::UObject* willie);                                    // Willie_BP Get_Up_Pal
     bool Push(ue::UObject* willie, const std::string& bone, const ue::FVector& impulse);   // a contact's impulse (kg cm/s) on one body
     // Rev 42 Deflect: an impulse (kg cm/s) on the weapon the fighter holds in slot 0 ("Weapon R") or 1 ("Weapon L").
     bool PushWeapon(ue::UObject* willie, int slot, const ue::FVector& impulse);
+    bool PressWound(ue::UObject* willie, const char* bone, const ue::FVector& offset);   // a hold on a wound: Heal and Restore at that bone
+    bool TalkAt(ue::UObject* speakerStandIn, ue::UObject* heard, double aggression, double fear);   // Func Talk to Others, on the host
     void TriggerDeath(ue::UObject* willie);
     size_t BoneCount() const { return bones_.size(); }
     ue::UObject* GameInstance();
@@ -370,6 +378,8 @@ private:
     bool bare_ = false;
     struct FlagBody { ue::UObject* comp = nullptr; uint8_t collision = 3; bool simulating = false; };
     ue::UClass* flagClass_ = nullptr;
+    ue::UClass* boltClass_ = nullptr;               // CrossbowBoltClass
+    int32_t boltClassIndex_ = -1;
     std::string flagClassName_;
     std::unordered_map<ue::UObject*, std::vector<FlagBody>> flagBodies_;   // per flag actor: each primitive as it was before it was frozen
     std::vector<std::pair<ue::UObject*, int32_t>> modActors_;                // the flags: actor and object index (IsModActor)
@@ -384,6 +394,10 @@ private:
     bool CopyPassport(ue::UObject* willie, const SpawnOptions& o, double& height);
     void ApplyBuild(ue::UObject* willie, ue::FProperty* passport, bool bot, double roleWeight);
     void StripEquipment(ue::UObject* willie, ue::FProperty* passport);
+    void WholeBody(uint8_t* passport, bool heal);   // a passport value's saved blood dropped and, with heal, its body made whole
+    struct ClassKick { ue::UObject* who; int32_t index; double kick; double atMs; };
+    std::vector<ClassKick> classKicks_;
+    void NoteClassKick(ue::UObject* willie, double kick);
     bool SavePassportFrom(ue::UObject* owner, ue::FProperty* src, std::vector<uint8_t>& out);
     ue::UObject* MeshOf(ue::UObject* willie);
     ue::UObject* world_ = nullptr;

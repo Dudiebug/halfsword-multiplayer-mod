@@ -8,17 +8,15 @@
 // Not included from here: sync/ must not depend on session/, so kGoreSeveredBits duplicates that constant
 // and must be kept in sync with it by hand.
 //
-// Dislocated-joint bits are the six dislocatable joints on Willie_BP
-// (re/out/decomp/Character/Blueprints/Willie_BP.cpp:1250-1255, the *_Dislocated bool fields):
-//   0 Arm R   1 Arm L   2 Leg R   3 Leg L   4 Neck   5 Spine (the "Back" constraint/field pair)
-// The native game only ever sets one of these true, from a tick-driven detection event
-// (Event_Check_Bone_Dislocation_Status, Willie_BP.cpp:8875+) that compares the physical bone against the
-// animated one and requires live physical-animation strain ("Bone Snapping > 0.1") -- both unreachable on a
-// neutralised stand-in whose Actor tick is blocked, which is exactly why this header exists: the owner
-// detects its own dislocations natively and streams the bits, and this is the stand-in side's reaction.
-// A grep of the whole decomp tree found no "X Dislocated = false" anywhere, so Relocate() exists
-// defensively/symmetrically for when the owner's bit clears, not for anything the vanilla game is observed
-// to do (see standin_gore.h for what little it is safe to apply for either transition).
+// Joint bits are the eight physics-asset joints the game lets go loose on Willie_BP (build 26568321), one bit each,
+// set while the owner's flag for it is (the *_Dislocated, *_Broken and Neck Snapped bool fields):
+//   0 Arm R (shoulder)   1 Arm L   2 Leg R (knee; dislocated or broken)   3 Leg L   4 Neck (dislocated or snapped)
+//   5 Spine (Back Broken)   6 Elbow R (Arm R Broken)   7 Elbow L (Arm L Broken)
+// The game sets them from the owner's tick (Dislocate Bone, Willie_BP.cpp:3750-3905: a per-part meter fed by live
+// physical-animation strain) and from its own damage (Break Arm/Leg/Back, Snap Neck) -- both unreachable on a
+// neutralised stand-in whose Actor tick is blocked, which is why this header exists: the owner detects them natively
+// and streams the bits, and this is the stand-in side's reaction. Healing clears them again (Restore Bone,
+// Willie_BP.cpp:6860-6990), so a bit can fall: Relocate() is the stand-in's answer to that (standin_gore.h).
 //
 // The severed-subtree exclusion (GoreDeadBones) and "a severed part never regrows within one body" (severedSeen_, reset
 // only when a seen bit clears) follow Cyrex0/HalfSword-MP mods/HSMPAvatars/Scripts/body_injury.lua (omit, select_mask),
@@ -31,7 +29,7 @@ namespace hsm::sync {
 
 constexpr uint32_t kGoreSeveredBits = 15;                              // mirrors hsm::kCombatPartBits
 constexpr uint32_t kGoreSeveredMask = (1u << kGoreSeveredBits) - 1u;
-constexpr uint32_t kGoreJoints = 6;
+constexpr uint32_t kGoreJoints = 8;
 constexpr uint32_t kGoreJointMask = (1u << kGoreJoints) - 1u;
 
 // A severed part's cosmetic fallback (hide + physics-inert, standin_gore.cpp) fires this long after the

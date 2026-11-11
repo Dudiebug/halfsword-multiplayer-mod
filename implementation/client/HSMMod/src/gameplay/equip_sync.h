@@ -60,7 +60,7 @@ public:
 private:
     struct Counters {
         uint64_t sent = 0, readFailed = 0, applied = 0, replanned = 0, noStandIn = 0, draws = 0, sheathes = 0, skipped = 0,
-                 failed = 0;
+                 failed = 0, tornSkipped = 0;
     };
     struct Read { combat::EquipSnapshot snap; std::array<ue::UObject*, combat::kEquipSlots> slots{}; std::array<ue::UObject*, 2> hands{}; };
     bool ReadFighter(ue::UObject* willie, Read& out) const;

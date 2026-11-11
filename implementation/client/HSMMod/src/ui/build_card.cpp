@@ -46,7 +46,7 @@ bool Build() {
     w.kit = Kit(w.hud, Vis::HitTestInvisible);
     Canvas root = w.kit.Root();
     if (!root) { HSM_LOG("buildcard: UI_HUD root is not a CanvasPanel; cards are off"); return false; }
-    if (UObject** src = Field<UObject*>(w.hud, "TextHurt"); src && *src) w.kit.FontFrom(*src, "UI_HUD.TextHurt");
+    ProbeFont(w.kit, w.hud);
     w.box = w.kit.MakeFixed();
     w.box.Width(kWidth);
     root.Add(w.box).Anchor({{0.012, 0.03}, {0.012, 0.03}}, {0, 0}).AutoSize().Z(kZOrder);

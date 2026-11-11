@@ -107,6 +107,7 @@
 #include "session/hsm_gvas.h"
 #include "session/hsm_director.h"
 #include "session/hsm_level_gate.h"
+#include "session/hsm_solo_level.h"
 #include "session/hsm_ground_clear.h"
 #include "session/hsm_loadout_change.h"
 #include "session/hsm_moderation.h"
@@ -523,7 +524,7 @@ public:
         });
     }
 
-    // Owner sync: the pause menu pauses the world (Esc: Willie_BP.cpp:11091 opens UI_Pause_Eng, whose Construct pauses),
+    // Owner sync: the pause menu pauses the world (Esc: Willie_BP.cpp:17826-17830 opens UI_Pause_Eng, whose Construct pauses),
     // which stops the GameMode tick and with it this player's stream. The others saw them freeze, and a client whose host
     // paused went back to the main menu after 7 s (logs 4, 7, 8). The check in Tick cannot see a pause that outlasts the
     // frame; widgets still tick while paused (UI_Pause_Eng has its own Tick), so one of them lifts it. The menu stays
@@ -672,7 +673,7 @@ public:
         adapter_.TickDeferredDestroys();
         saveGuard_.Tick(adapter_, joined, MatchLevel());   // a session never touches the player's own save
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
-        game::TickPhysicsPin(joined && !IsHost() ? info_.physics : std::array<float, kPinnedPhysics>{ -1.f, -1.f, -1.f });   // and its gore and bodies
+        game::TickPhysicsPin(joined && !IsHost() ? info_.physics : kUnpinnedPhysics);   // and its gore and bodies
         adapter_.SetDestroyAware(net_ != nullptr);
         adapter_.SetSubclassWeapons(true);   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel();
@@ -736,7 +737,9 @@ public:
         CtfVisualTick();
         HudScene hud = BuildHud();
         ui::HudTick(hud, NameTags(hud), Format(info_.format), CtfMarkers(hud));
-        ui::ChatTick(hud);
+        HudScene chatHud = hud;   // the chat runs in any session fight, a match or not (match/hsm_chat_scene.h ChatRuns)
+        chatHud.visible = ChatRuns({hud.visible, net_ != nullptr, MatchLevel(), localFighter_});
+        ui::ChatTick(chatHud);
         if (const SHORT cardKey = GetAsyncKeyState(cfg_.buildCardKey); (cardKey & 1) && hud.visible && !ui::Typing() && !game::fetchlink::KeysHeld() && cfg_.buildCards) ui::BuildCardToggle();
         ui::BuildCardTick(hud.visible);
         laps.Lap(TickPart::Hud);
@@ -2168,12 +2171,13 @@ private:
     int SnapshotHz() const { return std::max(cfg_.snapshotHz, 60); }   // older ini files say 30
     bool InFightLevel() const { return !currentLevel_.empty() && !IsMenuLevel(currentLevel_); }
     // Matches run in fight levels, not in the Tavern hub where players walk around between fights.
-    bool MatchLevel() const { return InFightLevel() && currentLevel_.find("Hub") == std::string::npos; }
+    // Not the procedural dungeon either (Game Mode 6, build 26568321): single-player content, hsm_solo_level.h.
+    bool MatchLevel() const { return InFightLevel() && currentLevel_.find("Hub") == std::string::npos && !IsSoloLevel(currentLevel_); }
     // A level with fighters in it. Not the Progression hub: outside Free Mode the Tavern is the game's menu-like hub
     // (character creation, the next fight's pick), with no pawn and a mouse cursor. Test 2026-10-25: the mod spawned a
     // fighter there after 15 s, took the cursor away (game-only input) and set the travel's game mode back over the
     // hub's own, so both players sat in the character screen unable to click while their spawned fighters died.
-    bool FighterLevel() const { return InFightLevel() && !progressionHub_; }
+    bool FighterLevel() const { return InFightLevel() && !progressionHub_ && !IsSoloLevel(currentLevel_); }
     bool InAbyss() const { return FighterLevel() && currentLevel_.find("Abyss") != std::string::npos; }
 
     // Sync audit 36, 37, every machine in a session on the Abyss: the level's own enemy spawner held shut (the host spawns
@@ -2449,7 +2453,7 @@ private:
                                                          "LookGamepad", "RightArm", "LeftArm", "RightGuard", "LeftGuard"};
     static constexpr const char* kActionNames[kActionCount] = {"GrabLeft", "GrabRight", "GuardLeft", "GuardRight", "Thrust", "ThrustGamepad",
                                                              "Jump", "CrouchKey", "CrouchHold", "Run", "SwapHands", "ToggleCameraLock",
-                                                             "KeyForward", "KeyBack", "KeyLeft", "KeyRight", "Talk", "RightMouse", "MiddleMouse"};
+                                                             "KeyForward", "KeyBack", "KeyLeft", "KeyRight", "Talk", "RightMouse", "ChainAttack", "Undress"};
     struct Held { float value = 0; uint32_t until = 0; };
 
     static std::string Vec3(const FVector& v) { char b[96]; std::snprintf(b, sizeof b, "[%.0f,%.0f,%.0f]", v.x, v.y, v.z); return b; }
@@ -2728,7 +2732,7 @@ private:
     // Our own OpenLevel bypasses the travel hook, so a level the host opens itself (Start match, -hsmauto, the bridge,
     // Progression back to the hub) must be announced to the lobby here, after the GI settings for it are set.
     void HostTravel(const std::string& level) {
-        OnOpenLevel(level, true, "");
+        if (!OnOpenLevel(level, true, "") && IsSoloLevel(level)) return;   // single-player content: refused, see OnOpenLevel
         game::OpenLevel(lastGameMode_, level, true, "");
     }
 
@@ -2787,6 +2791,13 @@ private:
         pauseLiftArmed_ = false;                       // the old level's world is going away
         ShowProfilerMessage(ue::prof::StopCapture());   // before the old level's functions are freed
         bool joined = steamMode() ? lobby_.InLobby() : net_ != nullptr;
+        // The procedural dungeon (Game Mode 6, the Seer's "Go to Hell"; build 26568321) is single-player content: every
+        // machine would build its own dungeon from unseeded draws (BP_Procedural_Dungeon_Director.cpp:408), and the level has
+        // no match setup (BP_LevelManager.cpp:758). Refused for the host (no travel is sent) and a client alike.
+        if (joined && IsSoloLevel(level)) {
+            HSM_LOG("session: %s is single-player content (the procedural dungeon); not opened while in a lobby - leave the lobby to play it solo", level.c_str());
+            return false;
+        }
         if (joined && IsHost() && !IsMenuLevel(level) && adapter_.EndErrandMode())
             HSM_LOG("session: %s opened as an errand (Game Mode 2); a session plays it as a normal fight", level.c_str());
         // The host's multiplayer career in or out, before its settings are captured for the travel: a load keeps the
@@ -2834,6 +2845,8 @@ private:
             if (cfg_.progressionSave && (steamMode() ? lobby_.InLobby() : net_ != nullptr)) saveGuard_.CareerHubLoaded(adapter_);
         }
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
+        if (IsSoloLevel(currentLevel_))
+            HSM_LOG("session: %s is single-player content (the procedural dungeon): not a match level, no fighters synced, the game keeps its own flow", currentLevel_.c_str());
         levelLoadedAt_ = NowMs();
         SetMyWillie(nullptr);                        // the old world's fighter is gone; the next tick names the new one
         peerSilence_.LevelLoaded(NowMs());   // the clients load too, and send nothing meanwhile
@@ -3262,11 +3275,17 @@ private:
     }
 
     // Owner sync: the game's single-player win/lose flow must not run in a session match. "Event Lose Match" on a
-    // player fighter (ours, every stand-in and every mod-spawned fighter have Player set) opens UI_Lose, which pauses
-    // the game and leads to "return to tavern / another fight"; "Force Finish Match" opens UI_NextFIght; "Call Minus
-    // Enemy" counts a dead non-player down to the stock win screen. The session's match referee decides instead.
-    // Non-player fighters (host bots) still run Event Lose Match for its "Give Up" AI state; its Call Minus Enemy is
-    // blocked. Active only while stockFlowGuard_ (owner sync, in a match level, joined); host sync never registers it.
+    // player fighter (ours, every stand-in and every mod-spawned fighter have Player set) starts the give-up countdown
+    // that ends in UI_Lose, which pauses the game and leads to "return to tavern / another fight" (build 26568321:
+    // Event_Lose_Match, Willie_BP.cpp:16134-16224; it is a DoOnce per Willie, so one ring-out is one call, and Death
+    // (:14124-14210) sets DED before it calls it, which is why RingOut's IsDead test drops that second entry);
+    // "Force Finish Match" opens UI_NextFIght; "Call Minus Enemy" (:12334, also a DoOnce) counts a dead non-player down
+    // to the stock win screen and sets "Match Won (Player)" (TickStockFlags mirrors that flag). The session's match
+    // referee decides instead. Non-player fighters (host bots) still run Event Lose Match for its "Give Up" /
+    // AI "My Give Up" state (Give Up for all but zombies, Skeletron and sleepers; zombies get the AI flag only); its
+    // Call Minus Enemy is blocked. Dying (:14428) and Death also reach HS Game Mode.Minus Enemy directly (:14476, :12347),
+    // past this hook; the game mode's own Match Won gate (TickStockFlags) is what keeps the stock win screen away.
+    // Active only while stockFlowGuard_ (owner sync, in a match level, joined); host sync never registers it.
     static constexpr const char* kStockFlowOwner = "stockflow";
     void GuardStockFlow() {
         ClearScriptHooks(kStockFlowOwner);
@@ -3387,6 +3406,14 @@ private:
                         set ? (CoopFightWon(mi, oneFight_) ? "fight won, waiting for G" : "break between waves") : "round or wave being fought",
                         unsigned(mi.format), ++wonSet_);
             }
+            // Build 26568321: the G hold (Give_Up_Hold_Down_Timeline__FinishedFunc, Willie_BP.cpp:16950; Event_Give_Up_UI_Countdown,
+            // :16152) and the kneel check (:16953, :19508) key on the fighter's own "Match Won (Player)", which only the stock
+            // Minus_Enemy sets (blocked in a session). Keep it the same as the game mode's flag on my fighter.
+            bool wonOwn = false;
+            if (own && GetBool(own, "Match Won (Player)", wonOwn) && wonOwn != set) {
+                SetBool(own, "Match Won (Player)", set);
+                HSM_LOG("session: my fighter's Match Won (Player) %d -> %d (follows the game mode's Match Won) (%u)", int(wonOwn), int(set), ++wonOwnSet_);
+            }
         }
         if (want.clearPlayerDed && GetBool(lastGameMode_, "Player DED", now) && now) {
             SetBool(lastGameMode_, "Player DED", false);
@@ -3423,6 +3450,7 @@ private:
                 g.sheet = GuestClassOnHost(ReportedSheet(e), true, UnrestrictedHere());
             }
             if (g.sheet && g.sheet->noPain) adapter_.ClearPain(w);
+            if (g.sheet && g.sheet->noDislocation) adapter_.HoldNoDislocation(w);
             if (!statsDue || (!g.sheet && !g.tracks.who)) continue;
             g.tracks.lightenHeld = true;
             adapter_.ApplyClassStats(w, g.sheet ? *g.sheet : ClassSheet{}, g.tracks);
@@ -3492,6 +3520,7 @@ private:
         const bool applies = picked && !ClassesOff() && ClassProblems(*picked, UnrestrictedHere()).empty() && ClassAppliesHere(lobby_.InLobby(), lobby_.InClassesLobby());
         UObject* const me = adapter_.PlayerWillie(0);
         if (applies && picked->noPain) adapter_.ClearPain(me);
+        if (applies && picked->noDislocation) adapter_.HoldNoDislocation(me);
         // The game's own bite: one press starts it and the next ends it (Willie_BP Bite Event).
         if (const SHORT key = GetAsyncKeyState(cfg_.classBiteKey); (key & 1) && applies && picked->bite && me && !ui::Typing() && !game::fetchlink::KeysHeld()) {
             Call(me, "Bite Event").invoke();
@@ -3599,9 +3628,9 @@ private:
         if (!adapter_.BindInputs(w)) return;
         in.Target(w);
         InputApplier::Step s = in.Tick(dt * 1000.f);
-        // Not played on the host (sync audit item 15): the camera lock flips the host's own setting (Willie_BP.cpp:11280),
-        // the middle mouse button runs a debug damage trace (:11067).
-        auto played = [](Action a) { return a != Action::ToggleCameraLock && a != Action::MiddleMouse; };
+        // Not played on the host (sync audit item 15): the camera lock flips the host's own setting (Willie_BP.cpp:18062-18064).
+        // Build 26568321's M / N / O debug keys (:17801-17824) are no Action at all, so they are never replayed.
+        auto played = [](Action a) { return a != Action::ToggleCameraLock; };
         for (Action a : s.released) if (played(a)) adapter_.FireAction(w, a, false);
         for (Action a : s.pressed) if (played(a)) adapter_.FireAction(w, a, true);
         // The client's mouse axes come scaled by its own look settings; the game multiplies by mine again (item 16).
@@ -3871,7 +3900,7 @@ private:
             const game::fetchlink::Replaying replaying;   // Fetch's recorder saw these when they were pressed
             for (size_t i = 0; i < kActionCount; ++i) {
                 const Action a = Action(i);
-                if (!((diff >> i) & 1u) || a == Action::ToggleCameraLock || a == Action::MiddleMouse) continue;
+                if (!((diff >> i) & 1u) || a == Action::ToggleCameraLock) continue;
                 adapter_.FireAction(me, a, ((held >> i) & 1u) != 0);
                 ++fired;
             }
@@ -3945,7 +3974,7 @@ private:
                     const Axis a = Axis(bind.index);
                     const float value = game::Adapter::ReadAxisParam(f, params);
                     capture_.OnAxis(a, value);
-                    // Host input delay: not the look axes (they turn the host's own camera as well as aim, Willie_BP.cpp:11410-11560).
+                    // Host input delay: not the look axes (they turn the host's own camera as well as aim, Willie_BP.cpp:18261-18431).
                     if (LocalDelays() && !IsLookAxis(a)) { delayedIn_.PushAxis(NowMs(), uint8_t(bind.index), value); return true; }
                     return hostPlays && !(a == Axis::TurnMouse || a == Axis::LookMouse || a == Axis::TurnGamepad || a == Axis::LookGamepad);
                 }
@@ -4569,6 +4598,10 @@ private:
     }
     // The sender owns `from` (checked on receipt); the write goes to the target's owner alone, never back to the sender.
     void RouteHostRemote(uint8_t senderSlot, const sync::RemoteWriteMsg& m) {
+        if (m.kind == sync::RemoteKind::Talk) {   // for the bots, which are here; the host's own lines reach them natively
+            if (senderSlot != kHostSlot) ApplyTalk(m);
+            return;
+        }
         const uint8_t owner = OwnerSlotOf(m.target, leases_.holders());
         if (owner == 0xFF || owner == senderSlot) { ++remoteDropped_; return; }
         if (owner == kHostSlot) ApplyRemote(m);
@@ -4576,7 +4609,23 @@ private:
     }
     // The owner makes the write on its own fighter, after its own checks: a push as it came (Decode capped it), a revive
     // only from a teammate (Team Int, as Get_Up_Pal tests it, here) and once a second, a let-go only of that hold.
+    // A client's fighter spoke at m.target on its screen: its stand-in here says it to the bots (Adapter::TalkAt), at most
+    // one line per speaker per kTalkEveryMs.
+    void ApplyTalk(const sync::RemoteWriteMsg& m) {
+        UObject* const speaker = standIns_.ActorOf(m.from);
+        UObject* heard = OwnedActorOf(m.target);
+        if (!heard) heard = standIns_.ActorOf(m.target);
+        if (!speaker || !heard || !talkGate_.Allow(m.from, game::SteadyNowMs()) || !adapter_.TalkAt(speaker, heard, m.vec.x, m.vec.y)) {
+            ++remoteDropped_;
+            return;
+        }
+        ++remoteApplied_;
+        if (++talksApplied_ <= 20)
+            HSM_LOG("session: e%u spoke at e%u (aggression %.2f, fear %.2f): Func Talk to Others on its stand-in here", m.from, m.target,
+                    m.vec.x, m.vec.y);
+    }
     void ApplyRemote(const sync::RemoteWriteMsg& m) {
+        if (m.kind == sync::RemoteKind::Talk) { ++remoteDropped_; return; }   // the host's alone (RouteHostRemote)
         UObject* me = OwnedActorOf(m.target);
         if (!me) { ++remoteDropped_; return; }
         bool done = false;
@@ -4604,6 +4653,13 @@ private:
                 if (!DeflectFresh(m)) break;   // combat_copies: the second copy of a knock
                 done = adapter_.PushWeapon(me, m.bone, FVector{ m.vec.x, m.vec.y, m.vec.z });
                 break;
+            case sync::RemoteKind::Press:     // rev 44: a hold on my wound stops its blood here, where my bleeding is counted
+                if (!standIns_.ActorOf(m.from)) break;
+                done = adapter_.PressWound(me, sync::kPoseBoneNames[m.bone], FVector{ m.vec.x, m.vec.y, m.vec.z });
+                if (done && ++pressesApplied_ <= 20)
+                    HSM_LOG("session: e%u presses my e%u's %s: Heal and Restore run here", m.from, m.target, sync::kPoseBoneNames[m.bone]);
+                break;
+            case sync::RemoteKind::Talk: break;
         }
         if (done) ++remoteApplied_;
         else ++remoteDropped_;
@@ -6028,8 +6084,10 @@ private:
         if (ev.rematch) { LogPairing("rematch"); RespawnAll(); }
         if (!respawnQueue_.empty()) { const uint8_t e = respawnQueue_.front(); respawnQueue_.pop_front(); RespawnEntity(e); }
         if (progression_ && !bots_.empty() && match_.phase() == MatchPhase::Live) {
-            // Every opponent out, as the stock Enemy Count takes it: dead, given up or downed (Willie_BP Event Lose Match), and
-            // out for good (OutLatch). A hired mercenary need not fall. The fight then waits for G (CoopResultsMs).
+            // Every opponent out, as the stock Enemy Count takes it: dead, given up or downed (Willie_BP Event Lose Match, build 26568321
+            // :16134-16224: "Give Up" is set for every bot but a zombie, Skeletron or a sleeper, so a zombie yields only on the
+            // AI controller's "My Give Up"; Progression's bots are plain Willies, the Zombies format never reaches this test),
+            // and out for good (OutLatch). A hired mercenary need not fall. The fight then waits for G (CoopResultsMs).
             std::vector<CoopFighter> sides;
             int dead = 0, yielded = 0;
             for (auto& [e, ref] : bots_) {
@@ -6961,7 +7019,7 @@ private:
         m.damagePct = SessionDamage();
         m.teamKit = uint8_t(c.teamKit);
         if (IsTag(c.format) && tag_.active()) { m.tagIt = tag_.it(); m.fuseLeftMs = uint16_t(std::min<uint32_t>(tag_.FuseLeftMs(now), kFuseMaxS * 1000u)); }   // Wave 3: "it" and its fuse
-        m.physics = game::OwnPhysics();   // rev 31: the host's Gore Rate, Bone Snapping and Dead Weight Scale
+        m.physics = game::OwnPhysics();   // rev 31: the host's Gore Rate, Bone Snapping and Dead Weight Scale; rev 44: and Weapon Weight Scale
         m.waveBreakS = c.waveBreakS; m.clearGroundMin = c.clearGroundMin; m.clearCount = clearCount_;
         m.syncMode = uint8_t(nextSync_);   // rev 29: the mode the next map runs
         if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
@@ -8822,7 +8880,7 @@ private:
     uint32_t ownDiedAt_ = 0;
     GiveUpHold giveUp_;
     std::unordered_map<uint8_t, uint32_t> gaveUp_;   // host: entity -> when it held G (free-for-all, teams, Duel)
-    uint32_t dedCleared_ = 0, wonSet_ = 0;           // TickStockFlags: times the game mode's flags were changed
+    uint32_t dedCleared_ = 0, wonSet_ = 0, wonOwnSet_ = 0;         // TickStockFlags: times the game mode's flags were changed
     bool giveUpWait_ = false;                        // G is held but there is nothing to give up yet (queued for respawn / round gap)
     MapResetGate mapGate_;                           // a queued map reset waits for the respawn and the drop clear
     // Progression vote (ProgVoteTick). Host: the engine and the options; every machine: the state it last heard.
@@ -9066,6 +9124,8 @@ private:
     uint32_t nextKeepAlive_ = 0, streamsDropped_ = 0, claimsRejected_ = 0;
     sync::RemoteGate remoteGate_;                          // the owner's side of RemoteWrite revives
     uint64_t remoteApplied_ = 0, remoteDropped_ = 0;
+    sync::TalkGate talkGate_;                              // the host's side of RemoteWrite talk
+    uint64_t pressesApplied_ = 0, talksApplied_ = 0;
     uint16_t remoteSeq_ = 0;
     uint32_t spectateOverlaysAt_ = 0;   // the last HideDeathOverlays scan
     int spectateScreensLogged_ = 0;   // "widgets on screen" lines at a spectate start (the first 10 a game run)
@@ -9143,11 +9203,11 @@ bool StartMod(const Config& cfg) {
     });
     // A stand-in's own timelines tick with its TimelineComponents, not with the blocked ReceiveTick. These ones run the
     // Willie's own logic, which on a stand-in is the owner's to run and stream:
-    //   Timeline_0/1 (Willie_BP.cpp:21168, 21232), the grip check: with the stand-in's tonus at zero, the hand's constraint
+    //   Timeline_0/1 (Willie_BP.cpp:29762, 29814), the grip check: with the stand-in's tonus at zero, the hand's constraint
     //     force soon beats its strength and the hand lets go: Set Up Right/Left Hand Weapon with no weapon (a drop, left
     //     floating by the stand-in's gravity-off weapon), Release Grab, or Get Damage on the hand;
-    //   Timeline (21139) and Timeline_10 (21297, 21302), waking up: they clear Invulnerable, and Timeline_10 overwrites
-    //     Consciousness.
+    //   Timeline (29750, Wake Up Rate; its end broadcasts Woke Up) and Timeline_10 (29871), waking up: Timeline_10 overwrites
+    //     Consciousness and Initial Wake Up State.
     HookFunctionsMatching([](const std::string& n) {
         return n == "Timeline_0__UpdateFunc" || n == "Timeline_1__UpdateFunc" || n == "Timeline__UpdateFunc" ||
                n == "Timeline_10__UpdateFunc" || n == "Timeline_10__FinishedFunc";

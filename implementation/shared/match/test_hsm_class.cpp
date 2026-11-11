@@ -198,6 +198,11 @@ int main() {
     ClassSheet noGrip; noGrip.grip = 0.1; noGrip.hands = 0.1; CHECK(ClassPoints(noGrip) == 0);
     // Stamina: above 100% only part of a drop is felt, below it more, and gains are left alone.
     CHECK(ClassStaminaNext(100, 90, 2.0) == 95 && ClassStaminaNext(100, 90, 0.5) == 80 && ClassStaminaNext(90, 100, 2.0) == 100 && ClassStaminaNext(1, 0, 0.1) == 0);
+    // Recovery: the game's own small rise is scaled (and never past 100); a set, a drop and no change are left alone.
+    CHECK(ClassRecoveryNext(50, 51, 2.0) == 52 && ClassRecoveryNext(50, 51, 0.5) == 50.5 && ClassRecoveryNext(50, 51, 1.0) == 51);
+    CHECK(ClassRecoveryNext(99.5, 100, 3.0) == 100 && ClassRecoveryNext(50, 50 + kClassRecoveryStepMax, 2.0) == 50 + 2 * kClassRecoveryStepMax);
+    CHECK(ClassRecoveryNext(5, 20, 2.0) == 20 && ClassRecoveryNext(50, 40, 2.0) == 40 && ClassRecoveryNext(50, 50, 2.0) == 50 && ClassRecoveryNext(0, 100, 0.5) == 100);
+    CHECK(ClassRecoveryNext(50, 51, 0.0) == 50 && ClassRecoveryNext(50, 51, std::nan("")) == 51);
     // A value saved before Recovery and Endurance reads as the game's own, and new ones come through.
     CHECK(DecodeClass("r1 w1 s1 g1 h1 k1 n1 b1 m1 j5000 f000000000").has_value() && DecodeClass("r1 w1 s1 g1 h1 k1 n1 b1 m1 j5000 f000000000")->recovery == 1);
     ClassSheet newOnes; newOnes.recovery = 2; newOnes.endurance = 1.5;

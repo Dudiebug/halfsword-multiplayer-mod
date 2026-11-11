@@ -219,6 +219,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     bl.loopCount = 4; bl.extraVelocity = true; bl.velocity = sync::V3{ -30, 12, 400 }; bl.bleeding = 37; s.push_back(Encode(bl));
     combat::PaintFxMsg wd; wd.entity = uint8_t(kMaxWillies); wd.kind = combat::FxKind::Wound; wd.bone = "head"; wd.extent = sync::V3{ 3, 3, 3 };
     wd.damageRate = 1.5; s.push_back(Encode(wd));
+    combat::PaintFxMsg xb; xb.entity = 2; xb.kind = combat::FxKind::Crossbow; xb.bone = "hand_r"; xb.bodyPart = 3; s.push_back(Encode(xb));
     combat::EquipStateMsg eq; eq.entity = 2; eq.seq = 9; eq.hand = {1, 4}; eq.sheathed = 0x04; s.push_back(Encode(eq));
     PropCensusMsg pc; pc.seq = 3; pc.part = 1; pc.parts = 2;
     pc.entries = {CensusEntry{0, 0x1234u, 10, -20, 30}, CensusEntry{9, 0xBEEFu, -500, 0.5f, 120}}; s.push_back(Encode(pc));

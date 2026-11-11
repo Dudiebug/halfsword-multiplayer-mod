@@ -1,6 +1,7 @@
 // Which actor classes the object walk never announces (0.8.0-pre2, M0 fix): fighters' gore, blood, decals, particle and
-// Niagara actors, effect projectiles and the mod's own helper actors. Their physics bodies are cosmetic, per machine, and
-// short-lived: announcing one would flood the wire with objects no other machine could ever bind. Game-independent.
+// Niagara actors, effect projectiles, crossbow bolts and the mod's own helper actors. Their physics bodies are cosmetic,
+// per machine, and short-lived: announcing one would flood the wire with objects no other machine could ever bind.
+// Game-independent.
 //
 // A class name is split into words (at '_', digits, other punctuation, a lower-to-upper change and the end of an upper-case
 // run: "BP_MeshBloodSimManager_C" -> bp, mesh, blood, sim, manager, c) and the class is skipped when any word is on the
@@ -30,6 +31,9 @@ inline const char* const* Words(size_t& n) {
         "niagara", "particle", "particles", "emitter", "fx", "vfx", "effect", "effects", "spark", "sparks",   // engine effects
         "wasps", "flies",                                                            // insect swarms (Niagara actors)
         "hsm", "generator",                                                          // the mod's own actors, spawn helpers
+        // Crossbow bolts ("Projectle" is the game's spelling): each machine's bolt is its own (the owner's makes the hit
+        // claim, a stand-in's is the cosmetic replay of combat/hsm_crossbow_fx.h), so none is ever one shared object.
+        "projectle", "projectile", "projectiles",
     };
     n = sizeof kWords / sizeof kWords[0];
     return kWords;

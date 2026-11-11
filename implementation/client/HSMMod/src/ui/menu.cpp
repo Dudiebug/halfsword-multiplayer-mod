@@ -1207,8 +1207,7 @@ void Build() {
     UObject* anchor = *anchorPtr;
     g.kit = Kit(g.menu, Vis::Visible);
     g.maker = mp::Maker(&g.kit);
-    if (!startup) if (UObject** tf = Field<UObject*>(g.menu, "TextFreeMode"); tf && *tf) g.kit.FontFrom(*tf, "UI_MainMenuSNF.TextFreeMode");
-    if (!g.kit.HasFont()) if (Text probe = g.kit.MakeText()) g.kit.FontFrom(probe.get(), "a new TextBlock");   // sizes by font, not by scale
+    ProbeFont(g.kit, g.menu);   // TextFreeMode on the older menu, else a new TextBlock: sizes by font, not by scale
     if (!InjectOpenButton(anchor, startup)) return;
     BuildPanel();
 }

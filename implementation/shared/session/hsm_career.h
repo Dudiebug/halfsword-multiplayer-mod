@@ -8,14 +8,16 @@
 // The rest of the stock end (owner decisions 2026-11-03). The stock claim, lose and death screens (UI_NextFIght, UI_Lose,
 // UI_DeathDoor) never run in a session, so the host tells every player how the fight went (ProgressionResult 69, before the
 // Travel back to the Tavern) and each machine does to its own career what those screens would have:
-//   the game's own capture  GI_Settings Override Player Character Equipment(false): each limb heals 10, between 25 and 100,
-//                           and a clean win keeps the gear held and worn (decomp GI:765-953). A death is no exception: no
-//                           Hell, no new character, only the hurt it left.
+//   the game's own capture  GI_Settings Override Player Character Equipment(false): each limb heals 10, between 10 and 100
+//                           (build 26568321; 25 and 100 before), the character's Health 25 more, between 25 and 100, and a
+//                           clean win keeps the gear held and worn (decomp GI_Settings.cpp:786-950). A death is no exception:
+//                           no Hell, no new character, only the hurt it left (Player Just Died floors limbs and Health at 50).
 //   a win                   every player is paid the whole purse, and half of it as reputation on their rank; a Tourney won
 //                           ranks every player up (CareerAfterFight)
 //   the time                one step on (Skip Time Event), by the host's clock: its Travel carries Day Time and Day Count
 // A fight's start carries the body in: the mod spawns the players itself, so it sets the stock spawner's start body
-// (CareerBodyAtSpawn).
+// (CareerBodyAtSpawn). In build 26568321 that body is the passport's (BodyPartConditions_53 and CharacterCondition_56, applied
+// to the fighter 1 s after BeginPlay), no longer the game instance's Player Body Condition.
 #pragma once
 #include "hsm_protocol.h"
 #include <algorithm>

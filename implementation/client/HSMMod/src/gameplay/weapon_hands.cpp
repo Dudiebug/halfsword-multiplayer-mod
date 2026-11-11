@@ -263,11 +263,11 @@ ObjectSync::DropResult ObjectSync::DropFromHands(UObject* standIn, int hand, UOb
         bool ok = false;
         if (h == 0) {
             Call c(standIn, "Set Up Right Hand Weapon");
-            c.set<bool>("Dropped With no Damage", true);
+            c.set<bool>("Dropped With no Damage", true).set<bool>("Don't Save", true);   // Don't Save: Willie_BP.cpp:9372
             ok = c.invoke();
         } else {
             Call c(standIn, "Set Up Left Hand Weapon");
-            c.set<bool>("Dropped with No Damage", true);
+            c.set<bool>("Dropped with No Damage", true).set<bool>("Don't Save", true);   // Willie_BP.cpp:8714
             ok = c.invoke();
         }
         if (!ok) break;
@@ -434,18 +434,35 @@ void ObjectSync::SelfDropped(uint8_t e, UObject* standIn, int h, StandInHand& sh
     LetLoose(e, h, w, nowMs);
 }
 
+// Whether the stand-in's hand is torn off: the game's Set Up Right/Left Hand Weapon then attaches nothing (Willie_BP.cpp:9180
+// / :8544, "if (!Hand R/L Torn Off)"), so a weapon refused there is the game's answer. Logged for the first few, then silent.
+bool ObjectSync::HandTornOff(UObject* standIn, int h) {
+    bool torn = false;
+    GetBool(standIn, h == 0 ? "Hand R Torn Off" : "Hand L Torn Off", torn);
+    static uint64_t logged = 0;
+    if (torn && ++logged <= kLogFirst)
+        HSM_LOG("props: %s hand %d is torn off: it takes no weapon (the game attaches nothing to a missing hand)", ObjectName(standIn).c_str(), h);
+    return torn;
+}
+
 // "Set Up Right/Left Hand Weapon" with that weapon, as the game's own pick-up does (Willie_BP.cpp:17357): the hand grips
-// it and the grip constraint pulls it in; the rig drives it from the next pose on.
+// it and the grip constraint pulls it in; the rig drives it from the next pose on. 26568321 no longer switches the weapon's
+// physics around the attach (the old SetSimulatePhysics(false) ... (true), Willie_BP_C__Set_Up_Right_Hand_Weapon.diff), so a
+// copy the mod froze (a held prop, adapter.cpp's thaw) is switched on here first; "Don't Save" keeps the stand-in's own
+// passport out of it (:8714 / :9372).
 bool ObjectSync::TakeIntoHand(UObject* standIn, int h, UObject* weapon) {
     if (adapter_->IsModActor(weapon)) return false;   // #612: the CTF flag is nobody's pickup, not even taken back
+    if (HandTornOff(standIn, h)) return false;
+    Call rc(weapon, "K2_GetRootComponent");
+    EnableSimulation(rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr);
     bool ok = false;
     if (h == 0) {
         Call c(standIn, "Set Up Right Hand Weapon");
-        c.set<UObject*>("Weapon R", weapon);
+        c.set<UObject*>("Weapon R", weapon).set<bool>("Don't Save", true);
         ok = c.valid() && c.invoke();
     } else {
         Call c(standIn, "Set Up Left Hand Weapon");
-        c.set<UObject*>("Weapon L", weapon);
+        c.set<UObject*>("Weapon L", weapon).set<bool>("Don't Save", true);
         ok = c.valid() && c.invoke();
     }
     return ok && ObjectField(standIn, h == 0 ? 1 : 2) == weapon && ObjectField(weapon, 0) == standIn;
@@ -496,6 +513,7 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
     }
     UObject* w = actors[size_t(pick)];
     if (!TakeIntoHand(standIn, h, w)) {
+        if (HandTornOff(standIn, h)) return false;   // the game's answer for a missing hand, said by HandTornOff
         HSM_LOG("props: stand-in of e%u did not take %s into hand %d", e, ObjectName(w).c_str(), h);
         return false;
     }
@@ -536,8 +554,11 @@ bool ObjectSync::SpawnIntoHand(uint8_t e, UObject* standIn, int h, uint32_t clas
     UClass* cls = weaponClasses_.count(classHash) ? weaponClasses_[classHash].first : nullptr;
     bool ok = false;
     if (cls) {
+        // A torn-off hand takes nothing (Willie_BP.cpp:9180 / :8544); the weapon the game spawns is born simulating, nothing
+        // of the mod's has frozen it, so no EnableSimulation here (unlike TakeIntoHand).
+        if (HandTornOff(standIn, h)) return false;
         Call c(standIn, h == 0 ? "Set Up Right Hand Weapon" : "Set Up Left Hand Weapon");
-        c.set<UClass*>("Weapon Class", cls);
+        c.set<UClass*>("Weapon Class", cls).set<bool>("Don't Save", true);
         ok = c.valid() && c.invoke();
     }
     UObject* w = ok ? ObjectField(standIn, h == 0 ? 1 : 2) : nullptr;

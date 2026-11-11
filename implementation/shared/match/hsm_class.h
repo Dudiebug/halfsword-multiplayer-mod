@@ -34,7 +34,7 @@ enum class ClassHeal : uint8_t { Off, Logan, Weathered };
 
 struct ClassSheet {
     double run = 1, walk = 1, strength = 1, grip = 1, hands = 1, kick = 1, knockback = 1, bones = 1, mass = 1, jump = kRuleJumpBase;
-    double recovery = 1, endurance = 1;     // the game's Regen Rate; how much of a drop in Stamina is felt
+    double recovery = 1, endurance = 1;     // how much of the body's own healing is kept (ClassRecoveryNext); how much of a drop in Stamina is felt
     bool noPain = false, quickKicks = false, bite = false, noDislocation = false;
     bool grappler = false, panicker = false;   // a perk and a flaw: what they do is below (ClassHoldRate, ClassEnduranceNow)
     // Half Wolverine's. They need the mod.
@@ -341,6 +341,15 @@ inline double ClassStaminaNext(double last, double now, double endurance) {
     if (!(now < last) || !(endurance > 0.0)) return now;
     return std::max(0.0, last - (last - now) / endurance);
 }
+// Recovery over one step, for Health and each body part (0 to 100). The game heals each a little every frame and has no
+// rate to scale (build 26568321: nothing reads Regen Rate), so a small rise since the last look is that healing and is
+// scaled. A bigger rise is a set (a spawn, a revive, a joint put back: 15 and up) and is left alone, as is any drop.
+constexpr double kClassRecoveryStepMax = 2.5;   // the most the game heals in one look (100 ms) is about 1.1
+inline double ClassRecoveryNext(double last, double now, double recovery) {
+    const double rise = now - last;
+    if (!(rise > 0.0) || rise > kClassRecoveryStepMax || !(recovery >= 0.0)) return now;
+    return std::min(100.0, last + rise * recovery);
+}
 // The next class in the picker's order; an unknown name starts from the first.
 inline std::string ClassNameStep(std::string_view current, int dir) {
     const int n = ClassPickCount();
@@ -426,7 +435,7 @@ inline const char* ClassFieldInfo(int i) {
         case 8: return "How fast you run. Most fighting happens at a walk, so this costs and earns less than WALK. Lowering it earns nothing while WALK is raised, and pays fully only when WALK comes down too.";
         case 9: return "How fast you walk, your main speed in a fight, so this costs and earns more than RUN. Lowering it earns nothing while RUN is raised, and pays fully only when RUN comes down too.";
         case 10: return "How strong your body is: it's what lets you lift and hold people, carry armour without slowing, and it makes you heavier. Costs 60 power per 100%, and earns power when lowered, down to 70%.";
-        case 11: return "How fast your body recovers by itself: health, consciousness and pain. No mod needed. Costs 30 power per 100%, and earns power when lowered, down to 70%.";
+        case 11: return "How fast your body heals by itself: your health and each limb's. No mod needed. Costs 30 power per 100%, and earns power when lowered, down to 70%.";
         case 12: return "How long your stamina lasts. Above 100% you tire more slowly. Costs 25 power per 100%, and earns power when lowered, down to 70%.";
         case 13: return "How rigid your hands are, which makes your punches hit harder. It only starts to matter well above 100% without gauntlets. Costs 15 power per 100%. Lowering it earns nothing.";
         case 14: return "How far your blows push and throw people. Earns power when lowered, down to 70%.";

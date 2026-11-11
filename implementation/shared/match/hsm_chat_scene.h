@@ -48,8 +48,16 @@ inline Rgba ChatNameInk(const MatchInfo& m, uint8_t entity) {
 
 struct ChatEntry { std::string name; Rgba ink = style::kIron; std::string text; uint32_t atMs = 0; };
 
+// Where the chat runs: wherever the match HUD shows, and in any fight level of a session even with no match running (a
+// host alone in a mode that needs two players, players still joining, between matches). Chat and /bug are the session's,
+// not the match's: tying them to the match HUD left a fight with no match without either (0.8.0-pre46, Survival test).
+// The Progression hub is no fight level (no pawn, the game's cursor), so it has none; nor has a role=server machine
+// (localFighter false: nobody plays on it).
+struct ChatWhere { bool matchHud = false, session = false, fightLevel = false, localFighter = false; };
+inline bool ChatRuns(const ChatWhere& w) { return w.matchHud || (w.session && w.fightLevel && w.localFighter); }
+
 struct ChatLocal {
-    bool hud = false;                // the match HUD shows: the chat runs only then
+    bool hud = false;                // the chat runs (ChatRuns): only then is it drawn and are keys read
     uint32_t hudAtMs = 0;            // when it came up (the idle hint's start)
     ChatKey key = ChatKey::Enter;
     std::vector<ChatEntry> lines;    // oldest first; the newest kChatLogLines are used

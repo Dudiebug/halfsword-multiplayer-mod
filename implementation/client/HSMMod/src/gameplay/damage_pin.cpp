@@ -11,12 +11,13 @@ using namespace ue;
 
 namespace {
 constexpr const char* kHookOwner = "damagepin";
-// GI_Settings.cpp:4-5; the slider sets them (UI_GameSettings.cpp:268, 277), Get Damage reads them (Willie_BP.cpp:2974).
+// GI_Settings.cpp:4-5; the slider sets them (UI_GameSettings.cpp:268, 277), Get Damage reads the cached copy (Willie_BP.cpp:4876).
 constexpr const char* kPlayer = "Player Damage Rate";
 constexpr const char* kNpc = "NPC Damage Rate";
-// Willie_BP.cpp:1187: the rate Get Damage multiplies by, cached by BeginPlay (:16490) and Apply Gameplay Settings (:7681)
-// from the Player flag, which is only computed 0.1 s after BeginPlay (:13033) or set by the mod after a spawn.
-constexpr const char* kCache = "Damagr Rste Var";
+// Willie_BP.cpp:1235: the rate Get Damage multiplies by, cached by Apply Gameplay Settings (:10578; the game's own spelling
+// is "Damagr Rate Var", it was "Damagr Rste Var" before build 26568321) and by Damage Rate (:24377) from the Player flag, which
+// is only computed 0.1 s after BeginPlay or set by the mod after a spawn.
+constexpr const char* kCache = "Damagr Rate Var";
 constexpr uint64_t kSliderScanMs = 15000, kSweepMs = 5000;   // a full object scan: spawns refresh their own (RefreshDamageCache)
 
 struct Pin {
@@ -34,7 +35,7 @@ struct Pin {
 };
 Pin g;
 
-// The pinned GI_Settings doubles (sync audit 10, 13): Willie_BP.cpp:7680-7703 copies each onto the fighter by name.
+// The pinned GI_Settings doubles (sync audit 10, 13): Willie_BP.cpp:10578-10600 copies each onto the fighter by name.
 struct Phys {
     bool active = false;                   // pinned (the host sent a value) and the player's own saved
     bool restore = false;                  // unpinned: the next sweep writes the own value back onto the fighters
@@ -44,12 +45,37 @@ std::array<Phys, kPinnedPhysics> gp;
 bool physSweepNow = false;
 uint64_t physNextSweep = 0;
 
+// The weapons' own copy of Weapon Weight Scale (build 26568321): a weapon takes the setting as its Extra Weight Scale when
+// it spawns (ModularWeaponBP.cpp:1432, 1981) and a held one weighs Mass Default times it (Set Weapon Damping Pick Up, :385).
+// The settings screen writes every weapon and runs that pick-up again on the held ones (UI_GameSettings.cpp:366-379). Here
+// a held weapon gets the mass alone: the pick-up also resets the damping and collision the stand-ins' rigs own.
+void SweepWeaponWeight(double forced) {
+    UClass* weapon = FindClass("ModularWeaponBP_C");
+    if (!weapon) return;
+    int changed = 0;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* w = ObjectAt(i);
+        if (!w || IsDefaultObject(w) || !IsA(w, weapon) || IsGarbage(w)) continue;
+        double* scale = Field<double>(w, "Extra Weight Scale");
+        if (!scale || *scale == forced) continue;
+        *scale = forced; ++changed;
+        bool held = false;
+        UObject** mesh = Field<UObject*>(w, "BaseMesh");
+        const float* mass = Field<float>(w, "Mass Default");
+        if (GetBool(w, "Is Held", held) && held && mesh && *mesh && mass)
+            Call(*mesh, "SetMassOverrideInKg").setName("BoneName", FName{}).set<float>("MassInKg", float(*mass * forced)).set<bool>("bOverrideMass", true).invoke();
+    }
+    static unsigned logged = 0;
+    if (changed && ++logged <= 5) HSM_LOG("physics: Weapon Weight Scale %.3f written to %d weapon(s)", forced, changed);
+}
+
 void SweepPhysics() {
     for (UObject* w : FindInstances("Willie_BP_C")) {
         if (IsGarbage(w)) continue;
         for (size_t i = 0; i < kPinnedPhysics; ++i)
             if (gp[i].active || gp[i].restore) if (double* d = Field<double>(w, kPinnedPhysicsNames[i]); d && *d != gp[i].forced) *d = gp[i].forced;
     }
+    if (const Phys& ph = gp[kPinnedWeaponWeight]; ph.active || ph.restore) SweepWeaponWeight(ph.forced);
 }
 
 double* Rate(UObject* o, const char* name) { return o ? Field<double>(o, name) : nullptr; }
@@ -190,7 +216,7 @@ void TickDamagePin(bool active, uint16_t stored, bool host) {
 }
 
 std::array<float, kPinnedPhysics> OwnPhysics() {
-    std::array<float, kPinnedPhysics> out{ -1.f, -1.f, -1.f };
+    std::array<float, kPinnedPhysics> out = kUnpinnedPhysics;
     for (size_t i = 0; i < kPinnedPhysics; ++i) {
         double* d = Rate(g.gi, kPinnedPhysicsNames[i]);
         const double v = gp[i].active ? gp[i].own : d ? *d : -1.0;

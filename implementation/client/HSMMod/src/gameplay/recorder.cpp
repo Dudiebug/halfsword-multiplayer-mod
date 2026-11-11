@@ -57,7 +57,7 @@ constexpr const char* kSlot[rec::kSheathSlots] = {"Weapon Slot R 1", "Weapon Slo
 constexpr const char* kActionText[kActionCount] = {
     "Grab Left", "Grab Right", "Guard Left", "Guard Right", "Thrust", "Thrust Gamepad", "Jump", "Crouch Key",
     "Crouch Hold", "Run", "Swap Hands", "Toggle Camera Lock", "Key Forward", "Key Back", "Key Left", "Key Right",
-    "Talk", "RightMouseButton", "MiddleMouseButton"};
+    "Talk", "RightMouseButton", "Chain Attack", "Undress"};
 
 float Finite(double v) { return std::isfinite(v) ? float(v) : 0.f; }
 rec::F3 F3Of(const sync::V3& v) { return {Finite(v.x), Finite(v.y), Finite(v.z)}; }

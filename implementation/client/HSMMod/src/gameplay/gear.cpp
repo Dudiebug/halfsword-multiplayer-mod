@@ -110,7 +110,7 @@ std::vector<uint8_t> RandomPassportBlob(Adapter& a, int tier, WeaponFilter weapo
     if (!g) { HSM_LOG("gear: FinishSpawningActor failed for the generator (tier %d)", rank); return blob; }
 
     Call make(g, "Generate Character");
-    make.set<UClass*>("Actor Class", willie).set<uint8_t>("Nationality", 0).set<uint8_t>("Tier", uint8_t(rank))
+    make.set<UClass*>("Actor Class", willie).set<uint8_t>("Nationality", 0).set<uint8_t>("Faction", 1).set<uint8_t>("Tier", uint8_t(rank))
         .set<bool>("Is Mercenary", false).set<bool>("Ignore Budget", false);
     bool ok = false;
     {

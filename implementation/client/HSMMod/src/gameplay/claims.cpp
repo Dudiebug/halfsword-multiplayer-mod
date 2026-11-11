@@ -102,6 +102,8 @@ bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
                        [this](ScriptCall& c) { AfterDealComplexDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Damage", [this](ScriptCall& c) { return OnGetDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Up, Pal", [this](ScriptCall& c) { OnGetUpPal(c); return false; });
+    n += ObserveScript(kHookOwner, "Willie_BP_C", "Heal and Restore", [this](ScriptCall& c) { OnHealAndRestore(c); });
+    n += ObserveScript(kHookOwner, "Willie_BP_C", "Func Talk to Others", {}, [this](ScriptCall& c) { OnTalk(c); });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
     HSM_LOG("claims: %s (%d function(s) hooked now; components %s, box class %s)",
@@ -147,6 +149,14 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
     UObject* self = c.self();
     UObject* comp = nullptr;
     c.get("Collided Component", comp);
+    // A class's kick (build 26568321 has no foot weapon to carry it): a body-on-body hit while the striker's leg is out has
+    // its Kick Power scaled here, before the game's Get Damage and the claim below both read it.
+    if (UObject* const body = comp ? OuterOf(comp) : nullptr; body && body != c.self())
+        if (const double kick = adapter_->ClassKickNow(body); kick != 1.0) {
+            double power = 1.0;
+            if (c.get("Kick Power", power) && c.set("Kick Power", power * kick) && ++n_.classKicks <= 5)
+                HSM_LOG("claims: class kick x%.2f on %s by %s", kick, ObjectName(c.self()).c_str(), ObjectName(body).c_str());
+        }
     {
         UObject* const by = comp ? adapter_->FighterOf(OuterOf(comp)) : nullptr;
         const bool selfStandIn = standIns_->EntityOf(self) != 0, selfMine = env_.ownedEntity(self) != 0;
@@ -418,6 +428,61 @@ void Claims::OnGetUpPal(ScriptCall& c) {
     if (++revivesSent_ <= kLogFirst) HSM_LOG("claims: e%u helps e%u up (Get Up, Pal on its stand-in); sent to its owner", from, target);
 }
 
+// A hold on a wound. A fighter's grab, as it takes hold, runs Heal and Restore(grab point, Grab Bone, 10, 0, none, false) on
+// the fighter held (Willie_BP.cpp:17093, 17203, 25837, 26100), which ends the blood fountains within 10 uu of the hand. On a stand-in
+// that stops only this screen's blood: the real fighter's bleeding counts its own fountains (Bleeding Added From Emmitters,
+// :24745), so its owner makes the call. Other callers (a heal poured on a body, a fighter's hand on its own wound) pass a
+// heal amount or a saviour and are not this.
+void Claims::OnHealAndRestore(ScriptCall& c) {
+    const uint8_t target = standIns_->EntityOf(c.self());
+    if (!target || !env_.sendRemote || !env_.ownedActor) return;
+    double heal = 0;
+    UObject* saviour = nullptr;
+    FName bone{};
+    FVector at{};
+    if (!c.get("Heal Amount", heal) || heal != 0.0 || !c.get("Saved By Willie", saviour) || saviour) return;
+    if (!c.get("Bone Name", bone) || !c.get("Location", at)) return;
+    uint8_t from = 0;                               // whose hand: a fighter simulated here that holds this stand-in's mesh
+    for (uint8_t e = 1; e <= kMaxWillies && !from; ++e) {
+        UObject* const mine = env_.ownedActor(e);
+        if (!mine) continue;
+        for (const char* field : { "Grab Component R", "Grab Component L" })
+            if (UObject** comp = Field<UObject*>(mine, field); comp && *comp && OuterOf(*comp) == c.self()) from = e;
+    }
+    if (!from && env_.myEntity) from = env_.myEntity();   // Grab Specific Object: the hold's fields are written after the call
+    if (!from || from == target) return;
+    const std::string name = NameToString(bone);
+    const int pb = sync::PoseBoneIndex(name);
+    FVector origin{};
+    if (pb < 0 || !adapter_->BoneLocation(c.self(), name.c_str(), origin)) {
+        if (++pressesOffBone_ <= 3) HSM_LOG("claims: e%u's hold on e%u at %s is not sent as a wound press (no such pose bone)", from, target, name.c_str());
+        return;
+    }
+    sync::RemoteWriteMsg m;
+    if (!presses_.Make(from, target, pb, sync::V3{ at.x - origin.x, at.y - origin.y, at.z - origin.z }, SteadyNowMs(), m)) return;
+    env_.sendRemote(m);
+    if (++pressesSent_ <= kLogFirst)
+        HSM_LOG("claims: e%u presses e%u's %s (Heal and Restore on its stand-in); sent to its owner", from, target, name.c_str());
+}
+
+// A spoken line. After a voice line the speaker's Func Talk to Others (Willie_BP.cpp:4807) looks for a fighter ahead and
+// tells that fighter's AI (Get Spoken To: its aggression and fear change, it may accept a gift or answer) and the
+// speaker's allies near by (AI Get Alerted). The AI lives on the host; here the fighter found is a stand-in without one,
+// so the host runs the call on the speaker's stand-in. Speaking With is the function's own local, read after it ran.
+void Claims::OnTalk(ScriptCall& c) {
+    const uint8_t from = env_.ownedEntity ? env_.ownedEntity(c.self()) : 0;
+    UObject* heard = nullptr;
+    double aggression = 0, fear = 0;
+    if (!from || !env_.sendRemote || !c.get("Speaking With", heard) || !heard) return;
+    const uint8_t target = standIns_->EntityOf(heard);
+    if (!target || !c.get("Aggressionn", aggression) || !c.get("Fearr", fear)) return;
+    sync::RemoteWriteMsg m;
+    if (!talks_.Make(from, target, aggression, fear, SteadyNowMs(), m)) return;
+    env_.sendRemote(m);
+    if (++talksSent_ <= kLogFirst)
+        HSM_LOG("claims: e%u spoke at e%u's stand-in (aggression %.2f, fear %.2f); sent to the host", from, target, aggression, fear);
+}
+
 void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t attacker, UObject* attackerWillie, UObject* comp,
                        const ObjectSync::Touch* prop) {
     DcdInputs in;
@@ -440,6 +505,13 @@ void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t 
     c.getBool("Extra High Velocity", in.extraHighVelocity);
     UObject* box = nullptr;
     if (c.get("Hit Box", box)) ReadHitBox(box, in);
+    // Build 26568321: a hit on a separate armour collision piece (a Hit Component tagged 'CM') takes that piece's armour
+    // values from its tags (Willie_BP.cpp:3463). A claim names no hit component, so the owner replays it on its body mesh,
+    // without them. Counted and logged: whether stand-ins take such hits at all is for a tester's log to show.
+    if (UObject* hit = nullptr; c.get("Hit Component", hit) && hit && hit != adapter_->Mesh(standIn))
+        if (Call tag(hit, "ComponentHasTag"); tag.valid() && tag.setName("Tag", MakeName("CM")).invoke() && tag.get<bool>("ReturnValue") && n_.armorPiece++ < 5)
+            HSM_LOG("claims: e%u's stand-in was hit on an armour collision piece (%s): its owner replays the blow on the body mesh (%llu)", victim,
+                    ObjectName(hit).c_str(), static_cast<unsigned long long>(n_.armorPiece));
     Xform boneWorld;
     if (!BoneXform(adapter_->Mesh(standIn), bone, boneWorld)) {
         ++n_.noBone;
@@ -782,19 +854,16 @@ void Claims::Effect(const HitClaim& c) {
 }
 
 // My weapon met theirWeapon, a weapon in a hand of defender's stand-in. The game's own parry roll runs on this machine
-// next, in my weapon's hit (ModularWeaponBP:918), and reads the defender: its guard, skill and Fallen come with the
-// owner's Vitals (StandIns), its tonus is written here. A parried blow's claim then carries the game's reduced impulse
-// and cut (Just Parried Rate), where 0.8.0-pre8 and earlier cancelled the whole claim on the victim's machine (sync
-// audit item 1). A weapon in neither hand (a sheathed one bumped) parries nothing (clashUnmatched).
+// next, in my weapon's hit, and read the defender: its stance, skill and Fallen come with the owner's Vitals (StandIns).
+// Build 26568321 has no parry roll on the defender's tonus any more (nothing raises Just Parried Rate), so a clash is only
+// counted here. A weapon in neither hand (a sheathed one bumped) is no clash (clashUnmatched).
 void Claims::NoteClash(uint8_t defender, UObject* theirWeapon) {
     if (!active_ || !ValidEntity(defender) || !theirWeapon) return;
     UObject* standIn = standIns_->ActorOf(defender);
-    const VitalsMsg* v = standIn ? standIns_->Vitals(defender) : nullptr;
-    if (!v) return;
+    if (!standIn) return;
     UObject** right = Field<UObject*>(standIn, "Weapon R");
     UObject** left = Field<UObject*>(standIn, "Weapon L");
     if (!(right && *right == theirWeapon) && !(left && *left == theirWeapon)) { ++n_.clashUnmatched; return; }
-    adapter_->WriteParryTonus(standIn, *v);
     ++n_.clashes;
 }
 

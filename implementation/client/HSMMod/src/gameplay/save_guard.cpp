@@ -15,7 +15,7 @@ namespace hsm::game {
 using namespace hsm::ue;
 namespace {
 
-constexpr const wchar_t* kSave = L"GameProgress.sav";   // GI_Settings.cpp:1431 SaveGameToSlot(Save File, "GameProgress", 0)
+constexpr const wchar_t* kSave = L"GameProgress.sav";   // GI_Settings.cpp:1219 SaveGameToSlot(Save File, "GameProgress", 0)
 constexpr const char* kHookOwner = "saveguard";
 constexpr const wchar_t* kCareer = L"HSMMP_Progression.sav";          // the multiplayer career (session/hsm_mp_career.h)
 constexpr const wchar_t* kCareerPrev = L"HSMMP_Progression.prev.sav";  // the career as it was before its last write
@@ -320,7 +320,7 @@ void SaveGuard::Backup(Adapter& adapter) {
 void SaveGuard::Reload(Adapter& adapter) {
     UObject* gi = adapter.GameInstance();
     if (!gi) return;
-    Call load(gi, "Load Game");   // GI_Settings.cpp:603: every saved field back into the game instance
+    Call load(gi, "Load Game");   // GI_Settings.cpp:653: every saved field back into the game instance
     if (!load.valid() || !load.invoke()) HSM_LOG("save: Load Game could not be called");
 }
 
@@ -368,7 +368,7 @@ void SaveGuard::CareerTravel(Adapter& adapter, bool progression, bool host) {
 bool SaveGuard::CaptureFightEnd(Adapter& adapter) {
     UObject* gi = adapter.GameInstance();
     if (!gi) return false;
-    Call capture(gi, "Override Player Character Equipment");   // GI_Settings.cpp:725
+    Call capture(gi, "Override Player Character Equipment");   // GI_Settings.cpp:786
     if (!capture.valid()) return false;
     capture.set<bool>("Keep Exact Values", false);
     passOne_ = "Override Player Character Equipment";
@@ -413,16 +413,16 @@ bool SaveGuard::LoadCareer(Adapter& adapter, bool host) {
     bool ok = false;
     own_ = true;
     if (from == session::CareerSource::File) {
-        Call load(gi, "Load Game");   // GI_Settings.cpp:603: every saved field from the slot "GameProgress", the career's for this call
+        Call load(gi, "Load Game");   // GI_Settings.cpp:653: every saved field from the slot "GameProgress", the career's for this call
         ok = WriteAll(dir + kSave, bytes) && load.valid() && load.invoke();
     } else {
-        // A new career: the game's own Delete Save (GI_Settings.cpp:292) resets every career field, makes a character and
+        // A new career: the game's own Delete Save (GI_Settings.cpp:309) resets every career field, makes a character and
         // fills the fight board. First Start stays on, so the Tavern opens with character creation (Map_Hub_Tavern_Frank);
-        // the tutorial is marked as played, since finishing creation would otherwise open the Cellar by itself and leave
-        // the session (UI_CharacterCreation.cpp:433), and so is the intro video.
+        // the intro video is marked as played (UI_Startup_Menu.cpp:99, 173). Character creation no longer opens the Cellar
+        // tutorial, and nothing reads First Start Tutorial Played any more (UI_CharacterCreation.cpp, build 26568321).
         Call reset(gi, "Delete Save");
         ok = reset.valid() && reset.invoke();
-        if (ok) { SetBool(gi, "First Start Tutorial Played", true); SetBool(gi, "First Start Intro Played", true); }
+        if (ok) SetBool(gi, "First Start Intro Played", true);
     }
     own_ = false;
     if (held) CopyPassports(holder, gi);
@@ -459,14 +459,23 @@ bool SaveGuard::SaveCareer(Adapter& adapter, const char* why) {
         HSM_LOG("career: NOT saved (%s): %s", why, dir.empty() || !gi ? "no save folder or game instance" : "the backup of your own save is gone, so its slot is not borrowed");
         return false;
     }
+    // Save Game writes the career block (Day Time, Player Character, inventories, funds, combatants...) only while Current Play
+    // Mode is 0; at 1 it writes the Free Mode characters and at 2 the Abyss fields (GI_Settings.cpp:1119-1219, build 26568321).
+    // A lobby fight leaves the game instance at Play Mode 1 (PrepareFreeModeFight), and "Progression left" saves after it:
+    // the file then had no career and replaced the career file. The mode is 0 for the call, and put back after it.
+    uint8_t* mode = Field<uint8_t>(gi, "Current Play Mode");
+    const uint8_t wasMode = mode ? *mode : uint8_t(0);
+    if (!mode) { HSM_LOG("career: NOT saved (%s): Current Play Mode was not found on the game instance", why); return false; }
     // The game's own Save Game writes the career into the slot, emptied first so it makes a fresh save object and nothing
     // of the player's own save rides along into the career's file.
     TouchBackup(dir + backup_);
     DeleteFileW((dir + kSave).c_str());
-    Call save(gi, "Save Game");   // GI_Settings.cpp:1355
+    if (wasMode != 0) { *mode = 0; HSM_LOG("career: saving (%s): Current Play Mode was %u, set to 0 for the save (the career block is written only at 0)", why, unsigned(wasMode)); }
+    Call save(gi, "Save Game");   // GI_Settings.cpp:1119
     own_ = true;
     const bool called = save.valid() && save.invoke();
     own_ = false;
+    *mode = wasMode;
     std::vector<uint8_t> bytes;
     bool exists = false;
     std::string bad;
@@ -480,6 +489,7 @@ bool SaveGuard::SaveCareer(Adapter& adapter, const char* why) {
     }
     const bool back = RefillSlot(dir, backup_);
     if (kept) HSM_LOG("career: saved (%s): %zu bytes to %ls", why, bytes.size(), kCareer);
+    else if (called && read && !good) HSM_LOG("career: NOT saved (%s): the game's file is refused (%s); %ls is kept as it was", why, bad.c_str(), kCareer);
     else HSM_LOG("career: NOT saved (%s): %s", why, !called ? "Save Game could not be called" : !read ? "the game wrote no save" : !good ? bad.c_str() : "the file could not be written");
     if (!back) HSM_LOG("career: putting your own save back in its slot FAILED; the backup still holds it and goes back when the session ends");
     return kept;

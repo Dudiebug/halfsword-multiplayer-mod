@@ -48,17 +48,27 @@ UObject** ConstraintField(UObject* w, int slot) {
 }
 
 // "Set Up Right/Left Hand Weapon" with that hand's weapon (null: let go). No class, no blow, nothing destroyed on
-// purpose; the passport is only read to spawn a class. Not under ScriptHookBypass: the claims hooks keep guarding
-// anything it reaches (as prop_sync's drop).
+// purpose; the passport is only read to spawn a class. "Don't Save" (new in 26568321, Willie_BP.cpp:8385 / :9009): without it
+// the function writes the weapon into the Character Passport's WeaponinHands / WeaponsinSlots (:8714 / :9372), the stand-in's
+// own passport, which nobody reads. Not under ScriptHookBypass: the claims hooks keep guarding anything it reaches (as
+// prop_sync's drop).
 bool SetUpHand(UObject* willie, int hand, UObject* weapon) {
     if (hand == 0) {
         Call c(willie, "Set Up Right Hand Weapon");
-        c.set<UObject*>("Weapon R", weapon);
+        c.set<UObject*>("Weapon R", weapon).set<bool>("Don't Save", true);
         return c.valid() && c.invoke();
     }
     Call c(willie, "Set Up Left Hand Weapon");
-    c.set<UObject*>("Weapon L", weapon);
+    c.set<UObject*>("Weapon L", weapon).set<bool>("Don't Save", true);
     return c.valid() && c.invoke();
+}
+
+// The game attaches a weapon only to a hand that is still there (Willie_BP.cpp:8544 / :9180: the whole attach sits in
+// "if (!Hand L/R Torn Off)"), so a torn-off hand refusing a weapon is the game's answer, not a failure of the mod.
+bool HandTornOff(UObject* willie, int hand) {
+    bool torn = false;
+    GetBool(willie, hand == 0 ? "Hand R Torn Off" : "Hand L Torn Off", torn);
+    return torn;
 }
 
 bool CreateSheathConstraint(UObject* willie, int hand, uint8_t slotEnum) {
@@ -282,6 +292,12 @@ bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot) {
     const bool grabbed = SetUpHand(standIn, hand, weapon);
     UObject** handField = HandField(standIn, hand);
     if (!grabbed || !handField || *handField != weapon) {
+        if (HandTornOff(standIn, hand)) {   // the hand is gone: it cannot draw (not a mod failure, the owner's pose shows it too)
+            ++n_.skipped;
+            if (++n_.tornSkipped <= 3)
+                HSM_LOG("equip: stand-in %s cannot draw %s: its hand %s is torn off", ObjectName(standIn).c_str(), ObjectName(weapon).c_str(), Side(hand));
+            return false;
+        }
         ++n_.failed;
         HSM_LOG("equip: stand-in %s did not take %s into hand %s", ObjectName(standIn).c_str(), ObjectName(weapon).c_str(), Side(hand));
         return false;
@@ -292,6 +308,10 @@ bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot) {
         Call(*constraint, "K2_DestroyComponent").set<UObject*>("Object", standIn).invoke();
     }
     Call(weapon, "Unsheathed Mode").invoke();
+    // 26568321: Unsheathed Mode now sets My Box Collisions to QueryOnly even while No Collision is set (it did nothing then,
+    // ModularWeaponBP_C__Unsheathed_Mode.diff), undoing the Turn Off Collision Set Up Hand Weapon just made. The game itself
+    // follows Unsheathed Mode with Turn Off Collision for a weapon in hand (Willie_BP.cpp:8599-8600 / :9238-9239): so does this.
+    Call(weapon, "Turn Off Collision").invoke();
     if (UObject** p = SlotField(standIn, slot); p && *p == weapon) *p = nullptr;
     return true;
 }
@@ -325,7 +345,7 @@ bool EquipSync::Sheathe(UObject* standIn, const Read& r, int hand, int slot) {
         return false;
     }
     const bool letGo = LetGo(standIn, hand);
-    if (letGo) StandInSlots::Anchor(standIn, true);   // the sheathed weapon goes with the body, not BoneCore (standin_slots.h)
+    if (letGo) StandInSlots::Anchor(standIn, true);   // the sheathed weapon goes with the body (standin_slots.h)
     return letGo;
 }
 

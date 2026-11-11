@@ -8,7 +8,7 @@ namespace hsm::game {
 using namespace hsm::ue;
 namespace {
 
-// UGameplayStatics::OpenLevel(const UObject*, FName, bool, FString) for build 24185754; both Blueprint thunks
+// UGameplayStatics::OpenLevel(const UObject*, FName, bool, FString) for builds 24185754 and 26568321 (same RVA); both Blueprint thunks
 // (OpenLevel, OpenLevelBySoftObjectPtr) end here. The FString is passed by hidden pointer and destroyed by the callee.
 constexpr uintptr_t kOpenLevelRva = 0x35E3590;
 using OpenLevelFn = void (*)(UObject*, FName, bool, void*);

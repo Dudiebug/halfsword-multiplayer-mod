@@ -97,7 +97,7 @@ bool Build() {
     w.kit = Kit(w.hud, Vis::HitTestInvisible);
     Canvas root = w.kit.Root();
     if (!root) { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
-    if (UObject** src = Field<UObject*>(w.hud, "TextHurt"); src && *src) w.kit.FontFrom(*src, "UI_HUD.TextHurt");
+    ProbeFont(w.kit, w.hud);
     // Bottom-left, growing upwards: the log panel, the input row under it, the idle hint at the bottom.
     w.column = w.kit.MakeColumn();
     root.Add(w.column).Anchor({{0.012, 0.965}, {0.012, 0.965}}, {0, 1}).AutoSize().Z(kZOrder);
@@ -358,7 +358,10 @@ void ChatTick(const HudScene& m) {
         if (d.pending) OpenPending(now);
         Poll(now);
     }
-    if (d.pending && uint32_t(now - d.pendingAt) > kPendingMs) d.pending = false;   // the HUD never came up
+    if (d.pending && uint32_t(now - d.pendingAt) > kPendingMs) {   // the chat never came up (no fight on screen)
+        d.pending = false;
+        HSM_LOG("chat: could not open with text: the chat is not on this screen (%s)", m.visible ? "it was busy" : "no fight here");
+    }
     ChatLocal c;
     c.hud = m.visible; c.hudAtMs = d.hudAt; c.key = d.session.key();
     c.lines.assign(d.lines.begin(), d.lines.end());

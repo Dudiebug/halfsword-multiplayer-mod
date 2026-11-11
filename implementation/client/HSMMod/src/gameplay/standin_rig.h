@@ -67,15 +67,16 @@ public:
     // over 150 uu, which may carry the Mesh along: on a placement call it before Shift, as HSMP does. yawDeg (optional)
     // also turns the capsule (pitch and roll 0). Unlike HSMP the turn never teleports, so it cannot swing the
     // simulating bodies around the capsule (Shift undoes a carried translation, not a rotation).
+    void BreakPelvisCapsule();                               // the unnamed Mesh-pelvis-to-capsule constraint, once
     void PlaceCapsule(const sync::V3& at, const double* yawDeg = nullptr);
 
     // Switches the Willie's own pulls off: tonus, muscles, pain reactions and damage every call (field writes); joint
-    // motors, physical animation, physics handles, root constraints, gravity, world collision, BoneCore and capsule
+    // motors, physical animation, physics handles, the pelvis-to-capsule constraint, gravity, world collision and capsule
     // collision on a schedule (every 0.5 s for the first 6 s after binding, then every 2 s, and after a weapon change).
     void Neutralise(double nowMs);
     // Hand-off (sync/hsm_handoff.h): undoes Neutralise, as the game's own start-up arms a fighter (Willie_BP BeginPlay,
     // W:14190-14212): the fields as Neutralise first found them, the joint motors' profile, physical animation, gravity
-    // and world collision, the held weapons' collision (ModularWeaponBP Turn On Collision), BoneCore and capsule
+    // and world collision, the held weapons' collision (ModularWeaponBP Turn On Collision) and capsule
     // collision, walking, and the pelvis-to-capsule constraints made again where the capsule stands. The session stops
     // blocking the Willie's tick, which takes over from the next frame. Then Unbind: nothing here drives it any more.
     // False leaves the rig bound and neutralised until a saved grip reference can be restored safely.
@@ -117,6 +118,7 @@ private:
         ue::UObject* tip = nullptr;            // "TippyTipScene"
         int32_t tipIndex = -1;
         bool fists = false;
+        bool unstuckSeen = false;              // "Static Mesh Collision Disabled (Unstuck)" as last read (Neutralise)
         bool comMeasured = false;
         int comTries = 0;
         uint32_t classHash = 0;
@@ -227,6 +229,7 @@ private:
     bool gripStateKnown_ = false;
     int ownToggles_ = -1;                                    // the owner's grip toggles last logged when sending (-1 none)
     ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
+    bool offTornLogged_ = false;                             // "left hand torn off" was logged for this stretch
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)
     ue::UObject* switchJoint_ = nullptr;                     // the right hand joint ApplySwitch last set
     bool switchOn_ = false;                                  // ... and whether it set it switched
@@ -250,7 +253,7 @@ private:
     std::vector<bool> savedTrue_, savedFalse_;
     bool savedFields_ = false, savedPolicy_ = false;
     uint8_t savedMeshResponse_[2] = {2, 2};                  // WorldStatic, WorldDynamic (ECR_Block)
-    uint8_t savedCore_ = 3, savedCapsule_ = 1;               // ECollisionEnabled: BoneCore QueryAndPhysics, the capsule QueryOnly
+    uint8_t savedCapsule_ = 1;                               // ECollisionEnabled: the capsule QueryOnly
     uint8_t savedHidden_[2] = {0xff, 0xff};                  // kHiddenParts, as they were (standin_parts_off); 0xff not read
     uint8_t savedBox_ = 2;                                   // Box1's BodyCollision response, ECR_Block in the game's template
     bool savedGravity_ = true;

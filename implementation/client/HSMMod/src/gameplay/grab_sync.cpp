@@ -248,7 +248,9 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
 
 // My fighter as a native grab leaves it (Willie_BP ReceiveTick, the grabber's side of a grab): "Grabbed By Willie" (its
 // contacts with the grabber then deal no rigidity damage), "Being Grabbed" (a fallen body's root handle and tonus
-// weaken), and "Event Is Grabbed" on every new grab (weapons let go of for 0.1 s, limb joints unbreakable for 0.5 s).
+// weaken), and "Event Block Bone Dislocation(true)" on every new grab (weapons let go of for 0.1 s, "Dislocation Blocked" for
+// 0.5 s; Willie_BP.cpp:15484, called with true on the grab at :17048 and :17158). It was "Event Is Grabbed" before build 26568321, and
+// its companion "Event Check Bone Dislocation Status" is an empty function now (Willie_BP.cpp:15518), so it is no longer called.
 // A fighter simulated here that grabbed mine natively has set those itself and clears them on its release: while
 // "Being Grabbed" is set and "Grabbed By Willie" names something other than what my last mark wrote or a stand-in, the
 // flags are its own, and only the event (a new grab on top of it) and the pull are mine.
@@ -269,11 +271,11 @@ void GrabSync::SetMark(uint8_t entity, UObject* willie, UObject* by, bool newGra
         SetBool(willie, "Being Grabbed", true);
         SetLimbFlags(willie, bone, hand);
     }
-    Call(willie, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", true).invoke();
-    Call(willie, "Event Check Bone Dislocation Status").invoke();   // W:17402: the grab's joints (items 28, 2)
+    if (!Call(willie, "Event Block Bone Dislocation").set<bool>("Disable Weapons Momentary", true).invoke() && ++n_.blockFailed <= 1)
+        HSM_LOG("grabs: Event Block Bone Dislocation is missing on the held fighter; its weapons will not let go");
 }
 
-// Items 28 and 2: what the grab sets on the held fighter by the bone taken (W:17410-17440): an arm's bones its arm's
+// Items 28 and 2: what the grab sets on the held fighter by the bone taken (Willie_BP.cpp:17050-17075, :17160-17185): an arm's bones its arm's
 // flag, either leg's "R Leg Being Grabbed" (the game has no left one), the neck the throat flag of the grabbing hand.
 void GrabSync::SetLimbFlags(UObject* willie, const std::string& bone, uint8_t hand) {
     if (InList(willie, "R Arm Bones", bone)) SetBool(willie, "R Arm Being Grabbed", true);
@@ -283,7 +285,7 @@ void GrabSync::SetLimbFlags(UObject* willie, const std::string& bone, uint8_t ha
 }
 
 // Item 6: a hold on my fighter turns its body's collision with the grabber's hand and forearm off, as the game does on
-// the grabber's own machine (W:17454, W:17696): the stand-in's hand no longer shoves the body it holds.
+// the grabber's own machine (Willie_BP.cpp:17081, :17191): the stand-in's hand no longer shoves the body it holds.
 void GrabSync::KeepNoCollide(const sync::GrabPull& p, UObject* me) {
     UObject* standIn = env_.standInActor ? env_.standInActor(p.grabber) : nullptr;
     UObject* hand = standIn ? adapter_->Mesh(standIn) : nullptr;
@@ -346,7 +348,7 @@ void GrabSync::OnBreak(UObject* grabber, uint8_t held, uint8_t hand) {
         HSM_LOG("grabs: e%u broke free of my hand %s on its owner's screen; let go", held, kHandTag[hand]);
 }
 
-// Released as Release Grab R/L does it ("Being Grabbed" false, "Event Is Grabbed(false)"), unless a fighter simulated
+// Released as Release Grab R/L does it ("Being Grabbed" false, "Event Block Bone Dislocation(false)"), unless a fighter simulated
 // here has grabbed mine natively (before or since): that grab is its own to release.
 void GrabSync::Unmark(uint8_t entity) {
     auto it = marks_.find(entity);
@@ -360,8 +362,7 @@ void GrabSync::Unmark(uint8_t entity) {
     SetBool(m.willie, "Being Grabbed", false);
     for (const char* f : {"R Arm Being Grabbed", "L Arm Being Grabbed", "R Leg Being Grabbed", "My Throat Is Held R", "My Throat Is Held L"})
         SetBool(m.willie, f, false);
-    Call(m.willie, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", false).invoke();
-    Call(m.willie, "Event Check Bone Dislocation Status").invoke();
+    Call(m.willie, "Event Block Bone Dislocation").set<bool>("Disable Weapons Momentary", false).invoke();
 }
 
 // ---------------------------------------------------------------- engine calls

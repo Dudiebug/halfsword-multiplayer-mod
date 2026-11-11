@@ -85,19 +85,35 @@ bool CanvasTop(UObject* button, double& top) {
     return true;
 }
 
-// The stock button the new one goes under: the lowest on a canvas, else the last one in the tree.
+// Build 26568321's UI_Pause_Eng has a debug button, Button_0 (its click opens Map_Test_Empty_Plane: UI_Pause_Eng.cpp:185),
+// that must never be the anchor or the style source. Other stock buttons that are not shown (Hidden or Collapsed) are no anchor either.
+bool Shown(UObject* button) {
+    if (ObjectName(button) == "Button_0") return false;
+    Call v(button, "GetVisibility");
+    if (!v.invoke()) return true;
+    const uint8_t vis = v.get<uint8_t>("ReturnValue");
+    return vis != uint8_t(Vis::Hidden) && vis != uint8_t(Vis::Collapsed);
+}
+
+// The stock button the new one goes under: the lowest shown one on a canvas, else the last shown one in the tree. When none is
+// shown (a layout this code has not seen), the lowest that is not Button_0.
 const Found* LastButton(const std::vector<Found>& buttons) {
     const Found* best = nullptr;
-    double bestTop = 0;
-    bool bestOnCanvas = false;
-    for (const Found& f : buttons) {
-        double top = 0;
-        if (CanvasTop(f.button, top)) {
-            if (!best || !bestOnCanvas || top >= bestTop) { best = &f; bestTop = top; bestOnCanvas = true; }
-        } else if (!bestOnCanvas) {
-            best = &f;
+    for (int pass = 0; pass < 2 && !best; ++pass) {
+        double bestTop = 0;
+        bool bestOnCanvas = false;
+        for (const Found& f : buttons) {
+            if (ObjectName(f.button) == "Button_0") continue;
+            if (pass == 0 && !Shown(f.button)) continue;
+            double top = 0;
+            if (CanvasTop(f.button, top)) {
+                if (!best || !bestOnCanvas || top >= bestTop) { best = &f; bestTop = top; bestOnCanvas = true; }
+            } else if (!bestOnCanvas) {
+                best = &f;
+            }
         }
     }
+    if (best) HSM_LOG("ui: pause menu: the report button goes under the stock button '%s'", ObjectName(best->button).c_str());
     return best;
 }
 
@@ -125,7 +141,7 @@ bool Build(UObject* menu) {
     HSM_LOG("ui: pause menu: %d widget(s), %zu button(s)%s", nodes, buttons.size(), logged ? "" : " (tree above)");
     logged = true;
     UObject* stockLabel = nullptr;
-    for (const Found& f : buttons) if ((stockLabel = FindLabel(f.button, 0))) break;
+    for (const Found& f : buttons) if (ObjectName(f.button) != "Button_0" && (stockLabel = FindLabel(f.button, 0))) break;
     s.button = s.kit.MakeButton();
     s.label = s.kit.MakeText();
     if (!s.button || !s.label) { HSM_LOG("ui: pause menu report button: widget spawn failed"); return false; }

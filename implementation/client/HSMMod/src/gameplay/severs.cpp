@@ -36,7 +36,7 @@ constexpr size_t kMaxBlockedOnMine = 64;
 constexpr size_t kMaxRetries = 64;
 constexpr size_t kMaxOwnCuts = 8;            // Initiates in flight on fighters simulated here (one, unless nested)
 constexpr uint64_t kLogFirst = 20;           // the first events of each kind are logged in full (test evidence)
-constexpr double kStuckSlackUu = 2;          // Constraint_Weapon_Stuck_BP.cpp:600-602: its limited linear axis on a cut
+constexpr double kStuckSlackUu = 2;          // Constraint_Weapon_Stuck_BP.cpp:667-669: its limited linear axis on a slash
 constexpr int32_t kMaxBoneNames = 1024;      // a sane bound on a Willie's bone and socket name arrays
 
 struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };
@@ -305,7 +305,7 @@ Severs::Read Severs::ReadSever(ScriptCall& c, UObject* willie, combat::SeverCapt
     c.get("VP Box Collision 1", box1);
     c.get("VP Box Collision 2", box2);
     if (!readBox(box1, in.box1World, in.box1Extent) || !readBox(box2, in.box2World, in.box2Extent)) return Read::NoBoxes;
-    // Call_Dismember attaches both boxes to the struck bone ("Bone Name 2"): that bone is the claim's frame. A box with
+    // Call_Dismember attaches both boxes to the struck bone ("Dismember Bone Name"): that bone is the claim's frame. A box with
     // no usable socket falls back to the part's own spawn bone.
     std::string bone;
     Call socket(box1, "GetAttachSocketName");
@@ -705,7 +705,12 @@ void Severs::ScanOurBlades(uint8_t entity, UObject* willie) {
 void Severs::SendStuck(uint8_t entity, StrikeSource source, Hand& h, UObject* constraint, uint8_t victim) {
     UObject** comp = Field<UObject*>(constraint, "Component 1 (Weapon)");
     UObject** body = Field<UObject*>(constraint, "Component 2 (Body)");
-    const FName* boneName = Field<FName>(constraint, "Bone Name 2");
+    // The struck bone, "Dismember Bone Name" (it was "Bone Name 2" before build 26568321; Constraint_Weapon_Stuck_BP.cpp:12). The
+    // game's second spawn path writes spine_02 for a pelvis hit (ModularWeaponBP.cpp:837) and its "Hit Actor" is whatever the
+    // blade struck, a weapon among them (:830-834): ScanOurBlades only reports a Hit Actor that is a stand-in.
+    const FName* boneName = Field<FName>(constraint, "Dismember Bone Name");
+    if (!boneName && ++n_.noBoneField == 1)
+        HSM_LOG("severs: the stuck-blade constraint has no 'Dismember Bone Name' field; no stuck blade can be reported");
     UObject* standIn = FighterActor(victim);
     UObject* mesh = (body && *body) ? *body : (standIn ? adapter_->Mesh(standIn) : nullptr);
     if (comp && !Alive(*comp)) comp = nullptr;   // the constraint may name a component the game has since destroyed
@@ -719,7 +724,9 @@ void Severs::SendStuck(uint8_t entity, StrikeSource source, Hand& h, UObject* co
     Xform bone, blade;
     if (!comp || !*comp || !mesh || m.bone.empty() || m.bone == "None" || !BoneXform(mesh, m.bone, bone) ||
         !ComponentXform(*comp, blade)) {
-        ++n_.stuckBad;
+        if (++n_.stuckBad <= 3)
+            HSM_LOG("severs: blade of e%u (%s) stuck in e%u cannot be reported (bone '%s'%s%s)", entity, SourceName(source), victim,
+                    m.bone.c_str(), comp && *comp ? "" : ", no weapon component", mesh ? "" : ", no body mesh");
         h = Hand{false, true, h.seq, victim, RefOf(constraint), {}};   // not retried every frame
         return;
     }
@@ -809,8 +816,10 @@ void Severs::Hold(const StuckBladeMsg& m) {
     Call(me, "FinishAddComponent").set<UObject*>("Component", joint).set<bool>("bManualAttachment", false)
         .set<FTransform>("RelativeTransform", identity).invoke();
     Call(joint, "K2_SetWorldTransform").set<FTransform>("NewTransform", ToF(at)).set<bool>("bSweep", false).set<bool>("bTeleport", true).invoke();
-    // Constraint_Weapon_Stuck_BP.cpp:597-602: every angular motion locked; linear motion limited on one axis and locked on
-    // the other two, which axis depending on the thrust flag the report does not carry: limited on all three here.
+    // Constraint_Weapon_Stuck_BP.cpp:662-669: every angular motion locked; linear motion limited on one axis and locked on
+    // the other two (a slash limits Z, a thrust limits X), by 2 uu for a slash and 5 for a thrust, scaled by
+    // MapRangeClamped(Material Density, 1000, 1e6, 1, 0) since build 26568321 (flesh at 1000 keeps all of it, a dense hit
+    // locks it). The report carries neither the thrust flag nor the density: limited on all three at the slash's 2 uu here.
     Call(joint, "SetLinearXLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kStuckSlackUu).invoke();   // LCM_Limited
     Call(joint, "SetLinearYLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kStuckSlackUu).invoke();
     Call(joint, "SetLinearZLimit").set<uint8_t>("ConstraintType", 1).setReal("LimitSize", kStuckSlackUu).invoke();
@@ -835,7 +844,7 @@ void Severs::Hold(const StuckBladeMsg& m) {
         const FNameArray* rigid = Field<FNameArray>(me, "Rigid Bones");
         if (rigid && rigid->data && rigid->num > 0 && rigid->num <= kMaxBoneNames) j.rigid.assign(rigid->data, rigid->data + rigid->num);
     }
-    // "Disable Nearest Collisions" is never set where a weapon spawns its stuck constraint (ModularWeaponBP.cpp:733-760):
+    // "Disable Nearest Collisions" is never set where a weapon spawns its stuck constraint (ModularWeaponBP.cpp:790-870):
     // the class default decides. Unreadable, it is taken as on: a blade pushing on the neighbouring bones would shove my
     // fighter, while one passing through them is barely seen.
     if (nearDefault_ < 0)
@@ -854,11 +863,12 @@ void Severs::Hold(const StuckBladeMsg& m) {
     if (!collisionOff) ++n_.collisionKept;
     const size_t rigidCount = j.rigid.size(), nearCount = j.near.size();
     joints_[{m.attacker, uint8_t(m.source)}] = std::move(j);
-    // Item 8: what the blade's Stuck writes on its victim (ModularWeaponBP.cpp:717-721): a just-grabbed fighter, whose
-    // limb joints the dislocation check makes unbreakable a moment.
-    SetBool(me, "Was Just Grabbed", true);
-    Call(me, "Event Is Grabbed").set<bool>("Disable Weapons Momentary", false).invoke();
-    Call(me, "Event Check Bone Dislocation Status").invoke();
+    // Item 8: what the blade's Stuck writes on its victim (ModularWeaponBP.cpp:779-780): "Dislocation Blocked" now, and
+    // Event Block Bone Dislocation(false), which sets it again and clears it 0.5 s later (Willie_BP.cpp:15484, :20372). It was
+    // "Was Just Grabbed" + Event Is Grabbed(false) before build 26568321; Event Check Bone Dislocation Status is empty now.
+    SetBool(me, "Dislocation Blocked", true);
+    if (!Call(me, "Event Block Bone Dislocation").set<bool>("Disable Weapons Momentary", false).invoke() && ++n_.noBlockEvent == 1)
+        HSM_LOG("severs: Event Block Bone Dislocation is missing on my fighter; a held blade will not block its dislocation");
     ++n_.held;
     if (n_.held <= kLogFirst)
         HSM_LOG("severs: holding the blade of e%u (%s '%s') in my bone %s, seq %u; its collision with %zu rigid and %zu "
@@ -875,11 +885,11 @@ void Severs::Let(uint8_t attacker, StrikeSource source) {
         Call(j.constraint.obj, "BreakConstraint").invoke();
         Call(j.constraint.obj, "K2_DestroyComponent").set<UObject*>("Object", j.owner.obj).invoke();
     }
-    Collide(j, false);   // as the game lets a stuck blade go (Constraint_Weapon_Stuck_BP.cpp:812-825): after the break
+    Collide(j, false);   // as the game lets a stuck blade go (Constraint_Weapon_Stuck_BP.cpp:838-841): after the break
     ++n_.released;
 }
 
-// The blade's collision with the fighter turned off (or on again) as Constraint_Weapon_Stuck_BP.cpp:499-500 does it:
+// The blade's collision with the fighter turned off (or on again) as Constraint_Weapon_Stuck_BP.cpp:571-573 does it:
 // against the Willie's SK_Skeleton "Rigid Bones" and against its Mesh bones near the struck one, never expiring (-1).
 // Only a list whose call went through is turned on again; nothing is called with a component that died.
 void Severs::Collide(Joint& j, bool off) {
@@ -903,7 +913,7 @@ void Severs::Collide(Joint& j, bool off) {
     one(j.mesh, j.near, j.nearOff);
 }
 
-// Constraint_Weapon_Stuck_BP.cpp:473-495 with Disable Nearest Collisions: every socket name whose parent bone is the
+// Constraint_Weapon_Stuck_BP.cpp:547-571 with Disable Nearest Collisions: every socket name whose parent bone is the
 // struck one, or, when the struck bone is a spine or clavicle bone, every name containing "spine"; then the struck bone's
 // parent; never the struck bone itself.
 std::vector<FName> Severs::NearBones(UObject* mesh, FName bone) const {

@@ -534,12 +534,25 @@ void ObjectSync::RestorePhysics(UObject* actor, UObject* root, int32_t rootIndex
     if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
     std::vector<UObject*> comps = actor ? ComponentsOf(actor, primitiveClass_) : std::vector<UObject*>{};
     if (std::find(comps.begin(), comps.end(), root) == comps.end()) comps.push_back(root);
+    EnableSimulation(root);
     for (UObject* c : comps) {
         if (c != root && !MovableComp(c)) continue;
         Call(c, "SetEnableGravity").set<bool>("bGravityEnabled", true).invoke();
         for (uint8_t ch : {kWorldStatic, kWorldDynamic, kPawn, kPhysicsBody})
             Call(c, "SetCollisionResponseToChannel").set<uint8_t>("Channel", ch).set<uint8_t>("NewResponse", kBlock).invoke();
     }
+}
+
+// 26568321's Set Up Right/Left Hand Weapon and Create Sheath Constraint no longer call SetSimulatePhysics (the old ones
+// switched the weapon off and on around the attach), so nothing but this switches a frozen weapon back on. Only the root and
+// only when it is off: a flail's chain bodies are set up on purpose (FighterRig::RearmFlail) and are left alone.
+void ObjectSync::EnableSimulation(UObject* root) {
+    if (!root) return;
+    Call sim(root, "IsSimulatingPhysics");
+    if (!sim.valid() || !sim.invoke() || sim.get<bool>("ReturnValue")) return;
+    Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
+    static uint64_t logged = 0;
+    if (++logged <= kLogFirst) HSM_LOG("props: %s was not simulating: switched on", ObjectName(root).c_str());
 }
 
 // ---------------------------------------------------------------- leases

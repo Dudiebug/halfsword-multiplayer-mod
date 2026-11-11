@@ -17,8 +17,7 @@ uint32_t ReadSeveredMask(ue::UObject* willie);
 // Constraint_Weapon_Stuck_BP builds during the cut, and those cannot be synthesized safely.
 bool ApplyDismember(ue::UObject* willie, uint32_t parts);
 
-// Client: blood / vertex paint for a CombatEvent of kind kCombatBlood, through the Willie's "Paint Blood Splash".
-bool ApplyBlood(ue::UObject* willie, const hsm::CombatEvent& e);
+// (There is no ApplyBlood: "Paint Blood Splash" is gone from build 26568321 and nothing called it; fx_sync shows blood.)
 
 // Host: the Enum_DismembermentPart index whose bone is closest to a world point (for blood events).
 uint8_t NearestPartBone(ue::UObject* willie, const ue::FVector& at);

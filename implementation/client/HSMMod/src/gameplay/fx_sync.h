@@ -10,21 +10,27 @@
 // Rev 15 adds what the stand-in's Invulnerable and its blocked tick also keep silent or unchanged: the owner's pain voice
 // (every line its Voice Audio plays, seen at Helmet Muffle Voice, played on the stand-in's Voice Audio), the blunt and bone sounds of each blow its Get Damage took
 // (played at the hit on the stand-in's bone, combat::PlanHitSound) every "Remove Armor" (replayed on the stand-in,
-// whose loose piece the prop census then pairs with the owner's), every "Pick Up Armor", and strip requests for a fallen
+// whose loose piece the prop census then pairs with the owner's), every "Equip Armor" (Pick Up Armor before build 26568321), and strip requests for a fallen
 // fighter stripped elsewhere (honoured by its owner).
+// Rev 43 adds the crossbow (combat/hsm_crossbow_fx.h): the owner polls its fighters' held crossbows for String Loaded and
+// Bolt Loaded and reports each draw, bolt and shot; the stand-in's crossbow replays Event Load String, Event Load Bolt
+// (with a bolt of its own) and Event Shoot, so everyone sees the bolt go in and leave.
 // Game thread only.
 #pragma once
+#include "combat/hsm_crossbow_fx.h"
 #include "combat/hsm_fx.h"
 #include "combat/hsm_paintgate.h"
 #include "gameplay/adapter.h"
 #include "gameplay/owner_sync.h"
 #include "session/hsm_budget.h"
 #include "ue/engine.h"
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace hsm::ue { class ScriptCall; }
@@ -48,25 +54,33 @@ public:
     // over the receive limit of kFxMaxRxPerSecond per fighter and kind, or one naming a cue / class off the allowlists). M1, M2.
     bool Accept(const combat::PaintFxMsg& m);
     void Forget(uint8_t entity);
-    // Applies armour changes held back by Apply while their fighter's vertex-paint tasks were still running (T5), each once
-    // the tasks are done or after kPaintWaitMs. Every frame; costs nothing while none is held.
+    // Every frame: reports the crossbow changes of fighters simulated here (a few field reads per held crossbow), then
+    // applies armour changes held back by Apply while their fighter's vertex-paint tasks were still running (T5), each once
+    // the tasks are done or after kPaintWaitMs.
     void Tick();
     std::string HealthLine();                                        // since the previous call
 
 private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
     struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
-                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0, stripHeld = 0; };
+                      skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0, stripHeld = 0,
+                      crossbow = 0, crossbowReplayed = 0, bloodGated = 0, paintGated = 0, stripWeapon = 0, stripBlocked = 0, woundDeferred = 0,
+                      woundGaveUp = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
     void OnBoxVertexPaint(ue::ScriptCall& c);
     void OnVoice(ue::ScriptCall& c);
-    void OnPickUpArmor(ue::ScriptCall& c);
+    void OnEquipArmor(ue::ScriptCall& c);
     void OnRemoveArmor(ue::ScriptCall& c);
     void OnStripBegin(ue::ScriptCall& c);   // a stand-in its owner reports down counts as Fallen for the stock strip
     void OnStripEnd();
     void SendHitSound(uint8_t entity, ue::UObject* willie, ue::ScriptCall& c, double damageRawScaled);
     void ApplyVoice(const combat::PaintFxMsg& m, ue::UObject* standIn);
+    void CrossbowTick();                                             // the owner's side: poll, report changes
+    void ApplyCrossbow(const combat::PaintFxMsg& m, ue::UObject* standIn);
+    ue::UObject* CrossbowIn(ue::UObject* willie, int hand);          // the crossbow in that hand (0 right, 1 left), null if none
+    bool ReadCrossbow(ue::UObject* crossbow, combat::CrossbowState& out);
+    bool LoadBolt(ue::UObject* crossbow, ue::UObject* standIn);      // seats a bolt of the stand-in's own
     void ApplyStrip(const combat::PaintFxMsg& m);
     void ApplyArmorOn(const combat::PaintFxMsg& m, ue::UObject* standIn, const combat::Xform& boneWorld);
     void ApplyHitSound(const combat::PaintFxMsg& m, ue::UObject* standIn, const combat::Xform& boneWorld);
@@ -94,8 +108,12 @@ private:
     bool boxFailLogged_ = false;
     bool cueFailLogged_ = false;
     uint32_t noBoneLogged_ = 0;                                      // one bit per (kind, reason) already logged
-    bool replaying_ = false;                                         // inside our own Remove / Pick Up Armor on a stand-in
+    bool equipLogged_ = false;                                       // the Equip Armor observer has fired once (logged)
+    bool replaying_ = false;                                         // inside our own Remove / Equip Armor on a stand-in
     ue::UObject* stripFallen_ = nullptr;                              // the stand-in made Fallen for the running strip call
+    ue::UObject* stripWatch_ = nullptr;                               // the stand-in the running strip call acts on, its weapons noted below
+    uint8_t stripWatchEntity_ = 0;
+    ue::UObject* stripWeapons_[3] = {};                               // its Weapon R, Weapon L, Weapon Slot Back before the call
     std::set<std::pair<uint8_t, uint8_t>> stripped_;                 // (entity, slot) stripped here, awaiting the owner's report
     std::map<std::string, ue::UObject*> cues_;                       // Get Damage's sound cues, found once
     // A peer-named object, found once (or not found: remembered so a bad name costs one scan, not one per message).
@@ -112,11 +130,17 @@ private:
     // under them frees what they read. Armour changes on a busy fighter wait here, in arrival order.
     struct Held { combat::PaintFxMsg m; double since = 0; };
     std::vector<Held> held_;
+    std::vector<Held> woundRetry_;                                   // wounds whose stand-in's Box Vertex Paint gate was shut (Tick retries them)
     combat::PaintGate gate_;                                         // quiet time before an armour replay; no blood right after one
     ue::UClass* paintClass_ = nullptr;
     bool paintClassLooked_ = false;
     uint32_t paintWaitsLogged_ = 0, paintBusyOwnLogged_ = 0;
     Counters n_, reported_;
+    // The owner's crossbows, per entity and hand: the object last seen there and its flags then.
+    struct CrossbowWatch { ue::UObject* crossbow = nullptr; int32_t index = -1; combat::CrossbowState state; };
+    std::array<std::array<CrossbowWatch, 2>, kMaxWillies + 1> crossbows_{};
+    std::unordered_map<const ue::UClass*, bool> crossbowClass_;      // a weapon class with String Loaded and Bolt Loaded
+    bool crossbowFailLogged_ = false;
 };
 
 }  // namespace hsm::game

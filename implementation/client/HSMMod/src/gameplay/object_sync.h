@@ -394,6 +394,8 @@ private:
     bool InCensus(uint64_t propId) const;                            // a level id of the current census
     bool TaggedRandomDelete(ue::UObject* actor);
     void RestorePhysics(ue::UObject* actor, ue::UObject* root, int32_t rootIndex);   // every movable primitive of the actor
+    void EnableSimulation(ue::UObject* root);                        // SetSimulatePhysics(true) when it is off (a frozen copy)
+    bool HandTornOff(ue::UObject* standIn, int hand);                // "Hand R/L Torn Off": the game attaches no weapon to it
     RootCalls* CallsFor(ue::UObject* root);
     ue::UObject* ObjectField(ue::UObject* o, int which);             // 0 "Parent Actor", 1 "Weapon R", 2 "Weapon L"
     bool InUse(uint64_t propId, double nowMs) const;

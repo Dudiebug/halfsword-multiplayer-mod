@@ -3,7 +3,7 @@
 // held. So each owned fighter's holds on stand-ins are streamed as GrabState (grip = its hand in the held bone's
 // frame), and every GrabState naming a fighter simulated here pulls that fighter's bone toward the grabber's hand as
 // its stand-in shows it (a soft, force-limited handle: sync::GrabPullDv). The held fighter is marked as natively
-// held ("Being Grabbed", "Grabbed By Willie", "Event Is Grabbed") while pulled. Stand-ins are only ever read.
+// held ("Being Grabbed", "Grabbed By Willie", "Event Block Bone Dislocation") while pulled. Stand-ins are only ever read.
 // Inert until Start (owner sync only). Game thread only.
 //
 // The design (grip in the bone frame, anchor = the grabber's stand-in hand, lease, break-free) follows
@@ -52,8 +52,8 @@ private:
     struct Grabber { ue::UObject* willie = nullptr; bool live = false; sync::GrabSender sender; };
     struct Mark { ue::UObject* willie = nullptr; int32_t index = -1; ue::UObject* by = nullptr; bool native = false; };   // a fighter of mine marked held; native: a local grab owns its flags
     struct Counters { uint64_t changes = 0, refreshes = 0, heard = 0, stale = 0, pulls = 0, grabs = 0, released = 0, broke = 0, farSkips = 0,
-                      noAnchor = 0, noBone = 0, letGo = 0, noCollide = 0; };
-    // Item 6: a hold on my fighter, its body's collision with the grabber's hand and forearm off (Willie_BP W:17454).
+                      noAnchor = 0, noBone = 0, letGo = 0, noCollide = 0, blockFailed = 0; };
+    // Item 6: a hold on my fighter, its body's collision with the grabber's hand and forearm off (Willie_BP.cpp:17081).
     struct NoCollide { ue::UObject* mine = nullptr; int32_t mineIndex = -1; ue::UObject* hand = nullptr; int32_t handIndex = -1; uint8_t side = 0; bool seen = false; };
     void SendFor(uint8_t entity, const std::array<GrabHand, kGrabHands>& reads, double nowMs);
     std::array<GrabHand, kGrabHands> ReadHands(ue::UObject* willie);

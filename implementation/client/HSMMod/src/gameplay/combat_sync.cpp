@@ -21,14 +21,9 @@ constexpr const char* kPartBones[kCombatPartBits] = {
     "thigh_r", "calf_r", "foot_r", "thigh_l", "calf_l", "foot_l",
 };
 
-// Blueprint names carry spaces (call sites in the decomp show them, e.g. "Paint Blood Splash(" in Willie_BP.cpp:8038).
-constexpr const char* kPaintBlood = "Paint Blood Splash";        // Willie_BP.cpp:4886 Paint_Blood_Splash
+// Blueprint names carry spaces (call sites in the decomp show them, e.g. "Dismember Function Initiate(").
 constexpr const char* kDismemberInitiate = "Dismember Function Initiate";   // Willie_BP.cpp:3648
 constexpr const char* kSeveredMap = "Dismembered Parts Map";     // Willie_BP.cpp:1016, Map<Byte<Enum_DismembermentPart>,Bool>
-
-// Blood tuning: CombatEvent::size 0..255 -> Size 0.25..4.25 (guess, tune in game); sharp hits paint harder.
-constexpr double kBloodSizeBase = 0.25, kBloodSizePerUnit = 1.0 / 64.0;
-constexpr double kBloodRateSharp = 1.0, kBloodRateBlunt = 0.5;
 
 bool Readable(const void* p, size_t n) { return p && n && !IsBadReadPtr(p, n); }
 
@@ -85,25 +80,9 @@ bool ApplyDismember(UObject* willie, uint32_t parts) {
     return false;
 }
 
-bool ApplyBlood(UObject* willie, const CombatEvent& e) {
-    if (!willie || e.kind != kCombatBlood || e.entity == 0 || e.bone >= kCombatPartBits) return false;
-    if (!std::isfinite(e.x) || !std::isfinite(e.y) || !std::isfinite(e.z)) return false;
-    UFunction* fn = FindFunction(ClassOf(willie), kPaintBlood);
-    if (!fn) { HSM_LOG("combat: %s not found on %s", kPaintBlood, ObjectName(willie).c_str()); return false; }
-    // Decomp: Paint_Blood_Splash(out Location, BoneName, Size, Rate) (Willie_BP.cpp:4886).
-    if (!HasParams(fn, {"Location", "BoneName", "Size", "Rate"})) {
-        HSM_LOG("combat: %s parameter list differs from the decomp; blood skipped", kPaintBlood);
-        return false;
-    }
-    const double size = kBloodSizeBase + kBloodSizePerUnit * e.size;
-    const double rate = e.sharp ? kBloodRateSharp : kBloodRateBlunt;
-    Call c(willie, fn);
-    c.set<FVector>("Location", FVector{e.x, e.y, e.z})
-        .setName("BoneName", MakeName(kPartBones[e.bone]))
-        .set<double>("Size", size)
-        .set<double>("Rate", rate);
-    return c.invoke();
-}
+// ApplyBlood (a CombatEvent of kind kCombatBlood through "Paint Blood Splash") is gone: build 26568321 removed that function
+// (only the stubs Paint Blood Bleed, Willie_BP.cpp:6429, and Paint Splash, 6433 remain), and nothing called it. Blood of a
+// blow is shown by fx_sync (owner-reported Spawn Blood / Box Vertex Paint replayed on the stand-in).
 
 uint8_t NearestPartBone(UObject* willie, const FVector& at) {
     UObject** mesh = Field<UObject*>(willie, "Mesh");

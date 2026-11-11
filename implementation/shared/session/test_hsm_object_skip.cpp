@@ -14,7 +14,9 @@ static void TestSkipped() {
                           "NiagaraActor", "Emitter", "DecalActor", "ParticleEventManager", "N_Wasps_C", "N_Flies_I_C",
                           "BP_Gore_Gib_C", "BP_Gib_Skull_C", "GibActor", "FX_Impact_C", "BP_VFX_Spark_C", "P_Sparks_Metal_C",
                           "BP_SplatterDrop_C", "HSMGhost", "HSM_Marker_C", "BP_Generator_Weapons_Random_C",
-                          "BP_Generator_Characters_Random_C", "BP_HitEffect_C", "ImpactEffects_C"})
+                          "BP_Generator_Characters_Random_C", "BP_HitEffect_C", "ImpactEffects_C",
+                          "BP_Weapon_Ranged_Projectle_Bolt_1_C", "BP_Weapon_Ranged_Projectle_Bolt1_C",
+                          "BP_Weapon_Ranged_Projectle_Master_C", "BP_Weapon_Ranged_Projectile_Arrow_C"})
         CHECK(ObjectClassSkipped(n));
 }
 
@@ -22,7 +24,8 @@ static void TestKept() {
     // Real physics objects, armour, weapons, fighters and look-alike words stay objects.
     for (const char* n : {"BP_Barrel_C", "StaticMeshActor", "BP_Stool_C", "BP_Plank_C", "BP_Crate_Large_C", "Willie_BP_C",
                           "BP_Armor_Head_Kettle_Helm_A_C", "BP_Weapon_Sword_C", "BP_Gibson_C", "FlyingCrate_C", "BP_Decalcomania_C",
-                          "BP_Sparkle_C", "BP_Wasp_Nest_C", "Fliesenleger", "BP_Bloodstone_C", "BP_Particleboard_C", "Actor", "Hsmith_C"})
+                          "BP_Sparkle_C", "BP_Wasp_Nest_C", "Fliesenleger", "BP_Bloodstone_C", "BP_Particleboard_C", "Actor", "Hsmith_C",
+                          "BP_Quiver_Bolt_1_C", "BP_Weapon_Ranged_Weapon_Crossbow_Light_C", "BP_Projector_C"})
         CHECK(!ObjectClassSkipped(n));
     CHECK(!ObjectClassSkipped("")); CHECK(!ObjectClassSkipped(nullptr));
     CHECK(!ObjectClassSkipped("BP_C"));

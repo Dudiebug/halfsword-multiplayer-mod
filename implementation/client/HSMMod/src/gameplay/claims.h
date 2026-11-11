@@ -66,7 +66,7 @@ public:
 
     void Replay(const combat::HitClaim& c, double nowMs);            // a claim against a fighter simulated here: queued
     void Effect(const combat::HitClaim& c);                          // someone else's claim: shown on the stand-in
-    void NoteClash(uint8_t defender, ue::UObject* theirWeapon);   // my weapon met that weapon of defender's stand-in: its parry state
+    void NoteClash(uint8_t defender, ue::UObject* theirWeapon);   // my weapon met that weapon of defender's stand-in (counted)
     uint8_t RecentAttacker(uint8_t victim, double nowMs) const;      // last replayed attacker within 10 s, else 0
     void Forget(uint8_t entity) {                                    // left, respawned or rejoined: its ids may restart
         dedupe_.Forget(entity);
@@ -92,7 +92,7 @@ private:
         uint64_t sent = 0, gated = 0, limited = 0, friendly = 0, coalesced = 0, zeroImpulse = 0, capped = 0, replayed = 0,
                  refused = 0, queued = 0, dropped = 0, dupes = 0, stale = 0, ageUnknown = 0, parried = 0, noVictim = 0, noBone = 0,
                  noStriker = 0, failed = 0, blockedStandIn = 0, blockedOnMine = 0, blockedFlag = 0, getDamageBlocked = 0, effects = 0,
-                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0, badBone = 0,
+                 effectsSkipped = 0, clashes = 0, clashUnmatched = 0, classKicks = 0, armorPiece = 0, propSent = 0, propReplayed = 0, blockedPropCopy = 0, badBone = 0,
                  stuckSent = 0, stuckLimited = 0, stuckReplayed = 0, stuckHeld = 0, armorStopped = 0, boltSent = 0, boltNoShooter = 0;
     };
     bool OnDealComplexDamage(ue::ScriptCall& c);
@@ -101,6 +101,8 @@ private:
     void AfterDealComplexDamage(ue::ScriptCall& c);
     void GatherPush(ue::ScriptCall& c, ue::UObject* striker, uint8_t attacker, uint8_t victim);   // item 3: its impulse, for the owner
     void OnGetUpPal(ue::ScriptCall& c);                              // item 22: my fighter helps a stand-in up
+    void OnHealAndRestore(ue::ScriptCall& c);                        // a hold of mine presses a stand-in's wound
+    void OnTalk(ue::ScriptCall& c);                                  // my fighter spoke at a stand-in
     void SendPending(ue::ScriptCall& c);                             // the claim made before the body ran, coalesced by its damage
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
                    const ObjectSync::Touch* prop);
@@ -142,8 +144,10 @@ private:
     combat::ReplayQueue queue_;
     sync::PushGather pushes_;
     sync::RemoteGate reviveSent_;
+    sync::PressGate presses_;
+    sync::TalkGate talks_;
     uint64_t frame_ = 0;
-    uint64_t pushesSent_ = 0, revivesSent_ = 0;
+    uint64_t pushesSent_ = 0, revivesSent_ = 0, pressesSent_ = 0, pressesOffBone_ = 0, talksSent_ = 0;
     std::array<uint32_t, kMaxWillies + 1> nextClaimId_{};
     // The claim just made (no id yet), until its stand-in's own run of the blow returns: its Damage Out decides whether
     // the claim is sent (combat::BlowCoalescer) and ranks it.

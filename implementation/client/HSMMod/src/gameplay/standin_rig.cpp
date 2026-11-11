@@ -30,7 +30,7 @@ constexpr const char* kStandInZeroDoubleFields[] = {
 constexpr const char* kStandInTrueBoolFields[] = {
     "Block Body Muscles", "Block Upper Leg Muscles", "Block Lower Leg Muscles", "Block Shoulder Muscles",
     "Block Arm Muscles", "Invulnerable", "Force Disable Dismemberment"};
-constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Bend Over Extreme"};
+constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Throwing Up"};
 
 constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried again this often, not every frame
 // The owner's offhand flag drops for a frame or two in fast swings: the off hand lets go only after it has been off this
@@ -53,7 +53,6 @@ constexpr const char* kSlotFields[FighterRig::kSheathSlots] = {"Weapon Slot R 1"
 constexpr const char* kGripBoolFields[] = {"L Hand In Offhand Attached", "R Alt Grip", "Mordhau Grip", "2H Switched Hands (Temp)",
                                             "R Hand Reverse Grip"};
 static_assert(sizeof(kGripBoolFields) / sizeof(kGripBoolFields[0]) == 5, "GripState has five flags");
-constexpr const char* kRootConstraints[] = {"PhysicsConstraint Main", "PhysicsConstraint_Z"};
 constexpr const char* kHiddenParts[] = {"DriverSkeleton", "CharacterMesh_Head"};   // standin_parts_off (SetStandInPartsOff)
 constexpr const char* kHandles[] = {"PhysicsHandle GetUp", "PhysicsHandle LowerBody", "PhysicsHandle UpperBody"};
 constexpr const char* kFistsPrefix = "Weapon_Fists";   // an empty hand's pseudo weapon, kinematic at the world origin
@@ -240,6 +239,33 @@ void RearmFlail(UObject* weapon) {
     // The chain wakes with whatever it carried while the root was off: it starts still, as Shift leaves it.
     Call(flail, "SetAllPhysicsLinearVelocity").set("NewVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
     Call(flail, "SetAllPhysicsAngularVelocityInDegrees").set("NewAngVel", FVector{}).set<bool>("bAddToCurrent", false).invoke();
+}
+
+// The StaticMeshComponent children of a weapon's BaseMesh (the blade, guard, pommel...) take their own responses: ModularWeaponBP
+// Event Check Stuck In Static Mesh (ModularWeaponBP.cpp:1074-1122, every second while held) puts WorldStatic (0) and
+// PhysicsBody (5) back to Block on all of them once the weapon has overlapped geometry, which on a stand-in's servo-driven
+// weapon snags it on floors and loose bodies. They get the root's policy (SetChainPolicy): both ignored. Returns how many
+// were set.
+int PoliceStaticChildren(UObject* root) {
+    static UClass* staticMesh = nullptr;
+    if (!staticMesh) staticMesh = FindClass("StaticMeshComponent");
+    if (!root || !staticMesh) return 0;
+    Call kids(root, "GetChildrenComponents");
+    kids.set<bool>("bIncludeAllDescendants", false);
+    if (!kids.invoke()) return 0;
+    void* const value = kids.paramPtr("Children");
+    const FObjArray* arr = static_cast<const FObjArray*>(value);
+    int n = 0;
+    if (arr && arr->data && arr->num > 0 && arr->num <= 256)
+        for (int32_t i = 0; i < arr->num; ++i) {
+            UObject* child = arr->data[i];
+            if (!child || !IsA(child, staticMesh)) continue;
+            Call(child, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kWorldStatic).set<uint8_t>("NewResponse", kIgnore).invoke();
+            Call(child, "SetCollisionResponseToChannel").set<uint8_t>("Channel", kPhysicsBody).set<uint8_t>("NewResponse", kIgnore).invoke();
+            ++n;
+        }
+    if (FProperty* prop = FindProperty(kids.function(), "Children"); prop && value) ClearPropertyValue(prop, value);   // the engine filled the array
+    return n;
 }
 
 int ObjectType(UObject* c) {
@@ -996,7 +1022,8 @@ void FighterRig::Neutralise(double nowMs) {
     for (FProperty* p : trueBools_) SetBoolValue(p, base + PropertyOffset(p), true);
     for (FProperty* p : falseBools_) SetBoolValue(p, base + PropertyOffset(p), false);
     if (boundAtMs_ < 0.0) boundAtMs_ = nowMs;
-    // A weapon the game just sheathed hangs from BoneCore, which the rig leaves behind when it moves the body: anchored
+    // A weapon the game just sheathed hangs from the Mesh's socket bone (up to 24185754 from BoneCore, which the rig left behind
+    // when it moves the body, and the rig anchored it by moving its constraint): anchored
     // (StandInSlots::Anchor) on this pass, not up to kFullEarlyEveryMs later. Two-player logs 8 and 9: each new stand-in's
     // sheathed weapons were 4-25 m away until a pass about 520 ms after its hand weapons came.
     bool slotsChanged = false;
@@ -1016,6 +1043,18 @@ void FighterRig::Neutralise(double nowMs) {
             Call g(wp.root, "GetCollisionResponseToChannel");
             g.set<uint8_t>("Channel", kPawn);
             if (g.invoke() && g.get<uint8_t>("ReturnValue") != kIgnore) SetChainPolicy(wp.root);
+            // The stuck check (ModularWeaponBP.cpp:1074, once a second while held) puts the blade children back to Block on
+            // WorldStatic and PhysicsBody when the weapon leaves the geometry it overlapped: its flag falling is the cue.
+            bool unstuck = false;
+            GetBool(wp.actor, "Static Mesh Collision Disabled (Unstuck)", unstuck);
+            if (wp.unstuckSeen && !unstuck) {
+                const int n = PoliceStaticChildren(wp.root);
+                static uint64_t logged = 0;
+                if (n && ++logged <= 10)
+                    HSM_LOG("rig: %s: %s: the game's stuck check gave its %d blade meshes world and body collision back; ignored again",
+                            ObjectName(willie_).c_str(), ObjectName(wp.actor).c_str(), n);
+            }
+            wp.unstuckSeen = unstuck;
         }
     }
     slots_.Watch(willie_);   // sheathed weapons that drifted from their sockets are put back (standin_slots.h)
@@ -1073,7 +1112,7 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     if (ApplySeat(g, weaponR) && offJoint_) {
         // The off hand's attach point follows the alt / mordhau flags (Willie_BP.cpp:1831): made again at once.
         Call br(willie_, "Break L Constraint");
-        br.set<bool>("Slide", false);
+        br.set<bool>("Slide", false).set<bool>("Destroy Constraint", true);   // 26568321: false only frees the joint, true destroys it (:2316)
         br.invoke();
         offJoint_ = nullptr;
         offTryMs_ = -1e18;
@@ -1083,6 +1122,17 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     const bool steady = now - offWantSinceMs_ >= (wantOff ? kOffhandAttachMs : kOffhandReleaseMs);
     if (wantOff && (!offJoint_ || FieldAt(gripOffset_[1]) != offJoint_) && (steady || offJoint_)) {
         if (now - offTryMs_ >= kOffhandRetryMs) {
+            // Attach L Hand To Offhand Position does nothing once the left hand is torn off (Willie_BP.cpp:2179): no joint can
+            // ever come, so do not retry (and do not log "attach FAILED" every half second); the ordinary retry resumes with the hand.
+            bool torn = false;
+            GetBool(willie_, "Hand L Torn Off", torn);
+            if (torn) {
+                offTryMs_ = now;
+                if (!offTornLogged_) HSM_LOG("rig: %s: off hand not attached, the left hand is torn off", ObjectName(willie_).c_str());
+                offTornLogged_ = true;
+                return;
+            }
+            offTornLogged_ = false;
             if (!RestoreTwoHandPose()) return;
             offTryMs_ = now;
             UObject* const before = FieldAt(gripOffset_[1]);
@@ -1097,7 +1147,7 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     } else if (!wantOff && offJoint_ && (steady || !weaponR)) {
         if (!RestoreTwoHandPose()) return;
         Call br(willie_, "Break L Constraint");
-        br.set<bool>("Slide", false);
+        br.set<bool>("Slide", false).set<bool>("Destroy Constraint", true);   // 26568321: false only frees the joint, true destroys it (:2316)
         br.invoke();
         offJoint_ = nullptr;
         HSM_LOG("rig: %s: off hand released", ObjectName(willie_).c_str());
@@ -1526,6 +1576,30 @@ void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow
             tol.slideUu > 0.0 ? ", mid-shaft" : "", ok ? "" : " (joint NOT remade)");
 }
 
+void FighterRig::BreakPelvisCapsule() {
+    static UClass* constraintClass = nullptr;
+    if (!constraintClass) constraintClass = FindClass("PhysicsConstraintComponent");
+    Call rc(willie_, "K2_GetRootComponent");
+    UObject* const capsule = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
+    if (!constraintClass || !capsule) return;
+    Call all(willie_, "K2_GetComponentsByClass");
+    all.set<UClass*>("ComponentClass", constraintClass);
+    if (!all.invoke()) return;
+    void* const value = all.paramPtr("ReturnValue");
+    const FObjArray* arr = static_cast<const FObjArray*>(value);
+    if (arr && arr->data && arr->num > 0 && arr->num <= 256)
+        for (int32_t i = 0; i < arr->num; ++i) {
+            UObject* c = arr->data[i];
+            if (!c || std::find(brokenRoots_.begin(), brokenRoots_.end(), c) != brokenRoots_.end()) continue;
+            Call got(c, "GetConstrainedComponents");
+            if (!got.invoke() || got.get<UObject*>("OutComponent1") != mesh_ || got.get<UObject*>("OutComponent2") != capsule) continue;
+            Call(c, "BreakConstraint").invoke();
+            brokenRoots_.push_back(c);
+            HSM_LOG("rig: %s: pelvis-to-capsule constraint %s broken", ObjectName(willie_).c_str(), ObjectName(c).c_str());
+        }
+    if (FProperty* prop = FindProperty(all.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);   // the engine filled the array
+}
+
 void FighterRig::SetBodyPolicy(UObject* body) {
     // Gravity off and world geometry ignored: the servo carries every body, and a floor or step must not snag it.
     // Pawn, body (armour: PhysicsBody) and weapon (custom channel 14) contacts stay, so blades and fists still meet it.
@@ -1561,13 +1635,11 @@ void FighterRig::NeutraliseFull() {
         Call g(h, "GetGrabbedComponent");
         if (g.invoke() && g.get<UObject*>("ReturnValue")) Call(h, "ReleaseComponent").invoke();
     }
-    // The pelvis-to-capsule constraints: broken once, the capsule is placed separately.
-    for (const char* f : kRootConstraints) {
-        UObject* c = ObjField(willie_, f);
-        if (!c || std::find(brokenRoots_.begin(), brokenRoots_.end(), c) != brokenRoots_.end()) continue;
-        Call(c, "BreakConstraint").invoke();
-        brokenRoots_.push_back(c);
-    }
+    // The pelvis-to-capsule constraint: broken once, the capsule is placed separately. 26568321 has no PhysicsConstraint Main /
+    // PhysicsConstraint_Z fields any more: Event Refresh Pelvis Constraints (Willie_BP.cpp:16280, once per Willie) adds one
+    // unnamed constraint, Mesh 'pelvis' to the capsule, so it is found by what it holds. Scanned on every full pass (it comes
+    // a moment after the spawn); nothing is broken that holds anything else.
+    BreakPelvisCapsule();
     if (!savedPolicy_) {
         savedPolicy_ = true;
         for (int i = 0; i < 2; ++i) {
@@ -1581,7 +1653,6 @@ void FighterRig::NeutraliseFull() {
             Call g(c, "GetCollisionEnabled");
             if (c && g.invoke()) out = g.get<uint8_t>("ReturnValue");
         };
-        enabled(ObjField(willie_, "BoneCore"), savedCore_);
         Call root(willie_, "K2_GetRootComponent");
         enabled(root.invoke() ? root.get<UObject*>("ReturnValue") : nullptr, savedCapsule_);
         for (size_t i = 0; i < std::size(kHiddenParts); ++i) enabled(ObjField(willie_, kHiddenParts[i]), savedHidden_[i]);
@@ -1599,11 +1670,11 @@ void FighterRig::NeutraliseFull() {
             // owner's swing (#68 "dragged by a poleaxe", #70/#76 "got flung"). Blows are judged on the owner's game and
             // weapons still meet it (parries, binds); a dropped one gets its responses back (ObjectSync::RestorePhysics).
             SetChainPolicy(wp.root);
+            PoliceStaticChildren(wp.root);
             // The flail chain follows the handle's policy (every body of the component): gravity and world geometry left
             // on sagged it and snagged it on the floor while the handle and body ignored both.
             ChainPolicy(wp);
         }
-    CollisionOff(ObjField(willie_, "BoneCore"));   // HSMP main.lua:4673
     Call rc(willie_, "K2_GetRootComponent");
     CollisionOff(rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr);   // the capsule only marks the position
     if (g_partsOff) {
@@ -1645,7 +1716,6 @@ bool FighterRig::Revive() {
     // Held weapons: the roots and chains back to a dropped weapon's responses (ObjectSync::RestorePhysics), then the
     // weapon's own re-arm for its parts.
     for (Weapon& wp : weapons_) RearmDropped(wp);
-    if (UObject* core = ObjField(willie_, "BoneCore")) Call(core, "SetCollisionEnabled").set<uint8_t>("NewType", savedCore_).invoke();
     Call rc(willie_, "K2_GetRootComponent");
     UObject* capsule = rc.invoke() ? rc.get<UObject*>("ReturnValue") : nullptr;
     if (capsule) Call(capsule, "SetCollisionEnabled").set<uint8_t>("NewType", savedCapsule_).invoke();
@@ -1660,8 +1730,8 @@ bool FighterRig::Revive() {
         Call(m, "SetMovementMode").set<uint8_t>("NewMovementMode", 1).set<uint8_t>("NewCustomMode", 0).invoke();   // MOVE_Walking
     int joined = 0;
     for (UObject* c : brokenRoots_)
-        if (c && capsule && Call(c, "SetConstrainedComponents").set<UObject*>("Component1", capsule).setName("BoneName1", MakeName("None"))
-                 .set<UObject*>("Component2", mesh_).setName("BoneName2", MakeName("pelvis")).invoke()) ++joined;
+        if (c && capsule && Call(c, "SetConstrainedComponents").set<UObject*>("Component1", mesh_).setName("BoneName1", MakeName("pelvis"))
+                 .set<UObject*>("Component2", capsule).setName("BoneName2", MakeName("None")).invoke()) ++joined;   // as Willie_BP.cpp:16293 made it
     HSM_LOG("rig: %s revived (fields %s, %d root constraint(s) made again, capsule collision %u)", ObjectName(willie_).c_str(),
             savedFields_ ? "restored" : "never neutralised", joined, unsigned(savedCapsule_));
     Unbind();

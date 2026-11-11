@@ -110,7 +110,7 @@ private:
         uint16_t seq = 0;
         uint8_t victim = 0;
         Ref actor;              // the Constraint_Weapon_Stuck_BP_C reported
-        std::string bone;       // the stand-in bone it is stuck in ("Bone Name 2"), while stuck
+        std::string bone;       // the stand-in bone it is stuck in ("Dismember Bone Name"), while stuck
     };
     struct Joint {              // a stand-in blade held to a bone of a fighter simulated here
         Ref constraint, owner, blade, skeleton, mesh;
@@ -123,7 +123,7 @@ private:
                  noBone = 0, noBox = 0, delayed = 0, delayedLost = 0, remembered = 0, shown = 0, shownLate = 0,
                  showRefused = 0, noClaim = 0, stuckSent = 0, stuckFreed = 0, stuckBad = 0, held = 0, released = 0,
                  holdFailed = 0, alreadyStuck = 0, callFailed = 0, broken = 0, collisionKept = 0, noticed = 0,
-                 noticeInvalid = 0, badBone = 0;
+                 noticeInvalid = 0, badBone = 0, noBoneField = 0, noBlockEvent = 0;
     };
     enum class Run { Accepted, Refused, InProcess, Failed };
     enum class Read { Ok, NoBoxes, NoBone };

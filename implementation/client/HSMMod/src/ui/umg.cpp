@@ -679,6 +679,20 @@ UObject* FindTextBlock(UObject* root, int depth) {
     return nullptr;
 }
 
+// UI_HUD lost TextHurt in build 26568321 (decomp UI/UI_HUD.cpp keeps TextWin and TextWin_1 as its only TextBlocks); the
+// older main menu has TextFreeMode. The first member the widget has and that gives a font wins; a widget with none (this
+// build's UI_Startup_Menu: ribbons with the label baked in) sizes by a new TextBlock's font.
+bool ProbeFont(Kit& kit, UObject* userWidget) {
+    if (kit.HasFont()) return true;
+    if (userWidget) {
+        if (UObject** t = Field<UObject*>(userWidget, "TextWin"); t && *t && kit.FontFrom(*t, "UI_HUD.TextWin")) return true;
+        if (UObject** t = Field<UObject*>(userWidget, "TextWin_1"); t && *t && kit.FontFrom(*t, "UI_HUD.TextWin_1")) return true;
+        if (UObject** t = Field<UObject*>(userWidget, "TextFreeMode"); t && *t && kit.FontFrom(*t, "UI_MainMenuSNF.TextFreeMode")) return true;
+    }
+    if (Text probe = kit.MakeText()) if (kit.FontFrom(probe.get(), "a new TextBlock")) { HSM_LOG("umg: no stock TextBlock font on %s; using a new TextBlock's", userWidget ? ObjectName(userWidget).c_str() : "(none)"); return true; }
+    return false;
+}
+
 namespace {
 // A name found once is checked by its object slot after, and looked up again when the engine has unloaded it (a level
 // change). A missing one is looked for again at most every 2 s: each look is an object array scan.

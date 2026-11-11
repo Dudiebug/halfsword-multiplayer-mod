@@ -18,6 +18,8 @@ using combat::Xform;
 
 namespace {
 
+struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };   // any TArray's header (data, count, capacity)
+
 constexpr const char* kHookOwner = "fxsync";
 constexpr uint64_t kLogFirst = 10;   // the first reports and replays are logged in full (test evidence)
 constexpr double kVoiceRateMin = 0.0, kVoiceRateMax = 2.0;  // clamp voice rate
@@ -27,6 +29,8 @@ constexpr double kPaintWaitMs = 1500.0;   // longest an armour change waits for 
 constexpr double kStripWaitMaxMs = 6000.0;
 constexpr size_t kHeldMax = 64;           // armour changes held at once; beyond it they apply at once, as before
 constexpr uint32_t kPaintLogFirst = 20;
+constexpr double kWoundRetryMs = 1500.0;   // longest a wound waits for its stand-in's Box Vertex Paint gate to open
+constexpr size_t kWoundRetryMax = 16;      // wounds waiting at once; beyond it they are dropped (they are cosmetic)
 
 bool ChangesArmor(const PaintFxMsg& m) {
     return combat::IsStripRequest(m) || m.kind == FxKind::Armor || m.kind == FxKind::ArmorOn;
@@ -70,6 +74,20 @@ bool Flag(UObject* willie, const char* name) {
     bool v = false;
     return GetBool(willie, name, v) && v;
 }
+// Box Vertex Paint's four busy flags on a fighter (Willie_BP.cpp:2206, build 26568321; combat::BoxVertexPaintBusy).
+bool PaintFlagsBusy(UObject* willie) {
+    return combat::BoxVertexPaintBusy(Flag(willie, "Dismemberment In Process"), Flag(willie, "Armor Swap In Process"),
+                                      Flag(willie, "Setup Armor in Process"), Flag(willie, "Hat Not Removable 2"));
+}
+// Block Undress Slots (Willie_BP.cpp:1395; filled by a dismember, 4366-4397): Strip Armor From Bone skips a slot in it.
+bool UndressBlocked(UObject* willie, uint8_t slot) {
+    const FObjArray* a = Field<FObjArray>(willie, "Block Undress Slots");   // a TArray<uint8>: read as bytes
+    if (!a || !a->data || a->num <= 0 || a->num > 64) return false;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(a->data);
+    for (int32_t i = 0; i < a->num; ++i)
+        if (bytes[i] == slot) return true;
+    return false;
+}
 
 const char* KindName(FxKind k) {
     switch (k) {
@@ -79,6 +97,7 @@ const char* KindName(FxKind k) {
         case FxKind::HitSound: return "hit sound";
         case FxKind::Armor: return "armour removal";
         case FxKind::ArmorOn: return "armour put on";
+        case FxKind::Crossbow: return "crossbow";
     }
     return "?";
 }
@@ -109,7 +128,7 @@ bool FxSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Spawn Blood", [this](ScriptCall& c) { OnSpawnBlood(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Box Vertex Paint", {}, [this](ScriptCall& c) { OnBoxVertexPaint(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Helmet Muffle Voice", [this](ScriptCall& c) { OnVoice(c); });
-    n += ObserveScript(kHookOwner, "Willie_BP_C", "Pick Up Armor", {}, [this](ScriptCall& c) { OnPickUpArmor(c); });
+    n += ObserveScript(kHookOwner, "Willie_BP_C", "Equip Armor", {}, [this](ScriptCall& c) { OnEquipArmor(c); });   // was Pick Up Armor before build 26568321 (Willie_BP.cpp:4623)
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Remove Armor", {}, [this](ScriptCall& c) { OnRemoveArmor(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Strip Armor From Bone", [this](ScriptCall& c) { OnStripBegin(c); },
                        [this](ScriptCall&) { OnStripEnd(); });
@@ -169,12 +188,26 @@ void FxSync::OnGetDamage(ScriptCall& c) {
 }
 
 // Spawn Blood on a fighter simulated here, seen before its body: the call as made plus the state its gates read (they
-// change it as the body runs). Get Damage is its only caller, so every blood burst of a real blow passes here.
+// change it as the body runs). Its callers (build 26568321): Get Damage (Willie_BP.cpp:5210), the blood of a real blow, and
+// Dismember Function Delayed's two bursts (4204, 4225), which pass Skip Check true. The latter are not sent: the stand-in's
+// replayed sever makes them again. A call its first gate drops (28789: 4 Attached Blood Emitters and no Skip Check) shows
+// nowhere, so it is not sent either (combat::SendSpawnBlood).
 void FxSync::OnSpawnBlood(ScriptCall& c) {
     if (!active_) return;
     UObject* self = c.self();
     const uint8_t entity = env_.ownedEntity(self);
     if (!entity || Flag(self, "Is Zombie?")) return;
+    bool skipCheck = false;
+    c.getBool("Skip Check", skipCheck);
+    const FObjArray* emitters = Field<FObjArray>(self, "Attached Blood Emitters");   // a TArray: the count is all that is read
+    const int attached = emitters ? emitters->num : 0;
+    if (!combat::SendSpawnBlood(attached, skipCheck)) {
+        if (n_.bloodGated++ < kLogFirst)
+            HSM_LOG("fx: Spawn Blood on my e%u not sent: %s (%d Attached Blood Emitters) (%llu)", entity,
+                    skipCheck ? "Skip Check call (a dismember burst; the stand-in's sever makes its own)" : "the game's own gate drops it (4 or more emitters)",
+                    attached, static_cast<unsigned long long>(n_.bloodGated));
+        return;
+    }
     PaintFxMsg m;
     m.entity = entity;
     m.kind = FxKind::Blood;
@@ -198,13 +231,22 @@ void FxSync::OnSpawnBlood(ScriptCall& c) {
     if (Send(m, self, bone)) ++n_.blood;
 }
 
-// Box Vertex Paint on a fighter simulated here (a stuck stab's wound), seen once it returned: it painted when the
-// fighter was not Invulnerable (its first gate; vertex paint off is its second, rechecked by the replay).
+// Box Vertex Paint on a fighter simulated here (a stuck stab's wound), seen once it returned: it painted when its first
+// gate passed (Willie_BP.cpp:2206, build 26568321): !Invulnerable and none of Dismemberment In Process, Armor Swap In
+// Process, Setup Armor in Process, Hat Not Removable 2 (combat::BoxVertexPaintRuns). Vertex paint off is its second gate,
+// rechecked by the replay. A call that gate refused painted nothing, so it is not sent.
 void FxSync::OnBoxVertexPaint(ScriptCall& c) {
     if (!active_) return;
     UObject* self = c.self();
     const uint8_t entity = env_.ownedEntity(self);
-    if (!entity || Flag(self, "Invulnerable")) return;
+    if (!entity) return;
+    if (!combat::BoxVertexPaintRuns(Flag(self, "Invulnerable"), Flag(self, "Dismemberment In Process"), Flag(self, "Armor Swap In Process"),
+                                    Flag(self, "Setup Armor in Process"), Flag(self, "Hat Not Removable 2"))) {
+        if (n_.paintGated++ < kLogFirst)
+            HSM_LOG("fx: Box Vertex Paint on my e%u painted nothing (Invulnerable, dismembering, armour swap or setup, or hat flag set): not sent (%llu)",
+                    entity, static_cast<unsigned long long>(n_.paintGated));
+        return;
+    }
     UObject* box = nullptr;
     if (!c.get("Box", box) || !box) return;
     FName bone{};
@@ -261,12 +303,17 @@ void FxSync::OnVoice(ScriptCall& c) {
     ++n_.pains;
 }
 
-// Pick Up Armor on a fighter simulated here, seen once it returned: Picked Up says whether the piece went on.
-void FxSync::OnPickUpArmor(ScriptCall& c) {
+// Equip Armor (Willie_BP.cpp:4623, build 26568321; Pick Up Armor before it) on a fighter simulated here, seen once it
+// returned: Picked Up says whether the piece went on. Its callers are the hand-to-body equips (19439, 19810, 19873).
+void FxSync::OnEquipArmor(ScriptCall& c) {
     if (!active_) return;
     UObject* self = c.self();
     const uint8_t entity = env_.ownedEntity(self);
     if (!entity) return;
+    if (!equipLogged_) {
+        equipLogged_ = true;
+        HSM_LOG("fx: armour put on is observed at Equip Armor (build 26568321; it was Pick Up Armor before)");
+    }
     bool picked = false;
     UObject* actor = nullptr;
     if (!c.getBool("Picked Up", picked) || !picked || !c.get("Armor Actor", actor) || !actor) return;
@@ -312,14 +359,27 @@ void FxSync::OnRemoveArmor(ScriptCall& c) {
     if (env_.noteSpawn) env_.noteSpawn();   // the loose piece is a new object: the object sync looks for it now
 }
 
-// Strip Armor From Bone (Willie_BP.cpp:7291) strips only a Fallen fighter, and a stand-in's Fallen never follows its
-// owner. While my fighter strips a stand-in whose owner reports it down (vitals: dead, fallen or knocked out), the
-// stand-in is Fallen for that one call, so the stock strip runs and its Remove Armor goes to the owner as a strip request.
+// Strip Armor From Bone (Willie_BP.cpp:10109, build 26568321) strips a slot only while the stripped fighter is Fallen
+// and the slot is not in its Block Undress Slots (10298, per slot), and a stand-in's Fallen never follows its owner.
+// While my fighter strips a stand-in whose owner reports it down (vitals: dead, fallen or knocked out), the stand-in is
+// Fallen for that one call, so the stock strip runs and its Remove Armor goes to the owner as a strip request (the owner
+// refuses a slot in its own Block Undress Slots: ApplyStrip). The call's other branch, a sphere trace at the stripper's
+// hand (10116-10120), takes a weapon the stand-in really holds whatever its Fallen: it is not sent to the owner; the
+// weapon taken is logged (stripWeapon).
 void FxSync::OnStripBegin(ScriptCall& c) {
     stripFallen_ = nullptr;
+    stripWatch_ = nullptr;
     if (!active_ || replaying_ || !env_.ownedEntity(c.self())) return;
     UObject* target = c.get<UObject*>("Stripped Willie");
     const uint8_t entity = target ? standIns_->EntityOf(target) : 0;
+    if (entity) {
+        stripWatch_ = target;
+        stripWatchEntity_ = entity;
+        for (int i = 0; i < 3; ++i) {
+            UObject* const* w = Field<UObject*>(target, i == 0 ? "Weapon R" : i == 1 ? "Weapon L" : "Weapon Slot Back");
+            stripWeapons_[i] = w ? *w : nullptr;
+        }
+    }
     const VitalsMsg* v = entity ? standIns_->Vitals(entity) : nullptr;
     if (!v || !((v->flags & 7u) != 0 || v->health <= 0.f) || Flag(target, "Fallen")) return;
     // A bleeding body's paint tasks read the armour being swapped (the engine's vertex-paint crash): while they are queued
@@ -336,6 +396,16 @@ void FxSync::OnStripBegin(ScriptCall& c) {
 void FxSync::OnStripEnd() {
     if (stripFallen_) SetBool(stripFallen_, "Fallen", false);
     stripFallen_ = nullptr;
+    if (stripWatch_) {
+        for (int i = 0; i < 3; ++i) {
+            UObject* const* w = Field<UObject*>(stripWatch_, i == 0 ? "Weapon R" : i == 1 ? "Weapon L" : "Weapon Slot Back");
+            if (!stripWeapons_[i] || (w && *w == stripWeapons_[i])) continue;
+            if (n_.stripWeapon++ < kLogFirst)
+                HSM_LOG("fx: my fighter took the %s weapon of e%u's stand-in with Strip Armor From Bone: local only, not sent to its owner (%llu)",
+                        i == 0 ? "right-hand" : i == 1 ? "left-hand" : "back", stripWatchEntity_, static_cast<unsigned long long>(n_.stripWeapon));
+        }
+    }
+    stripWatch_ = nullptr;
 }
 
 void FxSync::SendWound(uint8_t entity, UObject* willie, FName bone, const Xform& boxWorld, const sync::V3& extent) {
@@ -435,10 +505,13 @@ void FxSync::Refuse(const char* why, const PaintFxMsg& m, uint64_t& counter) {
 }
 
 void FxSync::Forget(uint8_t entity) {
+    if (entity <= kMaxWillies) crossbows_[entity] = {};
     limiter_.Forget(entity);
     rxLimiter_.Forget(entity);
     gate_.Forget(entity);
     held_.erase(std::remove_if(held_.begin(), held_.end(), [entity](const Held& h) { return h.m.entity == entity; }), held_.end());
+    woundRetry_.erase(std::remove_if(woundRetry_.begin(), woundRetry_.end(), [entity](const Held& h) { return h.m.entity == entity; }),
+                      woundRetry_.end());
 }
 
 UObject* FxSync::ArmorTarget(const PaintFxMsg& m) {
@@ -485,6 +558,25 @@ void FxSync::Apply(const PaintFxMsg& m) {
 }
 
 void FxSync::Tick() {
+    CrossbowTick();
+    if (!woundRetry_.empty()) {
+        std::vector<Held> todo;
+        todo.swap(woundRetry_);
+        const double now = SteadyNowMs();
+        for (Held& h : todo) {
+            UObject* standIn = active_ ? standIns_->ActorOf(h.m.entity) : nullptr;
+            if (!standIn) { ++n_.skipped; continue; }
+            if (PaintFlagsBusy(standIn) && now - h.since < kWoundRetryMs) { woundRetry_.push_back(std::move(h)); continue; }
+            if (PaintFlagsBusy(standIn)) {   // still refused: dropped, never counted as applied
+                ++n_.skipped;
+                if (n_.woundGaveUp++ < kLogFirst)
+                    HSM_LOG("fx: wound on e%u dropped: its stand-in's Box Vertex Paint gate stayed shut for %.0f ms (%llu)", h.m.entity,
+                            now - h.since, static_cast<unsigned long long>(n_.woundGaveUp));
+                continue;
+            }
+            ApplyNow(h.m);
+        }
+    }
     if (held_.empty()) return;
     if (!active_) { held_.clear(); return; }
     const double now = SteadyNowMs();
@@ -521,6 +613,10 @@ void FxSync::ApplyNow(const PaintFxMsg& m) {
         if (standIn) ApplyVoice(m, standIn); else ++n_.skipped;
         return;
     }
+    if (m.kind == FxKind::Crossbow) {
+        if (standIn) ApplyCrossbow(m, standIn); else ++n_.skipped;
+        return;
+    }
     const bool framedByPelvis = m.kind == FxKind::ArmorOn;
     if (!framedByPelvis && !util::ValidBoneName(m.bone)) { Refuse("bone name", m, n_.badBone); return; }   // M7: before any MakeName of it
     Xform boneWorld;
@@ -528,11 +624,127 @@ void FxSync::ApplyNow(const PaintFxMsg& m) {
     switch (m.kind) {
         case FxKind::Blood: ApplyBlood(m, standIn, mesh, boneWorld); break;
         case FxKind::Wound: ApplyWound(m, standIn, mesh, boneWorld); break;
-        case FxKind::Voice: break;   // above
+        case FxKind::Voice: break;      // above
+        case FxKind::Crossbow: break;   // above
         case FxKind::HitSound: ApplyHitSound(m, standIn, boneWorld); break;
         case FxKind::Armor: ApplyArmor(m, standIn, mesh, boneWorld); break;
         case FxKind::ArmorOn: ApplyArmorOn(m, standIn, boneWorld); break;
     }
+}
+
+// ---------------------------------------------------------------- crossbows (rev 43, combat/hsm_crossbow_fx.h)
+
+UObject* FxSync::CrossbowIn(UObject* willie, int hand) {
+    UObject** held = willie ? Field<UObject*>(willie, hand == 0 ? "Weapon R" : "Weapon L") : nullptr;
+    UObject* w = held ? *held : nullptr;
+    if (!w || IsGarbage(w)) return nullptr;
+    const UClass* cls = ClassOf(w);
+    auto it = crossbowClass_.find(cls);
+    if (it == crossbowClass_.end())
+        it = crossbowClass_.emplace(cls, FindProperty(ClassOf(w), "String Loaded") && FindProperty(ClassOf(w), "Bolt Loaded")).first;
+    return it->second ? w : nullptr;
+}
+
+bool FxSync::ReadCrossbow(UObject* crossbow, combat::CrossbowState& out) {
+    return GetBool(crossbow, "String Loaded", out.string) && GetBool(crossbow, "Bolt Loaded", out.bolt);
+}
+
+// The owner's side: each fighter simulated here, each hand that holds a crossbow. A crossbow first seen in a hand (picked
+// up, given, a new fighter, a hand-off) only sets the baseline; the stand-in's own catch-up covers what it missed.
+void FxSync::CrossbowTick() {
+    if (!active_ || !env_.ownedActor || !adapter_) return;
+    for (uint8_t e = 1; e <= kMaxWillies; ++e) {
+        UObject* willie = env_.ownedActor(e);
+        for (int hand = 0; hand < 2; ++hand) {
+            CrossbowWatch& w = crossbows_[e][size_t(hand)];
+            UObject* x = willie ? CrossbowIn(willie, hand) : nullptr;
+            combat::CrossbowState now;
+            if (!x || !ReadCrossbow(x, now)) { w = {}; continue; }
+            if (x != w.crossbow || ObjectIndex(x) != w.index) { w = {x, ObjectIndex(x), now}; continue; }
+            const auto action = combat::CrossbowEdge(w.state, now);
+            w.state = now;
+            if (!action || !limiter_.Allow(e, FxKind::Crossbow, SteadyNowMs())) continue;
+            PaintFxMsg m;
+            m.entity = e;
+            m.kind = FxKind::Crossbow;
+            m.bone = hand == 0 ? "hand_r" : "hand_l";
+            m.bodyPart = uint8_t(*action);
+            m.seq = ++seq_;
+            env_.send(m);
+            if (++n_.crossbow <= kLogFirst * 3)
+                HSM_LOG("fx: sent #%u crossbow %s on e%u (%s hand)", m.seq, combat::CrossbowActionName(*action), e,
+                        hand == 0 ? "right" : "left");
+        }
+    }
+}
+
+// A bolt of the stand-in's own on its crossbow: the bolt Event Add Bolt left waiting, else a new one spawned out of the
+// way as the game spawns it, then Event Load Bolt with it (it needs String Loaded and no bolt; it gives the bolt the
+// crossbow's Parent Actor, the stand-in, so the bolt deals no damage here). A bolt that did not seat is destroyed.
+bool FxSync::LoadBolt(UObject* crossbow, UObject* standIn) {
+    Call load(crossbow, "Event Load Bolt");
+    if (!load.valid()) return false;
+    if (!FindProperty(load.function(), "Loaded Ammo")) {   // an older crossbow: Add Bolt spawns from the quiver, Load Bolt seats it
+        if (UObject** q = Field<UObject*>(standIn, "Attached Bolt Quiver"); q && *q)
+            if (int32_t* n = Field<int32_t>(*q, "Projectile Count"); n && *n < 1) *n = 1;
+        Call(crossbow, "Event Add Bolt").invoke();
+        return load.invoke();
+    }
+    UObject** waiting = Field<UObject*>(crossbow, "Loaded Ammo");
+    UObject* bolt = waiting && *waiting && !IsGarbage(*waiting) ? *waiting : nullptr;
+    const bool spawned = !bolt;
+    if (spawned) {
+        UClass* cls = adapter_->CrossbowBoltClass();
+        bolt = cls ? adapter_->SpawnActorAt(cls, FVector{0, 0, -100000}, FRotator{}) : nullptr;
+        if (!bolt) {
+            if (!crossbowFailLogged_)
+                HSM_LOG("fx: crossbow bolt class %s: stand-ins' crossbows show no bolt", cls ? "spawn failed" : "missing");
+            crossbowFailLogged_ = true;
+            return false;
+        }
+    }
+    load.set<UObject*>("Loaded Ammo", bolt);
+    load.invoke();
+    combat::CrossbowState s;
+    if (ReadCrossbow(crossbow, s) && s.bolt) return true;
+    if (spawned) adapter_->DestroyActor(bolt);
+    return false;
+}
+
+// Everyone else: the stand-in's crossbow in the owner's hand (or the other one) runs what it needs to match the owner.
+void FxSync::ApplyCrossbow(const PaintFxMsg& m, UObject* standIn) {
+    const int hand = m.bone == "hand_l" ? 1 : 0;
+    UObject* x = CrossbowIn(standIn, hand);
+    if (!x) x = CrossbowIn(standIn, 1 - hand);
+    combat::CrossbowState s;
+    if (!x || !ReadCrossbow(x, s)) {
+        ++n_.skipped;
+        if (n_.skipped <= 3) HSM_LOG("fx: #%u crossbow on e%u: its stand-in holds no crossbow", m.seq, m.entity);
+        return;
+    }
+    const auto action = combat::CrossbowAction(m.bodyPart);
+    const std::vector<combat::CrossbowStep> steps = combat::PlanCrossbowReplay(s, action);
+    ScriptHookBypass bypass;   // our own calls
+    bool ok = true;
+    for (combat::CrossbowStep step : steps) {
+        switch (step) {
+            case combat::CrossbowStep::LoadString: {
+                Call string(x, "Event Load String");
+                if (string.valid()) string.invoke();
+                combat::CrossbowState now;
+                if (!ReadCrossbow(x, now) || !now.string) ok &= SetBool(x, "String Loaded", true);   // Block String Loading held it
+                break;
+            }
+            case combat::CrossbowStep::LoadBolt: ok &= LoadBolt(x, standIn); break;
+            case combat::CrossbowStep::Shoot: ok &= Call(x, "Event Shoot").invoke(); break;
+        }
+    }
+    ++n_.crossbowReplayed;
+    if (!ok) { Count(false, m); return; }
+    ++n_.applied;
+    if (n_.crossbowReplayed <= kLogFirst * 3)
+        HSM_LOG("fx: replayed #%u crossbow %s on the stand-in of e%u (%zu step(s), was string %d bolt %d)", m.seq,
+                combat::CrossbowActionName(action), m.entity, steps.size(), int(s.string), int(s.bolt));
 }
 
 // The owner's cue on the stand-in's own Voice Audio, then its Helmet Muffle Voice (the low-pass a helmet puts on it).
@@ -550,7 +762,7 @@ void FxSync::ApplyVoice(const PaintFxMsg& m, UObject* standIn) {
     else if (known && !known->found) { ++n_.skipped; return; }   // looked up and not there: no second scan
     else {
         if (!cueScans_.Allow(now)) { ++n_.scanLimited; return; }
-        sound = FindObject(m.bone, "SoundCue");
+        sound = FindObject(m.bone, combat::IsVoiceWaveName(m.bone) ? "SoundWave" : "SoundCue");   // Gulp, Spit: wave assets (VO_Gulp, Willie_BP.cpp:31005)
         voiceCues_.Put(m.bone, sound ? ObjRef{sound, ObjectIndex(sound)} : ObjRef{}, sound != nullptr, now);
     }
     if (!audio || !*audio || !sound) { Count(false, m); return; }
@@ -566,11 +778,18 @@ void FxSync::ApplyVoice(const PaintFxMsg& m, UObject* standIn) {
 }
 
 // A strip request for a fighter simulated here: another machine's fighter stripped our fallen fighter's stand-in
-// there. Honoured only while it really is fallen (Strip Armor From Bone's own gate); the Remove Armor it runs is then
-// reported to everyone as usual.
+// there. Honoured only while it really is fallen and the slot is not in its Block Undress Slots (Strip Armor From Bone's
+// own per-slot gate, Willie_BP.cpp:10298); the Remove Armor it runs is then reported to everyone as usual.
 void FxSync::ApplyStrip(const PaintFxMsg& m) {
     UObject* own = env_.ownedActor ? env_.ownedActor(m.entity) : nullptr;
     if (!own || !Flag(own, "Fallen")) { ++n_.skipped; return; }
+    if (UndressBlocked(own, uint8_t(m.rate))) {
+        ++n_.skipped;
+        if (n_.stripBlocked++ < kLogFirst)
+            HSM_LOG("fx: strip of armour slot %u from my fallen e%u refused: the slot is in its Block Undress Slots (a limb is off) (%llu)",
+                    unsigned(m.rate), m.entity, static_cast<unsigned long long>(n_.stripBlocked));
+        return;
+    }
     UObject* mesh = adapter_->Mesh(own);
     Xform boneWorld;
     if (!mesh || !BoneXform(mesh, MakeName(kArmorBone), boneWorld)) { ++n_.skipped; return; }
@@ -587,8 +806,8 @@ void FxSync::ApplyStrip(const PaintFxMsg& m) {
     Count(ok, m);
 }
 
-// The nearest loose piece of the owner's class to where the owner's lay, put on the stand-in by its own Pick Up Armor
-// (Player raised for the call: it is the function's first gate).
+// The nearest loose piece of the owner's class to where the owner's lay, put on the stand-in by its own Equip Armor
+// (Willie_BP.cpp:4623, build 26568321: it reads no Player flag, so none is raised any more).
 void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& boneWorld) {
     // M2: only the armour Blueprint family is searched for (then handed to a Blueprint call on the stand-in). A class no
     // loaded object has is remembered for 5 s, and walks are limited to 10 a second.
@@ -623,11 +842,8 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
     bool staticMesh = false;
     GetBool(best, "World Mesh Static", staticMesh);
     UObject* const* piece = Field<UObject*>(best, staticMesh ? "Armor Mesh Static" : "Armor Mesh Skeletal");
-    Call pick(standIn, "Pick Up Armor");
+    Call pick(standIn, "Equip Armor");
     pick.set<UObject*>("Picked Armor", piece ? *piece : nullptr).set<UObject*>("Armor Actor", best);
-    bool wasPlayer = false;
-    GetBool(standIn, "Player", wasPlayer);
-    SetBool(standIn, "Player", true);
     bool ok = false;
     {
         ScriptHookBypass bypass;   // our own call
@@ -635,7 +851,8 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
         ok = pick.valid() && pick.invoke();
         replaying_ = false;
     }
-    SetBool(standIn, "Player", wasPlayer);
+    // Picked Up is the game's own verdict (a blocked slot or missing arming points leave it false)
+    if (ok && FindProperty(pick.function(), "Picked Up") && !pick.get<bool>("Picked Up")) ok = false;
     HSM_LOG("fx: %s put on the stand-in of e%u%s", m.bone.c_str(), m.entity, ok ? "" : ": FAILED");
     if (ok && env_.gearChanged) env_.gearChanged(m.entity);
     Count(ok, m);
@@ -723,6 +940,20 @@ void FxSync::ApplyBlood(const PaintFxMsg& m, UObject* standIn, UObject* mesh, co
 // The stand-in's own Box Vertex Paint over a private box at the owner's wound, with the owner's body part and damage
 // rate, and Invulnerable (its first gate) lowered for the one call. The rig sets Invulnerable again every frame anyway.
 void FxSync::ApplyWound(const PaintFxMsg& m, UObject* standIn, UObject* mesh, const Xform& boneWorld) {
+    // Box Vertex Paint's first gate also refuses while the stand-in dismembers, swaps armour, sets armour up or has its hat
+    // flag set (Willie_BP.cpp:2206): the call would return with nothing painted. The wound waits for the gate (Tick) for
+    // up to kWoundRetryMs and is not counted as applied; one still refused then is dropped (skipped).
+    if (PaintFlagsBusy(standIn)) {
+        if (woundRetry_.size() < kWoundRetryMax) {
+            if (n_.woundDeferred++ < kLogFirst)
+                HSM_LOG("fx: wound on e%u waits: its stand-in is dismembering, swapping or setting up armour (retries up to %.0f ms) (%llu)",
+                        m.entity, kWoundRetryMs, static_cast<unsigned long long>(n_.woundDeferred));
+            woundRetry_.push_back({m, SteadyNowMs()});
+        } else {
+            ++n_.skipped;
+        }
+        return;
+    }
     UObject* box = PaintBox(m.entity, standIn);
     if (!box) { ++n_.failed; return; }
     const Xform world = combat::FxFromBone(boneWorld, m.local);
@@ -792,10 +1023,10 @@ std::string FxSync::HealthLine() {
     const Counters& a = n_;
     const Counters& b = reported_;
     auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
-    char line[400];
-    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu (limited %llu nobone %llu noname %llu passed-on %llu) | replayed %llu (skipped %llu failed %llu) | refused rx-limit %llu name %llu bone %llu scan-limit %llu",
-                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.pains, b.pains), d(a.hits, b.hits), d(a.armor, b.armor), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName), d(a.passedOn, b.passedOn),
-                  d(a.applied, b.applied),
+    char line[512];
+    std::snprintf(line, sizeof line, "fx: sent blood %llu wounds %llu pain %llu hits %llu armour %llu crossbow %llu (limited %llu nobone %llu noname %llu passed-on %llu) | replayed %llu (crossbow %llu, skipped %llu failed %llu) | refused rx-limit %llu name %llu bone %llu scan-limit %llu",
+                  d(a.blood, b.blood), d(a.wounds, b.wounds), d(a.pains, b.pains), d(a.hits, b.hits), d(a.armor, b.armor), d(a.crossbow, b.crossbow), d(a.limited, b.limited), d(a.noBone, b.noBone), d(a.noName, b.noName), d(a.passedOn, b.passedOn),
+                  d(a.applied, b.applied), d(a.crossbowReplayed, b.crossbowReplayed),
                   d(a.skipped, b.skipped), d(a.failed, b.failed), d(a.rxLimited, b.rxLimited), d(a.badName, b.badName), d(a.badBone, b.badBone),
                   d(a.scanLimited, b.scanLimited));
     reported_ = n_;

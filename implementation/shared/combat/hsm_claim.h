@@ -128,7 +128,11 @@ struct HitClaim {
     V3 worldLocation;
 };
 
-constexpr double kMaxStuckRawDamage = 1e7;      // Stuck claims: Raw Damage above this is not a stuck blade's (Bone Mass * 1000 is ~1e5)
+// Stuck claims: Raw Damage above this is not a stuck blade's. Build 26568321 raised the lodged-blade multiplier from x10 to
+// x1000 for a brain pierce (x500 heart, x25 other bone) and its density term from 5000 to 10000
+// (Constraint_Weapon_Stuck_BP.cpp:903-925), up to 200 times the old range, so the cap went from 1e7 to 2e9. The sender clamps
+// to this (claims.cpp), it never drops a claim for being over it.
+constexpr double kMaxStuckRawDamage = 2e9;
 constexpr double kMaxStuckCuttingPower = 1e6;   // and so is a Cutting Power above this (the game's own are a few thousand at most)
 
 // The world-space "Deal Complex Damage" call inputs, same fields as the decompiled signature

@@ -189,7 +189,46 @@ static void TestCareerSave() {
         CHECK(ok(w.b));
         CHECK(!CheckPassportSave(w.b.data(), w.b.size()));
     }
-    { Writer w = Header(); End(w); CHECK(ok(w.b)); }                                     // a save of defaults only
+    // Build 26568321 writes the career block only at Current Play Mode 0; a save from any other mode has none of it, and must
+    // not replace the career. The Free Mode characters and the mode fields are written at every mode.
+    const std::string kEnumGameMode = "ByteProperty(Enum_GameMode(/Game/Blueprints/Enumerator/Enum_GameMode))";
+    {   // Play Mode 1: Free Mode's characters (and the passport type), the mode fields, Old Willie
+        Writer w = Header();
+        Prop(w, "Current Game Mode Enum", kEnumGameMode, {1});
+        Prop(w, "Free Mode Player Character 1", kPassportType, Bytes(300, 0x11));
+        Prop(w, "Free Mode Player Character 2", kPassportType, Bytes(300, 0x12));
+        Prop(w, "Free Mode Activated", "BoolProperty", {}, 0x10);
+        Prop(w, "Old Willie", "BoolProperty", {}, 0x10);
+        End(w);
+        CHECK(why(w.b) == "no career block");
+        CHECK(CareerBlockState(w.b.data(), w.b.size()) == 0);
+    }
+    { Writer w = Header(); End(w); CHECK(why(w.b) == "no career block"); }               // a save of defaults only: nothing to keep
+    {   // Play Mode 2: the Abyss fields
+        Writer w = Header();
+        Prop(w, "Current Abyss Tier FM", "ByteProperty(Enum_Ranks(/Game/Blueprints/Enumerator/Enum_Ranks))", {2});
+        Prop(w, "P1 Transform FM", "StructProperty(Transform(/Script/CoreUObject.Transform),00000000-0000-0000-0000-000000000000)", Bytes(80, 1), 0x08);
+        End(w);
+        CHECK(why(w.b) == "no career block");
+    }
+    // any one career field marks the block: a day-0 career with no funds omits Day Count and Player Funds (defaults)
+    for (const char* name : {"Player Character", "Day Count", "Player Funds", "Day Time", "Player Inventory", "Merchant Inventory"}) {
+        Writer w = Header();
+        Prop(w, "Current Game Mode Enum", kEnumGameMode, {0});
+        Prop(w, name, "IntProperty", {1, 0, 0, 0});
+        End(w);
+        CHECK(ok(w.b));
+        CHECK(CareerBlockState(w.b.data(), w.b.size()) == 1);
+    }
+    {   // a name that merely contains a career field is another property
+        Writer w = Header(); Prop(w, "Free Mode Player Character 1", kPassportType, Bytes(50, 1)); End(w);
+        CHECK(why(w.b) == "no career block");
+    }
+    {   // tags the walk cannot follow give no verdict: the file passes on its shape, as before
+        Writer w = Header(); Prop(w, "Current Game Mode Enum", kEnumGameMode, {1}, 0x04); End(w);
+        CHECK(CareerBlockState(w.b.data(), w.b.size()) == -1);
+        CHECK(ok(w.b));
+    }
     // the tail: "None", then at most 8 zero bytes
     { Bytes b = Good(); b.resize(b.size() - 4); CHECK(ok(b)); }
     { Bytes b = Good(); for (int i = 0; i < 4; ++i) b.push_back(0); CHECK(ok(b)); }
