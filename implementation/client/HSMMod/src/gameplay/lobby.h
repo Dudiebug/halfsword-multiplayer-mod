@@ -17,9 +17,9 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 20;  // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre50-test";
+constexpr const char* kModVersion = "0.8.0-pre51-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre50";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0-pre51";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -30,6 +30,11 @@ void SetAllowBuildMismatch(bool on);
 // once at start, before Steam networking starts.
 void SetDirectP2P(bool on);
 bool AllowBuildMismatch();
+// The installed game's Steam build id (steam::AppBuildId), read once Steam answers and logged with its verdict
+// (session/hsm_game_build.h); 0 while Steam cannot say.
+int SteamBuild();
+// The multiplayer page's line when this machine is not on the build this HSMMod is made for; empty otherwise.
+std::string GameBuildNotice();
 
 struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; std::string steamName; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
 

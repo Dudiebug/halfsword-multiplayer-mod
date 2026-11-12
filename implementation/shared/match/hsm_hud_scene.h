@@ -243,7 +243,7 @@ struct LocalHud {
     bool rouletteLoaded = false;     // Roulette: the holder has a live round in the crossbow
     uint8_t watching = 0;            // dead: the fighter the camera follows, 0 = none (the F key needs one)
     bool flying = false;             // dead: the free camera is on
-    bool hidden = false;             // the living player's free camera hid the HUD (H; #2624): nothing is drawn, the name tags neither
+    bool hidden = false;             // the game's photo mode is open in the match (#2624): nothing is drawn, the name tags neither
 };
 
 struct SceneText { bool visible = false; std::string text; Rgba color = style::kBone; float opacity = 1, scale = 1; };

@@ -219,75 +219,85 @@ private:
     Pose pose_;
 };
 
-// ------------------------------------------------------------------ the living player's free camera (#2624)
-// The game's photo mode pauses the world, which stalls a session, so its key stays blocked there. In a running match the
-// same key flies this camera instead, while the player's fighter lives and the host's Free cam row is on. The body's own
-// input is held meanwhile (LiveCamInput), the mouse and W A S D fly inside the dead player's box, and H hides the mod's
-// HUD for a clean shot. The key ends it, and so does anything that ends its condition (LiveCamMay).
-struct LiveCamWorld {
+// ------------------------------------------------------------------ the game's photo mode in a match (#2624)
+// As the game ships it, photo mode pauses the world, which stalls a session. That pause is a switch on photo mode's own
+// component (BPC_PhotoMode, on every fighter: bPauseGameInPhotoMode, and bPauseGameInGallery for its gallery). With both
+// off the same screen opens over a running fight. So in a running match the photo mode key opens the game's own photo
+// mode, not paused, while the player's fighter lives and the host's Free cam row is on. The fighter's own input is held
+// meanwhile (PhotoInput), the mod's HUD is hidden for the shot and its hotkeys stay quiet. The game's own key and
+// buttons close it; the mod closes it when its condition ends (PhotoEnds).
+constexpr uint32_t kPhotoSettleMs = 300;
+// The key reached my fighter while photo mode was open and its own screen did not close it within this: the mod does.
+constexpr uint32_t kPhotoCloseAfterMs = 150;
+inline bool PhotoKeyCloses(bool open, uint32_t sinceKeyMs) { return open && sinceKeyMs >= kPhotoCloseAfterMs; }
+struct PhotoWorld {
     bool matchLevel = false;    // a session match's level
     bool fighting = false;      // a match runs (not the lobby, not the results)
     bool alive = false;         // my fighter lives (a dead player has the spectator's camera)
     bool allowed = false;       // the host's Free cam row
+    bool busy = false;          // one of the mod's own screens has the keyboard (chat, the pause panel, the lobby page)
+    bool ready = false;         // the component is on my fighter and both of its pause switches read off
+    bool open = false;          // photo mode (or its gallery) is on screen now
+    uint32_t closedForMs = kPhotoSettleMs;   // how long ago it closed (kPhotoSettleMs and up: long enough, or never open)
 };
-inline bool LiveCamMay(const LiveCamWorld& w) { return w.matchLevel && w.fighting && w.alive && w.allowed; }
-enum class LiveCamAnswer : uint8_t { On, Off, NoMatch, Dead, NotAllowed, NoCamera };
-// What the player is told (empty: nothing; a dead player has the spectator's camera and its F key).
-inline const char* LiveCamLine(LiveCamAnswer a) {
+// The photo mode key reaching my own fighter. Only Open lets the game's key event through. While photo mode is open the
+// key is its screen's: the fighter's event would toggle it a second time (the game only guards that with its pause), so
+// it is kept from the fighter (Close), and for kPhotoSettleMs after it closed too (the same press, a frame later).
+enum class PhotoKey : uint8_t { Open, Close, NoMatch, Dead, NotAllowed, Busy, NotReady };
+inline PhotoKey PhotoKeyAnswer(const PhotoWorld& w) {
+    if (w.open) return PhotoKey::Close;
+    if (w.closedForMs < kPhotoSettleMs) return PhotoKey::Busy;
+    if (!w.matchLevel || !w.fighting) return PhotoKey::NoMatch;
+    if (!w.alive) return PhotoKey::Dead;
+    if (!w.allowed) return PhotoKey::NotAllowed;
+    if (w.busy) return PhotoKey::Busy;
+    if (!w.ready) return PhotoKey::NotReady;
+    return PhotoKey::Open;
+}
+// What the player is told when the key did nothing (empty: nothing).
+inline const char* PhotoKeyLine(PhotoKey a) {
     switch (a) {
-        case LiveCamAnswer::On: return "Free camera on: the mouse and W A S D fly, H hides the HUD, the photo mode key ends it";
-        case LiveCamAnswer::Off: return "Free camera off";
-        case LiveCamAnswer::NoMatch: return "The free camera works during a match";
-        case LiveCamAnswer::Dead: return "";
-        case LiveCamAnswer::NotAllowed: return "The host turned free cameras off for this match";
-        case LiveCamAnswer::NoCamera: return "The free camera could not start here";
+        case PhotoKey::NoMatch: return "Photo mode works during a match";
+        case PhotoKey::NotAllowed: return "The host turned free cameras off for this match, photo mode with them";
+        case PhotoKey::NotReady: return "Photo mode could not start here";
+        case PhotoKey::Dead: return "";    // a dead player has the spectator's camera and its F key
+        case PhotoKey::Busy: return "";    // the screen that has the keyboard got the key
+        case PhotoKey::Open: return "";    // the game's own screen says the rest
+        case PhotoKey::Close: return "";
     }
     return "";
 }
-class LiveCam {
-public:
-    bool on() const { return on_; }
-    bool hudHidden() const { return on_ && hudHidden_; }
-    const Pose& pose() const { return pose_; }
-
-    // The photo mode key. Off always works; on starts the flight at `current` (where the camera is now) when the world
-    // allows it and the box is usable, with the HUD shown.
-    LiveCamAnswer Toggle(const LiveCamWorld& w, const Pose& current, const Bounds& bounds) {
-        if (on_) { End(); return LiveCamAnswer::Off; }
-        if (!w.matchLevel || !w.fighting) return LiveCamAnswer::NoMatch;
-        if (!w.alive) return LiveCamAnswer::Dead;
-        if (!w.allowed) return LiveCamAnswer::NotAllowed;
-        if (!bounds.valid || !Finite(current.pos) || !Finite(current.yaw) || !Finite(current.pitch)) return LiveCamAnswer::NoCamera;
-        pose_ = current;
-        pose_.yaw = WrapYaw(pose_.yaw);
-        pose_.pitch = std::clamp(pose_.pitch, -kFreePitchLimit, kFreePitchLimit);
-        pose_.pos = Clamp(pose_.pos, bounds);
-        on_ = true;
-        hudHidden_ = false;
-        return LiveCamAnswer::On;
+// While it is open: why the mod closes it, or Keep. One of the mod's screens never ends it (none opens over it).
+enum class PhotoEnd : uint8_t { Keep, MatchOver, Down, HostOff };
+inline PhotoEnd PhotoEnds(const PhotoWorld& w) {
+    if (!w.matchLevel || !w.fighting) return PhotoEnd::MatchOver;
+    if (!w.alive) return PhotoEnd::Down;
+    if (!w.allowed) return PhotoEnd::HostOff;
+    return PhotoEnd::Keep;
+}
+inline const char* PhotoEndText(PhotoEnd e) {
+    switch (e) {
+        case PhotoEnd::MatchOver: return "the match or the level ended";
+        case PhotoEnd::Down: return "my fighter is down";
+        case PhotoEnd::HostOff: return "the host turned free cameras off";
+        case PhotoEnd::Keep: return "";
     }
-    // Every frame. False when the flight had to end: the fighter died, the match or the level ended, the host turned it off.
-    bool Keep(const LiveCamWorld& w) {
-        if (!on_ || LiveCamMay(w)) return true;
-        End();
-        return false;
-    }
-    void ToggleHud() { hudHidden_ = !hudHidden_; }   // read through hudHidden(): only a flight hides the HUD, and each one starts with it shown
-    void Look(double dx, double dy, double sensitivity = kSensitivity) { if (on_) pose_ = ApplyLook(pose_, dx, dy, sensitivity); }
-    void Fly(FreeInput in, bool fast, double dtSeconds, const Bounds& bounds) { if (on_) pose_ = StepFree(pose_, in, fast, dtSeconds, bounds); }
-    void End() { on_ = false; }
+    return "";
+}
 
-private:
-    bool on_ = false, hudHidden_ = false;
-    Pose pose_;
-};
-
-// The living body's own input while the camera flies: an axis reads zero (so nothing stays pushed), a press is dropped, a
-// release passes (a key held when the flight began lets go as usual).
+// A body's own input while it is held (a seeker waiting, photo mode open): an axis reads zero (so nothing stays pushed),
+// a press is dropped, a release passes (a key held when the hold began lets go as usual).
 enum class HeldInput : uint8_t { Pass, Zero, Drop };
-inline HeldInput LiveCamInput(bool flying, bool isAxis, bool pressed) {
-    if (!flying) return HeldInput::Pass;
+inline HeldInput HoldInput(bool held, bool isAxis, bool pressed) {
+    if (!held) return HeldInput::Pass;
     return isAxis ? HeldInput::Zero : pressed ? HeldInput::Drop : HeldInput::Pass;
+}
+// The fighter's own input while photo mode is open. The look axes pass while the game's own camera is the view (photo
+// mode turns it with them, as in play) and read zero while photo mode's free camera flies (that one reads the mouse
+// itself). Everything else is held.
+inline HeldInput PhotoInput(bool open, bool freeCam, bool isAxis, bool isLook, bool pressed) {
+    if (open && isAxis && isLook && !freeCam) return HeldInput::Pass;
+    return HoldInput(open, isAxis, pressed);
 }
 
 }  // namespace hsm::freecam

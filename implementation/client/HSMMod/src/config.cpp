@@ -67,6 +67,8 @@ constexpr char kDefaultIni[] =
     "join_sound=1\n"
     "; 1: in a multiplayer match Esc opens the mod's own pause menu, with every menu button of the game in one place, and the game's pause menu is not used; 0: the game's pause menu with the mod's buttons over it\n"
     "mod_pause=1\n"
+    "; 1: a trial: LOADOUT in the mod's pause menu opens the game's own inventory screen over the match. The screen was made for the Tavern and may not work in an arena; Esc closes it. 0: off\n"
+    "loadout_trial=0\n"
     "; 1: leave custom maps named as a test (Test_Arena, MapTest, test01) out of the map picker; 0: list them too\n"
     "hide_test_maps=1\n"
     "; 1: other players see your Half Wolverine claws and you see theirs, if you both have LoganClaws_P.pak; 0: off\n"
@@ -419,6 +421,7 @@ Config LoadConfig() {
     c.buildCards = ReadString(ini, L"build_cards", "1") != "0";
     c.joinSound = ReadString(ini, L"join_sound", "1") != "0";
     c.modPause = ReadString(ini, L"mod_pause", "1") != "0";
+    c.loadoutTrial = ReadString(ini, L"loadout_trial", "0") == "1";
     c.hideTestMaps = ReadString(ini, L"hide_test_maps", "1") != "0";
     c.clawMirror = ReadString(ini, L"claw_mirror", "1") != "0";
     c.className = ReadString(ini, L"class", "");

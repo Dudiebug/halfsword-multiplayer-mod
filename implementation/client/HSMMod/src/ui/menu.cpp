@@ -1752,6 +1752,7 @@ void UpdatePanel(Session& session) {
     else g.modsScene = LobbyModsScene{};
     DrawChat(lobby.InLobby());
     std::string notice = update::Notice();
+    if (const std::string build = game::GameBuildNotice(); !build.empty()) notice += (notice.empty() ? "" : "\n") + build;   // session/hsm_game_build.h
     if (const std::string install = update::InstallStatus(); !install.empty()) notice += (notice.empty() ? "" : "\n") + install;
     if (const std::string proxy = ue4ss::Notice(); !proxy.empty()) notice += (notice.empty() ? "" : "\n") + proxy;
     g.updateNote.Set(notice);

@@ -21,9 +21,11 @@ struct ScriptVm {
 struct BuildInfo { uint64_t key; const char* label; uintptr_t gobjects, appendString; uint32_t processEventIndex; ScriptVm vm; };
 // key = PE TimeDateStamp << 32 | SizeOfImage. Unknown key => mod disables itself.
 // The current Steam build only (tools/check_game_binary.py checks it). 26568321 kept every RVA of 24185754, which the
-// mod no longer starts on: its content changed too much for one mod build to serve both.
+// mod no longer starts on: its content changed too much for one mod build to serve both. 26615445 changed only the
+// content pak: its exe is byte for byte 26568321's, so the key is the same and the Steam build id tells the two apart
+// (session/hsm_game_build.h).
 constexpr BuildInfo kBuilds[] = {
-    {0xA54B1DAD09712000ull, "steam-26568321 (CL-2980)", 0x08BFD240, 0x012C1CB0, 0x4D,
+    {0xA54B1DAD09712000ull, "steam-26615445 (CL-2980, exe of 26568321)", 0x08BFD240, 0x012C1CB0, 0x4D,
      {0x014A4850, 0x014A4950, 0x6C, 0x036AF990, 0x014A4EF0}},
 };
 // Prologues of the two VM functions in the builds above (MSVC, /GS): checked before the executor is detoured.
@@ -90,7 +92,7 @@ bool Init() {
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_key = ComputeBuildKey();
     for (const BuildInfo& b : kBuilds) if (b.key == g_key) { g_build = &b; break; }
-    if (!g_build) { HSM_LOG("engine: unsupported build key %016llx (this HSMMod runs on Steam build 26568321 only)", (unsigned long long)g_key); return false; }
+    if (!g_build) { HSM_LOG("engine: unsupported build key %016llx (this HSMMod runs on Steam build 26615445 only)", (unsigned long long)g_key); return false; }
     g_objects = reinterpret_cast<TUObjectArray*>(g_base + g_build->gobjects);
     g_appendString = reinterpret_cast<AppendStringFn>(g_base + g_build->appendString);
     // Wait for the object array to fill (engine init) before anyone touches it.

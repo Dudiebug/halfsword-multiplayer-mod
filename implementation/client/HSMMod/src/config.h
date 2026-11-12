@@ -205,6 +205,9 @@ struct Config {
     // mod_pause=0: Esc in a session match opens the game's own pause menu (with the mod's overlay on it) as before. 1 (default): the game's
     // Esc pause toggle is blocked there and Esc opens the mod's own pause panel (ui/pause_panel.h).
     bool modPause = true;
+    // loadout_trial=1: a trial. LOADOUT shows in the mod's pause menu and opens the game's own inventory screen over the
+    // match (match/hsm_pause_panel.h). The screen was made for the Tavern; the trial is there to see what it does in an arena.
+    bool loadoutTrial = false;
     bool hideTestMaps = true; // hide_test_maps: leave maps named "test" out of the custom map list
     std::string className;    // class=: the class picked in the mods menu; empty or Fair: the game's own fighter
     bool classWolverine = true;   // class_wolverine=0: don't write a class's parts into Half Wolverine's settings at start

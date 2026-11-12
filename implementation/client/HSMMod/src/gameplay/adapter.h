@@ -87,6 +87,16 @@ public:
     // loaded by path, made with WidgetBlueprintLibrary.Create, its "Go Back To" class set when goBackToPath is given, added
     // to the viewport at z 99. Returns the widget; nullptr when a class would not load or the call failed (nothing opened).
     ue::UObject* OpenStockScreen(const std::string& objectPath, const std::string& goBackToPath = {});
+    // loadout_trial: a screen OpenStockScreen made. ScreenUp: still a live widget in the viewport. CloseScreen takes it
+    // off the screen if it is still there. PossessLocal: player 0's controller possesses `pawn` (the game's inventory
+    // screen possesses the Tavern's camera, and with none in an arena that takes the controller off the fighter).
+    bool ScreenUp(ue::UObject* w, int32_t index);
+    void CloseScreen(ue::UObject* w, int32_t index);
+    bool PossessLocal(ue::UObject* pawn);
+    // loadout_trial: the inventory screen's own exit makes the Tavern's hub menu (UI_Hub_Tavern_C). While on, that menu's
+    // Construct is skipped and it is removed the next tick, as the pause screen is for mod_pause.
+    void SwallowTavernHub(bool on);
+    uint32_t TakeHubSwallowed() { const uint32_t n = hubSwallowed_; hubSwallowed_ = 0; return n; }
     // The game's pause screen class path, the "Go Back To" of the screens the panel opens.
     static constexpr const char* kStockPauseClassPath = "/Game/UI/UI_Pause_Eng.UI_Pause_Eng_C";
     // Closes the pause menu the way its Continue button does (that button's click handler, found by name on the widget's
@@ -252,6 +262,15 @@ public:
     void SetGamePaused(bool paused);
     // World time back to normal speed (slow motion and photo mode change it on one machine only). True if it was not 1.
     bool ResetTimeDilation();
+    // The game's photo mode on a fighter (its BPC_PhotoMode component; UI/PhotoMode/Blueprints in the game). PhotoMode
+    // reads whether its screen or its gallery is up and whether its free camera flies. SetPhotoUnpaused(willie, true)
+    // turns the component's two "pause the game" switches off, keeping what they were, and says whether both now read
+    // off; (willie, false) puts them back on the component it changed. ClosePhotoMode closes what is open, through the
+    // component's own functions: the gallery first, photo mode itself on the next call.
+    struct PhotoState { ue::UObject* component = nullptr; bool open = false, gallery = false, freeCam = false; };
+    PhotoState PhotoMode(ue::UObject* willie);
+    bool SetPhotoUnpaused(ue::UObject* willie, bool unpaused);
+    bool ClosePhotoMode(ue::UObject* willie);
     void ConsoleCommand(const std::string& command);      // KismetSystemLibrary.ExecuteConsoleCommand                                 // GI_Settings.Free Mode Activated (false = Progression)
     bool IsDead(ue::UObject* willie);
     ue::UObject* FighterOf(ue::UObject* actor);            // the Willie an actor belongs to (itself, a held weapon, worn armor)
@@ -430,7 +449,11 @@ private:
     int32_t pauseWidgetIndex_ = -1;
     uint32_t pauseCheckAt_ = 0, pauseScanAt_ = 0, pauseArmedUntil_ = 0;   // PauseMenuOpen's throttles (GetTickCount ms)
     bool modPanelOpen_ = false;                    // the mod's pause panel is up (SetModPanelOpen)
+    ue::UObject* photoComp_ = nullptr;             // the photo mode component whose pause switches SetPhotoUnpaused turned off
+    int32_t photoCompIndex_ = -1;
+    bool photoPauseWas_ = true, photoGalleryPauseWas_ = true;   // what those switches were
     uint32_t pauseSwallowed_ = 0;                  // pause screens SuppressStockScreens kept from constructing (TakePauseSwallowed)
+    uint32_t hubSwallowed_ = 0;                    // Tavern hub menus kept from constructing (SwallowTavernHub)
     bool inputTouched_ = false;    // RestoreGameInput or CaptureInput ran since the last MenuInputBack
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;

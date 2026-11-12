@@ -1,7 +1,7 @@
 // The mod's pause panel (mod_pause=1): in a multiplayer session match Esc opens this instead of the game's pause menu. It is
 // built into the game's UI_HUD widget tree, as the chat and the build card are, and shows the buttons of
 // match/hsm_pause_panel.h: RESUME, MULTIPLAYER MENU, SETTINGS, MOD SETTINGS, REPORT A BUG, LEAVE MATCH, QUIT TO MAIN MENU,
-// QUIT TO DESKTOP (and LOADOUT once it is switched on). MULTIPLAYER MENU and MOD SETTINGS are pages of the panel itself;
+// QUIT TO DESKTOP (and LOADOUT with loadout_trial=1). MULTIPLAYER MENU and MOD SETTINGS are pages of the panel itself;
 // every other button is reported to the session (gameplay/session.cpp ModPauseTick), which carries it out. Esc ownership
 // is match/hsm_input_mode.h. Game thread only.
 #pragma once
@@ -17,6 +17,7 @@ struct PausePanelWant {
     bool open = false;       // the player has the panel open
     bool hidden = false;     // open, but one of the game's screens (SETTINGS) is in front: the panel waits out of sight
     bool reportOn = false;   // bug reports are on and this is a session fight: REPORT A BUG, HELP IMPROVE THE MOD
+    bool loadoutTrial = false;   // loadout_trial=1: the LOADOUT button shows
 };
 
 // Once per frame. Builds the panel on the UI_HUD that is on screen (again when the game swaps the HUD), shows or hides it,

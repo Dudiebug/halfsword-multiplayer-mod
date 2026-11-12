@@ -7,8 +7,9 @@ their own loadout. Delete the DLL to
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
-Supported build: Steam 26568321 only (exe key `0xA54B1DAD09712000`). On any other build the mod logs
-"unsupported build" and does nothing.
+Supported build: Steam 26615445 only (exe key `0xA54B1DAD09712000`, the same exe as 26568321). On a game with another
+exe the mod logs "unsupported build" and does nothing. On 26568321, whose exe is the same, the multiplayer page says to
+update the game in Steam, and lobbies show which side is behind (Steam's build id, `session/hsm_game_build.h`).
 
 ## Build and checks (Linux, no MSVC)
 
@@ -74,9 +75,11 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
   copies of the fighters; blades stay steel. Every team format has it (Teams, Team Duel, Riot, Juggernaut).
 - **Spectator camera:** a dead player orbits the fighter watched with the mouse, zooms with the wheel, and presses F for a free
   camera (W A S D, Space, Ctrl, Shift). The host's Free camera row (lobby key `hsm_fcam`) turns it off.
-- **A free camera while alive** (#2624): the game's photo mode pauses the world, so it stays blocked in a session
-  match; its key flies the mod's free camera instead while your fighter lives (same keys, same box, same host row).
-  Your fighter's input is held meanwhile, H hides the mod's HUD and the name tags, and the key again ends it.
+- **Photo mode in a match** (#2624): as the game ships it, photo mode pauses the world, which stalls a session. In a
+  session match the mod switches that pause off on your fighter's photo mode (and its gallery's) and lets the key
+  through while your fighter lives, a match runs and the host's Free camera row is on. The fight goes on around you:
+  your fighter's own input is held, the mod's HUD and name tags are hidden and its hotkeys are quiet until photo mode
+  closes. It closes by its own key and buttons, and when you die, the match ends or the host turns the row off.
 - **CHANGE LOADOUT** in the Esc menu: edit your kit in the game's menu, then bring it into the match out of the fight. Own
   gear only (not in Riot or Juggernaut); one change per 5 s.
 - **Crossbows row** (lobby key `hsm_xbow`: Off, 1, 2, Half, All; experimental): random players spawn with a crossbow,

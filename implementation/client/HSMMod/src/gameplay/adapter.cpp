@@ -1700,6 +1700,7 @@ constexpr const char* kOwnerMatchScreens[] = {"UI_Lose_C", "UI_GiveUp_C", "UI_Ne
 bool g_suppressScreens = false;
 bool g_suppressOwnerScreens = false;
 bool g_swallowPause = false;
+bool g_swallowHub = false;      // loadout_trial: the Tavern's hub menu never constructs in a session match (SwallowTavernHub)
 bool g_screenHooks = false;
 
 // A pause menu other than `self` is in the viewport (see PauseMenuOpen for the class match).
@@ -2097,6 +2098,63 @@ bool Adapter::ResetTimeDilation() {
     return true;
 }
 
+namespace {
+UObject* PhotoComponent(UObject* willie) {
+    UObject* const* c = willie ? Field<UObject*>(willie, "BPC_PhotoMode") : nullptr;
+    return c ? *c : nullptr;
+}
+UObject* PhotoScreen(UObject* component) {
+    UObject* const* w = component ? Field<UObject*>(component, "PhotoModeWidgetRef") : nullptr;
+    return w ? *w : nullptr;
+}
+}  // namespace
+
+Adapter::PhotoState Adapter::PhotoMode(UObject* willie) {
+    PhotoState s;
+    s.component = PhotoComponent(willie);
+    if (!s.component) return s;
+    GetBool(s.component, "bIsUsingPhotoMode", s.open);
+    GetBool(s.component, "bIsUsingGallery", s.gallery);
+    if (UObject* screen = s.open ? PhotoScreen(s.component) : nullptr) GetBool(screen, "bUsingFreeCamera", s.freeCam);
+    return s;
+}
+
+// BPC_PhotoMode.Photo Mode pauses (SetGamePaused or a 0.0001 time dilation, by PauseGameMethod) only under
+// bPauseGameInPhotoMode, and OpenGallery only under bPauseGameInGallery; nothing else in its screens touches world time.
+bool Adapter::SetPhotoUnpaused(UObject* willie, bool unpaused) {
+    UObject* comp = PhotoComponent(willie);
+    if (!unpaused) {
+        if (comp && comp == photoComp_ && ObjectAt(photoCompIndex_) == comp) {   // still the one changed: its own values go back
+            SetBool(comp, "bPauseGameInPhotoMode", photoPauseWas_);
+            SetBool(comp, "bPauseGameInGallery", photoGalleryPauseWas_);
+            HSM_LOG("photo: the pause switches of my fighter's photo mode are back as the game had them (photo mode %d, gallery %d)", int(photoPauseWas_), int(photoGalleryPauseWas_));
+        }
+        photoComp_ = nullptr; photoCompIndex_ = -1;
+        return false;
+    }
+    if (!comp) { photoComp_ = nullptr; photoCompIndex_ = -1; return false; }
+    bool photo = true, gallery = true;
+    if (!GetBool(comp, "bPauseGameInPhotoMode", photo) || !GetBool(comp, "bPauseGameInGallery", gallery)) return false;
+    if (comp != photoComp_ || ObjectIndex(comp) != photoCompIndex_) {            // a new fighter: what the game set is kept
+        photoComp_ = comp; photoCompIndex_ = ObjectIndex(comp);
+        photoPauseWas_ = photo; photoGalleryPauseWas_ = gallery;
+        HSM_LOG("photo: my fighter's photo mode had pause %d, gallery pause %d; both are off for the session match", int(photo), int(gallery));
+    }
+    if (!photo && !gallery) return true;
+    SetBool(comp, "bPauseGameInPhotoMode", false);
+    SetBool(comp, "bPauseGameInGallery", false);
+    return GetBool(comp, "bPauseGameInPhotoMode", photo) && GetBool(comp, "bPauseGameInGallery", gallery) && !photo && !gallery;
+}
+
+bool Adapter::ClosePhotoMode(UObject* willie) {
+    const PhotoState s = PhotoMode(willie);
+    if (!s.component || (!s.open && !s.gallery)) return false;
+    if (s.gallery) return Call(s.component, "ResetGallery").invoke();
+    if (s.freeCam)                       // the view and the controller's input go back to the fighter first, as its own Close button does
+        if (UObject* screen = PhotoScreen(s.component)) Call(screen, "CloseFreeCamera").invoke();
+    return Call(s.component, "ResetPhotoMode").invoke();
+}
+
 void Adapter::QuitGame() {
     UObject* ksl = nullptr;
     if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
@@ -2154,6 +2212,26 @@ UObject* Adapter::OpenStockScreen(const std::string& objectPath, const std::stri
     HSM_LOG("adapter: opened the game's screen %s", objectPath.c_str());
     return w;
 }
+
+bool Adapter::ScreenUp(UObject* w, int32_t index) { return w && ObjectAt(index) == w && InViewportNow(w); }
+
+void Adapter::CloseScreen(UObject* w, int32_t index) {
+    if (!w || ObjectAt(index) != w) return;
+    Call(w, "RemoveFromParent").invoke();
+    if (pauseWidget_ == w) { pauseOpen_ = false; pauseWidget_ = nullptr; pauseCheckAt_ = 0; pauseScanAt_ = 0; }
+}
+
+bool Adapter::PossessLocal(UObject* pawn) {
+    if (!pawn) return false;
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!ctrl) return false;
+    Call(ctrl, "Possess").set<UObject*>("InPawn", pawn).invoke();
+    return PlayerWillie(0) == pawn;
+}
+
+void Adapter::SwallowTavernHub(bool on) { g_swallowHub = on; }
 
 void Adapter::ConsoleCommand(const std::string& command) {
     UObject* ksl = nullptr;
@@ -2922,6 +3000,13 @@ void Adapter::SuppressStockScreens(bool on, bool ownerMatch, bool swallowPause) 
         if (g_swallowPause && ObjectName(reinterpret_cast<UObject*>(ClassOf(obj))).find("UI_Pause") != std::string::npos) {
             ++pauseSwallowed_;
             HSM_LOG("adapter: the game's pause screen was swallowed (mod pause menu)");
+            g_suppressed.push_back({obj, ObjectIndex(obj)});
+            return true;
+        }
+        // loadout_trial: the inventory screen's exit makes the Tavern's hub menu. It has no place in an arena.
+        if (g_swallowHub && ClassNamed(obj, "UI_Hub_Tavern_C")) {
+            ++hubSwallowed_;
+            HSM_LOG("adapter: the Tavern's hub menu was swallowed (loadout trial)");
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;
         }

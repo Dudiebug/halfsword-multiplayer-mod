@@ -18,6 +18,9 @@ void Tick(const interop::HsmFacts& facts, uint32_t dtMs);
 // HS Enhancer 0.6 on): the chat key, the build card, push to talk, G, Tab, the spectate keys and the rest are theirs until it
 // closes. False without a live Fetch or an open HS Enhancer menu.
 bool KeysHeld();
+// The game's own photo mode is open in a session match (#2624; session.cpp PhotoTick): the keyboard is that screen's, so
+// KeysHeld holds while it is.
+void SetPhotoMode(bool open);
 
 // While one lives, HSMMod is playing held-back keys of this player's again (host input delay, the match input delay, the
 // catch-up after a hand-off): the replay flag is set on the page, so Fetch's recorder does not take them as new presses.

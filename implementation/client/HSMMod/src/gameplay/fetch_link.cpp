@@ -12,6 +12,7 @@ bool g_tried = false;
 interop::LinkWatch g_watch;   // Fetch's half
 interop::LinkNotes g_notes;
 bool g_held = false;
+bool g_photo = false;          // the game's photo mode is open in a session match (SetPhotoMode)
 bool g_hseMenu = false;        // HS Enhancer's menu is open and has the keyboard (hse_hold.h MenuOpen)
 int g_replaying = 0;          // Replaying guards alive
 
@@ -59,7 +60,8 @@ void Tick(const interop::HsmFacts& facts, uint32_t dtMs) {
     if (n.gone) HSM_LOG("fetch link: Fetch is gone (its half stopped for %u ms)", unsigned(interop::kLinkStaleMs));
 }
 
-bool KeysHeld() { return g_held || g_hseMenu; }
+bool KeysHeld() { return g_held || g_hseMenu || g_photo; }
+void SetPhotoMode(bool open) { g_photo = open; }
 
 Replaying::Replaying() {
     if (g_replaying++ != 0) return;

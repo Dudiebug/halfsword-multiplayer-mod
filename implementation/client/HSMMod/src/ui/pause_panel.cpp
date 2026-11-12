@@ -240,7 +240,7 @@ std::optional<PauseButton> TickList(const PausePanelWant& want) {
         mp::Flat& f = g.buttons[i];
         if (!f.card) continue;
         const PauseButton b = order[i];
-        const bool show = PauseButtonShown(b, want.reportOn);
+        const bool show = PauseButtonShown(b, want.reportOn, want.loadoutTrial);
         f.card.button.Show(show);
         if (!show) continue;
         const bool armed = g.confirm.Armed(b, now);

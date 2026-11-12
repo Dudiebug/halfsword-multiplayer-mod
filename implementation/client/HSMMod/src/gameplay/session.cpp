@@ -601,7 +601,7 @@ public:
         }
         const bool pauseEvent = std::exchange(escPauseEvent_, false);
         if (!modPauseMatch_) {
-            if (modPanel_ || settingsVisit_) CloseModPanel("no longer in a session match");
+            if (modPanel_ || settingsVisit_ || loadoutVisit_) CloseModPanel("no longer in a session match");
             ui::PausePanelTick(*this, {});
             return;
         }
@@ -614,7 +614,11 @@ public:
                 HSM_LOG("pause: back from the game's settings (%s); the panel shows again", back ? "Back" : "the screen closed");
             }
         }
-        if (escPress_.Step(ui::mp::KeyDown(VK_ESCAPE), pauseEvent, now)) {
+        const bool esc = escPress_.Step(ui::mp::KeyDown(VK_ESCAPE), pauseEvent, now);
+        if (loadoutVisit_) {    // the LOADOUT trial: Esc is the way out of the game's inventory screen, whatever it does here
+            const LoadoutVisitEnd end = LoadoutVisitEnds(adapter_.ScreenUp(loadoutScreen_, loadoutScreenIndex_), esc, now - loadoutVisitAt_);
+            if (end != LoadoutVisitEnd::None) EndLoadoutVisit(end);
+        } else if (esc) {
             const bool ready = ui::PausePanelReady(true);
             EscContext c;
             c.sessionMatch = ready; c.modPause = cfg_.modPause;
@@ -622,14 +626,15 @@ public:
             c.lobbyPage = lobby || escBusyWas_[3]; c.settingsScreen = settings || escBusyWas_[4]; c.panelOpen = modPanel_;
             const EscOwner owner = EscOwnerOf(c);
             if (!ready) HSM_LOG("pause: Esc -> the game's menu (the mod panel is not on the HUD yet)");
-            else if (owner != EscOwner::Game) HSM_LOG("pause: Esc -> %s", EscOwnerText(owner));
+            else if (owner != EscOwner::Game) HSM_LOG("pause: Esc -> %s", owner == EscOwner::Fetch && photoOn_.load() ? "photo mode (the key is its screen's)" : EscOwnerText(owner));
             if (owner == EscOwner::OpenPanel) OpenModPanel();
             else if (owner == EscOwner::ClosePanel) CloseModPanel("Esc");
         }
         escBusyWas_[0] = chat; escBusyWas_[1] = textBox; escBusyWas_[2] = fetch; escBusyWas_[3] = lobby; escBusyWas_[4] = settings;
         ui::PausePanelWant want;
-        want.match = true; want.open = modPanel_; want.hidden = settingsVisit_;
+        want.match = true; want.open = modPanel_; want.hidden = settingsVisit_ || loadoutVisit_;
         want.reportOn = report::Enabled() && net_ && InFightLevel();
+        want.loadoutTrial = cfg_.loadoutTrial;
         if (const std::optional<PauseButton> b = ui::PausePanelTick(*this, want)) PausePanelAction(*b);
     }
     void OpenModPanel() {
@@ -637,10 +642,64 @@ public:
         adapter_.SetModPanelOpen(true);   // the pause menu for the input-mode logic: the cursor shows, the game's input comes back on close
     }
     void CloseModPanel(const char* why) {
-        if (!modPanel_ && !settingsVisit_) return;
+        if (!modPanel_ && !settingsVisit_ && !loadoutVisit_) return;
+        if (loadoutVisit_) EndLoadoutVisit(LoadoutVisitEnd::None);   // the panel goes: the trial's screen goes with it
         modPanel_ = false; settingsVisit_ = false;
         adapter_.SetModPanelOpen(false);
         HSM_LOG("pause: panel closed (%s)", why);
+    }
+
+    // loadout_trial=1: LOADOUT opens the game's own inventory screen over the match, to see what it does outside the
+    // Tavern. What is known from the game's Blueprint (UI_Tavern_Inventory PreConstruct and its exit): it possesses the
+    // BP_FreeCamera tagged 'Inventory' and dresses the Willie_BP_DressUp tagged 'Inventory', both placed in the Tavern
+    // level; with neither in an arena it possesses nothing, which takes the controller off the player's fighter, so the
+    // fighter is possessed again here. In Free Mode (a lobby fight is one) it edits Free Mode Player Character 1 and shows
+    // the Free Mode height and weight sliders. Its exit saves the game and makes the Tavern's hub menu, which is swallowed
+    // (Adapter::SwallowTavernHub, on in a session match whenever the trial is). Every step is logged under "loadout trial:".
+    static constexpr const char* kInventoryScreenPath = "/Game/UI/Tavern/UI_Tavern_Inventory.UI_Tavern_Inventory_C";
+    void OpenLoadoutTrial() {
+        UObject* me = adapter_.PlayerWillie(0);
+        HSM_LOG("loadout trial: opening %s in %s (Free Mode %s, my fighter %s)", kInventoryScreenPath, currentLevel_.c_str(),
+                adapter_.FreeModeActive() ? "on" : "OFF", me ? ObjectName(me).c_str() : "none");
+        UObject* w = adapter_.OpenStockScreen(kInventoryScreenPath);
+        if (!w) {
+            HSM_LOG("loadout trial: the game's inventory screen would not open");
+            ui::ShowLine("HSMMod", style::kBone, "The game's inventory screen would not open. See the log.");
+            return;
+        }
+        loadoutVisit_ = true; loadoutVisitAt_ = NowMs();
+        loadoutScreen_ = w; loadoutScreenIndex_ = ObjectIndex(w);
+        loadoutPawn_ = me; loadoutPawnIndex_ = me ? ObjectIndex(me) : 0;
+        if (me && adapter_.PlayerWillie(0) != me) {
+            const bool back = adapter_.PossessLocal(me);
+            HSM_LOG("loadout trial: the screen took the controller off my fighter (it possesses the Tavern's camera; there is none here); possessed again: %s",
+                    back ? "yes" : "NO");
+        } else HSM_LOG("loadout trial: my fighter is still mine after the screen opened");
+        HSM_LOG("loadout trial: the screen is %s. Esc, or its own exit, closes it", adapter_.ScreenUp(w, loadoutScreenIndex_) ? "on screen" : "not in the viewport yet");
+    }
+    // The visit is over: the screen comes down if it is still up, the fighter is the player's again, and the edited
+    // loadout goes where CHANGE LOADOUT sends it (its own rules apply: own gear, not while alive in a fight).
+    void EndLoadoutVisit(LoadoutVisitEnd end) {
+        if (!loadoutVisit_) return;
+        loadoutVisit_ = false;
+        const bool up = adapter_.ScreenUp(loadoutScreen_, loadoutScreenIndex_);
+        if (up) adapter_.CloseScreen(loadoutScreen_, loadoutScreenIndex_);
+        const uint32_t hubs = adapter_.TakeHubSwallowed();
+        const char* mine = "still mine";
+        if (!adapter_.PlayerWillie(0)) {
+            if (loadoutPawn_ && adapter_.StillValid(loadoutPawn_, loadoutPawnIndex_)) mine = adapter_.PossessLocal(loadoutPawn_) ? "possessed again" : "NOT possessed (Possess did not take)";
+            else mine = "gone (no fighter to possess)";
+        }
+        HSM_LOG("loadout trial: closed after %u ms (%s): the screen was %s, %u Tavern hub menu(s) swallowed, my fighter: %s",
+                unsigned(NowMs() - loadoutVisitAt_), end == LoadoutVisitEnd::None ? "the panel closed" : LoadoutVisitEndText(end),
+                up ? "taken down by the mod" : "already gone", unsigned(hubs), mine);
+        loadoutScreen_ = nullptr; loadoutPawn_ = nullptr;
+        if (end == LoadoutVisitEnd::None || !net_) {   // the panel closed with the match: there is no kit to ask for
+            HSM_LOG("loadout trial: no CHANGE LOADOUT (the visit ended with the match)");
+            return;
+        }
+        const std::string line = ChangeLoadout();
+        HSM_LOG("loadout trial: CHANGE LOADOUT after the visit: %s", line.empty() ? "(no answer)" : line.c_str());
     }
     // What a pause panel button does (the panel's own pages, MULTIPLAYER MENU and MOD SETTINGS, never get here).
     void PausePanelAction(PauseButton b) {
@@ -648,8 +707,8 @@ public:
             case PauseButton::Resume:
                 CloseModPanel("RESUME");
                 break;
-            case PauseButton::Loadout:   // hidden (kLoadoutButton): the later change that opens the game's loadout screen does it here
-                HSM_LOG("pause: LOADOUT has nothing to open yet");
+            case PauseButton::Loadout:   // only shown with loadout_trial=1
+                if (cfg_.loadoutTrial) OpenLoadoutTrial();
                 break;
             case PauseButton::Settings:
                 // The game's own settings screen, opened as its pause menu opens it; its Back makes the pause class, which is
@@ -817,8 +876,11 @@ public:
         adapter_.SetDestroyAware(net_ != nullptr);
         adapter_.SetSubclassWeapons(true);   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel();
+        if (photoGuardWas_ && !stockFlowGuard_) adapter_.SetPhotoUnpaused(adapter_.PlayerWillie(0), false);   // #2624: outside a session match photo mode pauses as the game ships it
+        photoGuardWas_ = stockFlowGuard_;
         pauseLiftArmed_ = stockFlowGuard_;
         modPauseMatch_ = cfg_.modPause && joined && MatchLevel() && FighterLevel();
+        adapter_.SwallowTavernHub(cfg_.loadoutTrial && modPauseMatch_);   // the trial's inventory screen makes the Tavern's hub menu on its way out
         adapter_.SuppressStockScreens(joined && MatchLevel(), true, modPauseMatch_ && ui::PausePanelReady());   // the panel is the pause menu: a pause screen the game makes is skipped
         if (stockFlowGuard_ && adapter_.ResetTimeDilation() && ++timeReset_ % 100 == 1)
             HSM_LOG("session: world time was not normal speed during a session match; reset (%u time(s))", timeReset_);
@@ -847,7 +909,7 @@ public:
         // Twice: after the level's own setup, then once more; never while the chat holds the keyboard (it gives it back).
         // The pause menu owns the input mode while it is open (cursor shown once); closing it restores the game's, once.
         {
-            const bool typing = ui::Typing();
+            const bool typing = ui::Typing() || photoOn_.load();   // photo mode owns the input mode while it is open, as a typed line does
             const bool menu = FighterLevel() && adapter_.PauseMenuOpen();
             InputModeState ms;
             ms.typing = typing; ms.menuOpen = menu; ms.wasMenuOpen = pauseMenuWas_; ms.fightLevel = FighterLevel();
@@ -869,7 +931,7 @@ public:
                 }
             }
         }
-        if (net_) { BenchedBodyTick(); LiveCamTick(); SpectateTick(); RouletteKeysTick(); }
+        if (net_) { BenchedBodyTick(); PhotoTick(); SpectateTick(); RouletteKeysTick(); }
         laps.Lap(TickPart::Voice);
         // Once a game run, in the first session fight: how to report a bug (the relay must be set).
         if (bugHintAt_ && NowMs() >= bugHintAt_) {
@@ -2362,7 +2424,8 @@ public:
     }
     // Slow motion (R) and photo mode change world time, and photo mode pauses the game, on one machine only (audit items
     // 4, 20, 32: Willie_BP SloMo input -> Slomo Timeline -> SetGlobalTimeDilation; BPC_PhotoMode SetGamePaused and
-    // SetGlobalTimeDilation). In a session match neither key does anything.
+    // SetGlobalTimeDilation). In a session match the slow motion key does nothing, and photo mode opens with its pause
+    // switched off (PhotoModeKey, PhotoTick).
     bool CuttingRingOut(UFunction* fn, void* params) {
         if (!stockFlowGuard_ || !params) return false;
         const int32_t off = OtherActorOffset(fn);
@@ -2379,16 +2442,37 @@ public:
         escPauseEvent_ = true;
         return true;
     }
+    void PhotoReset() {
+        photoOn_.store(false); photoFree_.store(false); photoKey_.store(uint8_t(freecam::PhotoKey::NoMatch));
+        photoAsk_.store(0); photoCloseAsk_.store(false);
+        photoClosedAt_ = photoKeyAt_ = photoCloseAt_ = 0; photoCloseTries_ = 0; photoFreeWas_ = false;
+        photoBody_ = nullptr; photoBodyIndex_ = -1;
+        game::fetchlink::SetPhotoMode(false);
+    }
     bool BlockTimeInput(const char* what) {
         if (!stockFlowGuard_) return false;
         if (++timeInputBlocked_ % 20 == 1) HSM_LOG("session: blocked %s during a session match (%u so far)", what, timeInputBlocked_);
         return true;
     }
-    // The photo mode key in a session match: the game's own photo mode stays blocked (it pauses the world); pressed on the
-    // player's own fighter it asks for the living player's free camera instead (#2624; LiveCamTick answers next frame).
+    // The middle mouse fighter spawn (build 26615445), blocked in a session match: the spawned fighter would be local only.
+    bool BlockSpawnInput() {
+        if (!stockFlowGuard_) return false;
+        if (++spawnInputBlocked_ % 20 == 1)
+            HSM_LOG("session: blocked the middle mouse fighter spawn during a session match (%u so far)", spawnInputBlocked_);
+        return true;
+    }
+    // The photo mode key in a session match (#2624; match/hsm_freecam.h PhotoKeyAnswer, which PhotoTick asks every tick). On
+    // my own living fighter in a running match, with the host's Free cam row on, the game's own key event goes through:
+    // photo mode opens with its pause switched off (PhotoTick keeps the switches). While photo mode is open the key is its
+    // screen's, and the fighter's event is kept back (it would toggle it a second time; PhotoTick closes it if the
+    // screen did not). Anywhere else in a session match the key stays blocked, and PhotoTick says why.
     bool PhotoModeKey(UObject* obj) {
         if (!stockFlowGuard_) return false;
-        if (obj && obj == myWillie_.load()) liveCamAsk_.store(true);
+        if (!obj || obj != myWillie_.load()) return BlockTimeInput("photo mode");
+        const freecam::PhotoKey key = freecam::PhotoKey(photoKey_.load());
+        if (key == freecam::PhotoKey::Open) return false;
+        if (key == freecam::PhotoKey::Close) { photoCloseAsk_.store(true); return true; }
+        photoAsk_.store(uint8_t(uint8_t(key) + 1));
         return BlockTimeInput("photo mode");
     }
 
@@ -2974,7 +3058,7 @@ private:
         syncMode_ = nextSync_ = clientNextSync_ = SyncMode::Owner; standIns_.SetReplica(false);
         capture_ = InputCapture{}; inputCadence_.Reset(); inputsTx_ = 0; inputSending_.reset();
         ResetLeases(); ownLeased_ = false; nativeButtons_ = 0; ResetHostDelay();
-        liveCam_.End(); liveCamOn_.store(false); liveCamAsk_.store(false);   // #2624: a flight ends with the session
+        PhotoReset();   // #2624: photo mode ends with the session
         rouletteView_ = {}; rouletteBody_.clear(); rouletteShot_ = 0;
         seekerHeld_.store(false); if (seekerBlind_) { adapter_.SetBlind(false); seekerBlind_ = false; }   // Hide and Seek: nobody stays blind after the session
         ownDeathReported_ = false; nextKeepAlive_ = 0; streamsDropped_ = claimsRejected_ = 0;
@@ -3167,7 +3251,7 @@ private:
         // Client side: puppets died with the level; the host re-announces them after Ready.
         world_.OnLevel(); puppets_.clear();
         ownLeased_ = false; nativeButtons_ = 0; ResetLeases(); ResetHostDelay();   // the bodies went with the level
-        liveCam_.End(); liveCamOn_.store(false); liveCamAsk_.store(false);   // #2624: and a flight with them (the level placed its own camera)
+        PhotoReset();   // #2624: and photo mode with them (its screen went with the level)
         seekerHeld_.store(false); seekerBlind_ = false;   // Hide and Seek: the new level has a camera manager of its own
         levelGate_.OnLevel(game::SteadyNowMs()); nextGateProbe_ = 0; managerProbed_ = false; recreate_.Clear(); lostSlots_.clear();
         // Owner sync, client: the stock pawn the level gives player 0 is replaced by the dressed fighter the host
@@ -4306,17 +4390,12 @@ private:
                     return true;
                 }
                 if (seekerHeld_.load()) {              // Hide and Seek: a seeker stands still while the others hide
-                    const freecam::HeldInput held = freecam::LiveCamInput(true, bind.isAxis, bind.pressed);
+                    const freecam::HeldInput held = freecam::HoldInput(true, bind.isAxis, bind.pressed);
                     if (held == freecam::HeldInput::Drop) return true;
                     if (held == freecam::HeldInput::Zero) game::Adapter::WriteAxisParam(f, params, 0.f);   // then on as usual: captured and played as zero
                 }
-                if (liveCamOn_.load()) {               // #2624: the living player's free camera holds the body's own input
-                    if (bind.isAxis && IsLookAxis(Axis(bind.index))) {   // the mouse turns our camera, not the fighter
-                        const float v = game::Adapter::ReadAxisParam(f, params);
-                        (Axis(bind.index) == Axis::TurnMouse ? spectateLookX_ : spectateLookY_) += v;
-                        return true;
-                    }
-                    const freecam::HeldInput held = freecam::LiveCamInput(true, bind.isAxis, bind.pressed);
+                if (photoOn_.load()) {                 // #2624: the game's photo mode is open: my fighter's own input is held
+                    const freecam::HeldInput held = freecam::PhotoInput(true, photoFree_.load(), bind.isAxis, bind.isAxis && IsLookAxis(Axis(bind.index)), bind.pressed);
                     if (held == freecam::HeldInput::Drop) return true;
                     if (held == freecam::HeldInput::Zero) game::Adapter::WriteAxisParam(f, params, 0.f);   // then on as usual: captured and played as zero
                 }
@@ -7964,7 +8043,7 @@ private:
         l.giveUp = giveUp_.progress();
         l.giveUpWait = giveUpWait_;
         l.watching = spectating_; l.flying = camState_.free();
-        l.hidden = liveCam_.hudHidden();
+        l.hidden = photoOn_.load();
         l.rouletteOneIn = rouletteView_.OneIn(); l.rouletteLoaded = rouletteView_.loaded;
         return BuildHudScene(ShownInfo(), l, now);
     }
@@ -8338,45 +8417,37 @@ private:
         return changed || camState_.free() != wasFree;
     }
 
-    // The living player's free camera (#2624; match/hsm_freecam.h LiveCam). The photo mode key asks for it (PhotoModeKey);
-    // while it flies the input hook holds the body's own input, the mouse and W A S D / Space / Ctrl / Shift move the
-    // camera inside the dead player's box, and H hides the mod's HUD. Our CameraActor is the view target, put back every
-    // 500 ms as for the spectator. It ends by the key, a death, the match's or level's end, or the host's Free cam row.
-    void LiveCamTick() {
+    // The game's photo mode in a session match (#2624; match/hsm_freecam.h PhotoWorld). Every tick the pause switches of my
+    // fighter's photo mode component are kept off and photoKey_ says what the key does (PhotoModeKey reads it in the key's
+    // hook). While photo mode is open the input hook holds my fighter's own input (PhotoInput), the HUD is hidden and the
+    // mod's hotkeys are quiet (fetchlink::SetPhotoMode). Its own key and buttons close it; the mod closes it when my
+    // fighter dies, the match or the level ends, the host turns the Free cam row off, or the key reached my fighter and
+    // its own screen did not take it.
+    void PhotoTick() {
         UObject* own = adapter_.PlayerWillie(0);
-        freecam::LiveCamWorld w;
+        const uint32_t now = NowMs();
+        freecam::PhotoWorld w;
         w.matchLevel = MatchLevel();
         w.fighting = info_.phase != uint8_t(MatchPhase::Idle) && info_.phase != uint8_t(MatchPhase::Results);
         w.alive = own && !adapter_.IsDead(own) && !spectating_ && !ownDeadPending_;
         w.allowed = IsHost() ? match_.config().freeCam : info_.freeCam != 0;
-        const bool was = liveCam_.on();
-        if (liveCamAsk_.exchange(false)) {
-            freecam::Pose cur;
-            if (!was) {
-                std::vector<freecam::Vec3> pts;
-                for (const FVector& v : adapter_.SpawnCandidates()) pts.push_back({v.x, v.y, v.z});
-                if (game::CameraPose(cur)) pts.push_back(cur.pos);
-                else cur.yaw = std::numeric_limits<double>::quiet_NaN();   // no camera placed to fly from: the toggle says so
-                if (own) { const FVector l = adapter_.ActorLocation(own); pts.push_back({l.x, l.y, l.z}); }
-                liveBounds_ = freecam::MakeBounds(pts.data(), pts.size());
-            }
-            const freecam::LiveCamAnswer a = liveCam_.Toggle(w, cur, liveBounds_);
-            const char* line = freecam::LiveCamLine(a);
-            HSM_LOG("livecam: photo mode key: %s", *line ? line : "ignored (my fighter is down: the spectator's camera has F)");
+        w.busy = ui::Typing() || ui::MenuTyping() || ui::PanelOpen() || modPanel_ || settingsVisit_ || adapter_.PauseMenuOpen();
+        w.ready = adapter_.SetPhotoUnpaused(own, stockFlowGuard_);
+        const game::Adapter::PhotoState s = adapter_.PhotoMode(own);
+        const bool was = photoOn_.load();
+        w.open = s.open || s.gallery;
+        w.closedForMs = photoClosedAt_ ? std::min<uint32_t>(uint32_t(now - photoClosedAt_), freecam::kPhotoSettleMs) : freecam::kPhotoSettleMs;
+        photoKey_.store(uint8_t(freecam::PhotoKeyAnswer(w)));
+        photoFree_.store(w.open && s.freeCam);
+        if (const uint8_t asked = photoAsk_.exchange(0)) {   // the key did nothing: say why, where there is something to say
+            static const char* const kWhy[] = {"it may open", "it is open", "no match runs", "my fighter is down", "the host's Free cam row is off",
+                                               "a mod screen has the keyboard, or photo mode only just closed", "its pause switches could not be turned off"};
+            const size_t k = size_t(asked - 1);
+            const char* line = freecam::PhotoKeyLine(freecam::PhotoKey(asked - 1));
+            HSM_LOG("photo: the key did nothing (%s)", k < std::size(kWhy) ? kWhy[k] : "?");
             if (*line) ui::ShowLine("HSMMod", style::kBone, line);
         }
-        if (!liveCam_.Keep(w))
-            HSM_LOG("livecam: off (%s)", !w.alive ? "my fighter is down" : !w.allowed ? "the host turned free cameras off" : "the match or the level ended");
-        if (was && !liveCam_.on()) {                     // the view and the input go back to the fighter
-            liveCamOn_.store(false);
-            spectateLookX_ = spectateLookY_ = 0;
-            const bool back = game::ResetViewToPawn(adapter_);
-            game::EndFollowCamera(adapter_);
-            HSM_LOG("livecam: the view is back on my fighter%s", back ? "" : " (the reset failed here; the game's next camera event puts it back)");
-        }
-        if (!liveCam_.on()) return;
-        const uint32_t now = NowMs();
-        if (!was) {                                      // the flight begins: what the body holds is let go, then its input is held
+        if (w.open && !was) {                            // it opened: what my fighter holds is let go, then its input is held
             int released = 0;
             const uint32_t heldButtons = capture_.buttons() | nativeButtons_;
             {
@@ -8388,38 +8459,37 @@ private:
                     ++released;
                 }
             }
-            liveCamOn_.store(true);
-            adapter_.RestoreGameInput();
-            liveCamMovedAt_ = now; liveCamApplyAt_ = 0; liveHudKeyDown_ = false;
-            spectateLookX_ = spectateLookY_ = 0;
-            HSM_LOG("livecam: on (%d held button(s) let go; the body's input is held; game input restored)", released);
+            photoOn_.store(true);
+            photoBody_ = own; photoBodyIndex_ = own ? ObjectIndex(own) : -1;
+            photoCloseTries_ = 0; photoCloseAt_ = photoKeyAt_ = 0; photoFreeWas_ = false; photoCloseAsk_.store(false);
+            HSM_LOG("photo: the game's photo mode is open, not paused (%d held button(s) let go; my fighter's input is held, the mod's HUD is hidden, its hotkeys are quiet)", released);
         }
-        bool ours = false;                               // not while typing, in a menu, or with another window in front
-        if (!ui::Typing() && !adapter_.PauseMenuOpen() && !game::fetchlink::KeysHeld()) {
-            DWORD pid = 0;
-            if (HWND win = GetForegroundWindow()) GetWindowThreadProcessId(win, &pid);
-            ours = pid == GetCurrentProcessId();
+        if (!w.open && was) {                            // it closed: by its own key or button, or by the call below
+            photoOn_.store(false);
+            photoClosedAt_ = now ? now : 1;
+            photoKeyAt_ = 0; photoCloseAsk_.store(false);
+            // my fighter changed under it (a respawn): the screen belongs to the body it opened on, if that one is still there
+            const bool left = photoBody_ && photoBody_ != own && ObjectAt(photoBodyIndex_) == photoBody_ && adapter_.ClosePhotoMode(photoBody_);
+            photoBody_ = nullptr; photoBodyIndex_ = -1;
+            HSM_LOG("photo: closed; my fighter's input is back%s", left ? " (it was still open on my earlier body: closed there)" : "");
         }
-        auto down = [&](int vk) { return ours && (GetAsyncKeyState(vk) & 0x8000) != 0; };
-        const bool h = down('H');
-        if (h && !liveHudKeyDown_) { liveCam_.ToggleHud(); HSM_LOG("livecam: HUD %s", liveCam_.hudHidden() ? "hidden" : "shown"); }
-        liveHudKeyDown_ = h;
-        const float dt = float(uint32_t(now - liveCamMovedAt_)) / 1000.0f;
-        liveCamMovedAt_ = now;
-        double dx = spectateLookX_, dy = spectateLookY_;   // the look axes the input hook swallowed
-        spectateLookX_ = spectateLookY_ = 0;
-        if (ours) {
-            game::MouseDelta m;
-            if (game::ReadMouse(adapter_, m) && (m.dx != 0 || m.dy != 0)) { dx = m.dx; dy = m.dy; }
-            liveCam_.Look(dx, dy);
-            freecam::FreeInput in;
-            in.fwd = double(down('W')) - double(down('S'));
-            in.right = double(down('D')) - double(down('A'));
-            in.up = double(down(VK_SPACE)) - double(down(VK_CONTROL));
-            liveCam_.Fly(in, down(VK_SHIFT), dt, liveBounds_);
+        game::fetchlink::SetPhotoMode(w.open);
+        if (!w.open) return;
+        if (s.freeCam != photoFreeWas_) {
+            photoFreeWas_ = s.freeCam;
+            HSM_LOG("photo: its free camera %s", s.freeCam ? "flies (my fighter's look axes are held too)" : "ended");
         }
-        UObject* cam = game::FreeCamera(adapter_, liveCam_.pose());
-        if (cam && (!was || uint32_t(now - liveCamApplyAt_) >= 500) && game::SetViewTarget(adapter_, cam, 0.0f)) liveCamApplyAt_ = now;
+        const freecam::PhotoEnd end = freecam::PhotoEnds(w);
+        if (photoCloseAsk_.exchange(false) && !photoKeyAt_) photoKeyAt_ = now ? now : 1;
+        const bool byKey = photoKeyAt_ && freecam::PhotoKeyCloses(true, uint32_t(now - photoKeyAt_));
+        if ((end != freecam::PhotoEnd::Keep || byKey) && (!photoCloseAt_ || uint32_t(now - photoCloseAt_) >= 250)) {
+            photoCloseAt_ = now ? now : 1;
+            const bool called = adapter_.ClosePhotoMode(own);
+            if (++photoCloseTries_ <= 5)
+                HSM_LOG("photo: closing it (%s)%s", end != freecam::PhotoEnd::Keep ? freecam::PhotoEndText(end) : "the photo mode key reached my fighter and its own screen did not take it",
+                        called ? "" : ": the call did not go through");
+            if (byKey) photoKeyAt_ = 0;
+        }
     }
 
     // Dead and waiting: watch living fighters (teammates first); Left/Right arrows cycle.
@@ -9834,11 +9904,15 @@ private:
     bool modPauseMatch_ = false;                     // mod_pause=1 and a session match: Esc is the mod's (ModPauseTick)
     bool modPanel_ = false;                          // the mod's pause panel is open
     bool settingsVisit_ = false;                     // SETTINGS opened the game's screen; the panel waits out of sight
+    bool loadoutVisit_ = false;                      // loadout_trial: LOADOUT opened the game's inventory screen; the panel waits out of sight
+    UObject* loadoutScreen_ = nullptr; int32_t loadoutScreenIndex_ = 0;   // that screen (OpenLoadoutTrial)
+    UObject* loadoutPawn_ = nullptr; int32_t loadoutPawnIndex_ = 0;       // the fighter the player had when it opened
+    uint32_t loadoutVisitAt_ = 0;
     uint32_t settingsVisitAt_ = 0, quitDesktopAt_ = 0;   // quitDesktopAt_: QUIT TO DESKTOP left the session, the game closes once the save is back
     bool escPauseEvent_ = false;                     // BlockPauseInput saw the game's pause event (Esc, P, Start)
     bool escBusyWas_[5] = {};                        // last tick's chat, text box, Fetch, lobby page and settings screen (an Esc that closes one is not ours)
     EscPress escPress_;
-    uint32_t timeInputBlocked_ = 0, timeReset_ = 0;
+    uint32_t timeInputBlocked_ = 0, timeReset_ = 0, spawnInputBlocked_ = 0;
     double nextListenerMs_ = 0;
     static constexpr uint32_t kRingOutEveryMs = 3000;   // a volume fires on every overlap; the death takes a moment
     std::unordered_map<uint8_t, uint32_t> ringOutAt_;   // BlockTimeInput, ResetTimeDilation
@@ -9886,12 +9960,16 @@ private:
     freecam::Bounds freeBounds_;        // where the free camera may fly (ToggleFreeCam)
     std::string freeBoundsLevel_;       // the level the bounds were last logged for
     bool spectateFDown_ = false;
-    freecam::LiveCam liveCam_;          // the living player's free camera (#2624; LiveCamTick)
-    freecam::Bounds liveBounds_;        // where it may fly: the same box as the dead player's
-    std::atomic<bool> liveCamAsk_{false};   // the photo mode key was pressed on my fighter (the input hook's ask)
-    std::atomic<bool> liveCamOn_{false};    // liveCam_.on(), for the input hook
-    uint32_t liveCamApplyAt_ = 0, liveCamMovedAt_ = 0;
-    bool liveHudKeyDown_ = false;
+    std::atomic<bool> photoOn_{false};      // the game's photo mode or its gallery is open on my fighter (#2624; PhotoTick): the input hook, the HUD
+    std::atomic<bool> photoFree_{false};    // ... and its free camera flies
+    std::atomic<uint8_t> photoKey_{uint8_t(freecam::PhotoKey::NoMatch)};   // what the photo mode key does now (PhotoKeyAnswer), for the key's hook
+    std::atomic<uint8_t> photoAsk_{0};      // the key did nothing on my fighter: the PhotoKey it met, plus 1 (PhotoTick says why)
+    std::atomic<bool> photoCloseAsk_{false};   // the key reached my fighter while photo mode was open
+    uint32_t photoClosedAt_ = 0, photoKeyAt_ = 0, photoCloseAt_ = 0;
+    int photoCloseTries_ = 0;
+    bool photoFreeWas_ = false, photoGuardWas_ = false;
+    UObject* photoBody_ = nullptr;      // the fighter it opened on
+    int32_t photoBodyIndex_ = -1;
     uint32_t spectateInputAt_ = 0;   // game input last re-asserted while spectating
     int spectateInputRestores_ = 0;
     double spectateLookX_ = 0, spectateLookY_ = 0;   // the look axes the input hook swallowed since the last frame (the controller read's fallback)
@@ -10037,6 +10115,11 @@ bool StartMod(const Config& cfg) {
     });
     HookFunctionsMatching([](const std::string& n) { return n.rfind("InpActEvt_Pause_", 0) == 0; },
                           [](UObject*, UFunction*, void*) { return g_session->BlockPauseInput(); });   // mod_pause: Esc is the mod's panel
+    // Build 26615445: the middle mouse button spawns a Willie_BP_Skeletron fighter (Axe2H, heavy pavise) where the camera
+    // looks (Willie_BP.cpp InpActEvt_MiddleMouseButton_K2Node_InputKeyEvent_3), in the shipping game. In a session match
+    // that fighter would exist on one machine only, so the key is blocked there; outside a session it works as shipped.
+    HookFunctionsMatching([](const std::string& n) { return n.rfind("InpActEvt_MiddleMouseButton_", 0) == 0; },
+                          [](UObject*, UFunction*, void*) { return g_session->BlockSpawnInput(); });
     HookFunctionsMatching([](const std::string& n) {   // Arena_Cutting_Map.cpp:54: the drop off the edge
         return n.rfind("BndEvt__Arena_Cutting_Map_TriggerVolume_0_", 0) == 0;
     }, [](UObject*, UFunction* fn, void* params) { return g_session->CuttingRingOut(fn, params); });

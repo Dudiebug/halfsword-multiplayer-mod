@@ -266,75 +266,65 @@ static void TestSwallowLookOnDeadBodyOnly() {
     CHECK(!SwallowLook(true, nullptr, nullptr));
 }
 
-// The living player's free camera (#2624): on only while the fighter lives in a running match with the host's Free cam
-// row on; the key always ends it, and so does the end of any of those; H hides the HUD only while it flies.
-static LiveCamWorld Live() { LiveCamWorld w; w.matchLevel = w.fighting = w.alive = w.allowed = true; return w; }
-static void TestLiveCam() {
-    const Bounds b = Box();
-    Pose p; p.pos = {500, 500, 50}; p.yaw = 190; p.pitch = 120;
-    CHECK(LiveCamMay(Live()));
-    for (int i = 0; i < 4; ++i) {                                    // each condition on its own
-        LiveCamWorld w = Live();
-        (i == 0 ? w.matchLevel : i == 1 ? w.fighting : i == 2 ? w.alive : w.allowed) = false;
-        CHECK(!LiveCamMay(w));
-        LiveCam c;
-        CHECK(c.Toggle(w, p, b) == (i < 2 ? LiveCamAnswer::NoMatch : i == 2 ? LiveCamAnswer::Dead : LiveCamAnswer::NotAllowed) && !c.on());
-        CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && c.on());
-        CHECK(c.Keep(Live()) && c.on());                             // nothing changed: it flies on
-        c.ToggleHud();
-        CHECK(c.hudHidden() && !c.Keep(w) && !c.on() && !c.hudHidden());   // the condition ended: so does the flight, once
-        CHECK(c.Keep(w) && !c.on());
-    }
-    { LiveCamWorld w = Live(); w.alive = false; w.fighting = false; LiveCam c; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::NoMatch); }   // no match first
-    { LiveCamWorld w = Live(); w.alive = false; w.allowed = false; LiveCam c; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::Dead); }       // then the death
-    LiveCam c;
-    CHECK(!c.on() && !c.hudHidden());
-    c.ToggleHud(); CHECK(!c.hudHidden());                            // H does nothing on the ground
-    c.Look(100, 100); c.Fly({1, 0, 0}, false, 0.1, b);
-    CHECK(Near(c.pose().pos.x, 0) && Near(c.pose().yaw, 0));         // nor do the mouse and the keys
-    // a flight: from where the camera is, the view wrapped and clamped, inside the box
-    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && Near(c.pose().yaw, -170) && Near(c.pose().pitch, kFreePitchLimit) && Near(c.pose().pos.x, 500));
-    Pose far = p; far.pos = {99999, -99999, 99999};
-    { LiveCam f; CHECK(f.Toggle(Live(), far, b) == LiveCamAnswer::On && Near(f.pose().pos.x, b.max.x) && Near(f.pose().pos.y, b.min.y) && Near(f.pose().pos.z, b.max.z)); }
-    const double yaw0 = c.pose().yaw;
-    c.Look(10, 0);
-    CHECK(Near(c.pose().yaw, yaw0 + 10 * kSensitivity));
-    c.Fly({0, 0, 1}, false, 0.1, b);
-    CHECK(c.pose().pos.z > 50 && c.pose().pos.z <= b.max.z);
-    for (int i = 0; i < 1000; ++i) c.Fly({1, 1, 1}, true, 0.1, b);
-    CHECK(c.pose().pos.x <= b.max.x && c.pose().pos.y <= b.max.y && c.pose().pos.z <= b.max.z && c.pose().pos.x >= b.min.x);
-    c.ToggleHud(); CHECK(c.hudHidden());
-    c.ToggleHud(); CHECK(!c.hudHidden() && c.on());
-    c.ToggleHud();
-    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::Off && !c.on() && !c.hudHidden());   // the key ends it, whatever the world says
-    CHECK(c.Toggle(Live(), p, b) == LiveCamAnswer::On && !c.hudHidden());               // a new flight shows the HUD again
-    { LiveCamWorld w = Live(); w.allowed = false; CHECK(c.Toggle(w, p, b) == LiveCamAnswer::Off); }   // off always works
-    // no camera to start from, or no box: refused
-    Pose bad = p; bad.yaw = kNaN;
-    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera && !c.on());
-    bad = p; bad.pos.x = kInf;
-    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera);
-    bad = p; bad.pitch = kNaN;
-    CHECK(c.Toggle(Live(), bad, b) == LiveCamAnswer::NoCamera);
-    CHECK(c.Toggle(Live(), p, Bounds{}) == LiveCamAnswer::NoCamera && !c.on());
-    c.Toggle(Live(), p, b); c.End();
-    CHECK(!c.on());
-    // what the player is told: every answer but the dead player's (the spectator's camera has its own F)
-    for (LiveCamAnswer a : {LiveCamAnswer::On, LiveCamAnswer::Off, LiveCamAnswer::NoMatch, LiveCamAnswer::NotAllowed, LiveCamAnswer::NoCamera}) CHECK(*LiveCamLine(a));
-    CHECK(!*LiveCamLine(LiveCamAnswer::Dead) && std::string(LiveCamLine(LiveCamAnswer::Off)) == "Free camera off");
-    CHECK(std::string(LiveCamLine(LiveCamAnswer::On)).find("H hides the HUD") != std::string::npos);
-    CHECK(std::string(LiveCamLine(LiveCamAnswer::NotAllowed)).find("host") != std::string::npos && std::string(LiveCamLine(LiveCamAnswer::NoMatch)).find("match") != std::string::npos);
+// The game's photo mode in a match (#2624): the key opens it only on a living fighter in a running match with the host's
+// Free cam row on, no mod screen up and its pause switched off; the mod closes it when the first three end.
+static PhotoWorld Shot() { PhotoWorld w; w.matchLevel = w.fighting = w.alive = w.allowed = w.ready = true; return w; }
+static void TestPhotoMode() {
+    CHECK(PhotoKeyAnswer(Shot()) == PhotoKey::Open && PhotoEnds(Shot()) == PhotoEnd::Keep);
+    { PhotoWorld w = Shot(); w.matchLevel = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::NoMatch && PhotoEnds(w) == PhotoEnd::MatchOver); }
+    { PhotoWorld w = Shot(); w.fighting = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::NoMatch && PhotoEnds(w) == PhotoEnd::MatchOver); }
+    { PhotoWorld w = Shot(); w.alive = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::Dead && PhotoEnds(w) == PhotoEnd::Down); }
+    { PhotoWorld w = Shot(); w.allowed = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::NotAllowed && PhotoEnds(w) == PhotoEnd::HostOff); }
+    // a mod screen or a pause switch that would not go off refuses the key; neither closes a photo mode that is open
+    { PhotoWorld w = Shot(); w.busy = true; CHECK(PhotoKeyAnswer(w) == PhotoKey::Busy && PhotoEnds(w) == PhotoEnd::Keep); }
+    { PhotoWorld w = Shot(); w.ready = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::NotReady && PhotoEnds(w) == PhotoEnd::Keep); }
+    // the first reason in this order: no match, the death, the host, a mod screen, the switches
+    { PhotoWorld w = Shot(); w.alive = false; w.fighting = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::NoMatch && PhotoEnds(w) == PhotoEnd::MatchOver); }
+    { PhotoWorld w = Shot(); w.alive = false; w.allowed = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::Dead && PhotoEnds(w) == PhotoEnd::Down); }
+    { PhotoWorld w = Shot(); w.allowed = false; w.busy = true; CHECK(PhotoKeyAnswer(w) == PhotoKey::NotAllowed); }
+    { PhotoWorld w = Shot(); w.busy = true; w.ready = false; CHECK(PhotoKeyAnswer(w) == PhotoKey::Busy); }
+    CHECK(PhotoKeyAnswer(PhotoWorld{}) == PhotoKey::NoMatch && PhotoEnds(PhotoWorld{}) == PhotoEnd::MatchOver);
+    // open: the key is the screen's, whatever else holds (the fighter's own event would toggle it a second time)
+    { PhotoWorld w = Shot(); w.open = true; CHECK(PhotoKeyAnswer(w) == PhotoKey::Close && PhotoEnds(w) == PhotoEnd::Keep); }
+    { PhotoWorld w; w.open = true; w.closedForMs = 0; CHECK(PhotoKeyAnswer(w) == PhotoKey::Close); }
+    // just closed: the same press does not open it again; then it does
+    { PhotoWorld w = Shot(); w.closedForMs = 0; CHECK(PhotoKeyAnswer(w) == PhotoKey::Busy); }
+    { PhotoWorld w = Shot(); w.closedForMs = kPhotoSettleMs - 1; CHECK(PhotoKeyAnswer(w) == PhotoKey::Busy && PhotoEnds(w) == PhotoEnd::Keep); }
+    { PhotoWorld w = Shot(); w.closedForMs = kPhotoSettleMs; CHECK(PhotoKeyAnswer(w) == PhotoKey::Open); }
+    { PhotoWorld w; w.closedForMs = 0; CHECK(PhotoKeyAnswer(w) == PhotoKey::Busy); }   // and says nothing meanwhile
+    CHECK(kPhotoSettleMs >= 200 && kPhotoSettleMs <= 1000 && kPhotoCloseAfterMs >= 100 && kPhotoCloseAfterMs < kPhotoSettleMs);
+    // the key reached my fighter while it was open: the screen has kPhotoCloseAfterMs to close it itself
+    CHECK(!PhotoKeyCloses(true, 0) && !PhotoKeyCloses(true, kPhotoCloseAfterMs - 1) && PhotoKeyCloses(true, kPhotoCloseAfterMs) && PhotoKeyCloses(true, 5000));
+    CHECK(!PhotoKeyCloses(false, 0) && !PhotoKeyCloses(false, 5000));
+    // what the player is told: only where the key did nothing and no other screen answered
+    for (PhotoKey a : {PhotoKey::NoMatch, PhotoKey::NotAllowed, PhotoKey::NotReady}) CHECK(*PhotoKeyLine(a));
+    for (PhotoKey a : {PhotoKey::Open, PhotoKey::Close, PhotoKey::Dead, PhotoKey::Busy}) CHECK(!*PhotoKeyLine(a));
+    CHECK(std::string(PhotoKeyLine(PhotoKey::NotAllowed)).find("host") != std::string::npos && std::string(PhotoKeyLine(PhotoKey::NoMatch)).find("match") != std::string::npos);
+    CHECK(std::string(PhotoKeyLine(PhotoKey::NotReady)) == "Photo mode could not start here");
+    for (PhotoEnd e : {PhotoEnd::MatchOver, PhotoEnd::Down, PhotoEnd::HostOff}) CHECK(*PhotoEndText(e));
+    CHECK(!*PhotoEndText(PhotoEnd::Keep) && std::string(PhotoEndText(PhotoEnd::Down)) == "my fighter is down");
+    CHECK(std::string(PhotoEndText(PhotoEnd::HostOff)).find("host") != std::string::npos && std::string(PhotoEndText(PhotoEnd::MatchOver)).find("match") != std::string::npos);
 }
 
-// The body's own input while the camera flies: axes read zero, presses are dropped, releases pass; all of it passes on the ground.
-static void TestLiveCamInput() {
-    CHECK(LiveCamInput(true, true, false) == HeldInput::Zero && LiveCamInput(true, true, true) == HeldInput::Zero);
-    CHECK(LiveCamInput(true, false, true) == HeldInput::Drop && LiveCamInput(true, false, false) == HeldInput::Pass);
-    for (bool axis : {false, true}) for (bool pressed : {false, true}) CHECK(LiveCamInput(false, axis, pressed) == HeldInput::Pass);
+// A held body's own input: axes read zero, presses are dropped, releases pass; all of it passes when nothing holds it.
+// Photo mode holds it the same way, but for the look axes while the game's own camera is the view.
+static void TestHeldInput() {
+    CHECK(HoldInput(true, true, false) == HeldInput::Zero && HoldInput(true, true, true) == HeldInput::Zero);
+    CHECK(HoldInput(true, false, true) == HeldInput::Drop && HoldInput(true, false, false) == HeldInput::Pass);
+    for (bool axis : {false, true}) for (bool pressed : {false, true}) CHECK(HoldInput(false, axis, pressed) == HeldInput::Pass);
+    for (bool free : {false, true}) for (bool axis : {false, true}) for (bool look : {false, true}) for (bool pressed : {false, true})
+        CHECK(PhotoInput(false, free, axis, look, pressed) == HeldInput::Pass);                            // closed: nothing is held
+    CHECK(PhotoInput(true, false, true, true, false) == HeldInput::Pass);                                  // the look axes turn the game's camera
+    CHECK(PhotoInput(true, true, true, true, false) == HeldInput::Zero);                                   // not while its free camera flies
+    for (bool free : {false, true}) {
+        CHECK(PhotoInput(true, free, true, false, false) == HeldInput::Zero);                              // walking and the arms
+        CHECK(PhotoInput(true, free, false, false, true) == HeldInput::Drop && PhotoInput(true, free, false, false, false) == HeldInput::Pass);
+        CHECK(PhotoInput(true, free, false, true, true) == HeldInput::Drop);                               // a button is never a look axis
+    }
 }
 
 int main() {
-    TestLiveCam(); TestLiveCamInput();
+    TestPhotoMode(); TestHeldInput();
     TestSwallowLookOnDeadBodyOnly();
     TestYawWraps();
     TestPitchClamp();

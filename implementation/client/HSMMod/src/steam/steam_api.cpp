@@ -26,7 +26,7 @@ constexpr int kCbRelayStatus = 1281, kCbServerConnectFailure = 102, kCbServersDi
 
 // ---------------------------------------------------------------- flat API
 HMODULE g_dll = nullptr;
-void *g_mm = nullptr, *g_friends = nullptr, *g_user = nullptr, *g_utils = nullptr, *g_msgs = nullptr, *g_netUtils = nullptr;
+void *g_mm = nullptr, *g_friends = nullptr, *g_user = nullptr, *g_utils = nullptr, *g_msgs = nullptr, *g_netUtils = nullptr, *g_apps = nullptr;
 template <class F> F Fn(const char* name) { return g_dll ? reinterpret_cast<F>(GetProcAddress(g_dll, name)) : nullptr; }
 #define FLAT(ret, name, ...) using name##_t = ret (*)(__VA_ARGS__); name##_t name = nullptr;
 struct Api {
@@ -64,6 +64,7 @@ struct Api {
     FLAT(bool, IsAPICallCompleted, void*, uint64_t, bool*)
     FLAT(bool, GetAPICallResult, void*, uint64_t, void*, int, int, bool*)
     FLAT(uint32_t, GetAppID, void*)
+    FLAT(int, GetAppBuildId, void*)
     FLAT(int, SendMessageToUser, void*, const NetIdentity*, const void*, uint32_t, int, int)
     FLAT(int, ReceiveMessagesOnChannel, void*, int, NetMessage**, int)
     FLAT(bool, AcceptSessionWithUser, void*, const NetIdentity*)
@@ -201,6 +202,7 @@ bool Init() {
     g_utils = Fn<void* (*)()>("SteamAPI_SteamUtils_v010") ? Fn<void* (*)()>("SteamAPI_SteamUtils_v010")() : nullptr;
     g_msgs = Fn<void* (*)()>("SteamAPI_SteamNetworkingMessages_SteamAPI_v002") ? Fn<void* (*)()>("SteamAPI_SteamNetworkingMessages_SteamAPI_v002")() : nullptr;
     g_netUtils = Fn<void* (*)()>("SteamAPI_SteamNetworkingUtils_SteamAPI_v004") ? Fn<void* (*)()>("SteamAPI_SteamNetworkingUtils_SteamAPI_v004")() : nullptr;
+    g_apps = Fn<void* (*)()>("SteamAPI_SteamApps_v008") ? Fn<void* (*)()>("SteamAPI_SteamApps_v008")() : nullptr;   // optional: AppBuildId
 #define BIND(field, name) g.field = Fn<Api::field##_t>(name); if (!g.field) { HSM_LOG("steam: missing export %s", name); return false; }
     BIND(RegisterCallback, "SteamAPI_RegisterCallback")
     BIND(RunCallbacks, "SteamAPI_RunCallbacks")
@@ -256,6 +258,10 @@ bool Init() {
     g.GetDirectPingToPOP = Fn<Api::GetDirectPingToPOP_t>("SteamAPI_ISteamNetworkingUtils_GetDirectPingToPOP");
     if (!g.AddRequestLobbyListDistanceFilter) HSM_LOG("steam: no lobby distance filter export; the browser looks only as far as Steam does by default");
     if (!g.GetPOPCount || !g.GetPOPList || !g.GetDirectPingToPOP) HSM_LOG("steam: no relay data centre exports; Auto region cannot be guessed");
+    // Optional: the installed game's Steam build id (AppBuildId, session/hsm_game_build.h). Without it the game build is
+    // told apart by the exe key alone, which a content-only game update does not change.
+    g.GetAppBuildId = Fn<Api::GetAppBuildId_t>("SteamAPI_ISteamApps_GetAppBuildId");
+    if (!g.GetAppBuildId || !g_apps) HSM_LOG("steam: no SteamApps build id export; the game build is checked by its exe only");
     // Optional: avatars on the multiplayer page; without them the rows keep an empty space.
     g.GetMediumFriendAvatar = Fn<Api::GetMediumFriendAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
     g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
@@ -335,6 +341,7 @@ std::string PersonaName(SteamId user) {
     return n ? n : "";
 }
 uint32_t AppId() { return g_ready ? g.GetAppID(g_utils) : 0; }
+int AppBuildId() { return g_ready && g_apps && g.GetAppBuildId ? g.GetAppBuildId(g_apps) : 0; }
 
 // EVoiceResult: 0 OK, 1 not initialised, 2 not recording, 3 no data, 4 buffer too small, 5 corrupt, 6 restricted,
 // 7 unsupported codec.

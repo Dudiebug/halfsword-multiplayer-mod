@@ -6,6 +6,7 @@
 #include "log.h"
 #include "match/hsm_build_card.h"
 #include "session/hsm_build.h"
+#include "session/hsm_game_build.h"
 #include "session/hsm_global_bans.h"
 #include "session/hsm_password.h"
 #include "session/hsm_version_refusal.h"
@@ -49,6 +50,21 @@ bool g_directP2P = false;
 void SetDirectP2P(bool on) { g_directP2P = on; }
 bool AllowBuildMismatch() { return g_allowBuildMismatch; }
 
+int SteamBuild() {
+    static int known = 0;
+    if (known) return known;
+    known = steam::AppBuildId();
+    if (known) {
+        const SteamBuildCheck c = CheckSteamBuild(known);
+        HSM_LOG("game: Half Sword Steam build %d (%s; this HSMMod is made for %d)", known,
+                c == SteamBuildCheck::Target ? "the build this HSMMod is made for" : c == SteamBuildCheck::Older ? "older: update the game in Steam" : "newer than this HSMMod",
+                kTargetSteamBuild);
+    }
+    return known;
+}
+
+std::string GameBuildNotice() { return SteamBuildNotice(SteamBuild()); }
+
 namespace {
 std::string BuildKeyHex() { char b[32]; std::snprintf(b, sizeof b, "%016llx", (unsigned long long)ue::BuildKey()); return b; }
 std::string ProtocolStr() { return std::to_string(int(kProtocolRevision)); }
@@ -88,6 +104,7 @@ void Lobby::Tick() {
                 if (!e.ok) { state_ = State::Idle; SetStatus("Could not create lobby"); break; }
                 steam::SetLobbyData(e.lobby, "hsm_proto", ProtocolStr());
                 steam::SetLobbyData(e.lobby, "hsm_build", BuildKeyHex());
+                if (SteamBuild()) steam::SetLobbyData(e.lobby, "hsm_sbuild", std::to_string(SteamBuild()));   // pre51: the content build too
                 steam::SetLobbyData(e.lobby, "hsm_ver", kModVersion);
                 steam::SetLobbyData(e.lobby, "name", LobbyTitleNow());
                 if (RegionKnown(region_)) steam::SetLobbyData(e.lobby, "hsm_region", RegionKey(region_));
@@ -179,6 +196,8 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     else if (l.banned) l.reason = "the host is banned from HalfSwordMP";
     else if (proto != ProtocolStr()) l.reason = VersionLobbyReason(steam::LobbyData(lobby, "hsm_ver"), kModVersion);   // who is behind (#3073)
     else if (build != BuildKeyHex()) l.reason = "different game version";
+    else if (std::string why = LobbySteamBuildReason(SteamBuild(), ParseSteamBuild(steam::LobbyData(lobby, "hsm_sbuild"))); !why.empty())
+        l.reason = why;   // same exe, other content (session/hsm_game_build.h); peer-written: parsed strictly
     else if (LobbyIsFull(l.players, l.maxPlayers) && std::find(members.begin(), members.end(), steam::MySteamId()) == members.end())
         l.reason = "lobby full";   // a full lobby we are already in is not full to us
     l.locked = steam::LobbyData(lobby, "hsm_lock") == "1";

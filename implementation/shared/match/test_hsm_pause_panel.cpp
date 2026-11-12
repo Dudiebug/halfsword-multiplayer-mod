@@ -18,19 +18,32 @@ static void TestOrderAndLabels() {
 }
 
 static void TestShown() {
-    for (bool report : {false, true}) {
-        CHECK(!PauseButtonShown(PauseButton::Loadout, report));   // hidden until a later change opens the game's loadout screen
-        CHECK(PauseButtonShown(PauseButton::Resume, report));
-        CHECK(PauseButtonShown(PauseButton::Multiplayer, report));
-        CHECK(PauseButtonShown(PauseButton::Settings, report));
-        CHECK(PauseButtonShown(PauseButton::ModSettings, report));
-        CHECK(PauseButtonShown(PauseButton::LeaveMatch, report));
-        CHECK(PauseButtonShown(PauseButton::QuitMainMenu, report));
-        CHECK(PauseButtonShown(PauseButton::QuitDesktop, report));
+    for (bool report : {false, true}) for (bool trial : {false, true}) {
+        CHECK(PauseButtonShown(PauseButton::Loadout, report, trial) == trial);   // only with loadout_trial=1
+        CHECK(PauseButtonShown(PauseButton::Resume, report, trial));
+        CHECK(PauseButtonShown(PauseButton::Multiplayer, report, trial));
+        CHECK(PauseButtonShown(PauseButton::Settings, report, trial));
+        CHECK(PauseButtonShown(PauseButton::ModSettings, report, trial));
+        CHECK(PauseButtonShown(PauseButton::LeaveMatch, report, trial));
+        CHECK(PauseButtonShown(PauseButton::QuitMainMenu, report, trial));
+        CHECK(PauseButtonShown(PauseButton::QuitDesktop, report, trial));
+        CHECK(PauseButtonShown(PauseButton::ReportBug, report, trial) == report);   // reports off, or not in a session fight
     }
-    CHECK(PauseButtonShown(PauseButton::ReportBug, true));
-    CHECK(!PauseButtonShown(PauseButton::ReportBug, false));      // reports off, or not in a session fight
-    CHECK(!kLoadoutButton);
+}
+
+// The LOADOUT trial: Esc always gets the player out; the screen's own exit counts once the opening frames are over.
+static void TestLoadoutVisit() {
+    CHECK(LoadoutVisitEnds(true, false, 0) == LoadoutVisitEnd::None && LoadoutVisitEnds(true, false, 60000) == LoadoutVisitEnd::None);
+    CHECK(LoadoutVisitEnds(true, true, 0) == LoadoutVisitEnd::Esc && LoadoutVisitEnds(false, true, 0) == LoadoutVisitEnd::Esc);
+    CHECK(LoadoutVisitEnds(false, true, 60000) == LoadoutVisitEnd::Esc);                    // Esc is named even when the screen is gone
+    CHECK(LoadoutVisitEnds(false, false, 0) == LoadoutVisitEnd::None);                      // the frame it was made: not in the viewport yet
+    CHECK(LoadoutVisitEnds(false, false, kLoadoutVisitGraceMs - 1) == LoadoutVisitEnd::None);
+    CHECK(LoadoutVisitEnds(false, false, kLoadoutVisitGraceMs) == LoadoutVisitEnd::ScreenClosed);
+    CHECK(LoadoutVisitEnds(false, false, 60000) == LoadoutVisitEnd::ScreenClosed);
+    CHECK(kLoadoutVisitGraceMs == 500);
+    CHECK(std::string_view(LoadoutVisitEndText(LoadoutVisitEnd::Esc)) == "Esc");
+    CHECK(std::string_view(LoadoutVisitEndText(LoadoutVisitEnd::ScreenClosed)) == "the screen's own exit");
+    CHECK(std::string_view(LoadoutVisitEndText(LoadoutVisitEnd::None)) == "still open");
 }
 
 static void TestConfirmLabels() {
@@ -102,7 +115,7 @@ static void TestQuitDesktop() {
 }
 
 int main() {
-    TestOrderAndLabels(); TestShown(); TestConfirmLabels(); TestSecondClick(); TestOtherButtonDisarms(); TestConfirmExpires();
+    TestOrderAndLabels(); TestShown(); TestLoadoutVisit(); TestConfirmLabels(); TestSecondClick(); TestOtherButtonDisarms(); TestConfirmExpires();
     TestClear(); TestQuitDesktop();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("hsm_pause_panel ok");

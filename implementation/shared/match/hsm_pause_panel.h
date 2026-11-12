@@ -11,7 +11,7 @@ namespace hsm {
 // The nine buttons, top to bottom. They take over everything the game's own pause menu did, so GAME MENU is gone:
 //   RESUME            closes the panel
 //   MULTIPLAYER MENU  the players (mute, volume, kick, votekick), voice and network page
-//   LOADOUT           the game's own loadout screen. Hidden until a later change opens it (kLoadoutButton)
+//   LOADOUT           the game's own inventory screen, as a trial: only with loadout_trial=1 (LoadoutVisitEnds)
 //   SETTINGS          the game's own settings screen; its Back brings the panel again
 //   MOD SETTINGS      HELP IMPROVE THE MOD, MENU LOOK and the voice settings
 //   REPORT A BUG      closes the panel and opens the chat with "/bug " typed (only when bug reports are on)
@@ -21,9 +21,9 @@ namespace hsm {
 enum class PauseButton : uint8_t { Resume, Multiplayer, Loadout, Settings, ModSettings, ReportBug, LeaveMatch, QuitMainMenu, QuitDesktop };
 constexpr size_t kPauseButtonCount = 9;
 
-// The hook for the later change that opens the game's loadout screen: turn this on and the LOADOUT button shows. The panel
-// then reports PauseButton::Loadout; session.cpp's PausePanelAction() is where it opens the screen.
-constexpr bool kLoadoutButton = false;
+// LOADOUT is a trial behind loadout_trial=1 (default 0). The game's inventory screen (UI_Tavern_Inventory_C) was made for
+// the Tavern: it looks for the Tavern's camera and dress-up figure, and its exit makes the Tavern's hub menu. The trial
+// opens it over a match to see what works in an arena; session.cpp's OpenLoadoutTrial() does it and logs every step.
 
 inline const char* PauseButtonLabel(PauseButton b) {
     switch (b) {
@@ -47,11 +47,30 @@ inline const char* PauseButtonConfirm(PauseButton b) {
         default: return nullptr;
     }
 }
-// Shown on the main list. reportOn: bug reports are on and the player is in a session fight.
-inline bool PauseButtonShown(PauseButton b, bool reportOn) {
-    if (b == PauseButton::Loadout) return kLoadoutButton;
+// Shown on the main list. reportOn: bug reports are on and the player is in a session fight. loadoutTrial: loadout_trial=1.
+inline bool PauseButtonShown(PauseButton b, bool reportOn, bool loadoutTrial) {
+    if (b == PauseButton::Loadout) return loadoutTrial;
     if (b == PauseButton::ReportBug) return reportOn;
     return true;
+}
+
+// The LOADOUT trial: the game's inventory screen is up over the match and the panel waits out of sight. What ends the
+// visit: Esc (the screen has no Esc of its own, so the mod takes it down: nobody is left stuck behind a screen that does
+// not work here), or the screen being gone (its own exit ran) once kLoadoutVisitGraceMs have passed since it opened (a
+// widget is not in the viewport in the very frame it is made).
+enum class LoadoutVisitEnd : uint8_t { None, Esc, ScreenClosed };
+constexpr uint32_t kLoadoutVisitGraceMs = 500;
+inline LoadoutVisitEnd LoadoutVisitEnds(bool screenUp, bool escPressed, uint32_t sinceOpenMs) {
+    if (escPressed) return LoadoutVisitEnd::Esc;
+    if (!screenUp && sinceOpenMs >= kLoadoutVisitGraceMs) return LoadoutVisitEnd::ScreenClosed;
+    return LoadoutVisitEnd::None;
+}
+inline const char* LoadoutVisitEndText(LoadoutVisitEnd e) {
+    switch (e) {
+        case LoadoutVisitEnd::Esc: return "Esc";
+        case LoadoutVisitEnd::ScreenClosed: return "the screen's own exit";
+        default: return "still open";
+    }
 }
 inline std::array<PauseButton, kPauseButtonCount> PauseButtonOrder() {
     return {PauseButton::Resume, PauseButton::Multiplayer, PauseButton::Loadout, PauseButton::Settings, PauseButton::ModSettings,
