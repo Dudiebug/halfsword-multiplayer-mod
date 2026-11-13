@@ -113,7 +113,7 @@ static void TestWire() {
     ProgResultMsg m; m.fight = 0x01020304; m.flags = kResultWon | kResultTourney; m.purse = 240;
     std::vector<uint8_t> b = Encode(m);
     MsgType t; CHECK(PeekType(b.data(), b.size(), t) && t == MsgType::ProgressionResult && uint8_t(t) == 69);
-    CHECK(kLastDecodedMsgType == 70 && kLastReservedMsgType == 70);   // rev 42: InputBatch 70 came after it
+    CHECK(kLastDecodedMsgType == 71 && kLastReservedMsgType == 71);   // rev 42: InputBatch 70 and rev 47: Gather 71 came after it
     CHECK(b.size() == 4 + 4 + 1 + 4);
     ProgResultMsg o;
     CHECK(Decode(b.data(), b.size(), o) && o.fight == 0x01020304 && o.won() && o.tourney() && o.purse == 240);

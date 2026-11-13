@@ -181,6 +181,12 @@ public:
         auto it = last_.find(peer);
         if (it != last_.end()) { it->second.ms = nowMs; it->second.loading = false; }
     }
+    // One peer starts a level load of its own (a Crypts gather, match/hsm_crypts.h: each machine opens its own run): the
+    // load window for it alone, from now, until its next Loaded. A peer not seen yet is not added.
+    void Loading(uint32_t peer, uint32_t nowMs) {
+        auto it = last_.find(peer);
+        if (it != last_.end()) { it->second.ms = nowMs; it->second.loading = true; }
+    }
     void Forget(uint32_t peer) { last_.erase(peer); }
     void Clear() { last_.clear(); }
     void LevelLoaded(uint32_t nowMs) { for (auto& [peer, e] : last_) { e.ms = nowMs; e.loading = true; } }

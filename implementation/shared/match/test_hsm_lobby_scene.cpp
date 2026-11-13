@@ -749,7 +749,7 @@ static void TestModes() {
                             Format::Chaos, Format::OneCrossbow, Format::Roulette, Format::HideSeek, Format::PlayersVsBots, Format::Zombies};
     const char* names[] = {"FREE-FOR-ALL", "DUEL", "LAST MAN STANDING", "TEAMS", "TEAM DUEL", "RIOT", "JUGGERNAUT", "TAG", "INFECTION",
                            "CROSSBOW TDM", "TOURNAMENT", "PIT BRIDGE DUELS", "CHAOS", "ONE CROSSBOW", "ROULETTE", "HIDE AND SEEK", "SURVIVAL", "ZOMBIES"};
-    CHECK(kModeOrderCount == 18 && kModeCardCount == 20);
+    CHECK(kModeOrderCount == 18 && kModeCardCount == 21);
     for (size_t i = 0; i < s.modes.size() && i < kModeOrderCount; ++i) {
         CHECK(s.modes[i].format == order[i] && s.modes[i].name == names[i] && !s.modes[i].description.empty());
         CHECK(s.modes[i].selected == (order[i] == Format::Duel));
@@ -768,8 +768,8 @@ static void TestModes() {
 // Tier row; picking it and leaving it restore the settings.
 static void TestBrawl() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Fists));
-    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kModeOrderCount) + 2);
-    const ModeCard& card = s.modes[s.modes.size() - 2];                       // Brawl, then Progression
+    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kModeOrderCount) + 3);
+    const ModeCard& card = s.modes[s.modes.size() - 3];                       // Brawl, then Crypts and Progression
     CHECK(card.brawl && card.format == Format::FreeForAll && card.name == "BRAWL" && card.selected && card.enabled && !card.progression);
     CHECK(card.description == "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.");
     int selected = 0, brawls = 0;
@@ -778,11 +778,11 @@ static void TestBrawl() {
     CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::ClearGround, LobbyRow::Sync}));   // no Gear, no Tier
     CHECK(RowOf(s, LobbyRow::Gear) == nullptr && RowOf(s, LobbyRow::Tier) == nullptr);
     LobbyScene own = BuildLobbyScene(InLobby(true));
-    CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 2].selected && RowOf(own, LobbyRow::Gear) != nullptr);
+    CHECK(own.modes[0].selected && !own.modes[own.modes.size() - 3].selected && RowOf(own, LobbyRow::Gear) != nullptr);
     LobbyScene member = BuildLobbyScene(InLobby(false, Format::FreeForAll, Gear::Fists));
-    CHECK(member.modes[member.modes.size() - 2].selected && !member.modes[member.modes.size() - 2].enabled);
+    CHECK(member.modes[member.modes.size() - 3].selected && !member.modes[member.modes.size() - 3].enabled);
     LobbyLocal prog = InLobby(true, Format::FreeForAll, Gear::Fists); prog.progression = true;
-    CHECK(!BuildLobbyScene(prog).modes[BuildLobbyScene(prog).modes.size() - 2].selected);   // the Progression card wins
+    CHECK(!BuildLobbyScene(prog).modes[BuildLobbyScene(prog).modes.size() - 3].selected);   // the Progression card wins
 
     MatchConfig c; c.format = Format::TwoTeams; c.scoreLimit = 30; c.gear = Gear::Mirror; c.tier = 6; c.timeLimitS = 600;
     MatchConfig b = SelectMode(c, Format::FreeForAll, true);
@@ -989,11 +989,11 @@ static void TestGroupsAndSections() {
     CHECK(s.modes.size() == kModeCardCount);
     for (size_t i = 0; i < s.modes.size(); ++i) CHECK(s.modes[i].group == ModeGroupAt(i));
     for (const ModeCard& c : s.modes) {
-        const bool coop = c.progression || (!c.brawl && IsBotFormat(c.format));
+        const bool coop = c.progression || (!c.brawl && !c.crypts && IsBotFormat(c.format));
         CHECK((c.group == ModeGroup::Coop) == coop);
     }
     CHECK(ModeGroupAt(0) == ModeGroup::Versus && ModeGroupAt(kModeOrderCount) == ModeGroup::Versus &&
-          ModeGroupAt(kModeOrderCount + 1) == ModeGroup::Coop);
+          ModeGroupAt(kModeOrderCount + 1) == ModeGroup::Versus && ModeGroupAt(kModeOrderCount + 2) == ModeGroup::Coop);   // Brawl, Crypts; Progression
     for (Format f : {Format::Duel, Format::LastManStanding, Format::TwoTeams}) {         // Duel, Last Man Standing and Teams are versus modes
         for (size_t i = 0; i < kModeOrderCount; ++i) if (kModeOrder[i] == f) CHECK(ModeGroupAt(i) == ModeGroup::Versus);
     }

@@ -88,6 +88,13 @@ struct DamageView {
     bool editing = false, hadFocus = false, focused = false, enterDown = false, escDown = false, dragging = false;
     float shown = -1;                                // where the slider was last put (-1: not yet)
 };
+// The Gather time row's value (Crypts): the time as a button between the arrows; a click swaps in a text box for any whole
+// minutes from 2 to 60 (Enter applies, Esc or clicking away cancels). Host only.
+struct GatherView {
+    Flat number;
+    EditBox edit;
+    bool editing = false, hadFocus = false, focused = false, enterDown = false, escDown = false;
+};
 // The Dead weight and Weapon weight rows' value: a slider (0..100%, 5% a step) with the number beside it. Host only.
 struct WeightView {
     LobbyRow id = LobbyRow::DeadWeight;
@@ -225,6 +232,7 @@ struct State {
     std::vector<ModeView> modes;             // kModeOrder, then Brawl, then Progression
     std::vector<StepperView> steppers;       // one per LobbyRow, in its order
     DamageView damage;
+    GatherView gather;
     std::array<WeightView, 2> weights;       // Dead weight, Weapon weight
     std::vector<MapView> maps;               // the pickable maps, kMaps order, then the modded ones
     Card start;
@@ -808,6 +816,20 @@ bool BuildDamageValue(Fixed& cell) {
     return true;
 }
 
+// The Gather time row's value cell: the time, and the text box in its place while it is typed.
+bool BuildGatherValue(Fixed& cell) {
+    GatherView& d = g.gather;
+    Box row = g.kit.MakeRow();
+    d.number = MakeFlat("10 min", 17, {8, 2, 8, 2});
+    d.edit = g.kit.MakeEditBox();
+    if (!row || !d.number.card || !d.edit) { g.gather = GatherView{}; return false; }
+    AddToHorizontalBox(row, d.number.card.button, 1, 0).Align(HAlign::Center, VAlign::Center);
+    AddToHorizontalBox(row, d.edit, 1, 0).Align(HAlign::Fill, VAlign::Center);
+    d.edit.Show(false);
+    cell.Content(row).Align(HAlign::Fill, VAlign::Center);
+    return true;
+}
+
 // A weight row's value cell: "slider | number". Empty when a widget could not be made.
 bool BuildWeightValue(LobbyRow id, Fixed& cell) {
     WeightView& w = g.weights[id == LobbyRow::DeadWeight ? 0 : 1];
@@ -860,6 +882,7 @@ void BuildRulesTab(Box& page) {
         // later Set on it crashed (0.8.0-pre26). Drop it; the UpdatePanel writes to an empty Text are no-ops.
         if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) v.value = Text{};
         else if ((LobbyRow(i) == LobbyRow::DeadWeight || LobbyRow(i) == LobbyRow::WeaponWeight) && BuildWeightValue(LobbyRow(i), valueBox)) v.value = Text{};   // the same
+        else if (LobbyRow(i) == LobbyRow::Gather && BuildGatherValue(valueBox)) v.value = Text{};   // the same
         else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(home, v.box, 10);
         if (LobbyRow(i) == LobbyRow::Weapons) {   // the types to tick, in two rows of four under the row's text
@@ -1774,6 +1797,7 @@ void UpdateOpenLabel(Session& session) {
     game::Lobby& lobby = session.lobby();
     std::string label = "MULTIPLAYER";
     if (lobby.InLobby()) label = std::string(lobby.IsHost() ? "LOBBY (HOST) " : "LOBBY ") + std::to_string(lobby.PlayerCount()) + "/" + std::to_string(lobby.MaxPlayers());
+    if (std::string crypts = session.CryptsStatus(); !crypts.empty()) label += " - " + crypts;   // Crypts: waiting in the menu
     g.openButton.label.Set(g.openButton.plain ? skin::Title(label) : label);   // the game's ribbons are titled, not shouted
 }
 
@@ -1865,6 +1889,55 @@ void HandleDamage(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
     if (d.shown < 0 || !std::isfinite(at) || std::fabs(at - want) > 0.01f) d.slider.Set(want);
     d.shown = want;
     d.number.label.Set(std::to_string(DamagePct(c.damagePct, r)) + "%");
+}
+
+void CloseGatherEdit() {
+    GatherView& d = g.gather;
+    d.editing = false; d.hadFocus = false; d.focused = false;
+    d.edit.Show(false); d.number.card.button.Show(true);
+}
+
+// The Gather time row's value, every frame: the time on its button; a click opens the text box, Enter sets what is typed
+// (match/hsm_crypts.h ParseGatherInput). The row's arrows step as before (StepGather).
+void HandleGather(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
+    GatherView& d = g.gather;
+    if (!d.number.card) return;
+    const bool enter = mp::KeyDown(VK_RETURN), enterEdge = enter && !d.enterDown;
+    const bool esc = mp::KeyDown(VK_ESCAPE), escEdge = esc && !d.escDown;
+    d.enterDown = enter; d.escDown = esc;
+    const SettingRow* row = nullptr;
+    for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Gather) row = &r;
+    const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
+    d.number.card.button.Enabled(live);
+    if (d.editing) {
+        const bool focused = d.edit.Focused();
+        if (focused) d.hadFocus = true;
+        const bool apply = enterEdge && (focused || d.focused);   // the box commits on Enter, so it may have lost the keyboard this frame
+        const bool away = d.hadFocus && !focused && !d.focused && !apply;
+        d.focused = focused;
+        if (focused) SetLobbyTyping(true);
+        if (!live || escEdge || away) { CloseGatherEdit(); return; }
+        if (!apply) return;
+        const std::optional<uint16_t> typed = ParseGatherInput(d.edit.Value());
+        if (!typed) { d.edit.Set(""); d.edit.Hint("2 to 60 min"); d.edit.Focus(); return; }
+        MatchConfig c = lobby.config();
+        c.gatherS = *typed;
+        lobby.SetConfig(c);
+        HSM_LOG("ui: gather time typed: %u min", unsigned(*typed / 60));
+        acted = true;
+        CloseGatherEdit();
+        return;
+    }
+    if (live && Clicked(d.number.card)) {
+        d.editing = true; d.hadFocus = false; d.focused = false;
+        d.number.card.button.Show(false); d.edit.Show(true);
+        d.edit.Hint("");
+        d.edit.Set(std::to_string(lobby.config().gatherS / 60));
+        d.edit.Focus();
+        acted = true;
+        return;
+    }
+    if (row) d.number.label.Set(row->value);
 }
 
 // The Dead weight and Weapon weight sliders, every frame, as the Damage one: the config is written when the handle is
@@ -2289,6 +2362,7 @@ void HandleClicks(Session& session) {
                   "Seen by the other players instead of your Steam name; the host also sees your Steam name. Empty: your Steam name.",
                   [&](const std::string& typed) { return session.SetNickname(typed); });
     HandleDamage(lobby, s, acted);               // after the two boxes: its own text box keeps the hotkeys off too
+    HandleGather(lobby, s, acted);               // the same
     HandleWeights(lobby, s, acted);
     if (ClassesOpen(s) && g.classNameBox && g.classNameBox.Focused()) SetLobbyTyping(true);   // and the class name's, after all of them
 
@@ -2327,8 +2401,12 @@ void HandleClicks(Session& session) {
         if (!act(Clicked(g.modes[i].card), g.tab == 0 && i < s.modes.size() && s.modes[i].enabled)) continue;
         if (s.modes[i].progression) { lobby.SetProgression(true); continue; }
         if (lobby.Progression()) lobby.SetProgression(false);
-        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl);
-        if (next.format != c.format || next.gear != c.gear) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
+        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl, s.modes[i].crypts);
+        if (next.format != c.format || next.gear != c.gear) {
+            const bool toCrypts = IsCrypts(next) && !IsCrypts(c);
+            lobby.SetConfig(next); lobby.ClearOverrides(); c = next;
+            if (const size_t m = CryptsDefaultMap(c.format); toCrypts && m < MapCount()) lobby.SetMapPick(MapAt(m).path);   // the Abyss first
+        }
     }
     for (size_t i = 0; i < g.steppers.size(); ++i) {
         StepperView& v = g.steppers[i];
@@ -2388,7 +2466,7 @@ void HandleClicks(Session& session) {
         else {
             const MapCard* custom = nullptr;                 // a modded map is the pick: it is open by its package path
             for (const MapCard& mc : s.maps) if (mc.modded && mc.selected) custom = &mc;
-            size_t m = EffectiveMap(c.format, lobby.MapPick());
+            size_t m = EffectiveMap(c.format, c.gear, lobby.MapPick());
             if (custom) session.StartOnMap(custom->path);
             else if (m < MapCount()) session.StartOnMap(MapAt(m).path);
         }
@@ -2406,6 +2484,7 @@ void HandleClicks(Session& session) {
     for (StepperView& v : g.steppers) { Paint(v.prev.card); Paint(v.next.card); }
     for (StepperView& v : g.modRules) { Paint(v.prev.card); Paint(v.next.card); }
     Paint(g.damage.number.card);
+    Paint(g.gather.number.card);
     for (MapView& v : g.maps) Paint(v.card);
     PaintTabs();
     PaintStart();

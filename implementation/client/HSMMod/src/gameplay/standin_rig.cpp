@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -31,6 +32,19 @@ constexpr const char* kStandInTrueBoolFields[] = {
     "Block Body Muscles", "Block Upper Leg Muscles", "Block Lower Leg Muscles", "Block Shoulder Muscles",
     "Block Arm Muscles", "Invulnerable", "Force Disable Dismemberment"};
 constexpr const char* kStandInFalseBoolFields[] = {"Pain Shock", "Throwing Up"};
+
+// The Willie_BP fields ABP_Willie reads for a hand's pose besides its grip type (ABP_Willie.cpp:1608-1789). The owner's
+// tick sets them from its input; a stand-in's tick is blocked, so it keeps what they held when it was spawned (#3282).
+std::string HandFields(UObject* w) {
+    auto b = [w](const char* n) { bool v = false; return GetBool(w, n, v) ? (v ? '1' : '0') : '?'; };
+    auto d = [w](const char* n) { const double* p = Field<double>(w, n); return p && std::isfinite(*p) ? *p : -1.0; };
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "thrust R %.1f L %.1f, toggle R %c L %c, obstacle %c, active R %c L %c, grabbed L %c, "
+                  "found L %c, using L %c, sheathing L %c, reverse L %c", d("R Thrust Alpha"), d("L Thrust Alpha"),
+                  b("R Hand Toggle"), b("L Hand Toggle"), b("Obstacle In Front"), b("R Hand Active"), b("L Hand Active"),
+                  b("Grabbed L"), b("Grab L Target Found"), b("Using L Hand"), b("L Weapon Sheathing"), b("L Reverse Grip Vertical"));
+    return buf;
+}
 
 constexpr double kOffhandRetryMs = 500.0;   // a failed off-hand attach is tried again this often, not every frame
 // The owner's offhand flag drops for a frame or two in fast swings: the off hand lets go only after it has been off this
@@ -746,6 +760,7 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
             HSM_LOG("rig: %s sends grips R %u L %u%s%s%s%s", ObjectName(willie_).c_str(), unsigned(g.gripR), unsigned(g.gripL),
                     g.altGrip ? " alt" : "", g.mordhau ? " mordhau" : "", g.switched2H ? " switched" : "", g.reverseR ? " reverse" : "");
         }
+        LogHands("owner", g.gripR, g.gripL);
     }
     if (!typesLogged_) {
         typesLogged_ = true;
@@ -1155,15 +1170,33 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     if (gripFlag_[0]) SetBoolValue(gripFlag_[0], base + PropertyOffset(gripFlag_[0]), offJoint_ != nullptr);
     ApplySwitch(g.switched2H && !g.mordhau, weaponR);   // mordhau sets the flag too, but is a seat (ApplySeat), not a slide
     applied.offhand = offJoint_ != nullptr;
+    LogHands("stand-in", applied.gripR, applied.gripL);
     const sync::GripState& l = gripStateLogged_;
     if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
         l.altGrip == applied.altGrip && l.mordhau == applied.mordhau && l.switched2H == applied.switched2H && l.reverseR == applied.reverseR)
         return;
     gripStateLogged_ = applied;
     gripStateKnown_ = true;
+    handsLogged_.clear();   // the hands line follows a grip change at once
     HSM_LOG("rig: %s grips R %u L %u%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(applied.gripR), unsigned(applied.gripL),
             applied.offhand ? " offhand" : "", applied.altGrip ? " alt" : "", applied.mordhau ? " mordhau" : "",
             applied.switched2H ? " switched" : "", applied.reverseR ? " reverse" : "");
+}
+
+// #3282: while a hand holds a shield or lantern grip, the fields ABP_Willie poses it from, read every kHandsReadMs and logged
+// when they change (at most every kHandsLogMs). The owner's line and its stand-in's, on two machines, show which field the
+// stand-in lacks.
+void FighterRig::LogHands(const char* side, uint8_t gripR, uint8_t gripL) {
+    if (!sync::ShieldHandGrip(gripR) && !sync::ShieldHandGrip(gripL)) { handsLogged_.clear(); return; }
+    const double now = SteadyMs();
+    if (now - handsReadMs_ < kHandsReadMs) return;
+    handsReadMs_ = now;
+    std::string t = HandFields(willie_);
+    if (t == handsLogged_ || (!handsLogged_.empty() && now - handsLoggedMs_ < kHandsLogMs)) return;
+    handsLogged_ = std::move(t);
+    handsLoggedMs_ = now;
+    HSM_LOG("rig: %s %s hands, grips R %u L %u: %s", ObjectName(willie_).c_str(), side, unsigned(gripR), unsigned(gripL),
+            handsLogged_.c_str());
 }
 
 // The polearm hand switch (X: Willie_BP Polearm Hands Switch, :16393) slides the hands along the shaft by moving the grip

@@ -20,7 +20,7 @@ static LobbyLocal Lobby(bool host, bool progression) {
 
 int main() {
     LobbyScene off = BuildLobbyScene(Lobby(true, false));
-    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == kModeOrderCount + 2);   // the formats, Brawl, Progression
+    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == kModeOrderCount + 3);   // the formats, Brawl, Crypts, Progression
     CHECK(off.modes.back().progression && !off.modes.back().selected && off.modes.back().enabled);
     CHECK(!off.settings.empty() && !off.maps.empty());
     size_t selected = 0;

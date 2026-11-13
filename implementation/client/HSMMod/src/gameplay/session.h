@@ -23,6 +23,7 @@ public:
     virtual uint32_t ReportStatusSeq() const = 0;                    // changes with every new outcome (0: none yet)
     virtual void LobbyChatLine(const std::string& line) = 0;         // typed in the lobby chat box: /bug, /sendlog and /nolog work as in the match chat, else it goes to every member
     virtual std::string TakeNotice() = 0;                            // why the host turned us away (kicked, banned, full...), once; empty: nothing new
+    virtual std::string CryptsStatus() = 0;                          // Crypts (#3199): this machine's gather line, as the pill reads it; empty: no gather
     virtual std::string ClassName() const = 0;                       // the class picked in the menu (match/hsm_class.h)
     virtual void SetClassName(const std::string& name) = 0;          // also written back to HSMMod.ini
     virtual hsm::ClassSheet ClassValue() const = 0;                       // what the picked class is

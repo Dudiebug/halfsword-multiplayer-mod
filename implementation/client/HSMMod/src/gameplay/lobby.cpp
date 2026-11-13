@@ -413,6 +413,7 @@ MatchConfig Lobby::config() const {
     c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
     c.freeCam = steam::LobbyData(lobby_, "hsm_fcam") != "0";                                       // none: on
     c.hostPhysics = steam::LobbyData(lobby_, "hsm_sync") == "host";                                  // none: per player
+    c.gatherS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_gather"), 600), int(kGatherMinS), int(kGatherMaxS)));   // none: 10 min (Crypts)
     return Sanitize(c);
 }
 
@@ -448,6 +449,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(c.clearGroundMin));
     steam::SetLobbyData(lobby_, "hsm_fcam", c.freeCam ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_sync", c.hostPhysics ? "host" : "owner");
+    steam::SetLobbyData(lobby_, "hsm_gather", std::to_string(c.gatherS));
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }

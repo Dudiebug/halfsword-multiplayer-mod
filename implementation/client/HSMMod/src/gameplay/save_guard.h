@@ -26,8 +26,9 @@ void SweepAtStartup();
 
 class SaveGuard {
 public:
-    // Every tick. joined: in a session (lobby joined or hosting); matchLevel: this machine is in a session fight level.
-    void Tick(Adapter& adapter, bool joined, bool matchLevel);
+    // Every tick. joined: in a session (lobby joined or hosting); matchLevel: this machine is in a session fight level (the
+    // fight-only blocks); holdLevel: a level that holds the guard after the session ends (session::GuardHoldsLevel).
+    void Tick(Adapter& adapter, bool joined, bool matchLevel, bool holdLevel);
     bool Blocking() const { return policy_.Blocking(); }
 
     // The multiplayer career. In a session, this machine is about to open a level: progression = a career level (Free
@@ -60,6 +61,7 @@ private:
     const char* passOne_ = nullptr;       // the one blocked function let through for this call (the fight end's capture), not what it calls
     bool hooked_ = false, leftChecked_ = false, hookFailLogged_ = false;
     bool matchLevel_ = false;             // this tick's matchLevel (the fight-only blocks)
+    bool holdLevel_ = false;              // this tick's holdLevel
     std::wstring backup_;                 // this session's backup file (empty: none made)
     std::wstring careerDir_;              // the SaveGames folder of the career held (set by its load)
     std::vector<Setting> settings_;       // the game instance's settings before the session

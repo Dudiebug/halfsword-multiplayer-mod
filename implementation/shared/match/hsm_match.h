@@ -44,9 +44,10 @@ constexpr uint8_t kFormatCount = 20;
 constexpr int kMinTeams = 2, kMaxTeams = 4;
 // PvP gear: own loadout / random by tier / everyone identical / Fists: nobody wears or holds anything (the Brawl card,
 // free-for-all only) / HostKit: everyone in the loadout the host built (#777). Fists is no choice of the Gear row
-// (kGearRow): the mode card sets it.
-enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3, HostKit = 4 };
-constexpr uint8_t kGearCount = 5;
+// (kGearRow): the mode card sets it. Crypts (#3199): everyone first loots a kit in their own Crypts run for the Gather
+// time, then fights the format in it (match/hsm_crypts.h); the Crypts card sets it, no stop of the Gear row either.
+enum class Gear : uint8_t { Own = 0, RandomTier = 1, Mirror = 2, Fists = 3, HostKit = 4, Crypts = 5 };
+constexpr uint8_t kGearCount = 6;
 inline constexpr Gear kGearRow[] = {Gear::Own, Gear::RandomTier, Gear::Mirror, Gear::HostKit};   // the Gear row's stops, in order
 constexpr uint8_t kGearRowCount = sizeof(kGearRow) / sizeof(kGearRow[0]);
 // Gear the host rolls within the tier's budget: the Tier row's budget and the Weapons row are for it only.
@@ -195,6 +196,7 @@ struct MatchConfig {
     uint8_t winBy = 0;                // hsm::WinBy (match/hsm_win_by.h): what loses a round besides death (lobby key hsm_winby); every machine reads it from the lobby, never a wire field
     bool propsOff = false;            // the Props row Off (#1252, lobby key hsm_props): every machine removes the map's loose props during the match (PropsOffClears); never a wire field
     bool hostPhysics = false;         // 0.9.0: the host runs every fighter's physics and every screen shows its copy (SyncMode::Host); false: each player its own (SyncMode::Owner)
+    uint16_t gatherS = 600;           // Crypts gear: the Gather time in seconds (kGatherMinS..kGatherMaxS, lobby key hsm_gather); host-side, the Gather message carries the clock
 };
 inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
 inline constexpr uint8_t kClearGroundOptions[4] = {0, 2, 3, 5};       // minutes, 0 = off
@@ -223,6 +225,17 @@ inline bool IsBrawl(const MatchConfig& c) { return IsBrawl(c.format, c.gear); }
 // Every body spawns bare (no armour, no weapons): Brawl, and Tag (always bare-fisted, 0.8.0-pre26).
 inline bool IsBare(Gear g) { return g == Gear::Fists; }
 inline bool IsBare(const MatchConfig& c) { return IsBare(c.gear); }
+// Crypts (#3199): a gear mode like Brawl, picked by its own card. Every player gathers a kit alone in a fresh Crypts run
+// for the Gather time; then the format is fought in the gathered kits (match/hsm_crypts.h).
+inline bool IsCrypts(Gear g) { return g == Gear::Crypts; }
+inline bool IsCrypts(const MatchConfig& c) { return IsCrypts(c.gear); }
+constexpr uint16_t kGatherMinS = 120, kGatherMaxS = 3600, kGatherDefaultS = 600;   // 2 to 60 minutes, whole minutes (typed or stepped)
+// The formats a Crypts gather can end in: the ones that fight in each player's own loadout. The formats that deal their
+// own gear or roles (Tag, Riot, Chaos, Hide and Seek, ...), the Abyss-only Zombies and the bridge are left out.
+inline bool CryptsBattleFormat(Format f) {
+    return f == Format::LastManStanding || f == Format::FreeForAll || f == Format::TwoTeams || f == Format::ThreeTeams || f == Format::TeamDuel
+        || f == Format::Tournament || f == Format::Duel || f == Format::PlayersVsBots;
+}
 // Tag's Player damage when the Tag card is picked: light hits, the fuse decides the round (the host can change it).
 inline constexpr uint16_t kTagDamagePct = 10;
 // Equipment Budget per tier, from BP_GameManager.Generate_Random_Characters: random gear is rolled within it.
@@ -240,10 +253,11 @@ inline double TierWeight(int tier) { return kTierWeight[std::clamp(tier, 0, 7)];
 // The Weight every player is forced to: the tier's (Brawl is always kBrawlTier).
 inline double ForcedWeight(Format, Gear, int tier) { return TierWeight(tier); }
 inline double ForcedWeight(const MatchConfig& c) { return ForcedWeight(c.format, c.gear, c.tier); }
-// The Bodies row (#1410). Own: every player keeps the build of their own character. It is a choice of own loadouts only:
-// rolled, dealt and the host's gear always come with the tier's build. ForcesBuild: whether a match builds every player
+// The Bodies row (#1410). Own: every player keeps the build of their own character. It is a choice of own loadouts and of
+// the Crypts (#3199: the build of the character each player gathered with); rolled, dealt and the host's gear always come
+// with the tier's build. ForcesBuild: whether a match builds every player
 // for the tier (the host's force_strength, unless the bodies are the players' own).
-inline bool BodiesOwn(const MatchConfig& c) { return c.gear == Gear::Own && c.ownBodies; }
+inline bool BodiesOwn(const MatchConfig& c) { return (c.gear == Gear::Own || c.gear == Gear::Crypts) && c.ownBodies; }
 inline bool ForcesBuild(bool forceStrength, const MatchConfig& c) { return forceStrength && !BodiesOwn(c); }
 // The Weight a fighter spawns with. on: exactly `forced` (up or down; whatever the passport holds, NaN too). off (a bot, or
 // force_strength=0): their own, clamped to 0..1 so an out-of-range passport cannot spawn a stronger body; NaN: the default.
@@ -262,8 +276,12 @@ inline ScenarioEffects ScenarioEffectsFor(const MatchConfig& c, std::string_view
     return EffectsOf(EffectiveScenario(mapPath, c.scenario), ScenarioFormatOf(c.format), players);
 }
 // The gear settings a format takes: own / random by tier / identical anywhere (Survival and Zombies too, 0.8.0-pre20);
-// Fists only for the Brawl card (free-for-all) and Tag.
-inline bool GearAllowed(Format f, Gear g) { return g == Gear::Fists ? f == Format::Roulette || f == Format::FreeForAll || f == Format::Tag || f == Format::OneCrossbow : uint8_t(g) < kGearCount; }
+// Fists only for the Brawl card (free-for-all) and Tag; Crypts only for its battle formats.
+inline bool GearAllowed(Format f, Gear g) {
+    if (g == Gear::Fists) return f == Format::Roulette || f == Format::FreeForAll || f == Format::Tag || f == Format::OneCrossbow;
+    if (g == Gear::Crypts) return CryptsBattleFormat(f);
+    return uint8_t(g) < kGearCount;
+}
 // Tournament and Pit Bridge Duels: two fighters fight at a time, everyone else sits on the bench (no body, spectating).
 inline bool IsQueueFormat(Format f) { return f == Format::Tournament || f == Format::PitBridgeDuel; }
 // Rounds between teams: the last team standing takes the round (Team Duel, Riot, Juggernaut).

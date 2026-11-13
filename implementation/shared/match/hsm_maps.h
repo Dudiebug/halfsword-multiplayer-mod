@@ -4,7 +4,7 @@
 // instances, VFX and lighting layers, menus and Map_Test_Empty are not listed.
 //   arena    - a fight arena: Duel, and every other format
 //   bigArena - a large non-menu level: every format except Duel
-//   abyss    - the Abyss level: Zombies and Infection
+//   abyss    - the Abyss level: Zombies and Infection, and a Crypts battle that takes large levels (MapAllowsMatch)
 //   pick     - listed in the lobby's picker; Cutting, Tavern and Smithery are not (the Tavern is Progression's)
 #pragma once
 #include "match/hsm_match.h"
@@ -121,15 +121,29 @@ inline bool MapAllowsFormat(const MapInfo& m, Format f) {
     return false;
 }
 
-// Next map after `current` (wrapping) that allows `f`; `current` itself if it is the only one.
-// Returns MapCount() when no map allows `f`.
-inline size_t NextMap(size_t current, Format f) {
+// A match's maps: the format's, and with Crypts gear (#3199) the Abyss as well for every battle format that takes large
+// levels (Duel and Tournament stay in the arenas).
+inline bool MapAllowsMatch(const MapInfo& m, Format f, Gear g) {
+    if (MapAllowsFormat(m, f)) return true;
+    return g == Gear::Crypts && m.abyss && CryptsBattleFormat(f) && f != Format::Duel && f != Format::Tournament;
+}
+
+// Next map after `current` (wrapping) that a match of format `f` with gear `g` may fight on (MapAllowsMatch); `current`
+// itself if it is the only one. Returns MapCount() when no map allows it.
+inline size_t NextMap(size_t current, Format f, Gear g) {
     const size_t n = MapCount();
     for (size_t step = 1; step <= n; ++step) {
         const size_t i = (current % n + step) % n;
-        if (kMaps[i].pick && MapAllowsFormat(kMaps[i], f)) return i;
+        if (kMaps[i].pick && MapAllowsMatch(kMaps[i], f, g)) return i;
     }
     return n;
+}
+// The same for the format alone (own gear: MapAllowsFormat).
+inline size_t NextMap(size_t current, Format f) { return NextMap(current, f, Gear::Own); }
+// The map the Crypts card picks when it is chosen: the Abyss where the battle format may fight there, else the format's first.
+inline size_t CryptsDefaultMap(Format f) {
+    for (size_t i = 0; i < MapCount(); ++i) if (kMaps[i].pick && kMaps[i].abyss && MapAllowsMatch(kMaps[i], f, Gear::Crypts)) return i;
+    return NextMap(MapCount() - 1, f, Gear::Crypts);
 }
 
 }  // namespace hsm

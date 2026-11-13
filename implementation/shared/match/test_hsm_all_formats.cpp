@@ -34,8 +34,8 @@ static bool HasCard(Format f) {
 static void TestTables() {
     CHECK(kFormatCount == 20 && uint8_t(Format::Chaos) == 16 && uint8_t(Format::OneCrossbow) == 17 && uint8_t(Format::Roulette) == 18 && uint8_t(Format::HideSeek) == 19 && uint8_t(Format::CaptureTheFlag) == 10 && uint8_t(Format::Tag) == 11 && uint8_t(Format::Infection) == 12 &&
           uint8_t(Format::CrossbowTDM) == 13 && uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15);
-    // One card per format but ThreeTeams (the Teams card's 3 teams) and CaptureTheFlag (removed), none twice; then Brawl and Progression.
-    CHECK(kModeOrderCount == kFormatCount - 2 && kModeCardCount == kModeOrderCount + 2);
+    // One card per format but ThreeTeams (the Teams card's 3 teams) and CaptureTheFlag (removed), none twice; then Brawl, Crypts and Progression.
+    CHECK(kModeOrderCount == kFormatCount - 2 && kModeCardCount == kModeOrderCount + 3);
     std::set<uint8_t> carded;
     for (Format k : kModeOrder) CHECK(carded.insert(uint8_t(k)).second);
     std::set<std::string> names, blurbs;

@@ -1,5 +1,6 @@
 #include "config.h"
 #include "match/hsm_class.h"
+#include "match/hsm_crypts.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_match.h"
 #include "match/hsm_roles.h"
@@ -356,6 +357,8 @@ Config LoadConfig() {
     c.standInPartsOff = ReadString(ini, L"standin_parts_off", "0") == "1";
     c.standInBoxFix = ReadString(ini, L"standin_box_fix", "1") != "0";
     c.fenceFix = ReadString(ini, L"fence_fix", "1") != "0";
+    c.cryptsPauseLift = ReadString(ini, L"crypts_pause_lift", "1") != "0";
+    c.cryptsRandomCharacter = ReadString(ini, L"crypts_random_character", "1") != "0";
     c.botWatchdog = ReadString(ini, L"bot_watchdog", "1") != "0";
     c.purgeEarly = ReadString(ini, L"purge_early", "1") != "0";
     c.stuckArmorGate = ReadString(ini, L"stuck_armor_gate", "1") != "0";
@@ -485,6 +488,10 @@ Config LoadConfig() {
     ReadModRuleKeys(c);
     c.record = ReadModString(ini, L"record", "0") != "0";
     if (c.record) HSM_LOG("config: record=1: fight levels are recorded to HSMRec-*.hsmrec next to this log");
+    c.cryptsMaxTier = CryptsTierCapFrom(std::atoi(ReadModString(ini, L"crypts_max_tier", "1").c_str()));
+    if (c.cryptsMaxTier != kCryptsTierCap) HSM_LOG("config: crypts_max_tier=%d: a Crypts gather runs %s", c.cryptsMaxTier, c.cryptsMaxTier >= kCryptsTierTop ? "at the game's own tiers" : "up to that tier");
+    c.cryptsProbe = ReadModString(ini, L"crypts_probe", "0") != "0";
+    if (c.cryptsProbe) HSM_LOG("config: crypts_probe=1: the Crypts' rooms are logged (cryptsprobe: lines)");
     // Command-line overrides (several instances may share one ini).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags

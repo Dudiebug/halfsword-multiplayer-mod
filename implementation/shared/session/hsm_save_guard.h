@@ -11,6 +11,7 @@
 // The guard comes on when the player joins a session (lobby or host). It stays on after the session ends while this
 // machine is still in a fight level: the level was set up as a session fight, and the game's own death or give-up in it
 // would otherwise save, or reset the character, with the session's settings. It goes off (restore) in a menu or hub.
+// A Crypts run (#3199) holds it the same way (GuardHoldsLevel): the run's own death and exit screens save the run.
 #pragma once
 #include <cstdint>
 
@@ -40,6 +41,11 @@ public:
 private:
     bool on_ = false;
 };
+
+// The levels that hold the guard after the session ends: a match level, and a solo level (the procedural dungeon), which a
+// session opens only as a Crypts gather's run. The run was set up by the session (a new character, Free Mode); its death
+// screen (UI_DED) and its exit (UI_ExtractedAmount) save through Save Game. The guard goes off at the menu the run ends in.
+inline bool GuardHoldsLevel(bool matchLevel, bool soloLevel) { return matchLevel || soloLevel; }
 
 // A backup left by a session whose process is gone (a crash, or the game closed mid-session) is put back at the next
 // start, before the player can play on it; one a live process still owns (two copies of the game on one machine) is

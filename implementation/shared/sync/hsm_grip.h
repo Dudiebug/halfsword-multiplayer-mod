@@ -45,6 +45,11 @@ constexpr GripSeat SeatFor(uint8_t gripR, bool offhand, bool alt, bool mordhau, 
     return s;
 }
 
+// A shield or lantern grip (5 Buckler, 6 Shield, 7 Shield_Heavy, 8 Shield_BarGrip, 9 Lantern): ABP_Willie poses these
+// hands from fields besides the grip type (a buckler shares the bare hand's branch while its Thrust Alpha is 0;
+// build 26568321 added two left-hand layers for 5 to 8), so the rig logs those fields while one is held (#3282).
+constexpr bool ShieldHandGrip(uint8_t grip) { return grip >= 5 && grip <= 9; }
+
 // The owner's toggles that make the game re-seat its weapon: alt grip, mordhau, reverse grip. A new joint starts at 0
 // (the game makes it at the weapon's default seat).
 constexpr uint8_t SeatKey(bool alt, bool mordhau, bool reverse) {

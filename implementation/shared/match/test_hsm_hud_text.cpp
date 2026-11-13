@@ -220,8 +220,21 @@ static void TestTierName() {
     CHECK(std::string(TierName(kBrawlTier)) == "Veteran" && std::string(TierName(MatchConfig{}.tier)) == "Commoner");   // Brawl's fixed tier and the default
 }
 
+// Crypts (#3199): the gather pill reads the clock while looting, the kit kept after a death or an exit, and nothing off.
+static void TestCryptsLine() {
+    CHECK(CryptsLine(GatherPhase::Off, GatherSelf::Gathering, 60000).empty());
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Gathering, 754000) == "CRYPTS 12:34 - gather your kit");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Opening, 600000) == "CRYPTS 10:00 - opening your Crypts");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Died, 250000) == "Kit kept, waiting 4:10");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Extracted, 5000) == "Kit kept, waiting 0:05");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Waiting, 30000) == "Fresh character, waiting 0:30");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::None, 30000) == "Fresh character, waiting 0:30");
+    for (GatherSelf s : {GatherSelf::None, GatherSelf::Opening, GatherSelf::Gathering, GatherSelf::Died, GatherSelf::Extracted, GatherSelf::Waiting})
+        CHECK(CryptsLine(GatherPhase::Collecting, s, 9000) == "Battle starting");
+}
+
 int main() {
-    TestLobbyText(); TestTierName(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
+    TestLobbyText(); TestTierName(); TestCryptsLine(); TestRoundsText(); TestWaveBreakText(); TestExtrapolate();
     TestStatus(); TestFourTeamsAndLms(); TestKillLine(); TestScoreboard();
     std::printf(g_fail ? "%d FAILED\n" : "all hud text tests passed\n", g_fail);
     return g_fail ? 1 : 0;

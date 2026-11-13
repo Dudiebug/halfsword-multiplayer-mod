@@ -48,6 +48,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.deadWeightPct = std::min(c.deadWeightPct, kWeightMaxPct);
     c.weaponWeightPct = std::min(c.weaponWeightPct, kWeightMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
+    c.gatherS = uint16_t(std::clamp(c.gatherS, kGatherMinS, kGatherMaxS) / 60 * 60);    // Crypts: 2 to 60 whole minutes
     if (c.timeOfDay >= kTimeOfDayCount) c.timeOfDay = 0;   // a stale or peer-written value: the map's own
     if (c.winBy > 2) c.winBy = 0;                                                         // hsm::WinBy: Death, First blood, Knockdown
     if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || IsRoundFormat(c.format) || IsInfection(c.format)) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
@@ -56,6 +57,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
 
 inline Regear RegearFor(const MatchConfig& c, RespawnCause cause) {
     if (c.gear == Gear::Fists) return Regear::None;                            // Brawl strips at the spawn instead
+    if (c.gear == Gear::Crypts) return cause == RespawnCause::Rematch ? Regear::Each : Regear::None;   // each player's gathered kit, dealt when everybody starts; kept for every life
     if (IsBotFormat(c.format) && cause != RespawnCause::Rematch) return Regear::None;   // the run's start: that loadout lasts the run
     if (c.gear == Gear::RandomTier) return Regear::Each;
     if (c.gear == Gear::Mirror && (cause == RespawnCause::RoundReset || cause == RespawnCause::Rematch)) return Regear::Shared;
@@ -492,7 +494,7 @@ inline bool GiveUpHold::Update(bool down, uint32_t nowMs) {
 }
 
 inline size_t Match::LoadoutsAhead() const {
-    if (HasRoles(cfg_.format) || cfg_.gear == Gear::HostKit) return 0;   // each role rolls at its own tier, the host's loadout is not rolled: nothing to make ahead
+    if (HasRoles(cfg_.format) || cfg_.gear == Gear::HostKit || cfg_.gear == Gear::Crypts) return 0;   // each role rolls at its own tier, the host's loadout and the gathered kits are not rolled: nothing to make ahead
     RespawnCause cause;
     if (phase_ == MatchPhase::Results) cause = RespawnCause::Rematch;
     else if (roundOver_ && (phase_ == MatchPhase::Live || phase_ == MatchPhase::SuddenDeath)) cause = RespawnCause::RoundReset;
@@ -514,7 +516,7 @@ inline size_t Match::LoadoutsAhead() const {
 }
 
 inline size_t StartLoadoutsAhead(const MatchConfig& c, size_t humans) {
-    if (HasRoles(c.format) || c.gear == Gear::HostKit) return 0;
+    if (HasRoles(c.format) || c.gear == Gear::HostKit || c.gear == Gear::Crypts) return 0;
     const Regear r = RegearFor(c, RespawnCause::Rematch);
     if (IsQueueFormat(c.format)) humans = std::min<size_t>(humans, 2);   // two fight at a time
     if (r == Regear::Shared) return humans ? 1 : 0;

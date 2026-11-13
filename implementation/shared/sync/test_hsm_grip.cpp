@@ -96,6 +96,10 @@ static void TestSeatKey() {
     CHECK(SeatKey(false, false, false) == 0);                                          // a new joint's seat
 }
 
+static void TestShieldHandGrip() {
+    for (int g = 0; g <= 255; ++g) CHECK(ShieldHandGrip(uint8_t(g)) == (g >= 5 && g <= 9));
+}
+
 int main() {
     TestHolderNeverGetsZeroFromThePose();
     TestNonZeroPoseGripIsAppliedUnchanged();
@@ -105,6 +109,7 @@ int main() {
     TestSeatFlip();
     TestSeatSocketAndBone();
     TestSeatKey();
+    TestShieldHandGrip();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");
     return g_fail != 0;

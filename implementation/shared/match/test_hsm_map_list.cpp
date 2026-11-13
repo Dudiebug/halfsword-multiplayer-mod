@@ -57,8 +57,27 @@ static void TestRows() {
     for (const MapRow& r : none) CHECK(!r.selected || r.shown);
 }
 
+// The battle map at the end of a Crypts gather: still allowed, or the battle format's first.
+static void TestBattleMap() {
+    const std::string abyss = "/Game/Maps/Abyss/Abyss_Map_Open_EA", yard = "/Game/Maps/Arenas/Map_Arena_Yard";
+    CHECK(BattleMapFor(Format::LastManStanding, Gear::Crypts, abyss) == abyss);
+    CHECK(BattleMapFor(Format::Duel, Gear::Crypts, abyss) == MapAt(Idx("Alley")).path);   // the Battle row moved to Duel: an arena
+    CHECK(BattleMapFor(Format::Tournament, Gear::Crypts, abyss) == MapAt(EffectiveMap(Format::Tournament, Gear::Crypts, "")).path);
+    CHECK(BattleMapFor(Format::Duel, Gear::Crypts, yard) == yard);
+    CHECK(BattleMapFor(Format::LastManStanding, Gear::Own, abyss) == MapAt(Idx("Alley")).path);   // no Abyss without Crypts gear
+    CHECK(BattleMapFor(Format::Duel, Gear::Crypts, "/Game/Maps/Somewhere/Map_Custom") == "/Game/Maps/Somewhere/Map_Custom");
+    CHECK(BattleMapFor(Format::Duel, Gear::Crypts, "/Game/Maps/Map_Hub_Tavern_Frank") == MapAt(Idx("Alley")).path);   // known, not pickable
+    const std::string smithery = "/Game/Maps/Workshop_Smithery_Map";                       // allowed for the format, still not pickable
+    CHECK(BattleMapFor(Format::LastManStanding, Gear::Crypts, smithery) == MapAt(EffectiveMap(Format::LastManStanding, Gear::Crypts, "")).path);
+    CHECK(MapAllowsMatch(MapAt(Idx("Smithery")), Format::LastManStanding, Gear::Crypts) && EffectiveMap(Format::LastManStanding, Gear::Crypts, "") != Idx("Smithery"));
+    // The gearless helpers are the Own-gear ones.
+    for (size_t i = 0; i < MapCount(); ++i) CHECK(NextMap(i, Format::Duel) == NextMap(i, Format::Duel, Gear::Own));
+    CHECK(EffectiveMap(Format::Zombies, yard) == EffectiveMap(Format::Zombies, Gear::Own, yard));
+}
+
 int main() {
     TestEffective();
+    TestBattleMap();
     TestRows();
     if (g_fail) { std::printf("test_hsm_map_list: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_map_list: all passed\n");

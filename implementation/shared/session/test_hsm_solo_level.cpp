@@ -37,8 +37,26 @@ static void TestStockMaps() {
     CHECK(solo > 0);
 }
 
+// A Crypts gather (#3199) opens the dungeon's main map on purpose, and only that one, only while its run is opening.
+static void TestGatherRun() {
+    CHECK(IsSoloLevel(kCryptsLevel));
+    CHECK(SoloLevelAllowed(kCryptsLevel, true) && !SoloLevelAllowed(kCryptsLevel, false));
+    CHECK(SoloLevelAllowed("Map_Procedural_Block_Test_Main", true));                     // the world's short name
+    CHECK(!SoloLevelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Dungeon_Probe", true));   // another solo level: never
+    CHECK(!SoloLevelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Logic/Map_Procedural_Block_Test_Module_Hall_1_Arena_Logic", true));
+    for (bool run : {false, true}) {                                                      // the rest: always
+        CHECK(SoloLevelAllowed("/Game/Maps/Abyss/Abyss_Map_Open_EA", run));
+        CHECK(SoloLevelAllowed("/Game/Maps/Menus/Map_Menu_Startup", run));
+        CHECK(SoloLevelAllowed("", run));
+    }
+    int opened = 0;
+    for (const char* p : kStockMapPaths) opened += SoloLevelAllowed(p, true) && IsSoloLevel(p);
+    CHECK(opened == 1);                                                                   // one stock solo map opens for a gather
+}
+
 int main() {
     TestDungeonIsSolo();
+    TestGatherRun();
     TestOtherLevelsAreNot();
     TestStockMaps();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }

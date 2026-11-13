@@ -190,6 +190,28 @@ public:
     // set it to 1, a normal fight. True if it was 2.
     bool EndErrandMode();
     void ClearFreeMode();                       // the stock Progression: Free Mode off
+    // Crypts (#3199, match/hsm_crypts.h): a fresh Crypts run, the game instance set as the game's own START OVER sets it
+    // (UI_Abyss_StartOver_Sure): the blank passport (an unarmed peasant in "Abyss Character Player 1 FM") at the entrance, no rooms
+    // cleared, Game Mode 5, Play Mode 2, Free Mode on. The caller opens the level; the save guard keeps the player's own
+    // save (and their own Crypts run) out of it. False when a field it needs is missing.
+    bool StartFreshCrypts();
+    // The run's player, after StartFreshCrypts: a passport blob (ExportPassport's format, e.g. game::RandomPassportBlob) put
+    // into the game instance's "Abyss Character Player 1 FM", which the Crypts director spawns the player from (Play Mode 2).
+    // The game instance only: nothing is saved. False (logged) when it cannot be read or the fields do not match.
+    bool SetCryptsCharacter(const std::vector<uint8_t>& blob);
+    // The kit a fresh Crypts run starts with (the blank passport), serialized like ExportPassport: a player who brought no
+    // kit out of the Crypts fights in it.
+    bool BlankCryptsKit(std::vector<uint8_t>& out);
+    // UI_FadeToSurface constructions since the last call: the screen the Crypts show when an exit is reached.
+    uint32_t TakeSurfaceFades() { const uint32_t n = surfaceFades_; surfaceFades_ = 0; return n; }
+    // UI_DED constructions since the last call: the death screen (in the Crypts its button opens the main menu).
+    uint32_t TakeDeathScreens() { const uint32_t n = deathScreens_; deathScreens_ = 0; return n; }
+    // The Crypts held at a tier (match/hsm_crypts.h CappedCryptsTier) during a gather: the dungeon director's "Current Abyss
+    // Tier" (the tier it generates every enemy at and picks the next rooms by) and the game instance's copy each call, and
+    // with `rooms` each of the director's "Active Levels" "Room Tier" (a room starts at its parent's tier plus its door's
+    // modifier, and the director takes the tier of each room the player walks into).
+    struct CryptsTierHold { bool director = false; int lowered = -1, rooms = 0; };   // lowered: the highest tier brought down, -1 none
+    CryptsTierHold HoldCryptsTier(uint8_t cap, bool rooms);
     // Combat scenarios (match/hsm_scenarios.h): the world settings on the game instance, set before a travel (they reach the
     // clients with its settings). The host's own values are kept the first time and put back by RestoreScenario.
     // False when none of the fields it needed could be set.
@@ -454,6 +476,8 @@ private:
     bool photoPauseWas_ = true, photoGalleryPauseWas_ = true;   // what those switches were
     uint32_t pauseSwallowed_ = 0;                  // pause screens SuppressStockScreens kept from constructing (TakePauseSwallowed)
     uint32_t hubSwallowed_ = 0;                    // Tavern hub menus kept from constructing (SwallowTavernHub)
+    uint32_t surfaceFades_ = 0;                    // UI_FadeToSurface constructions (TakeSurfaceFades)
+    uint32_t deathScreens_ = 0;                    // UI_DED constructions (TakeDeathScreens)
     bool inputTouched_ = false;    // RestoreGameInput or CaptureInput ran since the last MenuInputBack
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;

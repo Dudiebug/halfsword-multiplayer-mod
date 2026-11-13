@@ -9,6 +9,7 @@
 #include "hsm_protocol.h"
 #include "session/hsm_career.h"
 #include "session/hsm_dice.h"
+#include "session/hsm_gather.h"
 #include "session/hsm_lease.h"
 #include "session/hsm_loadout_change.h"
 #include "session/hsm_ground_clear.h"
@@ -73,7 +74,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
     Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
-    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n);
+    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n); Try<GatherMsg>(d, n); Try<GatherNoteMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -115,6 +116,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
         ma.status = AnswerStatus::Unable; s.push_back(Encode(ma));
     }
     InputFrame f; f.seq = 7; f.axes[0] = 1; f.buttons = 5; s.push_back(Encode(f));
+    { GatherMsg g; g.phase = GatherPhase::Gathering; g.leftMs = 600000; g.seq = 3; s.push_back(Encode(g)); GatherNoteMsg gn; gn.note = GatherNote::Died; gn.seq = 3; s.push_back(Encode(gn)); }   // rev 47: a Crypts gather
     { InputBatch b; b.entity = 2; b.delayMs = 33; b.frames.push_back({1000, f}); InputFrame g = f; g.seq = 8; b.frames.push_back({1017, g}); s.push_back(Encode(b)); }
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
     Event e; e.kind = EventKind::Died; e.a = 2; s.push_back(Encode(e));

@@ -100,7 +100,7 @@ static void TestMaps() {
     for (const MapCard& m : BuildLobbyScene(mod).maps) if (m.modded) CHECK(!m.allowed);
     LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     for (const MapCard& m : t.maps) if (!m.allowed) CHECK(m.reason == "Tournament needs an arena");
-    CHECK(BrowserModes().size() == 20 && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels" && BrowserModes()[13] == "Chaos" && BrowserModes()[14] == "One crossbow" && BrowserModes()[15] == "Roulette" && BrowserModes()[16] == "Hide and seek" && BrowserModes()[17] == "Brawl");
+    CHECK(BrowserModes().size() == 21 && BrowserModes()[18] == "Crypts" && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels" && BrowserModes()[13] == "Chaos" && BrowserModes()[14] == "One crossbow" && BrowserModes()[15] == "Roulette" && BrowserModes()[16] == "Hide and seek" && BrowserModes()[17] == "Brawl");
     CHECK(ModeMatches("Tournament", BrowserModes()[11]) && ModeMatches("Pit bridge duels", BrowserModes()[12]));
 }
 

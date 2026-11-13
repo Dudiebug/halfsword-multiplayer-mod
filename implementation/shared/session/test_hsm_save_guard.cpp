@@ -62,8 +62,18 @@ static void TestLeftBackups() {
     CHECK(!RestoreLeftBackup(false, false, false));
 }
 
+// A session that ends while this machine is in its Crypts run: the guard holds until the menu.
+static void TestCryptsRunHolds() {
+    CHECK(GuardHoldsLevel(true, false) && GuardHoldsLevel(false, true) && !GuardHoldsLevel(false, false));
+    SaveGuardPolicy g;
+    CHECK(g.Update(true, GuardHoldsLevel(false, true)) == SaveAction::Backup);
+    CHECK(g.Update(false, GuardHoldsLevel(false, true)) == SaveAction::None && g.Blocking());
+    CHECK(g.Update(false, GuardHoldsLevel(false, false)) == SaveAction::Restore && !g.Blocking());
+}
+
 int main() {
     TestOffUntilJoined();
+    TestCryptsRunHolds();
     TestJoiningBacksUpOnce();
     TestLeavingInAMenuRestores();
     TestLeavingInAFightHoldsUntilTheMenu();

@@ -108,6 +108,15 @@ struct Config {
     // destroys the bags (#706). fence_fix=0: as 0.8.0-pre23 (the fence never survives a level load). Per machine:
     // every machine's level manager wipes its own game instance, so every player in the fight needs it on.
     bool fenceFix = true;
+    // true (default from 0.8.0, #3199): in a Crypts gather's run the world keeps running under the pause menu (a paused
+    // world stops the 1 s keep-alive and the host drops the player after 15 s). crypts_pause_lift=0: the stock pause.
+    // Per machine.
+    bool cryptsPauseLift = true;
+    // true (default from 0.8.0, #3199): every Crypts run starts as a new random character of the lobby's tier, made by the
+    // game's own fighter generator (the rank's build and gear, the Weapons row's filter), and a player who brought no kit
+    // fights as one. crypts_random_character=0: the run starts as the game's blank peasant, and so does a player with no kit.
+    // Per machine (the host decides the no-kit fighters).
+    bool cryptsRandomCharacter = true;
     // true (default from 0.8.0-pre50): the host kills a wave bot that fell far below its spawn height or stood still for 90 s
     // with no player near, and the bots left of a wave in which nothing spawned or died for 5 minutes (#2413;
     // match/hsm_bot_watchdog.h). bot_watchdog=0: a stuck bot holds its wave. Host only.
@@ -292,6 +301,11 @@ struct Config {
     bool deflect = false;
     // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
     bool record = false;
+    // [mod] crypts_max_tier: the highest tier the Crypts reach during a gather (Enum_Ranks 0 Beggar .. 8 Lord; match/hsm_crypts.h).
+    // 1 Peasant by default; 8 leaves the game's own tiers.
+    int cryptsMaxTier = 1;
+    // [mod] crypts_probe=1: logs how the Crypts are built (gameplay/crypts_probe.h), for the shared Crypts map. Dev only.
+    bool cryptsProbe = false;
     // [mod] pack=<name>: the modpack in Paks/~mods/<name>/ (HSMPack.ini) a host announces in its lobby; off: none; empty: the only
     // valid one installed (gameplay/mod_pack.h, docs/MODPACK.md).
     std::string modPack;

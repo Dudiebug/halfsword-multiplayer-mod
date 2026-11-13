@@ -235,7 +235,7 @@ static void TestLobby() {
     bool card = false, browser = false;
     for (size_t i = 0; i < kModeOrderCount; ++i) card = card || kModeOrder[i] == f;
     for (const std::string& n : BrowserModes()) browser = browser || n == "Hide and seek";
-    CHECK(card && browser && kModeOrderCount == 18 && kModeCardCount == 20);
+    CHECK(card && browser && kModeOrderCount == 18 && kModeCardCount == 21);
     Format parsed = Format::FreeForAll;
     CHECK(ParseServerFormat("hideseek", &parsed) && parsed == f);
     int allowed = 0;

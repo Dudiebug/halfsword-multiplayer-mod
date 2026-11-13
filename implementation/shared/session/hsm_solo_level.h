@@ -4,7 +4,8 @@
 // (UI_Dialog_Widget_Seer_GoToHell.cpp:54-59, UI_Startup_Menu.cpp:128-130). BP_Procedural_Dungeon_Director builds the dungeon
 // from unseeded random draws at BeginPlay (BP_Procedural_Dungeon_Director.cpp:408), so two machines would walk two different
 // dungeons, and BP_LevelManager does no match setup in modes 5 and 6 (BP_LevelManager.cpp:758), so there is no spawn for a
-// level gate to wait for. Pure name test; the DLL decides what to do with the answer.
+// level gate to wait for. Pure name test; the DLL decides what to do with the answer. One exception: a Crypts gather
+// (#3199, match/hsm_crypts.h) opens the dungeon on purpose, each machine its own (SoloLevelAllowed).
 #pragma once
 #include <string>
 
@@ -13,6 +14,16 @@ namespace hsm {
 // A level path or short map name of the procedural block maps ("Map_Procedural_Block_Test_*", folder "ProceduralBlocksTest").
 inline bool IsSoloLevel(const std::string& level) {
     return level.find("Map_Procedural_Block_") != std::string::npos || level.find("/ProceduralBlocksTest/") != std::string::npos;
+}
+
+// The Crypts level the start menu opens (Game Mode 6): the one a gather opens on every machine.
+inline constexpr const char* kCryptsLevel = "/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main";
+
+// Whether a session may open `level` now: every level but the solo ones, and the Crypts while this machine opens its own
+// gather run (`gatherRun`). Even then only for itself: no other solo level, and no travel for the lobby (the DLL).
+inline bool SoloLevelAllowed(const std::string& level, bool gatherRun) {
+    if (!IsSoloLevel(level)) return true;
+    return gatherRun && level.find("Map_Procedural_Block_Test_Main") != std::string::npos;
 }
 
 }  // namespace hsm

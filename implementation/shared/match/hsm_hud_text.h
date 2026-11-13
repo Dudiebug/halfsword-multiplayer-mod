@@ -1,6 +1,7 @@
 // Match HUD text, built from the wire MatchInfo so host and clients show the same thing. Game-independent.
 #pragma once
 #include "hsm_protocol.h"
+#include "match/hsm_crypts.h"
 #include "match/hsm_match.h"
 #include <algorithm>
 #include <cctype>
@@ -289,10 +290,11 @@ inline std::string FormatName(Format f) {
         default: return "Free-for-all";
     }
 }
-// What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name.
-// `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
+// What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name and Crypts
+// with its battle ("Crypts (Teams)"). `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
 inline std::string ModeName(Format f, Gear g, int teams = 0) {
     if (IsBrawl(f, g)) return "Brawl";
+    if (IsCrypts(g)) return "Crypts (" + FormatName(f) + ")";
     return PicksTeams(f) && teams > 0 ? FormatName(f) + " (" + std::to_string(TeamCount(f, teams)) + ")" : FormatName(f);
 }
 inline std::string ModeName(uint8_t format, uint8_t gear, int teams = 0) { return ModeName(Format(format), Gear(gear), teams); }
@@ -354,6 +356,23 @@ inline std::string HideSeekLine(const MatchInfo& m, uint8_t myEntity) {
     if (m.fuseLeftMs) return std::string(seeker ? "WAIT " : hider ? "HIDE " : "HIDING ") + Seconds(m.fuseLeftMs) + " s";
     return seeker ? "SEEK" : hider ? "STAY HIDDEN" : "SEEKING";
 }
+// Crypts (#3199): the gather pill on this machine, from the host's clock and what its player is doing. Empty with no gather.
+// Looting: "CRYPTS 12:34 - gather your kit"; after a death, an exit or a late join: "Kit kept, waiting 4:10"; while the
+// last kits come in: "Battle starting".
+inline std::string CryptsLine(GatherPhase phase, GatherSelf self, uint32_t leftMs) {
+    if (phase == GatherPhase::Off) return {};
+    if (phase == GatherPhase::Collecting) return "Battle starting";
+    switch (self) {
+        case GatherSelf::Opening: return "CRYPTS " + Clock(leftMs) + " - opening your Crypts";
+        case GatherSelf::Gathering: return "CRYPTS " + Clock(leftMs) + " - gather your kit";
+        case GatherSelf::Died:
+        case GatherSelf::Extracted: return "Kit kept, waiting " + Clock(leftMs);
+        case GatherSelf::None:
+        case GatherSelf::Waiting: return "Fresh character, waiting " + Clock(leftMs);
+    }
+    return {};
+}
+
 // Roulette: the line under the round pill. The holder reads the two keys, everyone the odds of the next pull (`oneIn`:
 // live one time in that many); with a live round in the crossbow it says that instead.
 inline std::string RouletteLine(const MatchInfo& m, uint8_t myEntity, int oneIn, bool loaded) {

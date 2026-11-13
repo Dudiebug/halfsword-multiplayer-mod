@@ -88,6 +88,7 @@ public:
     // weapon. Call every frame after Neutralise and Drive. Logs one line per change.
     void ApplyGrip(const sync::GripState& g);
     void ApplySwitch(bool on, ue::UObject* weaponR);   // the polearm hand switch's joint positions
+    void LogHands(const char* side, uint8_t gripR, uint8_t gripL);   // #3282: a shield hand's pose fields (sync::ShieldHandGrip)
     bool ApplySeat(const sync::GripState& g, ue::UObject* weaponR);   // the right hand's seat on the weapon (hsm_grip.h)
     // Stand-in: when this weapon has sat in the right hand differently from the owner's for a while (hsm_held.h), the joint
     // is made again at the owner's seat, read from the target pose's hand_r and weapon. Call after ApplyGrip.
@@ -228,6 +229,9 @@ private:
     sync::GripState gripStateLogged_{};                      // the grip state ApplyGrip last logged
     bool gripStateKnown_ = false;
     int ownToggles_ = -1;                                    // the owner's grip toggles last logged when sending (-1 none)
+    static constexpr double kHandsReadMs = 500.0, kHandsLogMs = 2000.0;   // LogHands: read, and log a change at most, this often
+    std::string handsLogged_;                                // LogHands: the fields last logged ("" none since a grip change)
+    double handsReadMs_ = -1e9, handsLoggedMs_ = -1e9;
     ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
     bool offTornLogged_ = false;                             // "left hand torn off" was logged for this stretch
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)

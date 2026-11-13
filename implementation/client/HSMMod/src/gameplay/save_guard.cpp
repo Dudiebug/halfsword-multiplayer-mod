@@ -262,10 +262,10 @@ void SaveGuard::Hook() {
     hookFailLogged_ = !hooked_;
 }
 
-void SaveGuard::Tick(Adapter& adapter, bool joined, bool matchLevel) {
+void SaveGuard::Tick(Adapter& adapter, bool joined, bool matchLevel, bool holdLevel) {
     if (!leftChecked_) RestoreLeft(adapter);
-    matchLevel_ = matchLevel;
-    switch (policy_.Update(joined, matchLevel)) {
+    matchLevel_ = matchLevel; holdLevel_ = holdLevel;
+    switch (policy_.Update(joined, holdLevel)) {
     case session::SaveAction::Backup: Backup(adapter); break;
     case session::SaveAction::Restore: Restore(adapter); break;
     case session::SaveAction::None: break;
@@ -356,7 +356,7 @@ bool SaveGuard::BackupOnDisk(const std::wstring& dir) const {
 }
 
 void SaveGuard::CareerTravel(Adapter& adapter, bool progression, bool host) {
-    if (!policy_.Blocking()) Tick(adapter, true, matchLevel_);   // a travel heard in the tick the session began: the backup first
+    if (!policy_.Blocking()) Tick(adapter, true, matchLevel_, holdLevel_);   // a travel heard in the tick the session began: the backup first
     const bool guarded = policy_.Blocking() && BackupOnDisk(adapter.SaveGamesDir());
     const session::CareerStep step = career_.Travel(progression, guarded);
     if (step == session::CareerStep::Load) career_.Done(step, LoadCareer(adapter, host));

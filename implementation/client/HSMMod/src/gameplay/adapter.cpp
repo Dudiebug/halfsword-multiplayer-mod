@@ -5,6 +5,7 @@
 #include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "log.h"
+#include "match/hsm_crypts.h"
 #include "match/hsm_input_mode.h"
 #include "match/hsm_roles.h"
 #include "match/hsm_match.h"
@@ -1741,6 +1742,71 @@ void Adapter::ClearFreeMode() {
     }
 }
 
+namespace {
+constexpr const char* kCryptsKitField = "Abyss Character Player 1 FM";   // GI_Settings and SG_GameProgress_C: the free run's player
+// A passport-typed property of a fresh save object: its class default, the blank passport START OVER writes.
+bool BlankPassportOf(UObject* sg, const char* name, FProperty*& prop) {
+    prop = sg ? FindProperty(ClassOf(sg), name) : nullptr;
+    return prop != nullptr;
+}
+}  // namespace
+
+bool Adapter::StartFreshCrypts() {
+    UObject* gi = GameInstance();
+    if (!gi) return false;
+    bool ok = true;
+    UObject* sg = NewSaveObject();
+    for (const char* name : {"Abyss Character Player 1 FM", "Abyss Character Player 2 FM"}) {
+        FProperty* dst = FindProperty(ClassOf(gi), name);
+        FProperty* src = nullptr;
+        if (dst && BlankPassportOf(sg, name, src) && PropertySize(src) == PropertySize(dst) && PropertyType(src) == PropertyType(dst))
+            CopyPropertyValue(dst, reinterpret_cast<uint8_t*>(gi) + PropertyOffset(dst), reinterpret_cast<uint8_t*>(sg) + PropertyOffset(src));
+        else { HSM_LOG("adapter: crypts: %s could not be reset", name); ok = false; }
+    }
+    // The entrance block: the start menu takes an unset block as the entrance too (UI_Startup_Menu.cpp:120), so an unloaded
+    // class leaves it unset.
+    if (UClass** block = Field<UClass*>(gi, "Abyss Latest Loaded Block FM"))
+        *block = FindClass("BP_Procedural_Block_Entrance_2_C");
+    else ok = false;
+    if (int32_t* rooms = Field<int32_t>(gi, "Abyss Rooms Cleared Amount FM")) *rooms = 0; else ok = false;
+    if (uint8_t* tier = Field<uint8_t>(gi, "Current Abyss Tier FM")) *tier = 0; else ok = false;
+    if (FProperty* dead = FindProperty(ClassOf(gi), "Dead Opponents FM")) ClearPropertyValue(dead, reinterpret_cast<uint8_t*>(gi) + PropertyOffset(dead));
+    else ok = false;
+    for (const char* name : {"P1 Transform FM", "P2 Transform FM"}) {   // the identity: the director spawns the player at the entrance
+        FProperty* t = FindProperty(ClassOf(gi), name);
+        if (!t || PropertySize(t) != 0x60) { ok = false; continue; }
+        double* d = reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(gi) + PropertyOffset(t));
+        std::memset(d, 0, 0x60);
+        d[3] = 1.0;                                   // rotation (0,0,0,1) at 0x00, translation 0 at 0x20
+        d[8] = d[9] = d[10] = 1.0;                    // scale 1 at 0x40
+    }
+    if (uint8_t* m = Field<uint8_t>(gi, "Current Game Mode enum")) *m = 5; else ok = false;
+    if (uint8_t* p = Field<uint8_t>(gi, "Current Play Mode")) *p = 2; else ok = false;
+    SetBool(gi, "Free Mode Activated", true);
+    HSM_LOG("adapter: crypts: a fresh run set up (Game Mode 5, Play Mode 2, the entrance, the blank passport)%s", ok ? "" : " - SOME FIELDS MISSING");
+    return ok;
+}
+
+bool Adapter::SetCryptsCharacter(const std::vector<uint8_t>& blob) {
+    UObject* gi = GameInstance();
+    UObject* sg = gi && !blob.empty() ? LoadPassportSave(blob) : nullptr;
+    FProperty* src = sg ? FindProperty(ClassOf(sg), kSavePassport) : nullptr;
+    FProperty* dst = gi ? FindProperty(ClassOf(gi), kCryptsKitField) : nullptr;
+    if (!src || !dst || PropertySize(src) != PropertySize(dst) || PropertyType(src) != PropertyType(dst)) {
+        HSM_LOG("adapter: crypts: the run's character not set (%s)", !gi ? "no game instance" : !sg ? "the passport did not load" : !src || !dst ? "a passport field is missing" : "the passport fields differ");
+        return false;
+    }
+    CopyPropertyValue(dst, reinterpret_cast<uint8_t*>(gi) + PropertyOffset(dst), reinterpret_cast<uint8_t*>(sg) + PropertyOffset(src));
+    HSM_LOG("adapter: crypts: the run's character set (%zu bytes) in %s", blob.size(), kCryptsKitField);
+    return true;
+}
+
+bool Adapter::BlankCryptsKit(std::vector<uint8_t>& out) {
+    UObject* sg = NewSaveObject();
+    FProperty* src = nullptr;
+    return BlankPassportOf(sg, kCryptsKitField, src) && SavePassportFrom(sg, src, out);
+}
+
 void Adapter::PrepareFreeModeFight(int foes) {
     UObject* gi = GameInstance();
     if (!gi) return;
@@ -1802,6 +1868,36 @@ constexpr const char* kCombatEventClasses[] = {"BP_CombatEvent_Alley_C", "BP_Com
                                                "BP_CombatEvent_Pit_C", "BP_CombatEvent_Slums_C", "BP_CombatEvent_Yard_C", "BP_CombatEvent_Tourney_C",
                                                "BP_CombatEvent_TourneyBaron_C"};
 }  // namespace
+
+Adapter::CryptsTierHold Adapter::HoldCryptsTier(uint8_t cap, bool rooms) {
+    CryptsTierHold r;
+    UObject* gi = GameInstance();
+    if (!gi) return r;
+    auto hold = [&](uint8_t* t) {
+        if (!t || *t <= cap) return;
+        r.lowered = std::max(r.lowered, int(*t));
+        *t = hsm::CappedCryptsTier(*t, cap);
+    };
+    hold(Field<uint8_t>(gi, "Current Abyss Tier FM"));
+    UObject* const* slot = Field<UObject*>(gi, "Current Procedural Dungeon Director");
+    UObject* director = slot ? *slot : nullptr;   // set by the director's BeginPlay; a run's earlier director is garbage until then
+    if (!director || IsGarbage(director)) return r;
+    r.director = true;
+    hold(Field<uint8_t>(director, "Current Abyss Tier"));
+    if (!rooms) return r;
+    FProperty* p = FindProperty(ClassOf(director), "Active Levels");
+    if (!p || PropertyType(p) != "ArrayProperty" || PropertySize(p) != int32_t(sizeof(ScriptArray))) return r;
+    const ScriptArray* a = reinterpret_cast<const ScriptArray*>(reinterpret_cast<const uint8_t*>(director) + PropertyOffset(p));
+    if (a->num < 0 || a->num > 512 || (a->num && !a->data)) return r;
+    UObject* const* blocks = reinterpret_cast<UObject* const*>(a->data);
+    for (int32_t i = 0; i < a->num; ++i) {
+        UObject* b = blocks[i];
+        if (!b || IsGarbage(b)) continue;
+        ++r.rooms;
+        hold(Field<uint8_t>(b, "Room Tier"));
+    }
+    return r;
+}
 
 bool Adapter::ApplyScenario(const hsm::ScenarioWorld& w) {
     UObject* gi = GameInstance();
@@ -3018,6 +3114,8 @@ void Adapter::SuppressStockScreens(bool on, bool ownerMatch, bool swallowPause) 
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;
         }
+        if (ClassNamed(obj, "UI_FadeToSurface_C")) ++surfaceFades_;   // an exit reached in the Crypts (session.cpp CryptsTick)
+        if (ClassNamed(obj, "UI_DED_C")) ++deathScreens_;             // a death (session.cpp CryptsTick; suppressed or not)
         if (!g_suppressScreens) return false;
         for (const char* cls : kStockScreens) if (ClassNamed(obj, cls)) {
             HSM_LOG("adapter: suppressed stock %s during a session match", cls);

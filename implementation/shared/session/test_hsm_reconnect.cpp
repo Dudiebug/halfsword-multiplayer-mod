@@ -343,8 +343,29 @@ static void TestPeerSilenceJoinAndSpectate() {
     CHECK(m.Expired(S, true, streams).size() == 1);
 }
 
+// A Crypts gather: each machine loads its own run, the host none. A Loading note gives that peer alone the load window.
+static void TestPeerSilenceOwnLoad() {
+    constexpr uint32_t S = PeerSilenceMonitor::kSilentMs, L = PeerSilenceMonitor::kLoadingMs;
+    PeerSilenceMonitor m;
+    m.Seen(1, 0, true); m.Loaded(1, 0);
+    m.Seen(2, 0, true); m.Loaded(2, 0);
+    m.Seen(1, 1000); m.Loading(1, 1000);                                         // peer 1 opens its Crypts
+    const auto e = m.Expired(S, false);                                          // peer 2 did not: 15 s as before
+    CHECK(e.size() == 1 && e[0] == 2);
+    CHECK(m.Expired(1000 + L - 1, false).empty());                               // peer 1: the load window
+    CHECK(m.Expired(1000 + L, false).size() == 1);                               // and not longer
+    m.Seen(3, 0, true); m.Loaded(3, 0); m.Loading(3, 500); m.Loaded(3, 2000);   // loaded: 15 s from then
+    CHECK(m.Expired(2000 + S - 1, false).empty() && m.Expired(2000 + S, false).size() == 1);
+    PeerSilenceMonitor w;                                                        // the window runs from the note
+    w.Seen(4, 0, true); w.Loaded(4, 0); w.Loading(4, 10000);
+    CHECK(w.Expired(10000 + L - 1, false).empty() && w.Expired(10000 + L, false).size() == 1);
+    m.Loading(9, 0);                                                             // unknown: not added
+    CHECK(m.Expired(10 * L, false).empty());
+}
+
 int main() {
     TestClientDisconnectAction(); TestFightMsgsOpen(); TestHelloWatch(); TestPeerSilence(); TestPeerSilenceLobby(); TestPeerSilenceJoinAndSpectate();
+    TestPeerSilenceOwnLoad();
     TestClaimBeforeExpiryAndDoubleClaim(); TestClaimAfterExpiry(); TestWrongKey(); TestExpiryList();
     TestRefreshAndSameKeyRules(); TestRejections(); TestCap(); TestLapsedEvictedByReserve(); TestWrapAround();
     TestResendOrder(); TestMonitorSilenceToLostThenMenu(); TestMonitorPacketRecovers(); TestMonitorLateTickGoesToMenu();

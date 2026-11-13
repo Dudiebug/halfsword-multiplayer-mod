@@ -331,7 +331,7 @@ static void TestBotFormatGear() {
         CHECK(Sanitize(odd).gear == Gear::Own);
     }
     CHECK(GearAllowed(Format::FreeForAll, Gear::Fists) && !GearAllowed(Format::Duel, Gear::Fists) && !GearAllowed(Format::TwoTeams, Gear::Fists));
-    CHECK(GearAllowed(Format::Duel, Gear::Mirror) && GearAllowed(Format::Duel, Gear::HostKit) && !GearAllowed(Format::Duel, Gear(5)));
+    CHECK(GearAllowed(Format::Duel, Gear::Mirror) && GearAllowed(Format::Duel, Gear::HostKit) && GearAllowed(Format::Duel, Gear::Crypts) && !GearAllowed(Format::Duel, Gear(6)));
     MatchConfig pvp = Cfg(Format::Duel, 3); pvp.gear = Gear::RandomTier;
     CHECK(JoinRegearFor(pvp) == Regear::Each);                                                 // PvP joiners: as before
     pvp.gear = Gear::Fists; pvp.format = Format::FreeForAll;
@@ -725,7 +725,7 @@ static void TestLoadoutsAhead() {
 // Host's loadout (#777): everyone in the loadout the host built. It is handed out when everybody starts together (the
 // match's start, a rematch) and kept at every other respawn; nothing is rolled, so nothing is made ahead.
 static void TestHostKit() {
-    CHECK(uint8_t(Gear::HostKit) == 4 && kGearCount == 5 && kGearRowCount == 4);
+    CHECK(uint8_t(Gear::HostKit) == 4 && uint8_t(Gear::Crypts) == 5 && kGearCount == 6 && kGearRowCount == 4);
     CHECK(kGearRow[0] == Gear::Own && kGearRow[1] == Gear::RandomTier && kGearRow[2] == Gear::Mirror && kGearRow[3] == Gear::HostKit);
     CHECK(GearRolled(Gear::RandomTier) && GearRolled(Gear::Mirror) && !GearRolled(Gear::Own) && !GearRolled(Gear::HostKit) && !GearRolled(Gear::Fists));
     for (Format f : {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams, Format::TeamDuel, Format::Tournament, Format::PlayersVsBots}) {
@@ -767,6 +767,9 @@ static void TestBodiesOwn() {
     CHECK(Sanitize(s).ownBodies && BodiesOwn(Sanitize(s)));                     // Sanitize keeps the choice
     s.format = Format::Riot;
     CHECK(!BodiesOwn(Sanitize(s)));                                             // the roles deal the gear: the tier's build
+    MatchConfig k = c; k.gear = Gear::Crypts;                                   // the Crypts: the gathered character's build
+    CHECK(BodiesOwn(k) && !ForcesBuild(true, k));
+    k.ownBodies = false; CHECK(!BodiesOwn(k) && ForcesBuild(true, k));
 }
 
 static void TestStartLoadoutsAhead() {
