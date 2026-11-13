@@ -48,7 +48,7 @@ struct ResetCandidate {
     bool alive = true;         // the actor exists here
     bool haveStart = false;    // its start transform was recorded (a level prop or weapon)
     bool broken = false;       // a geometry collection that has shattered: the pieces cannot be put back together
-    bool held = false;         // a hand holds it (a weapon with a Parent Actor)
+    bool held = false;         // a hand holds it (a weapon with a holder in "Parent Actors")
     bool bornInRound = false;  // spawned objects: appeared after the match went live
     bool detached = false;     // a body that came off its object: it belongs to that object, not a thing of its own
     bool classKnown = false;   // level weapons: a loaded class that can be spawned again

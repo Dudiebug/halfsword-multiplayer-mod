@@ -4,7 +4,7 @@
 // The game's own "Last Parent" cannot tell a drop from the level's weapons: ModularWeaponBP clears it by itself once the weapon
 // is 300 uu from its last holder (a 0.2 s poll) and on a re-grab, so almost every real drop (thrown, kicked, a holder that
 // died and respawned) has none. The rule goes by what a weapon is now:
-//   held / sheathed   a Parent Actor (Willie_BP "Weapon R/L" and the sheath slots all keep it) -> kept
+//   held / sheathed   a holder in "Parent Actors" (Willie_BP "Weapon R/L" and the sheath slots all list it) -> kept
 //   fists, feet       the fighter's body weapons -> kept
 //   level start       a weapon the level placed that still lies at its spot (the map reset's record) -> kept
 //   anything else     a dropped weapon -> cleared. That includes a level weapon someone picked up and put down elsewhere;
@@ -30,7 +30,7 @@ inline bool AtLevelStart(double distanceSquaredUu) {
 }
 
 struct DropCandidate {
-    bool hasParent = false;       // "Parent Actor" set: in a hand or sheathed on a body
+    bool hasParent = false;       // "Parent Actors" not empty: in a hand or sheathed on a body
     bool inHand = false;          // with hasParent: the parent's Weapon R / Weapon L is this weapon (else it is sheathed)
     bool bodyWeapon = false;      // fists or feet
     bool levelStart = false;      // a recorded level weapon still at its start spot

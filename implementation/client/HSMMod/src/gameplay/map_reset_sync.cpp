@@ -12,7 +12,7 @@
 //                  with zero velocities; the lease goes back to FREE, so the host streams the prop again from where it lies
 //   spawned        objects tracked after the match began (a helmet knocked off, a snapped plank, a thrown barrel) are destroyed
 //                  on every machine, not announced as lost; what the level spawned during its own start-up stays
-//   level weapons  the weapons the level placed (MarkBaseline records them: Parent Actor and Last Parent empty) go back on
+//   level weapons  the weapons the level placed (MarkBaseline records them: Parent Actors and Last Parent empty) go back on
 //                  their spot; one a fighter picked up and dropped was destroyed by the drop clear, so a new one of its
 //                  class is spawned (a procedural weapon, whose class is the bare base, cannot be: skipped with a log)
 // Each machine does this on its own copy, so every machine ends in the same state; the host's FREE streams only confirm it.

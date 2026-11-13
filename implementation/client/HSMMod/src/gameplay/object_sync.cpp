@@ -1104,7 +1104,7 @@ void ObjectSync::NoteContact(UObject* a, UObject* b) {
             continue;
         }
         UObject* other = side == 0 ? b : a;
-        // What touched it (ContactClaimant): a fighter simulated here, or a weapon in its hand ("Parent Actor" only: a thrown
+        // What touched it (ContactClaimant): a fighter simulated here, or a weapon in its hand ("Parent Actors" only: a thrown
         // weapon's "Last Parent" is not a touch); a stand-in or its weapon claims nothing; and a prop this machine leases
         // (IslandSource: not a FREE one the host streams) claims what it pushes, credited to whoever touched that prop
         // last -- the pile one hit disturbed has one simulator.
@@ -1519,13 +1519,20 @@ UObject* ObjectSync::ObjectField(UObject* o, int which) {
     auto it = offs.find(cls);
     if (it == offs.end()) {
         FProperty* p = nullptr;
-        if (which == 0) p = FindProperty(ClassOf(o), "Parent Actor");
+        if (which == 0) p = FindProperty(ClassOf(o), "Parent Actors");   // build 26641406: a TArray of the holders
         else if (which == 1) p = FindProperty(ClassOf(o), "Weapon R");
         else p = FindProperty(ClassOf(o), "Weapon L");
-        it = offs.emplace(cls, p && PropertySize(p) == int32_t(sizeof(UObject*)) ? PropertyOffset(p) : -1).first;
+        const int32_t size = which == 0 ? int32_t(sizeof(FObjArray)) : int32_t(sizeof(UObject*));
+        it = offs.emplace(cls, p && PropertySize(p) == size ? PropertyOffset(p) : -1).first;
     }
     const int32_t off = it->second;
-    return off >= 0 ? *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(o) + off) : nullptr;
+    if (off < 0) return nullptr;
+    const uint8_t* at = reinterpret_cast<const uint8_t*>(o) + off;
+    if (which != 0) return *reinterpret_cast<UObject* const*>(at);
+    const FObjArray* a = reinterpret_cast<const FObjArray*>(at);    // the holder added last, as Adapter::WeaponHolder
+    if (a->num <= 0 || a->num > 64 || !a->data) return nullptr;
+    for (int32_t i = a->num - 1; i >= 0; --i) if (a->data[i]) return a->data[i];
+    return nullptr;
 }
 
 // Every machine decides by itself (IdleDespawnDue): the FREE Grant came to all of them at once. Only in the bot formats

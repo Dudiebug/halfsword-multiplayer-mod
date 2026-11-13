@@ -35,6 +35,26 @@ using namespace hsm::ue;
 namespace {
 
 struct FObjArray { UObject** data = nullptr; int32_t num = 0, max = 0; };
+
+// The fighters holding or carrying a modular weapon. Since build 26641406 the weapon keeps them in "Parent Actors": a hand
+// that takes the weapon or a sheath adds its fighter, a drop removes it (Willie_BP.cpp Set_Up_Left_Hand_Weapon:8559, 8475,
+// Sheathe_on_Spawn:9835), so two fighters can hold one weapon. Build 26615445 had one "Parent Actor". Null when the
+// actor has no such field (not a modular weapon) or the array is not sane.
+const FObjArray* WeaponParents(UObject* weapon) {
+    const FObjArray* a = Field<FObjArray>(weapon, "Parent Actors");
+    if (!a || a->num < 0 || a->num > 64 || (a->num > 0 && !a->data)) return nullptr;
+    return a;
+}
+// The holder added last (the one the single "Parent Actor" named before: every pick-up overwrote it), or null.
+UObject* LastWeaponParent(const FObjArray* a) {
+    for (int32_t i = a ? a->num - 1 : -1; i >= 0; --i) if (a->data[i]) return a->data[i];
+    return nullptr;
+}
+bool HasWeaponParent(const FObjArray* a, UObject* who) {
+    for (int32_t i = 0; a && who && i < a->num; ++i) if (a->data[i] == who) return true;
+    return false;
+}
+
 constexpr const char* kWillieClass = "Willie_BP_C";
 constexpr const char* kZombieClass = "Willie_BP_Zombie_C";   // the Zombies format's bots: a child of Willie_BP_C with the rotten look, no new fields
 constexpr const char* kGameInstanceClass = "GI_Settings_C";
@@ -1198,10 +1218,10 @@ std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
         if (UObject** p = Field<UObject*>(willie, f); p && *p) carried.push_back(*p);
     // Also the fists of a cut-off upper body and its sheathed weapons: actors of their own, constrained to the body, not
     // attached (Willie_BP.cpp:27831; build 26568321 spawns no feet). A slot variable can outlive its weapon's sheath, so a weapon
-    // is taken only while its "Parent Actor" is still this fighter.
+    // is taken only while its "Parent Actors" still lists this fighter.
     for (const char* f : {"Sapwned R Hand Weapon Upper Body", "Sapwned L Hand Weapon Upper Body", "Weapon Slot R 1", "Weapon Slot R 2", "Weapon Slot Back", "Weapon Slot L 1", "Weapon Slot L 2"})
         if (UObject** p = Field<UObject*>(willie, f); p && *p)
-            if (UObject** parent = Field<UObject*>(*p, "Parent Actor"); parent && *parent == willie) carried.push_back(*p);
+            if (HasWeaponParent(WeaponParents(*p), willie)) carried.push_back(*p);
     Call att(willie, "GetAttachedActors");
     att.set<bool>("bResetArray", true).set<bool>("bRecursivelyIncludeAttachedActors", true);
     if (att.invoke())
@@ -1211,6 +1231,9 @@ std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
     carried.erase(std::unique(carried.begin(), carried.end()), carried.end());
     return carried;
 }
+
+UObject* Adapter::WeaponHolder(UObject* weapon) { return weapon ? LastWeaponParent(WeaponParents(weapon)) : nullptr; }
+bool Adapter::WeaponHeldBy(UObject* weapon, UObject* who) { return weapon && HasWeaponParent(WeaponParents(weapon), who); }
 
 void Adapter::StopHair(UObject* willie, bool destroy) {
     UObject** p = Field<UObject*>(willie, "Hair");
@@ -2367,8 +2390,7 @@ UObject* Adapter::FighterOf(UObject* actor) {
     for (int depth = 0; actor && depth < 4; ++depth) {
         if (IsWillie(actor)) return actor;
         if (IsWeapon(actor)) {
-            UObject** p = Field<UObject*>(actor, "Parent Actor");
-            if (p && *p) return *p;
+            if (UObject* holder = LastWeaponParent(WeaponParents(actor))) return holder;
             UObject** last = Field<UObject*>(actor, "Last Parent");
             return last ? *last : nullptr;              // thrown weapons credit their last holder
         }
@@ -2406,17 +2428,20 @@ std::vector<UObject*> Adapter::WeaponActors() {
 Adapter::DropClear Adapter::DestroyDroppedWeapons(const std::function<bool(UObject*)>& levelStart) {
     DropClear out;
     for (UObject* w : WeaponActors()) {
-        UObject** parent = Field<UObject*>(w, "Parent Actor");
-        if (!parent) continue;                                   // not a modular weapon after all
+        const FObjArray* parents = WeaponParents(w);
+        if (!parents) continue;                                  // not a modular weapon after all
         DropCandidate c;
         c.bodyWeapon = IsBodyWeapon(w);
         c.beingDestroyed = BeingDestroyed(w);
-        c.hasParent = *parent != nullptr;
-        if (c.hasParent) {
-            UObject** right = Field<UObject*>(*parent, "Weapon R");
-            UObject** left = Field<UObject*>(*parent, "Weapon L");
+        c.hasParent = LastWeaponParent(parents) != nullptr;
+        for (int32_t i = 0; i < parents->num && !c.inHand; ++i) {   // in a hand of any holder
+            UObject* holder = parents->data[i];
+            if (!holder) continue;
+            UObject** right = Field<UObject*>(holder, "Weapon R");
+            UObject** left = Field<UObject*>(holder, "Weapon L");
             c.inHand = (right && *right == w) || (left && *left == w);
-        } else if (!c.bodyWeapon) {
+        }
+        if (!c.hasParent && !c.bodyWeapon) {
             c.levelStart = levelStart && levelStart(w);
         }
         switch (ClearableDrop(c)) {
@@ -2434,9 +2459,9 @@ std::vector<UObject*> Adapter::LevelWeapons() {
     std::vector<UObject*> out;
     for (UObject* w : WeaponActors()) {
         if (IsBodyWeapon(w)) continue;
-        UObject** parent = Field<UObject*>(w, "Parent Actor");
+        const FObjArray* parents = WeaponParents(w);
         UObject** last = Field<UObject*>(w, "Last Parent");
-        if (parent && !*parent && last && !*last) out.push_back(w);
+        if (parents && !LastWeaponParent(parents) && last && !*last) out.push_back(w);
     }
     return out;
 }

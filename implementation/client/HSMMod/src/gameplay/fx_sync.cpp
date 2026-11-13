@@ -699,7 +699,7 @@ void FxSync::CrossbowTick() {
 
 // A bolt of the stand-in's own on its crossbow: the bolt Event Add Bolt left waiting, else a new one spawned out of the
 // way as the game spawns it, then Event Load Bolt with it (it needs String Loaded and no bolt; it gives the bolt the
-// crossbow's Parent Actor, the stand-in, so the bolt deals no damage here). A bolt that did not seat is destroyed.
+// crossbow's holder, the stand-in, so the bolt deals no damage here). A bolt that did not seat is destroyed.
 bool FxSync::LoadBolt(UObject* crossbow, UObject* standIn) {
     Call load(crossbow, "Event Load Bolt");
     if (!load.valid()) return false;

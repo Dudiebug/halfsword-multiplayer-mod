@@ -12,7 +12,7 @@ using namespace hsm::ue;
 using namespace hsm::game::hands;
 
 // A weapon leaves the hand of a fighter simulated here (dropped, thrown, disarmed): the hand field moves off it and
-// the game clears its "Parent Actor" (a sheathed weapon keeps it, Willie_BP "Set Up Right Hand Weapon").
+// the game takes the fighter off its "Parent Actors" (a sheathed weapon keeps it, Willie_BP "Set Up Right Hand Weapon").
 void ObjectSync::DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, UObject*>>& owned) {
     std::array<bool, kMaxWillies + 1> seen{};
     for (const auto& [e, w] : owned) {
@@ -117,10 +117,10 @@ void ObjectSync::ResolvePending(double nowMs) {
     }
 }
 
-// A real weapon in that hand of the stand-in (its "Parent Actor" the stand-in) that no prop names; nullptr if none.
+// A real weapon in that hand of the stand-in (its "Parent Actors" lists the stand-in) that no prop names; nullptr if none.
 UObject* ObjectSync::UntrackedInHand(UObject* standIn, int hand) {
     UObject* w = standIn ? ObjectField(standIn, hand == 0 ? 1 : 2) : nullptr;
-    if (!w || byActor_.count(w) || !adapter_->IsWeapon(w) || adapter_->IsBodyWeapon(w) || ObjectField(w, 0) != standIn) return nullptr;
+    if (!w || byActor_.count(w) || !adapter_->IsWeapon(w) || adapter_->IsBodyWeapon(w) || !Adapter::WeaponHeldBy(w, standIn)) return nullptr;
     return w;
 }
 
@@ -228,7 +228,7 @@ void ObjectSync::DeadlineRelease(uint64_t id, uint8_t owner, int hand, UObject* 
 }
 
 // The game's own drop on the stand-in: "Set Up ... Hand Weapon" with no class detaches the weapon in that hand
-// ("Dropped With no Damage": no blow), clears the hand and the weapon's "Parent Actor". With the grip type at 0 the
+// ("Dropped With no Damage": no blow), clears the hand and takes the stand-in off the weapon's "Parent Actors". With the grip type at 0 the
 // same function destroys the weapon instead, so that case is left alone. Not under ScriptHookBypass: the claims
 // hooks keep guarding anything it might reach.
 bool ObjectSync::ReleaseFromStandIn(uint64_t propId, UObject* standIn, int hand, UObject* copy) {
@@ -247,7 +247,7 @@ bool ObjectSync::ReleaseFromStandIn(uint64_t propId, UObject* standIn, int hand,
 }
 
 // The drop itself, for ReleaseFromStandIn and the hand matching: both hands when the stand-in holds copy in both.
-// Dropped once neither hand holds it and its "Parent Actor" is clear; what names it in the log.
+// Dropped once neither hand holds it and its "Parent Actors" is empty; what names it in the log.
 ObjectSync::DropResult ObjectSync::DropFromHands(UObject* standIn, int hand, UObject* copy, const std::string& what) {
     const int32_t copyIndex = ObjectIndex(copy);
     for (int pass = 0; pass < 2; ++pass) {
@@ -340,7 +340,7 @@ void ObjectSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObjec
     StandInHand& sh = standInHands_[e].hand[size_t(h)];
     UObject* prev = sh.held;
     // Left both hands with nothing here letting it go (this code and Equip update or keep what they change; a sheathed
-    // weapon keeps its "Parent Actor"): the stand-in dropped it by itself.
+    // weapon keeps its "Parent Actors"): the stand-in dropped it by itself.
     if (prev && prev != cur[0] && prev != cur[1]) {
         if (!adapter_->StillValid(prev, sh.heldIndex)) {
             if (!sh.selfDropLogged)
@@ -464,11 +464,11 @@ bool ObjectSync::TakeIntoHand(UObject* standIn, int h, UObject* weapon) {
         c.set<UObject*>("Weapon L", weapon).set<bool>("Don't Save", true);
         ok = c.valid() && c.invoke();
     }
-    return ok && ObjectField(standIn, h == 0 ? 1 : 2) == weapon && ObjectField(weapon, 0) == standIn;
+    return ok && ObjectField(standIn, h == 0 ? 1 : 2) == weapon && Adapter::WeaponHeldBy(weapon, standIn);
 }
 
 // The owner picked a weapon up: the loose weapon of that class nearest the owner's (sync::PickAttach) goes into the
-// stand-in's hand. Loose: no "Parent Actor" (held and sheathed weapons have one), not a body weapon, not being destroyed.
+// stand-in's hand. Loose: an empty "Parent Actors" (held and sheathed weapons list their fighter), not a body weapon, not being destroyed.
 bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::PoseHandView& pose, double nowMs) {
     if (nowMs - weaponsMs_ >= kWeaponsRefreshMs) {
         weaponsMs_ = nowMs;
@@ -557,7 +557,7 @@ bool ObjectSync::SpawnIntoHand(uint8_t e, UObject* standIn, int h, uint32_t clas
         ok = c.valid() && c.invoke();
     }
     UObject* w = ok ? ObjectField(standIn, h == 0 ? 1 : 2) : nullptr;
-    ok = w && ClassHashOf(w) == classHash && ObjectField(w, 0) == standIn;
+    ok = w && ClassHashOf(w) == classHash && Adapter::WeaponHeldBy(w, standIn);
     if (!ok) {
         if (++n_.spawnFailed <= kLogFirst) HSM_LOG("props: stand-in of e%u hand %d: spawning its own %s failed", e, h,
                                                     cls ? ObjectName(reinterpret_cast<UObject*>(cls)).c_str() : "weapon");

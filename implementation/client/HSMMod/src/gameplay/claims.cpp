@@ -333,7 +333,7 @@ void Claims::OnStuckDamage(ScriptCall& c, UObject* standIn, uint8_t victim) {
     if (!fighter) {
         bool ammo = false;
         if (GetBool(OuterOf(comp), "Is Ammo", ammo) && ammo && ++n_.boltNoShooter <= 3)
-            HSM_LOG("claims: bolt '%s' lodged in e%u has no shooter (no Parent Actor); no stuck claim", ObjectName(OuterOf(comp)).c_str(), victim);
+            HSM_LOG("claims: bolt '%s' lodged in e%u has no shooter (no Parent Actors); no stuck claim", ObjectName(OuterOf(comp)).c_str(), victim);
     }
     if (!attacker || attacker == victim) return;
     StrikeSource source = HandOf(fighter, OuterOf(comp));

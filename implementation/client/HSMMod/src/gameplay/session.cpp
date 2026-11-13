@@ -2752,19 +2752,6 @@ public:
         if (++timeInputBlocked_ % 20 == 1) HSM_LOG("session: blocked %s during a session match (%u so far)", what, timeInputBlocked_);
         return true;
     }
-    // The middle mouse fighter spawn (build 26615445), blocked while joined to a session on any level (a match, a hub
-    // level, a Crypts run): the spawned fighter would be on one machine only, and in a Crypts gather its axe and pavise
-    // would be free loot. Only that one event is blocked; whatever else is bound to the button still works.
-    bool BlockSpawnInput() {
-        if (!net_ || (steamMode() && !lobby_.InLobby())) return false;
-        if (++spawnInputBlocked_ % 20 == 1 || spawnBlockedOn_ != currentLevel_) {
-            spawnBlockedOn_ = currentLevel_;
-            const size_t cut = currentLevel_.rfind('/');
-            HSM_LOG("session: blocked the middle mouse fighter spawn in a session (%s; %u so far)",
-                    currentLevel_.c_str() + (cut == std::string::npos ? 0 : cut + 1), spawnInputBlocked_);
-        }
-        return true;
-    }
     // The photo mode key in a session match (#2624; match/hsm_freecam.h PhotoKeyAnswer, which PhotoTick asks every tick). On
     // my own living fighter in a running match, with the host's Free cam row on, the game's own key event goes through:
     // photo mode opens with its pause switched off (PhotoTick keeps the switches). While photo mode is open the key is its
@@ -10299,8 +10286,7 @@ private:
     bool escPauseEvent_ = false;                     // BlockPauseInput saw the game's pause event (Esc, P, Start)
     bool escBusyWas_[5] = {};                        // last tick's chat, text box, Fetch, lobby page and settings screen (an Esc that closes one is not ours)
     EscPress escPress_;
-    uint32_t timeInputBlocked_ = 0, timeReset_ = 0, spawnInputBlocked_ = 0;
-    std::string spawnBlockedOn_;                     // the level BlockSpawnInput last logged on
+    uint32_t timeInputBlocked_ = 0, timeReset_ = 0;
     double nextListenerMs_ = 0;
     static constexpr uint32_t kRingOutEveryMs = 3000;   // a volume fires on every overlap; the death takes a moment
     std::unordered_map<uint8_t, uint32_t> ringOutAt_;   // BlockTimeInput, ResetTimeDilation
@@ -10516,12 +10502,6 @@ bool StartMod(const Config& cfg) {
     });
     HookFunctionsMatching([](const std::string& n) { return n.rfind("InpActEvt_Pause_", 0) == 0; },
                           [](UObject*, UFunction*, void*) { return g_session->BlockPauseInput(); });   // mod_pause: Esc is the mod's panel
-    // Build 26615445: the middle mouse button spawns a Willie_BP_Skeletron fighter (Axe2H, heavy pavise) where the camera
-    // looks (Willie_BP.cpp InpActEvt_MiddleMouseButton_K2Node_InputKeyEvent_3; that event does nothing else), in the
-    // shipping game. In a session that fighter would exist on one machine only, so the event is blocked on every level
-    // while joined (BlockSpawnInput); outside a session it works as shipped.
-    HookFunctionsMatching([](const std::string& n) { return n.rfind("InpActEvt_MiddleMouseButton_", 0) == 0; },
-                          [](UObject*, UFunction*, void*) { return g_session->BlockSpawnInput(); });
     HookFunctionsMatching([](const std::string& n) {   // Arena_Cutting_Map.cpp:54: the drop off the edge
         return n.rfind("BndEvt__Arena_Cutting_Map_TriggerVolume_0_", 0) == 0;
     }, [](UObject*, UFunction* fn, void* params) { return g_session->CuttingRingOut(fn, params); });

@@ -10,7 +10,7 @@
 //
 // This class logs what each slot looks like (at the first neutralise pass of a stand-in and again about 1 s and 3 s
 // later) so the failing step is on record, and anchors the slots combat::SlotAnchorPlan names (a weapon in the slot with
-// a live sheath constraint and in neither hand, the stand-in's own: "Parent Actor"): the weapon's BaseMesh gets the held
+// a live sheath constraint and in neither hand, the stand-in's own: "Parent Actors"): the weapon's BaseMesh gets the held
 // weapons' body policy (gravity off, world geometry ignored), and Shift moves it with the body. A constraint whose second
 // component is not the Mesh already (GetConstrainedComponents; a build that anchors a waist slot to something else) is pointed
 // at the Mesh's pelvis body, with the game's hang point and slack put back; one that already holds the Mesh is kept as the

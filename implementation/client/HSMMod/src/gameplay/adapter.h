@@ -159,6 +159,11 @@ public:
     // An actor the game is destroying (AActor::IsActorBeingDestroyed) or a component (UActorComponent::IsBeingDestroyed);
     // false for any other object. Each is asked its own class's function: the actor's reads garbage on a component.
     static bool BeingDestroyed(ue::UObject* o);
+    // A modular weapon's holders. Since build 26641406 the weapon lists them in "Parent Actors" (a TArray): every fighter
+    // whose hand or sheath has it; a drop removes the fighter. WeaponHolder is the holder added last (the one the single
+    // "Parent Actor" of build 26615445 named: each pick-up overwrote it), null when none; WeaponHeldBy asks for one fighter.
+    static ue::UObject* WeaponHolder(ue::UObject* weapon);
+    static bool WeaponHeldBy(ue::UObject* weapon, ue::UObject* who);
     // BP_SpawnerPoint_Willies actors in the loaded level that the level kept: BP_LevelManager::Spawn_Combatants destroys
     // every spawner not made for the current game, combat and play modes or the number of combatants (the Pit's bridge
     // and outer ring in Free Mode), and a destroyed one reads (0,0,0), the middle of the Pit.
@@ -302,13 +307,14 @@ public:
     bool IsBodyWeapon(ue::UObject* actor);
     std::vector<ue::UObject*> AllWillies();                // live Willie_BP_C instances in the loaded level
     std::vector<ue::UObject*> WeaponActors();              // live weapon actors (IsWeapon), sheathed, held and dropped
-    // Destroys every weapon lying loose: no "Parent Actor" (held and sheathed weapons keep it, Willie_BP.cpp:5987, 6299, 6995).
+    // Destroys every weapon lying loose: an empty "Parent Actors" (held and sheathed weapons list their fighter,
+    // Willie_BP.cpp:8559, 9198, 9835).
     // "Last Parent" is not asked: ModularWeaponBP clears it itself 300 uu from the holder (:1152-1157) and on a re-grab
     // (:1021-1023). levelStart says whether a weapon is one the level placed and still lies at its spot (kept); the
     // rule is session/hsm_ground_clear.h. Counts what was destroyed and what stayed.
     struct DropClear { int destroyed = 0, held = 0, sheathed = 0, level = 0; };
     DropClear DestroyDroppedWeapons(const std::function<bool(ue::UObject*)>& levelStart);
-    // Weapons the level itself placed: lying loose (no "Parent Actor") and never held ("Last Parent" empty). The map reset
+    // Weapons the level itself placed: lying loose (an empty "Parent Actors") and never held ("Last Parent" empty). The map reset
     // records them at the match start (object_sync.h). One pass over the object array.
     std::vector<ue::UObject*> LevelWeapons();
     // A new actor of a class (a Blueprint or native actor class with no setup of its own) at a place, spawned always.

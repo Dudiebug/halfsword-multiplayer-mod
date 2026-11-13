@@ -1,8 +1,9 @@
 // The Half Sword Steam build this HSMMod is made for, told by Steam's own build id (ISteamApps::GetAppBuildId).
-// The exe key (ue/engine.cpp kBuilds) cannot tell every update apart: build 26615445 changed only the content pak, and its
-// HalfSwordUE5-Win64-Shipping.exe is byte for byte the one of 26568321 (sha256 726c10f7...). The content differs in ways a
-// session feels (Willie_BP's grab rule, the middle mouse fighter spawn, the zombies' hearing; docs/REVERSE_ENGINEERING.md
-// section 12), so the Steam build id is checked as well: a notice on the multiplayer page when this machine is on another
+// The exe key (ue/engine.cpp kBuilds) cannot tell every update apart: builds 26615445 and 26641406 changed only the content
+// pak, and their HalfSwordUE5-Win64-Shipping.exe is byte for byte the one of 26568321 (sha256 726c10f7...). The content
+// differs in ways a session feels (26615445: Willie_BP's grab rule, the middle mouse fighter spawn, the zombies' hearing;
+// 26641406: a weapon lists its holders in "Parent Actors"; docs/REVERSE_ENGINEERING.md sections 12 and 13), so the Steam
+// build id is checked as well: a notice on the multiplayer page when this machine is on another
 // build, and a lobby whose host is on another build is not joinable. Steam may not say (0): then the exe key alone decides.
 // Pure; the DLL reads the id and shows the text.
 #pragma once
@@ -11,7 +12,7 @@
 
 namespace hsm {
 
-constexpr int kTargetSteamBuild = 26615445;
+constexpr int kTargetSteamBuild = 26641406;
 
 enum class SteamBuildCheck : unsigned char { Unknown, Target, Older, Newer };
 

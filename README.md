@@ -44,7 +44,7 @@ Online multiplayer for Half Sword in one drop-in DLL. No game files are changed;
    this.
 5. Start the game and click **MULTIPLAYER** on the main menu. `HSMMod.ini` is created next to the DLL on first run.
 
-Every player needs the same mod version and the same game build (Steam build 26568321). On any other game build the
+Every player needs the same mod version and the same game build (Steam build 26641406). On any other game build the
 mod logs "unsupported build" and does nothing.
 
 ## Features

@@ -180,7 +180,7 @@ inline bool ResolveDropNow(bool havePose, uint32_t poseHandClass, uint32_t copyC
 }
 
 // A lease change from the owner is a drop. A weapon in the hand of a fighter's stand-in here is that fighter's weapon
-// in its hand there, which its machine leases HOLD for as long as the game's "Parent Actor" names the fighter; the moment
+// in its hand there, which its machine leases HOLD for as long as the game's "Parent Actors" names the fighter; the moment
 // it lets go (a drop, a throw, a disarm) the claim falls to TOUCH -- the throw is still its simulation -- or the lease
 // ends. The host's Grant for that (it answers changes only, a renewal is no Grant) comes well before the owner's pose
 // shows the hand empty, and before the hand matching (sync/hsm_handmatch.h) lets the copy go: it holds the last shown

@@ -109,8 +109,7 @@ void RunPassportAndSpawn(game::Adapter& a) {
     if (Selected("weapon_owner")) {
         int held = 0, credited = 0;
         for (UObject* w : FindInstances("ModularWeaponBP_C")) {
-            UObject** parent = Field<UObject*>(w, "Parent Actor");
-            if (!parent || *parent != me) continue;
+            if (!game::Adapter::WeaponHeldBy(w, me)) continue;
             ++held; credited += a.FighterOf(w) == me;
         }
         Record("weapon_owner", held > 0 && credited == held, std::to_string(credited) + "/" + std::to_string(held) + " held weapons credited to you");

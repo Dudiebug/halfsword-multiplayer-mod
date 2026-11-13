@@ -1,6 +1,7 @@
 #include "ue/engine.h"
 #include "log.h"
 #include "util/hsm_names.h"
+#include "util/hsm_objects_wait.h"
 #include "hsm_chat.h"
 #include <windows.h>
 #include <cstring>
@@ -21,11 +22,11 @@ struct ScriptVm {
 struct BuildInfo { uint64_t key; const char* label; uintptr_t gobjects, appendString; uint32_t processEventIndex; ScriptVm vm; };
 // key = PE TimeDateStamp << 32 | SizeOfImage. Unknown key => mod disables itself.
 // The current Steam build only (tools/check_game_binary.py checks it). 26568321 kept every RVA of 24185754, which the
-// mod no longer starts on: its content changed too much for one mod build to serve both. 26615445 changed only the
-// content pak: its exe is byte for byte 26568321's, so the key is the same and the Steam build id tells the two apart
-// (session/hsm_game_build.h).
+// mod no longer starts on: its content changed too much for one mod build to serve both. 26615445 and 26641406 changed
+// only the content pak: their exe is byte for byte 26568321's, so the key is the same and the Steam build id tells them
+// apart (session/hsm_game_build.h).
 constexpr BuildInfo kBuilds[] = {
-    {0xA54B1DAD09712000ull, "steam-26615445 (CL-2980, exe of 26568321)", 0x08BFD240, 0x012C1CB0, 0x4D,
+    {0xA54B1DAD09712000ull, "steam-26641406 (CL-2980, exe of 26568321)", 0x08BFD240, 0x012C1CB0, 0x4D,
      {0x014A4850, 0x014A4950, 0x6C, 0x036AF990, 0x014A4EF0}},
 };
 // Prologues of the two VM functions in the builds above (MSVC, /GS): checked before the executor is detoured.
@@ -92,13 +93,38 @@ bool Init() {
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_key = ComputeBuildKey();
     for (const BuildInfo& b : kBuilds) if (b.key == g_key) { g_build = &b; break; }
-    if (!g_build) { HSM_LOG("engine: unsupported build key %016llx (this HSMMod runs on Steam build 26615445 only)", (unsigned long long)g_key); return false; }
+    if (!g_build) { HSM_LOG("engine: unsupported build key %016llx (this HSMMod runs on Steam build 26641406 only)", (unsigned long long)g_key); return false; }
     g_objects = reinterpret_cast<TUObjectArray*>(g_base + g_build->gobjects);
     g_appendString = reinterpret_cast<AppendStringFn>(g_base + g_build->appendString);
-    // Wait for the object array to fill (engine init) before anyone touches it.
-    for (int i = 0; i < 600 && (g_objects->numElements < 10000 || !g_objects->objects); ++i) Sleep(100);
-    if (g_objects->numElements < 10000 || g_objects->numElements > g_objects->maxElements) {
-        HSM_LOG("engine: GObjects looks wrong (num=%d max=%d)", g_objects->numElements, g_objects->maxElements); return false;
+    // Wait for the object array to fill (engine init) before anyone touches it. A slow cold start can take over a
+    // minute (#3079), so the wait is long and gives up early only when the array itself looks wrong (util/hsm_objects_wait.h).
+    const uint64_t start = GetTickCount64();
+    uint64_t waited = 0, wrongSince = 0;
+    bool wasWrong = false;
+    for (;;) {
+        util::ObjectArrayLook look;
+        look.hasObjects = g_objects->objects != nullptr;
+        look.maxElements = g_objects->maxElements; look.numElements = g_objects->numElements;
+        look.maxChunks = g_objects->maxChunks; look.numChunks = g_objects->numChunks;
+        const uint64_t now = GetTickCount64() - start;
+        const util::ObjectsState s = util::LookAtObjects(look);
+        if (s == util::ObjectsState::Wrong && !wasWrong) wrongSince = now;
+        wasWrong = s == util::ObjectsState::Wrong;
+        const util::ObjectsWait next = util::NextObjectsWait(s, now, wasWrong ? now - wrongSince : 0);
+        if (next == util::ObjectsWait::Go) {
+            if (now >= 30000) HSM_LOG("engine: the game finished loading after %llu s", (unsigned long long)(now / 1000));
+            break;
+        }
+        if (next != util::ObjectsWait::KeepWaiting) {
+            HSM_LOG("engine: GObjects %s (num=%d max=%d chunks=%d/%d, %llu s)",
+                    next == util::ObjectsWait::GiveUpWrong ? "looks wrong" : "still filling, giving up",
+                    look.numElements, look.maxElements, look.numChunks, look.maxChunks, (unsigned long long)(now / 1000));
+            return false;
+        }
+        if (util::ObjectsWaitLogDue(waited, now))
+            HSM_LOG("engine: waiting for the game to load (%d objects after %llu s)", look.numElements, (unsigned long long)(now / 1000));
+        waited = now;
+        Sleep(100);
     }
     UObject* first = ObjectAt(0);
     std::string n = first ? FullName(first) : "<null>";

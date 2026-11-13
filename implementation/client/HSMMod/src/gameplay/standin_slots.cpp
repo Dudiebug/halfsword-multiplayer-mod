@@ -1,4 +1,5 @@
 #include "gameplay/standin_slots.h"
+#include "gameplay/adapter.h"
 #include "combat/hsm_equip.h"
 #include "log.h"
 #include <algorithm>
@@ -142,7 +143,7 @@ struct Slot {
     UObject* body = nullptr;   // the weapon's BaseMesh
     UObject* scabbard = nullptr;   // a scabbard weapon's "Scabbard" body (it holds the weapon, and hangs from the waist), else null
     bool live = false;         // the constraint is there and not being destroyed
-    bool own = false;          // the weapon's "Parent Actor" is this stand-in
+    bool own = false;          // the weapon's "Parent Actors" lists this stand-in
     bool held = false;         // in a hand (a draw grabs it while the slot variable still holds it)
     bool anchor = false;       // combat::SlotAnchorPlan, an own weapon with a BaseMesh
     bool place = false;        // combat::SlotPlacePlan (waiting for its constraint), an own weapon with a BaseMesh
@@ -168,7 +169,7 @@ std::array<Slot, kEquipSlots> ReadSlots(UObject* willie) {
         if (!s.weapon) continue;
         s.body = ObjField(s.weapon, "BaseMesh");
         if (g_scabbardFix && s.body && InScabbard(s.weapon)) s.scabbard = ObjField(s.weapon, "Scabbard");
-        s.own = ObjField(s.weapon, "Parent Actor") == willie;
+        s.own = game::Adapter::WeaponHeldBy(s.weapon, willie);
         s.held = s.weapon == hands[0] || s.weapon == hands[1];
         s.anchor = plan[size_t(k)] && s.own && s.body;
         s.place = placePlan[size_t(k)] && s.own && s.body;
