@@ -3982,7 +3982,10 @@ private:
     // referee decides instead. Non-player fighters (host bots) still run Event Lose Match for its "Give Up" /
     // AI "My Give Up" state (Give Up for all but zombies, Skeletron and sleepers; zombies get the AI flag only); its
     // Call Minus Enemy is blocked. Dying (:14428) and Death also reach HS Game Mode.Minus Enemy directly (:14476, :12347),
-    // past this hook; the game mode's own Match Won gate (TickStockFlags) is what keeps the stock win screen away.
+    // past this hook. Since build 26737211 Minus Enemy's win is "Win Match" (BP_HalfSwordGameMode.cpp:118), which
+    // BP_GameManager's ReceiveTick also calls every 2 s in Game Mode 1 once no fighter off Team Int 1 is standing
+    // (BP_GameManager.cpp:342-383): it would set Match Won and Match Won (Player) in a Duel's round gap, where
+    // TickStockFlags leaves them as the game has them. Blocking it stops every route at one place; TickStockFlags stays.
     // Active only while stockFlowGuard_ (owner sync, in a match level, joined); host sync never registers it.
     static constexpr const char* kStockFlowOwner = "stockflow";
     void GuardStockFlow() {
@@ -4003,6 +4006,7 @@ private:
         int n = HookScript(kStockFlowOwner, "Willie_BP_C", "Event Lose Match", block("Event Lose Match"));
         n += HookScript(kStockFlowOwner, "Willie_BP_C", "Force Finish Match", block("Force Finish Match"));
         n += HookScript(kStockFlowOwner, "Willie_BP_C", "Call Minus Enemy", block("Call Minus Enemy"));
+        n += HookScript(kStockFlowOwner, "BP_HalfSwordGameMode_C", "Win Match", block("Win Match"));
         HSM_LOG("session: stock win/lose flow guard %s (%d function(s) hooked now)", ScriptHookActive() ? "on" : "NOT ACTIVE (no script VM hook)", n);
     }
 

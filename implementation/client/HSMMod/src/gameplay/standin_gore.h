@@ -28,21 +28,16 @@
 // cut surface and the blood and sound that go with them; the pelvis (part 2) is not hidden at all (hiding it hides the
 // body). The look is a whole limb gone below the Spawn Bone, not the game's cut.
 //
-// Loose joints (dislocated or broken). The game dislocates from the owner's tick, which needs live physical-animation
-// strain: Dislocate Bone (Willie_BP.cpp:3750-3905) fills a "<Part> Dislocation State" meter and at 1 sets X Dislocated
-// (Back Broken for the spine) and puts the part's physics-asset joint on the 'Broken' constraint profile (:3801;
-// shoulders UserConstraint_10/14, knees 0/18, neck 7, spine 4). A hit that breaks a bone (Get Damage, :5079-5161) does
-// the same through Break Arm (the elbow, UserConstraint_11/15), Break Leg and Snap Neck. The joint stays whole: it goes
-// loose, it does not come apart. The displaced bone is already in the owner's pose stream. What would hurt on the
+// Loose joints (broken or, on a Skeletron, dislocated). A hit that breaks a bone (Get Damage) runs Break Arm (the elbow,
+// UserConstraint_11/15), Break Leg or Snap Neck on the owner's machine: X Broken, and the part's physics-asset joint on the
+// 'Broken' constraint profile; on a Skeletron also X Dislocated and its shoulder, knee or neck joint (UserConstraint_10/14,
+// 0/18, 7) on the 'Skeletron' profile (Willie_BP.cpp:12135-12230, :28186). Until build 26737211 Dislocate Bone did the same
+// from strain, and a Skeletron's joint came apart (Event Dislocate Arm/Leg/Neck made it breakable at 0); since then Dislocate
+// Bone is empty and those events are gone. The joint stays whole: it goes loose, it does not come apart. The displaced bone is already in the owner's pose stream. What would hurt on the
 // stand-in is its own joint still on the 'Motor' profile: it would fight the servo's velocity target for a bone the
 // owner's loose joint lets hang. So Dislocate puts the same joint on the same profile, one joint per bit of the owner's
-// Vitals (sync/hsm_gore.h). Healing runs the meter down and Restore Bone (:6860-6990) clears the flags and puts the
-// profile back to 'Motor'; Relocate does the same on the stand-in (the bit falling) and forgets the joint as freed.
-// Only a Skeletron still comes apart (Event Dislocate Arm/Leg/Neck, :15619+, called under `if (Skeletron)` at :12252 and
-// on): every live constraint of the bone toward its parent (GetConstraintsFromBody(bone, parents, no children, no
-// terminated ones)) is made breakable at threshold 0, linear and angular, and the next physics step breaks it.
-// BreakJoint does that for a Skeletron stand-in. BreakConstraint(bone) would not do: the physics asset names its joints
-// UserConstraint_N, not after their bones. A joint the engine has broken is terminated and has no call to bring it back.
+// Vitals (sync/hsm_gore.h). Restore Bone clears the flags and puts the profile back to 'Motor' (a Skeletron's only while
+// Immortal); Relocate does the same on the stand-in (the bit falling) and forgets the joint as freed.
 // Not mirrored: the sound, the noise, health and pain (the Vitals carry the health values a bot reads).
 //
 // Once parts are gone the servo must not trust their bones: DeadBones(entity) gives the pose bones (sync/hsm_pose.h
@@ -106,7 +101,6 @@ private:
     void Reconcile(uint8_t entity, Entry& e, double nowMs);
     Outcome ShowSeverFallback(ue::UObject* willie, uint8_t part);
     int32_t Dislocate(ue::UObject* willie, unsigned joint, bool skeletron);
-    int32_t BreakJoint(ue::UObject* willie, unsigned joint);
     void Relocate(uint8_t entity, unsigned joint);
     void Reassert(ue::UObject* willie, uint32_t parts);
     bool HideBone(ue::UObject* component, ue::FName bone);
@@ -119,7 +113,6 @@ private:
     Env env_;
     std::array<Entry, kMaxWillies + 1> entries_{};
     std::map<std::string, ue::FName> names_;
-    ue::UObject* constraintLib_ = nullptr;                      // ConstraintInstanceBlueprintLibrary's default object
     Counters n_, reported_;
 };
 

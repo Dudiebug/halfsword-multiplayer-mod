@@ -1528,8 +1528,8 @@ bool Adapter::ReadVitals(UObject* willie, uint8_t entity, VitalsMsg& out) {
     if (GetBool(willie, "Asleep", b) && b) out.flags |= kVitalsFlagAsleep;
     out.neckHealth = d("Neck Health"); out.backHealth = d("Back Health");
     out.severed = ReadSeveredMask(willie);
-    // Bit per loose joint, in sync/hsm_gore.h's order: either flag puts that joint on the 'Broken' profile here (Dislocate
-    // Bone, Break Arm/Leg, Snap Neck), and the stand-ins do the same to theirs. A back sets only Back Broken.
+    // Bit per loose joint, in sync/hsm_gore.h's order: either flag puts that joint on the 'Broken' profile here (Break Arm/Leg,
+    // Snap Neck; Dislocate Bone too until build 26737211), and the stand-ins do the same to theirs. A back sets only Back Broken.
     constexpr const char* kLooseJointFields[][2] = {
         { "Arm R Dislocated", nullptr }, { "Arm L Dislocated", nullptr },      { "Leg R Dislocated", "Leg R Broken" },
         { "Leg L Dislocated", "Leg L Broken" }, { "Neck Dislocated", "Neck Snapped" }, { "Spine Dislocated", "Back Broken" },

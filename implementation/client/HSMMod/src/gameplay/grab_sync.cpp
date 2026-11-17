@@ -248,8 +248,8 @@ bool GrabSync::Pull(const sync::GrabPull& p, UObject* me, bool down, double nowM
 
 // My fighter as a native grab leaves it (Willie_BP ReceiveTick, the grabber's side of a grab): "Grabbed By Willie" (its
 // contacts with the grabber then deal no rigidity damage), "Being Grabbed" (a fallen body's root handle and tonus
-// weaken), and "Event Block Bone Dislocation(true)" on every new grab (weapons let go of for 0.1 s, "Dislocation Blocked" for
-// 0.5 s; Willie_BP.cpp:15484, called with true on the grab at :17048 and :17158). It was "Event Is Grabbed" before build 26568321, and
+// weaken), and "Event Block Bone Dislocation(true)" on every new grab ("Dislocation Blocked" for 0.5 s; until build 26737211 it
+// also made the weapons let go for 0.1 s, a flag the event now ignores). It was "Event Is Grabbed" before build 26568321, and
 // its companion "Event Check Bone Dislocation Status" is an empty function now (Willie_BP.cpp:15518), so it is no longer called.
 // A fighter simulated here that grabbed mine natively has set those itself and clears them on its release: while
 // "Being Grabbed" is set and "Grabbed By Willie" names something other than what my last mark wrote or a stand-in, the
@@ -272,7 +272,7 @@ void GrabSync::SetMark(uint8_t entity, UObject* willie, UObject* by, bool newGra
         SetLimbFlags(willie, bone, hand);
     }
     if (!Call(willie, "Event Block Bone Dislocation").set<bool>("Disable Weapons Momentary", true).invoke() && ++n_.blockFailed <= 1)
-        HSM_LOG("grabs: Event Block Bone Dislocation is missing on the held fighter; its weapons will not let go");
+        HSM_LOG("grabs: Event Block Bone Dislocation is missing on the held fighter; its dislocation is not blocked");
 }
 
 // Items 28 and 2: what the grab sets on the held fighter by the bone taken (Willie_BP.cpp:17050-17075, :17160-17185): an arm's bones its arm's

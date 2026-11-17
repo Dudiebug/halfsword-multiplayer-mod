@@ -18,20 +18,17 @@ constexpr uint8_t kMaxTries = 4;                    // and is given up after thi
 constexpr double kReassertMs = 2000.0;              // a hidden bone is checked still hidden this often (a rebuild resets it)
 constexpr const char* kPassTag = "Dismember Pass";  // Willie_BP.cpp:4452, the children the cut hides bones on as well
 constexpr const char* kHeadTwoTag = "Head 2";       // Willie_BP.cpp:4452: a head or neck cut no longer paints or hides this child
-constexpr int32_t kMaxBoneConstraints = 16;         // a bone has a handful of constraints; more is a misread array
-// The physics-asset joint each loose joint (hsm_gore.h bit order) is. Dislocate Bone puts it on the 'Broken' constraint
-// profile when the part's Dislocation State reaches 1 (Willie_BP.cpp:3801, the switch on the body part above it; 'Skeletron'
-// for a Skeletron), Break Arm/Leg and Snap Neck do when a hit breaks the bone (:12248, :12265, :12301, :12318, :28766: the
-// elbows are joints of their own), and Restore Bone puts each back on 'Motor' when the part's meter runs out (:6890-6990).
+// The physics-asset joint each loose joint (hsm_gore.h bit order) is. Break Arm/Leg and Snap Neck put it on the 'Broken'
+// constraint profile when a hit breaks the bone (Willie_BP.cpp:12135-12230, :28186; the elbows are joints of their own), and
+// a Skeletron's shoulder, knee or neck on its 'Skeletron' profile; Restore Bone puts each back on 'Motor'. Until build
+// 26737211 Dislocate Bone did so from strain as well; it is empty now.
 constexpr const char* kJointLoose[sync::kGoreJoints] = { "UserConstraint_10", "UserConstraint_14", "UserConstraint_0", "UserConstraint_18",
                                                         "UserConstraint_7",  "UserConstraint_4",  "UserConstraint_11", "UserConstraint_15" };
 constexpr const char* kLooseProfile = "Broken";
 constexpr const char* kLooseProfileSkeletron = "Skeletron";
+// The joints a Skeletron's break puts on 'Skeletron' (the shoulders, knees and neck); its elbows and back stay on 'Broken'.
+constexpr bool kSkeletronJoint[sync::kGoreJoints] = { true, true, true, true, true, false, false, false };
 constexpr const char* kRestoreProfile = "Motor";
-// A Skeletron comes apart as well (Event Dislocate Arm/Leg/Neck, called only under Skeletron: Willie_BP.cpp:12252 and on;
-// a broken arm goes at the shoulder, and a back never does). The bone its joint is freed at: the child of its constraint,
-// where the game looks the constraints up (GetConstraintsFromBody, Willie_BP.cpp:15619-15760 and on for the neck).
-constexpr const char* kJointBone[sync::kGoreJoints] = { "upperarm_r", "upperarm_l", "calf_r", "calf_l", "neck_02", nullptr, "upperarm_r", "upperarm_l" };
 constexpr const char* kJointName[sync::kGoreJoints] = { "arm R", "arm L", "leg R", "leg L", "neck", "spine", "elbow R", "elbow L" };
 
 }  // namespace
@@ -163,24 +160,18 @@ void StandInGore::Reconcile(uint8_t entity, Entry& e, double nowMs) {
             if (!(joints & bit)) continue;
             bool skeletron = false;
             GetBool(w, "Skeletron", skeletron);
-            const bool apart = skeletron && kJointBone[joint];
-            const int32_t loose = Dislocate(w, joint, skeletron);
-            const int32_t made = apart ? BreakJoint(w, joint) : loose;
+            skeletron = skeletron && kSkeletronJoint[joint];
+            const int32_t made = Dislocate(w, joint, skeletron);
             if (made > 0) {
                 r.did.freed |= bit;
-                if (++n_.dislocated > kLogFirst) {
-                } else if (apart) {
-                    HSM_LOG("gore: e%u %s loose (a Skeletron comes apart): %d constraint(s) at %s made breakable at 0", entity,
-                            kJointName[joint], made, kJointBone[joint]);
-                } else {
+                if (++n_.dislocated <= kLogFirst) {
                     HSM_LOG("gore: e%u %s loose: joint %s put on the %s profile", entity, kJointName[joint], kJointLoose[joint],
                             skeletron ? kLooseProfileSkeletron : kLooseProfile);
                 }
             } else if (++r.tries[sync::kGoreSeveredBits + joint] >= kMaxTries) {
                 r.did.jointsGaveUp |= bit;
                 ++n_.failed;
-                HSM_LOG("gore: e%u %s: gave up on the joint %s (%s)", entity, kJointName[joint], apart ? kJointBone[joint] : kJointLoose[joint],
-                        made == 0 ? "no live constraint on that bone" : "no mesh or the call is missing");
+                HSM_LOG("gore: e%u %s: gave up on the joint %s (no mesh or the call is missing)", entity, kJointName[joint], kJointLoose[joint]);
             } else {
                 r.retryAtMs = nowMs + kRetryMs;
             }
@@ -215,8 +206,8 @@ StandInGore::Outcome StandInGore::ShowSeverFallback(UObject* willie, uint8_t par
     return Outcome::Done;
 }
 
-// Willie_BP.cpp:3801: the joint goes on the 'Broken' constraint profile ('Skeletron' for one), which Restore Bone later
-// puts back to 'Motor'. 1 when the call went through, -1 when it or the mesh is missing.
+// Break Arm/Leg, Snap Neck (Willie_BP.cpp:12135-12230, :28186): the joint goes on the 'Broken' constraint profile
+// ('Skeletron' for a Skeletron's shoulder, knee or neck), which Restore Bone later puts back to 'Motor'. 1 when the call went through, -1 when it or the mesh is missing.
 int32_t StandInGore::Dislocate(UObject* willie, unsigned joint, bool skeletron) {
     UObject* mesh = adapter_ && joint < sync::kGoreJoints ? adapter_->Mesh(willie) : nullptr;
     if (!mesh) return -1;
@@ -229,47 +220,9 @@ int32_t StandInGore::Dislocate(UObject* willie, unsigned joint, bool skeletron) 
                : -1;
 }
 
-// A Skeletron's joint, Willie_BP.cpp:15619-15650 (and the same for the other five): GetConstraintsFromBody(bone, true,
-// false, false), then SetLinearBreakable(accessor, true, 0) and SetAngularBreakable(accessor, true, 0) for each. The
-// constraints made breakable, 0 when the bone has no live one, -1 when a call or the mesh is missing.
-int32_t StandInGore::BreakJoint(UObject* willie, unsigned joint) {
-    UObject* mesh = adapter_ && joint < sync::kGoreJoints && kJointBone[joint] ? adapter_->Mesh(willie) : nullptr;
-    if (!constraintLib_)
-        if (UClass* lib = FindClass("ConstraintInstanceBlueprintLibrary")) constraintLib_ = DefaultObject(lib);
-    if (!mesh || !constraintLib_) return -1;
-    Call get(mesh, "GetConstraintsFromBody");
-    Call linear(constraintLib_, "SetLinearBreakable");
-    Call angular(constraintLib_, "SetAngularBreakable");
-    FProperty* outProp = get.valid() ? FindProperty(get.function(), "OutConstraints") : nullptr;
-    FProperty* accessor = linear.valid() ? FindProperty(linear.function(), "Accessor") : nullptr;
-    const int32_t stride = accessor ? PropertySize(accessor) : 0;
-    if (!outProp || stride <= 0 || !angular.valid()) return -1;
-    get.setName("BodyName", NameOf(kJointBone[joint]))
-        .set<bool>("bParentConstraints", true)
-        .set<bool>("bChildConstraints", false)
-        .set<bool>("bIncludesTerminated", false);
-    if (!get.invoke()) return -1;
-    void* out = get.paramPtr("OutConstraints");
-    const FByteArray* arr = static_cast<const FByteArray*>(out);
-    int32_t made = 0;
-    if (arr->data && arr->num > 0 && arr->num <= kMaxBoneConstraints) {
-        for (int32_t i = 0; i < arr->num; ++i) {
-            const uint8_t* item = arr->data + size_t(i) * size_t(stride);
-            Call(constraintLib_, "SetLinearBreakable").setFrom("Accessor", item).set<bool>("bLinearBreakable", true)
-                .setReal("LinearBreakThreshold", 0.0).invoke();
-            Call(constraintLib_, "SetAngularBreakable").setFrom("Accessor", item).set<bool>("bAngularBreakable", true)
-                .setReal("AngularBreakThreshold", 0.0).invoke();
-            ++made;
-        }
-    }
-    ClearPropertyValue(outProp, out);               // the engine filled the array: its own ClearValue releases it
-    return made;
-}
-
 // The owner's joint healed (Restore Bone, Willie_BP.cpp:6890-6990). The game puts the joint's constraint profile back to 'Motor'
 // (SetConstraintProfile) and clears the flags; so does this, on the joint the physics asset names, which undoes Dislocate.
-// A Skeletron's broken joint stays broken (the engine has no call to bring one back): it is what the owner's own fighter
-// has too. The record forgets the joint as freed, so a dislocation after the heal frees it again.
+// The record forgets the joint as freed, so a dislocation after the heal frees it again.
 void StandInGore::Relocate(uint8_t entity, unsigned joint) {
     if (joint >= sync::kGoreJoints) return;
     Entry& e = entries_[entity];
