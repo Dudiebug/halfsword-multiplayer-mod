@@ -7,8 +7,8 @@ their own loadout. Delete the DLL to
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
-Supported build: Steam 26737211 only (exe key `0xA54B1DAD09712000`, the same exe as 26568321, 26615445 and 26641406). On
-a game with another exe the mod logs "unsupported build" and does nothing. On 26568321, 26615445 or 26641406, whose exe is
+Supported build: Steam 26820056 only (exe key `0xA54B1DAD09712000`, the same exe as 26568321, 26615445, 26641406 and 26737211).
+On a game with another exe the mod logs "unsupported build" and does nothing. On 26568321, 26615445, 26641406 or 26737211, whose exe is
 the same, the multiplayer page says to update the game in Steam, and lobbies show which side is behind (Steam's build id, `session/hsm_game_build.h`).
 
 ## Build and checks (Linux, no MSVC)
