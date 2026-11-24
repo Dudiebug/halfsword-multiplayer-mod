@@ -20,6 +20,14 @@ static void TestCatalog() {
     CHECK(TravelAllowed(kTravelMenuLevel, ""));
     CHECK(TravelAllowed("/Game/Maps/Menus/Map_Menu_Startup.Map_Menu_Startup", ""));
     CHECK(TravelAllowed("/Game/Maps/Menus/Map_Menu_Other", ""));
+    // the Crypts map is a lobby map now (the bare level); the old layout tags are not
+    CHECK(TravelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main", ""));
+    CHECK(TravelAllowed("Map_Procedural_Block_Test_Main", ""));
+    CHECK(!TravelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main#Descent", ""));
+    CHECK(!TravelAllowed("Map_Procedural_Block_Test_Main#BossHall", ""));
+    CHECK(!TravelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main#Catacombs", ""));
+    CHECK(!TravelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main#Kitchen", ""));
+    CHECK(!TravelAllowed("/Game/Maps/Arenas/Map_Arena_Yard#Descent", ""));
 }
 
 static void TestLevelRefused() {

@@ -299,6 +299,6 @@ inline std::string ProgResultLine(const ProgVoteMsg& r) {
     return "Vote result: " + r.name + " (" + ProgWinText(r.how) + ")";
 }
 // When the game's own path to start the winner is not available: the host starts it by hand.
-inline std::string ProgStartByHandLine(const std::string& name) { return "Vote result: " + name + " - start it from the Fencer"; }
+inline std::string ProgStartByHandLine(const std::string& name) { return "Vote result: " + name + ". The host starts the fight by talking to the Fencer."; }
 
 }  // namespace hsm

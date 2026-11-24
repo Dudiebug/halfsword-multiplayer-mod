@@ -1,7 +1,8 @@
 // Chat look (MATCH_ROUNDS_UI_CHAT_PLAN 3.3): what the chat overlay shows, as data. Bottom left, a smoke panel of the
 // last lines, each fading over the last second of its ten; the sender in their team's colour, the text in bone. While
 // typing: the kept history unfaded, then the input row with its blinking caret and the hint (or "slow down" for a
-// second after the rate limiter refused a line). For the first 20 s of the match HUD, "Enter to chat". The overlay
+// second after the rate limiter refused a line), and "(N left)" once the draft is within 20 bytes of the cap. For the
+// first 20 s of the match HUD, "Enter to chat". The overlay
 // (ui/chat.cpp) keeps the state in a ChatLocal and maps the scene onto widgets.
 #pragma once
 #include "match/hsm_hud_scene.h"
@@ -17,6 +18,8 @@ inline constexpr uint32_t kChatFadeMs = 1000;     // a line fades over the last 
 inline constexpr uint32_t kCaretBlinkMs = 530;    // the caret is on this long, then off this long
 inline constexpr uint32_t kChatHintMs = 20000;    // "Enter to chat" this long after the match HUD comes up
 inline constexpr uint32_t kChatSlowMs = 1000;     // "slow down" this long after a refused line
+inline constexpr size_t kChatLeftShownBytes = 20; // "(N left)" shows beside the hint from this many bytes left of kMaxChatBytes...
+inline constexpr size_t kChatLeftRedBytes = 5;    // ...and is red from this many
 
 // 1 until `fadeMs` before `endMs`, then linear to 0 at `endMs`, 0 after. A fade longer than the life never reaches 1.
 inline float FadeOut(uint32_t ageMs, uint32_t endMs, uint32_t fadeMs) {
@@ -78,6 +81,7 @@ struct ChatScene {
     std::string draft;
     bool caret = false;
     Span hint;                           // beside the draft: the keys, or "slow down"
+    Span counter;                        // "(N left)" near the byte cap; empty text: not shown
     SceneText idle;                      // "Enter to chat"
 };
 
@@ -100,6 +104,8 @@ inline ChatScene BuildChatScene(const ChatLocal& c, uint32_t nowMs) {
         s.caret = CaretOn(c.typingAtMs, nowMs);
         s.hint = c.refused && AgeMs(c.refusedAtMs, nowMs) < kChatSlowMs ? Span{"slow down", style::kWarn}
                                                                          : Span{"Enter send \xC2\xB7 Esc cancel", style::kIron};
+        const size_t left = c.draft.size() < kMaxChatBytes ? kMaxChatBytes - c.draft.size() : 0;   // bytes: the wire limit counts bytes
+        if (left <= kChatLeftShownBytes) s.counter = {"(" + std::to_string(left) + " left)", left <= kChatLeftRedBytes ? style::kBloodInk : style::kWarn};
     } else if (uint32_t age = AgeMs(c.hudAtMs, nowMs); age < kChatHintMs) {
         s.idle = {true, std::string(ChatKeyLabel(c.key)) + " to chat", style::kIron, FadeOut(age, kChatHintMs, kChatFadeMs), 1};
     }

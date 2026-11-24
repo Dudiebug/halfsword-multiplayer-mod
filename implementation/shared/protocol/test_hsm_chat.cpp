@@ -311,7 +311,8 @@ static void TestSessionEmptyAndRate() {
     }
 }
 
-// Every way out of typing gives the keyboard back exactly once, and all but Enter drop the draft.
+// Every way out of typing gives the keyboard back exactly once. Enter sends the draft; a pause or lost focus keeps it for the
+// next open; Escape and a hidden HUD drop it.
 static void TestSessionExits() {
     const ChatEvent exits[] = {ChatEvent::Escape, ChatEvent::FocusLost, ChatEvent::HudHidden, ChatEvent::Paused,
                                ChatEvent::Enter};
@@ -329,12 +330,133 @@ static void TestSessionExits() {
             st = s.On(again, 40);
             CHECK(!st.captureChanged && !st.capture && !s.typing());
         }
-        // Opened again: the dropped draft is gone.
+        // Opened again: the draft comes back only after a pause or lost focus (TestSessionKeptDraft).
         s.On(ChatEvent::Enter, 50);
-        CHECK(s.typing() && s.draft().empty());
+        CHECK(s.typing() && s.draft() == (e == ChatEvent::Paused || e == ChatEvent::FocusLost ? "ab" : ""));
     }
     for (ChatEvent e : exits) CHECK(std::string(ChatEventName(e)).size() > 0);
     CHECK(std::string(ChatEventName(ChatEvent::FocusLost)) == "focus lost");
+}
+
+// A pause or the game losing focus closes the line but keeps what was typed: the next open starts with it, and typing goes on
+// from there. Escape, a sent line, a hidden HUD and ForgetDraft leave nothing.
+static void TestSessionKeptDraft() {
+    const std::string line = "gg \xC3\xA9";
+    for (ChatEvent e : {ChatEvent::Paused, ChatEvent::FocusLost}) {
+        ChatSession s;
+        s.On(ChatEvent::Enter, 0);
+        s.On(ChatEvent::Char, 1, "gg ");
+        s.On(ChatEvent::Char, 2, "\xC3\xA9");
+        CHECK(s.kept().empty());                               // nothing is kept while the line is open
+        ChatStep st = s.On(e, 3);
+        CHECK(st.captureChanged && !st.capture && !s.typing() && s.draft().empty() && s.kept() == line);
+        for (uint32_t i = 0; i < 3; ++i) {                     // the pause holds: the event comes every frame
+            st = s.On(e, 4 + i);
+            CHECK(!st.captureChanged && !st.capture && s.kept() == line);
+        }
+        s.On(ChatEvent::Char, 8, "x");                         // keys while closed are the game's
+        s.On(ChatEvent::Backspace, 8);
+        CHECK(s.kept() == line && s.draft().empty());
+        st = s.On(ChatEvent::Enter, 20);                       // the next open: the line is back
+        CHECK(st.captureChanged && st.capture && s.typing() && s.draft() == line && s.kept().empty());
+        s.On(ChatEvent::Char, 21, "!");
+        CHECK(s.draft() == line + "!");
+        st = s.On(ChatEvent::Enter, 22);                       // sent: nothing left over
+        CHECK(st.send && *st.send == line + "!" && s.kept().empty());
+        s.On(ChatEvent::Enter, 23);
+        CHECK(s.typing() && s.draft().empty());
+    }
+    {   // Escape cancels the line, and so does a hidden HUD (the match is over): no ghost of it at the next open.
+        for (ChatEvent e : {ChatEvent::Escape, ChatEvent::HudHidden}) {
+            ChatSession s;
+            s.On(ChatEvent::Enter, 0);
+            s.On(ChatEvent::Char, 1, "gone");
+            s.On(e, 2);
+            CHECK(!s.typing() && s.kept().empty());
+            s.On(ChatEvent::Enter, 3);
+            CHECK(s.typing() && s.draft().empty());
+        }
+    }
+    {   // What came back is an ordinary line: Escape in it drops it.
+        ChatSession s;
+        s.On(ChatEvent::Enter, 0);
+        s.On(ChatEvent::Char, 1, "kept");
+        s.On(ChatEvent::Paused, 2);
+        s.On(ChatEvent::Enter, 3);
+        CHECK(s.draft() == "kept");
+        s.On(ChatEvent::Escape, 4);
+        s.On(ChatEvent::Enter, 5);
+        CHECK(s.draft().empty() && s.kept().empty());
+    }
+    {   // A blank line is not worth keeping; a later pause keeps the new one.
+        ChatSession s;
+        s.On(ChatEvent::Enter, 0);
+        s.On(ChatEvent::Char, 1, "   ");
+        s.On(ChatEvent::Paused, 2);
+        CHECK(s.kept().empty());
+        s.On(ChatEvent::Enter, 3);
+        s.On(ChatEvent::Char, 4, "a ");
+        s.On(ChatEvent::FocusLost, 5);
+        s.On(ChatEvent::Enter, 6);
+        s.On(ChatEvent::Paused, 7);
+        CHECK(s.kept() == "a ");                               // kept as typed, not trimmed
+    }
+    {   // The letter key: its own press is not typed, the kept line is there; a full line is kept whole.
+        ChatSession s(ChatKey::T);
+        s.On(ChatEvent::OpenKey, 0, "t");
+        for (size_t i = 0; i < kMaxChatBytes; ++i) s.On(ChatEvent::Char, 1, "z");
+        s.On(ChatEvent::Paused, 2);
+        CHECK(s.kept().size() == kMaxChatBytes);
+        ChatStep st = s.On(ChatEvent::OpenKey, 3, "t");
+        CHECK(st.capture && s.draft() == std::string(kMaxChatBytes, 'z') && s.freeBytes() == 0);
+    }
+    {   // ForgetDraft: the session or the match is over, or a prefilled line is about to open.
+        ChatSession s;
+        s.On(ChatEvent::Enter, 0);
+        s.On(ChatEvent::Char, 1, "old");
+        s.On(ChatEvent::Paused, 2);
+        s.ForgetDraft();
+        CHECK(s.kept().empty());
+        s.On(ChatEvent::Enter, 3);
+        CHECK(s.typing() && s.draft().empty());
+    }
+}
+
+// The "Close the menu to chat." notice: once per opening of a menu, however often the chat key is pressed in it.
+static void TestMenuNote() {
+    {   // no menu: the key is the chat's, nothing to say
+        ChatMenuNote n;
+        CHECK(!n.Step(false, true) && !n.Step(false, false) && !n.Step(false, true));
+    }
+    {   // a menu open and no key pressed: nothing to say, however long it stays open
+        ChatMenuNote n;
+        for (int i = 0; i < 5; ++i) CHECK(!n.Step(true, false));
+        CHECK(n.Step(true, true));                              // the first press in it says so
+    }
+    {   // several presses in one opening: said once
+        ChatMenuNote n;
+        CHECK(n.Step(true, true));
+        for (int i = 0; i < 6; ++i) CHECK(!n.Step(true, true));
+        CHECK(!n.Step(true, false));
+        CHECK(!n.Step(true, true));
+    }
+    {   // closed and opened again: said again, once
+        ChatMenuNote n;
+        CHECK(n.Step(true, true) && !n.Step(true, true));
+        CHECK(!n.Step(false, false));                           // closed
+        CHECK(!n.Step(true, false));                            // opened, no press yet
+        CHECK(n.Step(true, true) && !n.Step(true, true));
+        CHECK(!n.Step(false, true));                            // a press with the menu just closed is the chat's own
+        CHECK(n.Step(true, true));
+    }
+    {   // the polls stopped (another window in front): Reset lets the next opening say it
+        ChatMenuNote n;
+        CHECK(n.Step(true, true));
+        n.Reset();
+        CHECK(n.Step(true, true) && !n.Step(true, true));
+        n.Reset(); n.Reset();
+        CHECK(!n.Step(true, false) && n.Step(true, true));
+    }
 }
 
 static void TestSessionDraft() {
@@ -395,6 +517,8 @@ static void TestSessionRandom() {
             CHECK(!(st.send && st.refused));
             CHECK(s.draft().size() <= kMaxChatBytes && ValidUtf8(s.draft()));
             if (!s.typing()) CHECK(s.draft().empty());
+            if (s.typing()) CHECK(s.kept().empty());           // a line that is open has taken what was kept
+            CHECK(s.kept().size() <= kMaxChatBytes && ValidUtf8(s.kept()));
         }
         CHECK(ons == offs + (s.typing() ? 1 : 0));
     }
@@ -504,6 +628,8 @@ int main() {
     TestSessionLetterKey();
     TestSessionEmptyAndRate();
     TestSessionExits();
+    TestSessionKeptDraft();
+    TestMenuNote();
     TestSessionDraft();
     TestSessionRandom();
     if (g_fail) { std::printf("test_hsm_chat: %d failures\n", g_fail); return 1; }

@@ -17,9 +17,9 @@ namespace hsm::game {
 constexpr int kMaxLobbyMembers = 20;  // players: == kMaxPlayers (session/hsm_roster.h; static_assert in session.cpp).
                                       // A role=server lobby has one member more: the server, which is not a player.
 #ifdef HSM_TESTBENCH
-constexpr const char* kModVersion = "0.8.0-pre56-test";
+constexpr const char* kModVersion = "0.8.0-test";
 #else
-constexpr const char* kModVersion = "0.8.0-pre56";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.0";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -33,7 +33,8 @@ bool AllowBuildMismatch();
 // The installed game's Steam build id (steam::AppBuildId), read once Steam answers and logged with its verdict
 // (session/hsm_game_build.h); 0 while Steam cannot say.
 int SteamBuild();
-// The multiplayer page's line when this machine is not on the build this HSMMod is made for; empty otherwise.
+// The multiplayer page's line when this machine's game is older than the build this HSMMod was checked on; empty
+// otherwise (a newer build's changes come from the game check, gameplay/game_check.h).
 std::string GameBuildNotice();
 
 struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; std::string steamName; bool ready = false; int team = -1; int hostOverride = -1; bool host = false; std::string build; };
@@ -41,6 +42,7 @@ struct LobbyMember { steam::SteamId id = 0; std::string card; std::string name; 
 struct LobbyListing {
     steam::SteamId id = 0;
     std::string name, map, mode;
+    uint8_t scenario = 0; // the host's hsm_scen: with the advertised mode it tells an older host's Brawling or Blossfechten (match/hsm_mode_merge.h BrowserModeFor)
     Region region = Region::Auto;   // the host's region (hsm_region); Auto: it did not say
     int players = 0;      // players: a role=server lobby's server is not counted
     int maxPlayers = 8;   // the host's player limit (hsm_max); 8 (kDefaultPlayerLimit) when the lobby has none
@@ -69,11 +71,12 @@ public:
     std::function<bool(steam::SteamId oldOwner, steam::SteamId newOwner)> onOwnerChanged;
     std::function<void(steam::SteamId from, const std::string& text)> onChat;   // a lobby chat line (ours too); the text is unchecked
     bool BlockHse() const;                       // HS Enhancer is refused: this lobby's switch, from its host; this machine's choice outside one
-    ModPreset hostPreset = ModChoice{}.preset;  // the rule of this machine's lobbies (mod_rule=)
-    bool InClassesLobby() const;                 // the lobby this machine is in uses classes (mod_rule=classes or unrestricted)
-    bool InUnrestrictedLobby() const;            // ...with no class power budget (mod_rule=unrestricted)
+    ClassesMode hostClasses = ModChoice{}.classes;   // the Classes row of this machine's lobbies (mod_classes=)
+    ClassesMode ClassesModeHere() const;         // the Classes row of the lobby this machine is in; Off outside one (an older host's Classes rule reads as On)
+    bool InClassesLobby() const;                 // the lobby this machine is in uses classes (the row is On or Unrestricted, with any Mods allowed preset)
+    bool InUnrestrictedLobby() const;            // ...with no class power budget (the row is Unrestricted)
     std::function<std::string()> myRuleSheet;   // this machine's class settings (hsm_online_rules.h)
-    std::function<std::string(ModPreset, bool blockHse, double powerLimit)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
+    std::function<std::string(ClassesMode, bool blockHse, double powerLimit)> onlineBlock;   // why this machine may not play online in this kind of lobby; empty: it may
     std::function<void()> onEnterCard;   // a new lobby: the old lobby's cards go
     void RepublishMyCard();   // the card again, if it changed since it was sent
     std::function<std::string()> myCard;                                        // this machine's build card (hsm_build_card.h), asked for on entering a lobby
@@ -130,6 +133,8 @@ public:
     void SetConfig(const MatchConfig& c);
     std::string MapPick() const;                    // host's chosen level (package path), empty until picked
     void SetMapPick(const std::string& path);
+    std::string FightPick() const;                  // a Crypt Royale's Fight map (package path), empty until picked: the default (lobby key hsm_fmap)
+    void SetFightPick(const std::string& path);
     LobbyPack Pack() const;                         // the host's announced modpack (session/hsm_modpack.h); empty: none
     void SetPack(const LobbyPack& pack);            // host: announce it (empty: none); gameplay/mod_pack.cpp
     // Host: announce the lobby's mod rule (gameplay/mod_rules.cpp LobbyTick); only changed keys are written.

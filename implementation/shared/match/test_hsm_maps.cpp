@@ -13,7 +13,7 @@ static size_t IndexOf(const MapInfo* m) { return m ? size_t(m - &kMaps[0]) : Map
 static size_t IndexOfName(const char* name) { return IndexOf(FindMap(name)); }
 
 static void TestCatalog() {
-    CHECK(MapCount() == 12);
+    CHECK(MapCount() == 13);
     std::set<std::string> paths, shorts;
     for (size_t i = 0; i < MapCount(); ++i) {
         const MapInfo& m = MapAt(i);
@@ -23,7 +23,7 @@ static void TestCatalog() {
         CHECK(p.find("Test_Empty") == std::string::npos);
         CHECK(p.find('.') == std::string::npos);                      // no object suffix
         CHECK(m.display[0] != '\0');
-        CHECK(m.arena || m.bigArena || m.abyss);                      // every map supports something
+        CHECK(m.arena || m.bigArena || m.abyss || m.crypts);         // every map supports something
         CHECK(paths.insert(p).second);
         CHECK(shorts.insert(std::string(p.substr(p.rfind('/') + 1))).second);
     }
@@ -75,10 +75,10 @@ static void TestFormatFilter() {
     CHECK(!MapAllowsFormat(yard, Format::Zombies));
     CHECK(MapAllowsFormat(cutting, Format::Duel));
 
-    // Big non-menu levels: every format except Duel (Last Man Standing is free-for-all's), Zombies only on the abyss (Infection plays there too).
-    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::LastManStanding})
+    // Big non-menu levels: every format (Duel is the Last man standing card with two players since 0.9.0, so it follows Last Man Standing,
+    // which is free-for-all's), Zombies only on the abyss (Infection plays there too).
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::PlayersVsBots, Format::LastManStanding, Format::Duel})
         CHECK(MapAllowsFormat(hub, f));
-    CHECK(!MapAllowsFormat(hub, Format::Duel));
     CHECK(!MapAllowsFormat(hub, Format::Zombies));
 
     // Abyss: Zombies and Infection; not Duel.
@@ -95,7 +95,7 @@ static void TestFormatFilter() {
         if (MapAllowsFormat(m, Format::Zombies)) ++zombie;
         CHECK(MapAllowsFormat(m, Format::Zombies) == m.abyss);
         CHECK(MapAllowsFormat(m, Format::FreeForAll) == (m.arena || m.bigArena));
-        CHECK(MapAllowsFormat(m, Format::LastManStanding) == (m.arena || m.bigArena) && MapAllowsFormat(m, Format::Duel) == m.arena);
+        CHECK(MapAllowsFormat(m, Format::LastManStanding) == (m.arena || m.bigArena) && MapAllowsFormat(m, Format::Duel) == MapAllowsFormat(m, Format::LastManStanding));
     }
     CHECK(zombie == 1);
     CHECK(!MapAllowsFormat(MapAt(0), Format(200)));                   // out-of-range enum allows nothing
@@ -137,7 +137,7 @@ static void TestNextMapCycles() {
     CHECK(duelNext < n && MapAllowsFormat(MapAt(duelNext), Format::Duel));
     CHECK(duelNext == IndexOfName("Map_Arena_Ambush_Test"));          // past the big levels to the Forest arena
 
-    // Duel skips hub, workshop and abyss; the full Duel cycle is every arena once.
+    // Duel skips the menu-only maps and the abyss; the full Duel cycle is every pickable Last man standing map once.
     std::set<size_t> seen;
     cur = 0;
     for (size_t step = 0; step < n; ++step) {
@@ -146,7 +146,7 @@ static void TestNextMapCycles() {
         seen.insert(cur);
     }
     size_t arenas = 0;
-    for (size_t i = 0; i < n; ++i) if (MapAt(i).arena && MapAt(i).pick) ++arenas;
+    for (size_t i = 0; i < n; ++i) if (MapAt(i).pick && MapAllowsFormat(MapAt(i), Format::Duel)) ++arenas;
     CHECK(seen.size() == arenas);
 
     // Zombies: the only allowed map cycles to itself.
@@ -157,15 +157,44 @@ static void TestNextMapCycles() {
 
     // Skips disallowed and unpickable maps going forward: from Cutting the next team-capable pickable map is Forest.
     CHECK(NextMap(IndexOfName("Arena_Cutting_Map"), Format::TwoTeams) == IndexOfName("Map_Arena_Ambush_Test"));
-    CHECK(NextMap(IndexOfName("Abyss_Map_Open_EA"), Format::Duel) == 0);
+    CHECK(NextMap(IndexOfName("Abyss_Map_Open_EA"), Format::Duel) == IndexOfName("Map_Arena_Alley"));   // past the Crypts map (no format's) and round to the first arena
 
     // Out-of-range current index still lands on a valid allowed map.
     CHECK(NextMap(n + 3, Format::Duel) < n);
     CHECK(MapAllowsFormat(MapAt(NextMap(n + 3, Format::Duel)), Format::Duel));
 }
 
+// The Crypts map: one catalog entry, the game's whole dungeon. No format may pick it; the Crypts modes (Gear::Crypts) play on it and
+// nowhere else. The four mod-built layout maps are gone.
+static void TestCryptsMap() {
+    size_t cryptsMaps = 0;
+    for (const MapInfo& m : kMaps) {
+        if (!m.crypts) continue;
+        ++cryptsMaps;
+        CHECK(std::string(m.display) == "Crypts" && std::string(m.path) == "/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main");
+        CHECK(m.pick && !m.arena && !m.bigArena && !m.abyss);
+        CHECK(FindMap(m.path) == &m && FindMap("Map_Procedural_Block_Test_Main") == &m);
+        for (uint8_t i = 0; i < kFormatCount; ++i) CHECK(!MapAllowsFormat(m, Format(i)));   // no format's own map
+        CHECK(MapAllowsMatch(m, Format::LastManStanding, Gear::Crypts) && MapAllowsMatch(m, Format::PlayersVsBots, Gear::Crypts));
+        CHECK(!MapAllowsMatch(m, Format::LastManStanding, Gear::Own) && !MapAllowsMatch(m, Format::Zombies, Gear::Crypts));
+    }
+    CHECK(cryptsMaps == 1 && CryptsMapIndex() < MapCount() && kMaps[CryptsMapIndex()].crypts);
+    CHECK(!FindMap("Map_Procedural_Block_Test_Main#Purgatory") && !FindMap("Map_Procedural_Block_Test_Main#Catacombs") && !FindMap("Map_Procedural_Block_Test_Main#Kitchen"));
+    for (const char* gone : {"Purgatory", "Boss Hall", "Descent", "Catacombs"})
+        for (const MapInfo& m : kMaps) CHECK(std::string(m.display) != gone);
+    // The Crypts modes never play on another map; the fight after a Crypt Royale run is on the Fight map, which is never the Crypts.
+    for (const MapInfo& m : kMaps) {
+        if (m.crypts) { CHECK(!MapAllowsFight(m, Format::LastManStanding)); continue; }
+        CHECK(!MapAllowsMatch(m, Format::LastManStanding, Gear::Crypts) && !MapAllowsMatch(m, Format::FreeForAll, Gear::Crypts));
+    }
+    // the Fight map still opens on the Abyss
+    for (Format f : {Format::LastManStanding, Format::FreeForAll, Format::TwoTeams, Format::PlayersVsBots})
+        CHECK(CryptsDefaultMap(f) == IndexOfName("Abyss_Map_Open_EA"));
+}
+
 int main() {
     TestCatalog();
+    TestCryptsMap();
     TestFindByPath();
     TestFindByShortName();
     TestFindUnknown();

@@ -1,4 +1,4 @@
-// Unit tests for hsm_ini.h (SetIniValue, GetIniValue). Run via implementation/shared/run_tests.sh test_hsm_ini.
+// Unit tests for hsm_ini.h (SetIniValue, GetIniValue, RetiredKeyNotes). Run via implementation/shared/run_tests.sh test_hsm_ini.
 #include "util/hsm_ini.h"
 #include <cstdio>
 
@@ -6,6 +6,7 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 
 using hsm::util::GetIniValue;
+using hsm::util::RetiredKeyNotes;
 using hsm::util::SetIniValue;
 
 static void TestReplace() {
@@ -73,6 +74,23 @@ static void TestGet() {
     CHECK(GetIniValue(saved, "net", "nickname", v) && v == "Zo\xC3\xAB");
 }
 
+// An INI written by an older HSMMod still has mod_pause: it is ignored, and the log gets one line whatever the value was.
+static void TestRetiredKeys() {
+    const std::string line = "config: mod_pause is gone; the mod's pause menu is always used";
+    for (const char* v : {"0", "1", "", " 0 "}) {
+        const std::vector<std::string> n = RetiredKeyNotes(std::string("; HSMMod\n[net]\nrole=steam\nmod_pause=") + v + "\nname=Pl\n");
+        CHECK(n.size() == 1 && n[0] == line);
+    }
+    const std::vector<std::string> twice = RetiredKeyNotes("[net]\nmod_pause=0\nmod_pause=1\n");   // written twice: still one line
+    CHECK(twice.size() == 1 && twice[0] == line);
+    CHECK(RetiredKeyNotes("[NET]\r\nMod_Pause = 0\r\n").size() == 1);                              // names compare without case
+    CHECK(RetiredKeyNotes("[net]\nrole=steam\nloadout_trial=0\n").empty());                         // a file without it: nothing
+    CHECK(RetiredKeyNotes("").empty());
+    CHECK(RetiredKeyNotes("[net]\n; mod_pause=0\n# mod_pause=1\n").empty());                        // a comment is not the key
+    CHECK(RetiredKeyNotes("[mod]\nmod_pause=0\n").empty());                                         // the key was read from [net] only
+    CHECK(RetiredKeyNotes("[net]\nmod_pause_x=0\n").empty());                                       // another key that starts the same
+}
+
 int main() {
     TestReplace();
     TestAddToSection();
@@ -81,6 +99,7 @@ int main() {
     TestCommentedKeyIsNotTheKey();
     TestRefusals();
     TestGet();
+    TestRetiredKeys();
     if (g_fail) { std::printf("%d ini checks failed\n", g_fail); return 1; }
     std::printf("all ini tests passed\n");
     return 0;

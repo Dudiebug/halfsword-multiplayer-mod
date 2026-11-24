@@ -1,6 +1,8 @@
 #include "ui/menu.h"
 #include "config.h"
 #include "ui/chat.h"
+#include "ui/dropdown.h"
+#include "ui/notices.h"
 #include "ui/umg.h"
 #include "ui/mp_widgets.h"
 #include "ui/skin.h"
@@ -19,6 +21,7 @@
 #include "match/hsm_class.h"
 #include "match/hsm_hud_style.h"
 #include "match/hsm_lobby_mods.h"
+#include "match/hsm_lobby_nav.h"
 #include "match/hsm_lobby_scene.h"
 #include "match/hsm_menu_pick.h"
 #include "session/hsm_mod_switch.h"
@@ -26,6 +29,7 @@
 #include "util/hsm_bmp.h"
 #include "paths.h"
 #include <windows.h>
+#include <utility>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -42,10 +46,13 @@ namespace {
 using mp::Card;
 using mp::Flat;
 using mp::Paint;
+using mp::InkOn;
 constexpr float kChatHeight = 170;                // the chat log's frame, in px
 constexpr int kMemberRowsShown = 8;               // the players list: eight rows as ever ...
 constexpr float kMoreMembersHeight = 150;         // ... and the rest of a bigger lobby (up to 20) in a scrolling frame, in px
 constexpr Rgba kClear{1, 1, 1, 0};                  // a Button's own brush, hidden: the frame and face are ours
+constexpr float kPlateWidth = 230;                  // a dropdown's closed control, in px: a row's value cell, and the plates in SETTINGS
+constexpr int32_t kDropdownZ = 105;                 // the dropdown list's backdrop (the list sits one above): over the page (100), under the windows (110+)
 constexpr float kStartGlow = 0.2f;                  // START under the mouse: this far from the accent to its ink (text stays >= 4.5)
 
 // The injected Multiplayer entry on the main menu: either a Button in the stock menu button's style (`plain`), or our
@@ -64,7 +71,7 @@ struct BrowserView { Card card; Text name, detail, players, note; };
 struct ChatRow { Box row; Text name, text; };
 struct MemberView { Card card; Icon swatch, avatar, ready; Text name, badge, team; };
 struct HostView { Card card; Text name, blurb; };
-struct TabView { Card card; Text label; Panel line; };   // MODE | RULES | MAP | MODS: the chosen one underlined in the accent
+struct TabView { Card card; Text label; Panel line; };   // MODE | MAP | RULES | MODS | CLASSES: the chosen one underlined in the accent
 
 // A player's Steam avatar as an engine texture, made once and kept while the engine keeps it (an Image's brush holds
 // it; one no row shows any more is collected, and made again when it is needed).
@@ -77,7 +84,7 @@ struct Avatar {
     int tries = 0;
 };
 constexpr int kAvatarTries = 20;                     // once a second while Steam fetches it
-struct StepperView { Box box; Text label, value, hint; Flat prev, next; };
+struct StepperView { Box box; Text label, value, hint; Flat prev, next, plate; };   // plate: a dropdown row's value, in place of value
 struct ClassRow { Box box; Flat name; Text value; Flat prev, next; };
 // The Damage row's value (0.8.0-pre26): a slider (0..200%) with the number beside it; a click on the number swaps in a
 // text box for a custom value up to 1000% (Enter applies, Esc or clicking away cancels). Host only.
@@ -106,9 +113,7 @@ struct WeightView {
 // MODS tab: one mod: its name, "kind · who runs it", why the lobby refuses it; the verdict on the right.
 struct ModItemView { Box box; Text name, detail, note, verdict; };
 constexpr size_t kModItemRows = 48;                  // more: "+N more" (the host's log has the whole list)
-constexpr size_t kTabCount = 5;                      // MODE, RULES, MAP, MODS, CLASSES
-constexpr size_t kModsTab = 3, kClassesTab = 4;
-constexpr size_t kSectionCount = size_t(LobbySection::Count);
+constexpr size_t kTierChipCount = 8;                 // the tier chips under Gear (or the Crypts card's Starting tier): Beggar ... Knight
 
 // A name row: a text box with SET and CLEAR and a line under it (the host's lobby name, the player's nickname).
 struct NameRow {
@@ -143,7 +148,8 @@ struct State {
     Box classTabList;
     bool classTabOpen = false, classDeleteArmed = false, warnOpen = false;
     Panel warn;                               // the Unrestricted disclaimer
-    Flat classUnrestricted;
+    Flat classUnrestricted;                   // the old MODS checkbox: kept in the tree, hidden; the Classes row asks for the disclaimer now
+    bool unrestrictedAsked = false;           // the Classes row was stepped onto Unrestricted: the disclaimer comes first
     Text warnTitle, warnBody, warnMods;
     enum class WarnKind { Unrestricted, Hse, Switch };   // what the warning panel asks about: Switch is the restart with mods off (Lobby::SwitchAsk)
     WarnKind warnKind = WarnKind::Unrestricted;
@@ -155,10 +161,11 @@ struct State {
     Flat classNameSave;
     std::string classNameFor, classNameNote;  // the class the box was filled for; why its name was refused
     bool classNameEnterDown = false, classNameFocused = false;
-    Flat classContinue, classOpen, classChange;
+    Flat classOpen, classChange;
     Box classRow;                            // in a lobby that uses classes: the class we fight as, and CHANGE
     Text classRowText;
-    bool classShown = false;                 // not in a lobby: YOUR CLASS has put the classes in the right column
+    bool classShown = false;                 // YOUR CLASS has put the classes in the right column: outside a lobby, or in one that has no CLASSES tab
+    bool wasIn = false;                      // the last drawn scene was in a lobby (arriving or leaving closes the class page)
     int classFieldSel = 7;                   // the row the description box explains (RUN)
     Box updateRow;                           // the update notice and its UPDATE NOW button (net/update_check.h)
     Flat updateNow;
@@ -167,10 +174,11 @@ struct State {
     // Not in a lobby: HOST on the left, the browser on the right. In one: players and chat left, the tabs right.
     Box mainRow, idleLeft, inLeft, idleRight, inRight, settingsView;
     HostView hostFriends, hostPublic;
-    Flat refresh, invite, readyUp, balance, shuffle, leave, close, settingsOpen, alone;   // shuffle: SHUFFLE NOW (Lobby::ShuffleTeamsNow)
+    Flat refresh, invite, readyUp, balance, shuffle, leave, close, settingsOpen;   // shuffle: SHUFFLE NOW (Lobby::ShuffleTeamsNow); close: the footer's bottom-left button (FooterFor)
     std::array<Flat, 1 + kWeaponTypeCount> weaponChips;   // the Weapons row's ticks: Any, then the game's types 1..7 (SettingRow::chips)
     std::array<Box, 2> weaponChipRows;
-    bool aloneArmed = false;
+    std::array<Flat, kTierChipCount> gearTierChips, startTierChips;   // the tiers, under Gear (while the tier is used) and under the Crypts card's Starting tier
+    std::array<Box, 2> gearTierRows, startTierRows;
     std::array<Flat, kFilterChips> chips;
     Text browserCount, browserEmpty;
     BrowserFilter filter;                    // the chips' state, kept while the game runs
@@ -178,13 +186,14 @@ struct State {
     std::array<Box, kTabCount> tabPages;
     Box tabBar, tabFoot;                     // the tabs, and the summary with START: only in a lobby, unlike the classes
     Fixed tabRule;
-    size_t tab = 0;
-    std::array<Text, kSectionCount> sectionTitles;
+    size_t tab = kModeTab;
+    std::array<Flat, kSectionCount> subTabs;   // RULES: MATCH | COMBAT | TEAMS | GEAR | WORLD, the ones the mode has rows in
+    Box subTabRow;
+    LobbySection rulesTab = LobbySection::Match;
     std::array<Box, kSectionCount> sections;
     Text noMaps;
     bool settingsShown = false;
     Flat reportOpen, reportSend, reportCancel;   // REPORT A BUG, and the box it opens
-    Text reportHow;                              // how to report from a fight (/bug)
     Box reportBox;
     EditBox reportText;
     Text reportNote;
@@ -195,6 +204,7 @@ struct State {
     Flat lookToggle;                         // MENU LOOK: CLASSIC / GAME ART / DARK (SETTINGS); ui_style, used from the next start
     Text lookNote;
     style::MenuLook look = style::MenuLook::Classic; bool lookSaved = true;   // what HSMMod.ini will say at the next start; written
+    DropdownLayer drops;                     // the one list every dropdown on the page opens in (ui/dropdown.h); built first, under the windows
     mp::VoiceBlock voice;                    // VOICE CHAT: your own reach, knocked-out toggle, the microphone, the meter
     Text helpNote;
     Panel ask;                               // the one-time HELP IMPROVE THE MOD question over the whole menu (0.8.0-pre7)
@@ -209,12 +219,15 @@ struct State {
     EditBox pwHostText;
     Flat pwSet, pwClear;
     Text pwHostNote;
+    Text rulesNote;                          // RULES in Progression: why it holds only three rows
     bool pwHostFocused = false, pwHostEnterDown = false;
     NameRow lobbyName;                       // the host's lobby name row in the lobby (SET / CLEAR); only the host sees it
     NameRow nickname;                        // SETTINGS: the nickname the other players see instead of the Steam name
     Flat hideToggle;                         // SETTINGS: HIDE PLAYER NAMES: ON/OFF
     Text hideNote;
-    Flat regionPick;                         // the region picker at the top right of the page: Auto, NA East ...
+    Flat myRegion;                           // SETTINGS: MY REGION: AUTO (NA EAST); steps Auto, NA East ... (Session::SetRegionPick); without the lists
+    Flat myRegionPlate, lookPlate;           // SETTINGS: MY REGION and MENU LOOK as dropdowns (the buttons are then not made)
+    Text myRegionNote;
     Box chatBox;                             // the lobby chat: CHAT, the last lines, the text box and SEND (only in a lobby)
     Box chatScroll;
     std::array<ChatRow, kChatLogLines> chatRows;
@@ -268,7 +281,7 @@ Text NewText(const std::string& text, float size, Rgba color) { return g.maker.N
 
 // A section label: a rubric in the game's blackletter (MATCH, PUBLIC LOBBIES, CHAT).
 Text Section(Box& column, const std::string& text, float padTop) {
-    Text t = NewText(skin::Title(text), 23, style::kMenuAccentInk);
+    Text t = NewText(skin::Title(text), style::type::kSection, style::kMenuAccentInk);
     if (t) { skin::Font(t, skin::Face::Heading); t.Wrap(true); AddToVerticalBox(column, t, padTop); }   // a narrow column wraps it
     return t;
 }
@@ -288,8 +301,8 @@ void AddFlatH(Box& row, Flat& f, float padRight) { if (f.card) AddToHorizontalBo
 HostView MakeHost(const std::string& name, const std::string& blurb) {
     HostView v;
     Box body = g.kit.MakeColumn();
-    v.name = NewText(name, 22, style::kMenuText);
-    v.blurb = NewText(blurb, 14, style::kMenuDim);
+    v.name = NewText(name, style::type::kEmphasis, style::kMenuText);
+    v.blurb = NewText(blurb, style::type::kHint, style::kMenuDim);
     if (!body || !v.name || !v.blurb) return HostView{};
     v.blurb.Wrap(true);
     AddToVerticalBox(body, v.name, 0);
@@ -299,11 +312,22 @@ HostView MakeHost(const std::string& name, const std::string& blurb) {
 }
 
 // Live or not: a dead card is dimmed and takes no clicks.
-void Live(Card& c, bool on, float dim = 0.4f) {
+void Live(Card& c, bool on) {
     if (!c) return;
     c.live = on;
     c.button.Enabled(on);
-    c.button.Opacity(on ? 1.f : dim);
+    c.button.Opacity(on ? 1.f : style::kDisabledAlpha);
+}
+
+// Dimmed (mp::Dimmed, mp_widgets.h): not disabled, so a click can still say why. The click does nothing (HandleClicks' act checks
+// `allowed`); only the look and the hover glow follow `on`.
+
+// What a click on a control the player cannot use says. The ONE place a reason goes out: a notice (notices.h), keyed so a
+// second click replaces the first.
+void Explain(const std::string& why) {
+    if (why.empty()) return;
+    HSM_LOG("ui: a click on a dimmed control: %s", why.c_str());
+    Notify(notices::StartWhy(why));
 }
 
 // The menu's structure around the anchor, to the log once per run: the next log shows how the stock entries are built
@@ -420,7 +444,7 @@ void BuildChat(Box& left) {
     g.chatScroll = g.kit.MakeScroll();
     Box lines = g.kit.MakeColumn(), input = g.kit.MakeRow();
     g.chatText = g.kit.MakeEditBox();
-    g.chatSend = MakeFlat("SEND", 15, {14, 5, 14, 5});
+    g.chatSend = MakeFlat("SEND", style::type::kBody, {14, 5, 14, 5});
     if (!g.chatBox || !frame || !border || !panel || !g.chatScroll || !lines || !input || !g.chatText || !g.chatSend.card) {
         HSM_LOG("ui: lobby chat widgets could not be made; chat disabled");
         g.chatBox = Box{};
@@ -439,8 +463,8 @@ void BuildChat(Box& left) {
     g.chatScroll.Add(lines);
     for (ChatRow& r : g.chatRows) {
         r.row = g.kit.MakeRow();
-        r.name = NewText("", 15, style::kMenuDim);
-        r.text = NewText("", 15, style::kMenuText);
+        r.name = NewText("", style::type::kBody, style::kMenuDim);
+        r.text = NewText("", style::type::kBody, style::kMenuText);
         if (!r.row || !r.name || !r.text) continue;
         r.text.Wrap(true);
         AddToHorizontalBox(r.row, r.name, 0, 8).Align(HAlign::Left, VAlign::Top);
@@ -464,7 +488,7 @@ void BuildIdleLeft() {
     g.hostPublic = MakeHost("HOST PUBLIC", "Listed in the public lobbies for anyone with the mod.");
     for (HostView* h : {&g.hostFriends, &g.hostPublic})
         if (h->card) AddToVerticalBox(col, h->card.button, 10).Align(HAlign::Fill, VAlign::Fill);
-    g.idleHint = NewText("Host a lobby or join one to choose the mode and the map.", 15, style::kMenuDim);
+    g.idleHint = NewText("Host a lobby or join one to choose the mode and the map.", style::type::kBody, style::kMenuDim);
     if (g.idleHint) { g.idleHint.Wrap(true); AddToVerticalBox(col, g.idleHint, 18); }
 }
 
@@ -475,27 +499,24 @@ void BuildIdleRight() {
     Box head = g.kit.MakeRow(), chips = g.kit.MakeRow(), list = g.kit.MakeScroll();
     if (!head || !chips || !list) { HSM_LOG("ui: the lobby browser could not be made"); return; }
     AddToVerticalBox(col, head, 0);
-    Text title = NewText(skin::Title("Public Lobbies"), 23, style::kMenuAccentInk);
+    Text title = NewText(skin::Title("Public Lobbies"), style::type::kSection, style::kMenuAccentInk);
     skin::Font(title, skin::Face::Heading);
     if (title) AddToHorizontalBox(head, title, 0, 16).Align(HAlign::Left, VAlign::Center);
-    g.browserCount = NewText("", 14, style::kMenuDim);
+    g.browserCount = NewText("", style::type::kHint, style::kMenuDim);
     if (g.browserCount) AddToHorizontalBox(head, g.browserCount, 1, 12).Align(HAlign::Left, VAlign::Center);
-    g.chips[kRegionChip] = MakeFlat("", 14, {12, 4, 12, 4});   // the region filter sits by REFRESH; the other chips have their own row
-    AddFlatH(head, g.chips[kRegionChip], 8);
-    g.refresh = MakeFlat("REFRESH", 15, {14, 5, 14, 5});
+    g.refresh = MakeFlat("REFRESH", style::type::kBody, {14, 5, 14, 5});
     AddFlatH(head, g.refresh, 0);
     AddToVerticalBox(col, chips, 12);
-    for (size_t i = 0; i < g.chips.size(); ++i) {
-        if (i == kRegionChip) continue;
-        g.chips[i] = MakeFlat("", 14, {12, 4, 12, 4});
+    for (size_t i = 0; i < g.chips.size(); ++i) {   // the region first (kRegionChip is 0), then the others
+        g.chips[i] = MakeFlat("", style::type::kHint, {12, 4, 12, 4});
         AddFlatH(chips, g.chips[i], 8);
     }
     FillVerticalBox(col, list, 12);
     for (size_t i = 0; i < kBrowserRows; ++i) {
         BrowserView v;
         Box row = g.kit.MakeRow(), text = g.kit.MakeColumn();
-        v.name = NewText("", 18, style::kMenuText); v.detail = NewText("", 13, style::kMenuDim);
-        v.players = NewText("", 15, style::kMenuDim); v.note = NewText("", 15, style::kMenuOk);
+        v.name = NewText("", style::type::kRow, style::kMenuText); v.detail = NewText("", style::type::kHint, style::kMenuDim);
+        v.players = NewText("", style::type::kBody, style::kMenuDim); v.note = NewText("", style::type::kBody, style::kMenuOk);
         if (row && text && v.name && v.detail && v.players && v.note) {
             AddToVerticalBox(text, v.name, 0); AddToVerticalBox(text, v.detail, 2);
             AddToHorizontalBox(row, text, 1, 14);
@@ -507,7 +528,7 @@ void BuildIdleRight() {
         g.rows.push_back(v);                    // kept even if empty: g.rows[i] is the scene's browser[i]
     }
     g.rowLobbies.assign(g.rows.size(), 0);
-    g.browserEmpty = NewText("", 15, style::kMenuDim);
+    g.browserEmpty = NewText("", style::type::kBody, style::kMenuDim);
     if (g.browserEmpty) { g.browserEmpty.Wrap(true); list.Add(g.browserEmpty).Padding({0, 6, 0, 0}); }
 }
 
@@ -517,9 +538,9 @@ void BuildPasswordRow(Box& left) {
     g.pwHostBox = g.kit.MakeColumn();
     Box input = g.kit.MakeRow();
     g.pwHostText = g.kit.MakeEditBox();
-    g.pwSet = MakeFlat("SET", 15, {14, 5, 14, 5});
-    g.pwClear = MakeFlat("CLEAR", 15, {14, 5, 14, 5});
-    g.pwHostNote = NewText("", 13, style::kMenuDim);
+    g.pwSet = MakeFlat("SET", style::type::kBody, {14, 5, 14, 5});
+    g.pwClear = MakeFlat("CLEAR", style::type::kBody, {14, 5, 14, 5});
+    g.pwHostNote = NewText("", style::type::kHint, style::kMenuDim);
     if (!g.pwHostBox || !input || !g.pwHostText || !g.pwSet.card || !g.pwClear.card || !g.pwHostNote) {
         HSM_LOG("ui: the lobby password row could not be made");
         g.pwHostBox = Box{};
@@ -532,6 +553,7 @@ void BuildPasswordRow(Box& left) {
     AddToVerticalBox(g.pwHostBox, input, 6);
     g.pwHostNote.Wrap(true);
     AddToVerticalBox(g.pwHostBox, g.pwHostNote, 4);
+    g.pwHostNote.Show(false);               // only a refusal is said here; the box and its buttons say the rest
     AddToVerticalBox(left, g.pwHostBox, 14);
     g.pwHostBox.Show(false);
 }
@@ -541,9 +563,9 @@ void BuildNameRow(NameRow& r, Box& parent, const std::string& title, const std::
     r.box = g.kit.MakeColumn();
     Box input = g.kit.MakeRow();
     r.text = g.kit.MakeEditBox();
-    r.set = MakeFlat("SET", 15, {14, 5, 14, 5});
-    r.clear = MakeFlat("CLEAR", 15, {14, 5, 14, 5});
-    r.note = NewText("", 13, style::kMenuDim);
+    r.set = MakeFlat("SET", style::type::kBody, {14, 5, 14, 5});
+    r.clear = MakeFlat("CLEAR", style::type::kBody, {14, 5, 14, 5});
+    r.note = NewText("", style::type::kHint, style::kMenuDim);
     if (!r.box || !input || !r.text || !r.set.card || !r.clear.card || !r.note) {
         HSM_LOG("ui: the %s row could not be made", title.c_str());
         r.box = Box{};
@@ -581,7 +603,7 @@ void BuildInLeft() {
         MemberView v;
         Box row = g.kit.MakeRow();
         v.swatch = g.kit.MakeIcon(); v.avatar = g.kit.MakeIcon(); v.ready = g.kit.MakeIcon();
-        v.name = NewText("", 17, style::kMenuText); v.badge = NewText("HOST", 13, style::kMenuAccentInk); v.team = NewText("", 14, style::kMenuDim);
+        v.name = NewText("", style::type::kRow, style::kMenuText); v.badge = NewText("HOST", style::type::kHint, style::kMenuAccentInk); v.team = NewText("", style::type::kHint, style::kMenuDim);
         if (row && v.swatch && v.avatar && v.ready && v.name && v.badge && v.team) {
             v.swatch.Size({5, 32}); v.avatar.Size({32, 32}); v.ready.Size({10, 10}); v.ready.Color(style::kMenuOk);
             v.avatar.Visibility(Vis::Hidden);
@@ -598,20 +620,18 @@ void BuildInLeft() {
     }
     g.memberIds.assign(g.members.size(), 0);
     Box actions1 = g.kit.MakeRow(), actions2 = g.kit.MakeRow();
-    g.invite = MakeFlat("INVITE FRIENDS", 15, {14, 6, 14, 6});
-    g.readyUp = MakeFlat("Mark me ready", 15, {14, 6, 14, 6});
-    g.balance = MakeFlat("AUTO-BALANCE", 15, {14, 6, 14, 6});
-    g.shuffle = MakeFlat("SHUFFLE NOW", 15, {14, 6, 14, 6});
-    g.leave = MakeFlat("LEAVE LOBBY", 15, {14, 6, 14, 6});
-    if (actions1 && actions2) {
+    g.readyUp = MakeFlat("Mark me ready", style::type::kBody, {14, 6, 14, 6});
+    g.balance = MakeFlat("AUTO-BALANCE", style::type::kBody, {14, 6, 14, 6});
+    g.shuffle = MakeFlat("SHUFFLE NOW", style::type::kBody, {14, 6, 14, 6});
+    if (actions1 && actions2) {      // INVITE FRIENDS and LEAVE LOBBY are in the footer now (BuildPanel)
         AddToVerticalBox(col, actions1, 14);
         AddToVerticalBox(col, actions2, 8);
-        AddFlatH(actions1, g.invite, 8); AddFlatH(actions1, g.readyUp, 0);
-        AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.shuffle, 8); AddFlatH(actions2, g.leave, 0);
+        AddFlatH(actions1, g.readyUp, 0);
+        AddFlatH(actions2, g.balance, 8); AddFlatH(actions2, g.shuffle, 0);
     }
     g.classRow = g.kit.MakeRow();
-    g.classRowText = NewText("", 15, style::kMenuText);
-    g.classChange = MakeFlat("CHANGE", 15, {14, 5, 14, 5});
+    g.classRowText = NewText("", style::type::kBody, style::kMenuText);
+    g.classChange = MakeFlat("CHANGE", style::type::kBody, {14, 5, 14, 5});
     if (g.classRow && g.classRowText && g.classChange.card) {
         AddToHorizontalBox(g.classRow, g.classRowText, 1, 8).Align(HAlign::Fill, VAlign::Center);
         AddFlatH(g.classRow, g.classChange, 0);
@@ -631,14 +651,14 @@ void BuildAsk(Canvas& root) {
     Fixed width = g.kit.MakeFixed();
     Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
     Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    Text title = NewText(skin::Title("Help Improve the Mod?"), 30, style::kMenuAccentInk);
+    Text title = NewText(skin::Title("Help Improve the Mod?"), style::type::kModal, style::kMenuAccentInk);
     Text body = NewText("When someone in your lobby files a bug report, or your game crashes, your HSMMod log is sent to the "
-                        "maintainers so the bug can be found and fixed.", 17, style::kMenuText);
+                        "maintainers so the bug can be found and fixed.", style::type::kRow, style::kMenuText);
     Text privacy = NewText("Steam IDs, IP addresses and your Windows user name are removed first. Player names stay. "
                            "Nothing is sent unless you say yes. You can change this any time in SETTINGS on the "
-                           "multiplayer page or in the Esc menu during a match.", 14, style::kMenuDim);
-    g.askYes = MakeFlat("YES, SEND MY LOG", 18);
-    g.askNo = MakeFlat("NO THANKS", 18);
+                           "multiplayer page or in the Esc menu during a match.", style::type::kHint, style::kMenuDim);
+    g.askYes = MakeFlat("YES, SEND MY LOG", style::type::kRow);
+    g.askNo = MakeFlat("NO THANKS", style::type::kRow);
     if (!g.ask || !width || !frame || !face || !column || !buttons || !title || !body || !privacy || !g.askYes.card || !g.askNo.card) {
         HSM_LOG("ui: the help-improve question could not be made; the page opens without it");
         g.ask = Panel{};
@@ -656,7 +676,6 @@ void BuildAsk(Canvas& root) {
     face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     privacy.Wrap(true); AddToVerticalBox(column, privacy, 10);
@@ -675,11 +694,11 @@ void BuildWarn(Canvas& root) {
     Fixed width = g.kit.MakeFixed();
     Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
     Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    Text title = g.warnTitle = NewText("", 30, style::kMenuAccentInk);
-    Text body = g.warnBody = NewText("", 17, style::kMenuText);
-    Text mods = g.warnMods = NewText("", 16, style::kMenuDim);
-    g.warnOn = MakeFlat("TURN IT ON", 18);
-    g.warnCancel = MakeFlat("CANCEL", 18);
+    Text title = g.warnTitle = NewText("", style::type::kModal, style::kMenuAccentInk);
+    Text body = g.warnBody = NewText("", style::type::kRow, style::kMenuText);
+    Text mods = g.warnMods = NewText("", style::type::kBody, style::kMenuDim);
+    g.warnOn = MakeFlat("TURN IT ON", style::type::kRow);
+    g.warnCancel = MakeFlat("CANCEL", style::type::kRow);
     if (!g.warn || !width || !frame || !face || !column || !buttons || !title || !body || !mods || !g.warnOn.card || !g.warnCancel.card) {
         HSM_LOG("ui: the Unrestricted warning could not be made, so the checkbox stays off");
         g.warn = Panel{};
@@ -697,7 +716,6 @@ void BuildWarn(Canvas& root) {
     face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     mods.Wrap(true); AddToVerticalBox(column, mods, 10);
@@ -737,12 +755,12 @@ void BuildPassword(Canvas& root) {
     Fixed width = g.kit.MakeFixed();
     Panel frame = g.kit.MakePanel(), face = g.kit.MakePanel();
     Box column = g.kit.MakeColumn(), buttons = g.kit.MakeRow();
-    Text title = NewText(skin::Title("This Lobby Is Locked"), 30, style::kMenuAccentInk);
-    Text body = NewText("Type the lobby's password to join. The host gave it to you.", 17, style::kMenuText);
-    g.pwNote = NewText("", 17, style::kMenuWarn);
+    Text title = NewText(skin::Title("This Lobby Is Locked"), style::type::kModal, style::kMenuAccentInk);
+    Text body = NewText("Type the lobby's password to join. The host gave it to you.", style::type::kRow, style::kMenuText);
+    g.pwNote = NewText("", style::type::kRow, style::kMenuWarn);
     g.pwText = g.kit.MakeEditBox();
-    g.pwOk = MakeFlat("JOIN", 18);
-    g.pwCancel = MakeFlat("CANCEL", 18);
+    g.pwOk = MakeFlat("JOIN", style::type::kRow);
+    g.pwCancel = MakeFlat("CANCEL", style::type::kRow);
     if (!g.pw || !width || !frame || !face || !column || !buttons || !title || !body || !g.pwNote || !g.pwText || !g.pwOk.card || !g.pwCancel.card) {
         HSM_LOG("ui: the lobby password question could not be made; locked lobbies cannot be joined from this page");
         g.pw = Panel{};
@@ -760,7 +778,6 @@ void BuildPassword(Canvas& root) {
     face.Color(kClear);
     face.Padding({36, 28, 36, 28});
     face.Content(column);
-    title.Font(36);
     AddToVerticalBox(column, title, 0);
     body.Wrap(true); AddToVerticalBox(column, body, 14);
     g.pwText.Hint("Password");
@@ -786,7 +803,7 @@ void BuildModeTab(Box& page) {
     for (size_t i = 0; i < kModeCardCount; ++i) {
         ModeView v;
         Box body = g.kit.MakeColumn();
-        v.name = NewText("", 19, style::kMenuText); v.blurb = NewText("", 13, style::kMenuDim);
+        v.name = NewText("", style::type::kEmphasis, style::kMenuText); v.blurb = NewText("", style::type::kHint, style::kMenuDim);
         if (body && v.name && v.blurb) {
             v.blurb.Wrap(true);
             AddToVerticalBox(body, v.name, 0); AddToVerticalBox(body, v.blurb, 4);
@@ -805,7 +822,7 @@ bool BuildDamageValue(Fixed& cell) {
     DamageView& d = g.damage;
     Box row = g.kit.MakeRow();
     d.slider = g.kit.MakeSlider();
-    d.number = MakeFlat("100%", 15, {8, 2, 8, 2});
+    d.number = MakeFlat("100%", style::type::kBody, {8, 2, 8, 2});
     d.edit = g.kit.MakeEditBox();
     if (!row || !d.slider || !d.number.card || !d.edit) { g.damage = DamageView{}; return false; }
     AddToHorizontalBox(row, d.slider, 1, 6).Align(HAlign::Fill, VAlign::Center);
@@ -820,7 +837,7 @@ bool BuildDamageValue(Fixed& cell) {
 bool BuildGatherValue(Fixed& cell) {
     GatherView& d = g.gather;
     Box row = g.kit.MakeRow();
-    d.number = MakeFlat("10 min", 17, {8, 2, 8, 2});
+    d.number = MakeFlat("10 min", style::type::kRow, {8, 2, 8, 2});
     d.edit = g.kit.MakeEditBox();
     if (!row || !d.number.card || !d.edit) { g.gather = GatherView{}; return false; }
     AddToHorizontalBox(row, d.number.card.button, 1, 0).Align(HAlign::Center, VAlign::Center);
@@ -835,7 +852,7 @@ bool BuildWeightValue(LobbyRow id, Fixed& cell) {
     WeightView& w = g.weights[id == LobbyRow::DeadWeight ? 0 : 1];
     Box row = g.kit.MakeRow();
     w.slider = g.kit.MakeSlider();
-    w.number = NewText(WeightLabel(kWeightDefaultPct), 15, style::kMenuText);
+    w.number = NewText(WeightLabel(kWeightDefaultPct), style::type::kBody, style::kMenuText);
     if (!row || !w.slider || !w.number) { w = WeightView{}; return false; }
     w.id = id;
     AddToHorizontalBox(row, w.slider, 1, 6).Align(HAlign::Fill, VAlign::Center);
@@ -851,12 +868,12 @@ StepperView MakeStepper(Fixed& valueBox) {
     v.box = g.kit.MakeRow();
     Box text = g.kit.MakeColumn();
     valueBox = g.kit.MakeFixed();
-    v.label = NewText("", 17, style::kMenuText); v.value = NewText("", 17, style::kMenuText); v.hint = NewText("", 13, style::kMenuDim);
-    v.prev = g.maker.MakeArrow(false, 17); v.next = g.maker.MakeArrow(true, 17);
+    v.label = NewText("", style::type::kRow, style::kMenuText); v.value = NewText("", style::type::kRow, style::kMenuText); v.hint = NewText("", style::type::kHint, style::kMenuDim);
+    v.prev = g.maker.MakeArrow(false, style::type::kRow); v.next = g.maker.MakeArrow(true, style::type::kRow);
     if (!v.box || !text || !valueBox || !v.label || !v.value || !v.hint || !v.prev.card || !v.next.card) return StepperView{};
     v.value.Align(Justify::Center);
     v.hint.Wrap(true);
-    valueBox.Width(230);
+    valueBox.Width(kPlateWidth);
     AddToVerticalBox(text, v.label, 0);
     AddToVerticalBox(text, v.hint, 2);
     AddToHorizontalBox(v.box, text, 1, 16).Align(HAlign::Fill, VAlign::Center);
@@ -866,10 +883,43 @@ StepperView MakeStepper(Fixed& valueBox) {
     return v;
 }
 
-// RULES tab: a stepper per setting, "label and hint | < | value | >", in its section (MATCH, TEAMS, GEAR, WORLD).
+// A dropdown row's value: the plate fills the value cell and the value's Text is dropped (in no tree it is freed by garbage
+// collection, so it is never written). False (the row keeps its value Text, and its arrows step) when no list is built.
+bool BuildPlateValue(Fixed& valueBox, StepperView& v) {
+    if (!g.drops) return false;
+    v.plate = g.maker.MakePlate(style::type::kRow);
+    if (!v.plate.card) { v.plate = Flat{}; return false; }
+    valueBox.Content(v.plate.card.button).Align(HAlign::Fill, VAlign::Center);
+    v.value = Text{};
+    return true;
+}
+
+// Chips under a stepper row, in two rows of four: the Weapons types, the eight tiers. Made once; DrawChipRows fills and shows them.
+template <size_t N, class Name>
+void BuildChipRows(Box& home, std::array<Box, 2>& rows, std::array<Flat, N>& chips, Name name) {
+    for (size_t r = 0; r < rows.size(); ++r) {
+        rows[r] = g.kit.MakeRow();
+        if (rows[r]) AddToVerticalBox(home, rows[r], r ? 4 : 6);
+    }
+    for (size_t k = 0; k < chips.size(); ++k) {
+        chips[k] = MakeFlat(name(k), style::type::kHint, {10, 4, 10, 4});
+        Box& row = rows[k < (N + 1) / 2 ? 0 : 1];
+        if (row) AddFlatH(row, chips[k], 6);
+    }
+}
+
+// RULES tab: the sub-tabs (MATCH, COMBAT, TEAMS, GEAR, WORLD: the ones the mode has rows in), and a stepper per setting of the
+// chosen one, "label and hint | < | value | >". Every row is made here and Draw shows the chosen sub-tab's.
 void BuildRulesTab(Box& page) {
+    g.subTabRow = g.kit.MakeRow();
+    if (g.subTabRow) AddToVerticalBox(page, g.subTabRow, 0);
     for (size_t sct = 0; sct < kSectionCount; ++sct) {
-        g.sectionTitles[sct] = Section(page, SectionName(LobbySection(sct)), sct ? 18 : 0);
+        g.subTabs[sct] = MakeFlat(SectionName(LobbySection(sct)), style::type::kBody, {14, 6, 14, 6});
+        if (g.subTabRow) AddFlatH(g.subTabRow, g.subTabs[sct], 8);
+    }
+    g.rulesNote = NewText("", style::type::kHint, style::kMenuDim);   // Progression: "The game's own rules, in the Tavern." (hidden otherwise; never removed)
+    if (g.rulesNote) { g.rulesNote.Wrap(true); AddToVerticalBox(page, g.rulesNote, 12); g.rulesNote.Show(false); }
+    for (size_t sct = 0; sct < kSectionCount; ++sct) {
         g.sections[sct] = g.kit.MakeColumn();
         if (g.sections[sct]) AddToVerticalBox(page, g.sections[sct], 2);
     }
@@ -883,19 +933,15 @@ void BuildRulesTab(Box& page) {
         if (LobbyRow(i) == LobbyRow::Damage && BuildDamageValue(valueBox)) v.value = Text{};
         else if ((LobbyRow(i) == LobbyRow::DeadWeight || LobbyRow(i) == LobbyRow::WeaponWeight) && BuildWeightValue(LobbyRow(i), valueBox)) v.value = Text{};   // the same
         else if (LobbyRow(i) == LobbyRow::Gather && BuildGatherValue(valueBox)) v.value = Text{};   // the same
+        else if (lobby_detail::RowKindOf(LobbyRow(i)) == RowKind::Choice && BuildPlateValue(valueBox, v)) {}   // a named value: a dropdown
         else valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(home, v.box, 10);
-        if (LobbyRow(i) == LobbyRow::Weapons) {   // the types to tick, in two rows of four under the row's text
-            for (size_t r = 0; r < g.weaponChipRows.size(); ++r) {
-                g.weaponChipRows[r] = g.kit.MakeRow();
-                if (g.weaponChipRows[r]) AddToVerticalBox(home, g.weaponChipRows[r], r ? 4 : 6);
-            }
-            for (size_t k = 0; k < g.weaponChips.size(); ++k) {
-                g.weaponChips[k] = MakeFlat(WeaponTypeName(uint8_t(k)), 13, {10, 4, 10, 4});
-                Box& row = g.weaponChipRows[k < 4 ? 0 : 1];
-                if (row) AddFlatH(row, g.weaponChips[k], 6);
-            }
-        }
+        if (LobbyRow(i) == LobbyRow::Weapons)   // the types to tick, in two rows of four under the row's text
+            BuildChipRows(home, g.weaponChipRows, g.weaponChips, [](size_t k) { return std::string(WeaponTypeName(uint8_t(k))); });
+        if (LobbyRow(i) == LobbyRow::Gear)      // the tier, while it is used (random or identical gear, bots)
+            BuildChipRows(home, g.gearTierRows, g.gearTierChips, [](size_t k) { return TierChips(0)[k].label; });
+        if (LobbyRow(i) == LobbyRow::Tier)      // the Crypts card's Starting tier: the chips alone
+            BuildChipRows(home, g.startTierRows, g.startTierChips, [](size_t k) { return TierChips(0)[k].label; });
         g.steppers.push_back(v);
     }
 }
@@ -910,7 +956,7 @@ void BuildMapTab(Box& page) {
     auto add = [&](const std::string& name) {
         MapView v;
         Box body = g.kit.MakeColumn();
-        v.name = NewText(name, 18, style::kMenuText); v.tag = NewText("", 13, style::kMenuDim);
+        v.name = NewText(name, style::type::kRow, style::kMenuText); v.tag = NewText("", style::type::kHint, style::kMenuDim);
         if (body && v.name && v.tag) {
             AddToVerticalBox(body, v.name, 0); AddToVerticalBox(body, v.tag, 2);
             v.card = MakeCard(body, {12, 8, 12, 9});
@@ -921,7 +967,7 @@ void BuildMapTab(Box& page) {
     };
     for (size_t i = 0; i < MapCount(); ++i) if (MapAt(i).pick) add(MapAt(i).display);
     for (size_t i = 0; i < kMaxModMaps; ++i) add("");   // hidden until a modded map fills it
-    g.noMaps = NewText("Progression plays in the Tavern: there is no map to pick.", 15, style::kMenuDim);
+    g.noMaps = NewText("Progression plays in the Tavern: there is no map to pick.", style::type::kBody, style::kMenuDim);
     if (g.noMaps) { g.noMaps.Wrap(true); AddToVerticalBox(page, g.noMaps, 6); g.noMaps.Show(false); }
 }
 
@@ -934,22 +980,24 @@ void BuildModsTab(Box& page) {
         Fixed valueBox;
         StepperView v = MakeStepper(valueBox);
         if (!v.box) continue;
-        valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
+        if (!ModRuleIsChoice(ModRuleRow(i)) || !BuildPlateValue(valueBox, v))   // Mods allowed and Classes are dropdowns; the two switches keep their arrows
+            valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
         AddToVerticalBox(page, v.box, i ? 10 : 2);
         g.modRules[i] = v;
     }
-    g.modSummary = NewText("", 15, style::kMenuText);
-    g.modStatus = NewText("", 14, style::kMenuWarn);
+    g.modSummary = NewText("", style::type::kBody, style::kMenuText);
+    g.modStatus = NewText("", style::type::kHint, style::kMenuWarn);
     for (Text* t : {&g.modSummary, &g.modStatus}) if (*t) { t->Wrap(true); AddToVerticalBox(page, *t, 8); }
     g.classUnrestricted = MakeFlat("[  ] UNRESTRICTED", 15, {10, 4, 10, 4});
     AddFlat(page, g.classUnrestricted, 12);
+    if (g.classUnrestricted.card) g.classUnrestricted.card.button.Show(false);   // the Classes row (a stepper above) is the switch now; the widget stays
     Section(page, "IN THIS LOBBY", 18);
     for (size_t i = 0; i < kModItemRows; ++i) {
         ModItemView v;
         v.box = g.kit.MakeRow();
         Box text = g.kit.MakeColumn();
-        v.name = NewText("", 16, style::kMenuText); v.detail = NewText("", 13, style::kMenuDim);
-        v.note = NewText("", 13, style::kMenuWarn); v.verdict = NewText("", 14, style::kMenuDim);
+        v.name = NewText("", style::type::kRow, style::kMenuText); v.detail = NewText("", style::type::kHint, style::kMenuDim);
+        v.note = NewText("", style::type::kHint, style::kMenuWarn); v.verdict = NewText("", style::type::kHint, style::kMenuDim);
         if (!v.box || !text || !v.name || !v.detail || !v.note || !v.verdict) { g.modItems.push_back(ModItemView{}); continue; }
         v.detail.Wrap(true); v.note.Wrap(true);
         AddToVerticalBox(text, v.name, 0);
@@ -961,22 +1009,22 @@ void BuildModsTab(Box& page) {
         v.box.Show(false);
         g.modItems.push_back(v);
     }
-    g.modEmpty = NewText("", 14, style::kMenuDim);
-    g.modMore = NewText("", 14, style::kMenuDim);
-    g.modTruncated = NewText("", 14, style::kMenuWarn);
+    g.modEmpty = NewText("", style::type::kHint, style::kMenuDim);
+    g.modMore = NewText("", style::type::kHint, style::kMenuDim);
+    g.modTruncated = NewText("", style::type::kHint, style::kMenuWarn);
     for (Text* t : {&g.modEmpty, &g.modMore, &g.modTruncated}) if (*t) { t->Wrap(true); AddToVerticalBox(page, *t, 6); }
     g.modPendingTitle = Section(page, "WAITING", 18);
     for (Text& t : g.modPending) {
-        t = NewText("", 14, style::kMenuWarn);
+        t = NewText("", style::type::kHint, style::kMenuWarn);
         if (t) { t.Wrap(true); AddToVerticalBox(page, t, 4); t.Show(false); }
     }
-    g.modPrivacy = NewText("", 13, style::kMenuDim);
+    g.modPrivacy = NewText("", style::type::kHint, style::kMenuDim);
     if (g.modPrivacy) { g.modPrivacy.Wrap(true); AddToVerticalBox(page, g.modPrivacy, 18); }
 }
 
 void BuildClassView(Box& rowOf);
 
-// In a lobby, right: the MODE | RULES | MAP | MODS | CLASSES tabs, the chosen tab's page, and the summary with START at the foot.
+// In a lobby, right: the MODE | MAP | RULES | MODS | CLASSES tabs, the chosen tab's page, and the summary with START at the foot.
 void BuildInRight() {
     Box& col = g.inRight;
     Box tabs = g.kit.MakeRow(), foot = g.kit.MakeRow(), footText = g.kit.MakeColumn();
@@ -985,12 +1033,13 @@ void BuildInRight() {
     if (!tabs || !foot || !footText || !under || !underLine) { HSM_LOG("ui: the lobby tabs could not be made"); return; }
     g.tabBar = tabs; g.tabRule = under; g.tabFoot = foot;
     AddToVerticalBox(col, tabs, 0);
-    static constexpr const char* kTabNames[kTabCount] = {"MODE", "RULES", "MAP", "MODS", "CLASSES"};
+    std::array<const char*, kTabCount> kTabNames{};
+    for (size_t i = 0; i < kTabCount; ++i) kTabNames[i] = TabName(i);     // MODE, MAP, RULES, MODS, CLASSES (match/hsm_lobby_nav.h)
     for (size_t i = 0; i < kTabCount; ++i) {
         TabView& t = g.tabs[i];
         Box body = g.kit.MakeColumn();
         Fixed lineBox = g.kit.MakeFixed();
-        t.label = NewText(skin::Title(kTabNames[i]), 25, style::kMenuDim);
+        t.label = NewText(skin::Title(kTabNames[i]), style::type::kEmphasis, style::kMenuDim);
         skin::Font(t.label, skin::Face::Heading);
         t.line = g.kit.MakePanel();
         if (!body || !lineBox || !t.label || !t.line) continue;
@@ -1016,22 +1065,22 @@ void BuildInRight() {
         if (!scroll || !g.tabPages[i]) continue;
         scroll.Add(g.tabPages[i]).Padding({0, 0, 12, 0});
         FillVerticalBox(col, scroll, 14);
-        if (i == 0) BuildModeTab(g.tabPages[i]);
-        if (i == 1) BuildRulesTab(g.tabPages[i]);
-        if (i == 2) BuildMapTab(g.tabPages[i]);
+        if (i == kModeTab) BuildModeTab(g.tabPages[i]);
+        if (i == kMapTab) BuildMapTab(g.tabPages[i]);
+        if (i == kRulesTab) BuildRulesTab(g.tabPages[i]);
         if (i == kModsTab) BuildModsTab(g.tabPages[i]);
         g.tabPages[i] = scroll;                 // what the tab shows and collapses is the page's scroll box
     }
     AddToVerticalBox(col, foot, 14);
     AddToHorizontalBox(foot, footText, 1, 18).Align(HAlign::Fill, VAlign::Center);
-    g.summary = NewText("", 15, style::kMenuText);
-    g.hostOnly = NewText("", 14, style::kMenuDim);
-    g.waiting = NewText("", 15, style::kMenuDim);
+    g.summary = NewText("", style::type::kBody, style::kMenuText);
+    g.hostOnly = NewText("", style::type::kHint, style::kMenuDim);
+    g.waiting = NewText("", style::type::kBody, style::kMenuDim);
     for (Text* t : {&g.summary, &g.hostOnly, &g.waiting}) if (*t) { t->Wrap(true); AddToVerticalBox(footText, *t, 2); }
-    g.startLabel = NewText("START MATCH", 28, style::kMenuLight);
+    g.startLabel = NewText("START MATCH", style::type::kCard, style::kMenuLight);
     g.start = MakeCard(g.startLabel, {38, 12, 38, 12});
     if (g.start) {
-        g.startLabel.Font(28, 1, {0, 0, 0, 0.6f});
+        g.startLabel.Font(style::type::kCard, 1, style::kOutlineInk);
         g.startLabel.Align(Justify::Center);
         AddToHorizontalBox(foot, g.start.button, 0, 0).Align(HAlign::Right, VAlign::Center);
     }
@@ -1052,7 +1101,7 @@ Box AddClassColumn(Box& row, float fill, float padRight, bool scroll) {
 Bar AddClassBar(Box& col, const char* name) {
     Box row = g.kit.MakeRow();
     Fixed labelBox = g.kit.MakeFixed(), barBox = g.kit.MakeFixed();
-    Text label = NewText(name, 15, style::kMenuDim);
+    Text label = NewText(name, style::type::kBody, style::kMenuDim);
     Bar bar = g.kit.MakeBar();
     if (!row || !labelBox || !barBox || !label || !bar) return Bar{};
     labelBox.Width(120);
@@ -1071,41 +1120,41 @@ void BuildClassView(Box& rowOf) {
     Box pickCol = AddClassColumn(rowOf, 0.65f, 16, true), statCol = AddClassColumn(rowOf, 1.35f, 16, true), infoCol = AddClassColumn(rowOf, 0.85f, 0, false);
     if (!pickCol || !statCol || !infoCol) return;
     Section(pickCol, "CHOOSE YOUR CLASS", 0);
-    g.classTabButton = MakeFlat("CLASSES  v", 16, {12, 5, 12, 5});
+    g.classTabButton = MakeFlat("CLASSES  v", style::type::kRow, {12, 5, 12, 5});
     AddFlat(pickCol, g.classTabButton, 8);
     g.classTabList = g.kit.MakeColumn();
     if (g.classTabList) {
         for (const ClassTab& t : ClassTabs()) {
-            Flat f = MakeFlat(t.title, 15, {18, 4, 12, 4});
+            Flat f = MakeFlat(t.title, style::type::kBody, {18, 4, 12, 4});
             AddFlat(g.classTabList, f, 2);
             g.classTabs.push_back(f);
         }
         AddToVerticalBox(pickCol, g.classTabList, 2);
         g.classTabList.Show(false);
     }
-    g.classTabNote = NewText("", 14, style::kMenuDim);
+    g.classTabNote = NewText("", style::type::kHint, style::kMenuDim);
     if (g.classTabNote) { g.classTabNote.Wrap(true); AddToVerticalBox(pickCol, g.classTabNote, 6); }
     for (int i = 0; i < ClassPickCount(); ++i) {
-        Flat f = MakeFlat(ClassPickName(i), 17, {14, 5, 14, 5});
+        Flat f = MakeFlat(ClassPickName(i), style::type::kRow, {14, 5, 14, 5});
         AddFlat(pickCol, f, 6);
         g.classPicks.push_back(f);
     }
-    g.classNew = MakeFlat("+ NEW CLASS", 16, {14, 5, 14, 5});
+    g.classNew = MakeFlat("+ NEW CLASS", style::type::kRow, {14, 5, 14, 5});
     AddFlat(pickCol, g.classNew, 8);
-    g.classWhere = NewText("Classes only count in Classes lobbies. In any other lobby you fight as the game's plain fighter.", 14, style::kMenuDim);
+    g.classWhere = NewText("Used in lobbies with Classes on.", style::type::kHint, style::kMenuDim);
     if (g.classWhere) { g.classWhere.Wrap(true); AddToVerticalBox(pickCol, g.classWhere, 8); }
-    g.className = NewText("", 28, style::kMenuText);
-    g.classNote = NewText("", 15, style::kMenuDim);
+    g.className = NewText("", style::type::kCard, style::kMenuText);
+    g.classNote = NewText("", style::type::kBody, style::kMenuDim);
     if (g.className) AddToVerticalBox(statCol, g.className, 0);
     if (g.classNote) { g.classNote.Wrap(true); AddToVerticalBox(statCol, g.classNote, 6); }
     g.classNameRow = g.kit.MakeRow();
     g.classNameBox = g.kit.MakeEditBox();
-    g.classNameSave = MakeFlat("SAVE NAME", 14, {10, 3, 10, 3});
+    g.classNameSave = MakeFlat("SAVE NAME", style::type::kHint, {10, 3, 10, 3});
     if (g.classNameRow && g.classNameBox && g.classNameSave.card) {
         g.classNameBox.Hint("Name this class");
         AddToHorizontalBox(g.classNameRow, g.classNameBox, 1, 8).Align(HAlign::Fill, VAlign::Center);
         AddToHorizontalBox(g.classNameRow, g.classNameSave.card.button, 0, 8).Align(HAlign::Left, VAlign::Center);
-        g.classDelete = MakeFlat("DELETE", 14, {10, 3, 10, 3});
+        g.classDelete = MakeFlat("DELETE", style::type::kHint, {10, 3, 10, 3});
         if (g.classDelete.card) AddToHorizontalBox(g.classNameRow, g.classDelete.card.button, 0, 0).Align(HAlign::Left, VAlign::Center);
         AddToVerticalBox(statCol, g.classNameRow, 8);
         g.classNameRow.Show(false);
@@ -1119,9 +1168,9 @@ void BuildClassView(Box& rowOf) {
         ClassRow v;
         v.box = g.kit.MakeRow();
         Fixed valueBox = g.kit.MakeFixed();
-        v.value = NewText("", 15, style::kMenuText);
-        v.name = MakeFlat(ClassField(ClassSheet{}, i).label, 14, {8, 2, 8, 2});
-        v.prev = g.maker.MakeArrow(false, 15); v.next = g.maker.MakeArrow(true, 15);
+        v.value = NewText("", style::type::kBody, style::kMenuText);
+        v.name = MakeFlat(ClassField(ClassSheet{}, i).label, style::type::kHint, {8, 2, 8, 2});
+        v.prev = g.maker.MakeArrow(false, style::type::kBody); v.next = g.maker.MakeArrow(true, style::type::kBody);
         if (!v.box || !valueBox || !v.value || !v.name.card || !v.prev.card || !v.next.card) { g.classFields.push_back(ClassRow{}); continue; }
         v.value.Align(Justify::Center);
         valueBox.Width(120);
@@ -1134,45 +1183,66 @@ void BuildClassView(Box& rowOf) {
         g.classFields.push_back(v);
     }
     // Here and not by the bars, because this column doesn't scroll: it stays on screen while the stats are being changed.
-    g.classBudget = NewText("", 20, style::kMenuText);
+    g.classBudget = NewText("", style::type::kEmphasis, style::kMenuText);
     if (g.classBudget) { g.classBudget.Wrap(true); AddToVerticalBox(infoCol, g.classBudget, 0); }
     Section(infoCol, "WHAT THIS DOES", 16);
-    g.classInfoName = NewText("", 20, style::kMenuText);
-    g.classInfo = NewText("", 16, style::kMenuDim);
+    g.classInfoName = NewText("", style::type::kEmphasis, style::kMenuText);
+    g.classInfo = NewText("", style::type::kBody, style::kMenuDim);
     if (g.classInfoName) AddToVerticalBox(infoCol, g.classInfoName, 8);
     if (g.classInfo) { g.classInfo.Wrap(true); AddToVerticalBox(infoCol, g.classInfo, 8); }
-    g.classContinue = MakeFlat("DONE", 20, {22, 12, 22, 12});
-    AddFlat(infoCol, g.classContinue, 28);
+}
+
+// A dropdown's closed control at the foot of a column, kPlateWidth wide. Empty when it could not be made.
+Flat AddPlate(Box& col, float padTop) {
+    Flat f = g.maker.MakePlate(style::type::kRow);
+    Fixed box = g.kit.MakeFixed();
+    if (!f.card || !box) return Flat{};
+    box.Width(kPlateWidth);
+    box.Content(f.card.button).Align(HAlign::Fill, VAlign::Fill);
+    AddToVerticalBox(col, box, padTop).Align(HAlign::Left, VAlign::Top);
+    return f;
 }
 
 // SETTINGS (the footer button): help improve the mod and voice chat, in place of the lobby while it is open.
 void BuildSettingsView(Box& col) {
     Section(col, "HELP IMPROVE THE MOD", 0);
     // The setting behind help_improve in HSMMod.ini; what it sends is session.cpp's business.
-    g.helpToggle = MakeFlat("HELP IMPROVE THE MOD: OFF", 17);
+    g.helpToggle = MakeFlat("HELP IMPROVE THE MOD: OFF", style::type::kRow);
     AddFlat(col, g.helpToggle, 8);
-    g.helpNote = NewText("When on, your HSMMod log goes to the maintainers when someone in your lobby files a bug report or your game "
-                         "crashes. Steam IDs, IPs and your Windows user name are removed; player names stay. Off unless you turn it on.",
+    g.helpNote = NewText("Sends your HSMMod log if someone in your lobby files a bug report or the game crashes.\n"
+                         "Steam IDs, IPs and your Windows user name are removed; player names stay.",
                          14, style::kMenuDim);
     if (g.helpNote) { g.helpNote.Wrap(true); AddToVerticalBox(col, g.helpNote, 8); }
     // NICKNAME: what the other players see instead of the Steam name. HIDE PLAYER NAMES: what this screen shows for them.
     BuildNameRow(g.nickname, col, "NICKNAME", "Nickname (up to 24 characters)", 28);
+    // MY REGION: where your lobbies are listed and what My region means in the browser (was REGION: AUTO in the page's header).
+    if (g.drops) {                          // a dropdown: the section's name over the plate
+        Section(col, "MY REGION", 28);
+        g.myRegionPlate = AddPlate(col, 8);
+    }
+    if (!g.myRegionPlate.card) {
+        g.myRegion = MakeFlat("MY REGION: AUTO", style::type::kRow);
+        AddFlat(col, g.myRegion, g.drops ? 8 : 28);
+    }
+    g.myRegionNote = NewText("Auto: the nearest by ping.", style::type::kHint, style::kMenuDim);
+    if (g.myRegionNote) { g.myRegionNote.Wrap(true); AddToVerticalBox(col, g.myRegionNote, 8); }
     Section(col, "HIDE PLAYER NAMES", 28);
-    g.hideToggle = MakeFlat("HIDE PLAYER NAMES: OFF", 17);
+    g.hideToggle = MakeFlat("HIDE PLAYER NAMES: OFF", style::type::kRow);
     AddFlat(col, g.hideToggle, 8);
-    g.hideNote = NewText("When on, every other player shows as Player 1, Player 2 ... on your screen only: name tags, chat, the "
-                         "scoreboard, the kill feed and the lobby page. For streams and clips. Yours is not hidden.",
-                         14, style::kMenuDim);
+    g.hideNote = NewText("On your screen only. For streams and clips.", style::type::kHint, style::kMenuDim);
     if (g.hideNote) { g.hideNote.Wrap(true); AddToVerticalBox(col, g.hideNote, 8); }
     // MENU LOOK: the game's own art (the default), dark, or the earlier look. The widgets are built once, so it takes effect at the next start.
     Section(col, "MENU LOOK", 28);
     g.look = style::CurrentMenuLook();
-    g.lookToggle = MakeFlat("", 17);
-    AddFlat(col, g.lookToggle, 8);
-    g.lookNote = NewText("", 14, style::kMenuDim);
+    if (g.drops) g.lookPlate = AddPlate(col, 8);
+    if (!g.lookPlate.card) {
+        g.lookToggle = MakeFlat("", style::type::kRow);
+        AddFlat(col, g.lookToggle, 8);
+    }
+    g.lookNote = NewText("", style::type::kHint, style::kMenuDim);
     if (g.lookNote) { g.lookNote.Wrap(true); AddToVerticalBox(col, g.lookNote, 8); }
     // VOICE CHAT: the same block as the in-match Esc menu (ui/mp_widgets.h); shown with or without a lobby.
-    g.voice.Build(g.maker, col, 28);
+    g.voice.Build(g.maker, col, 28, g.drops ? &g.drops : nullptr);
 }
 
 // A column's dark panel around a box (a scroll box when `scroll`), as one share of the body row.
@@ -1211,6 +1281,8 @@ bool BuildPanel() {
         return false;
     }
     root.Add(g.panel).Anchor({{0, 0}, {1, 1}}, {0, 0}).Offsets({0, 0, 0, 0}).Z(100);
+    // The dropdown list: over the page, under its own windows (the question, the password, the warning: Z 110 and up).
+    if (!g.drops.Build(g.kit, root, kDropdownZ)) HSM_LOG("ui: the lists could not be made; the dropdown rows step with their arrows");
     skin::Paint(g.panel, skin::Art::Backdrop, style::kMenuBackdrop);
     g.panel.Padding({48, 26, 48, 22});
     g.panel.Content(page);
@@ -1233,30 +1305,28 @@ bool BuildPanel() {
     // Header: the title, our Steam name, the state pill (outlined) and the version badge; under it the accent rule and
     // the lobby's last message.
     AddToVerticalBox(head, header, 0);
-    g.title = NewText(skin::Title("Multiplayer"), 50, style::kMenuAccentInk);
-    g.me = NewText("", 17, style::kMenuDim);
-    g.pillText = NewText("", 15, style::kMenuDim);
-    g.badge = NewText("", 14, style::kMenuDim);
+    g.title = NewText(skin::Title("Multiplayer"), style::type::kPage, style::kMenuAccentInk);
+    g.me = NewText("", style::type::kRow, style::kMenuDim);
+    g.pillText = NewText("", style::type::kBody, style::kMenuDim);
+    g.badge = NewText("", style::type::kHint, style::kMenuDim);
     if (g.title) AddToHorizontalBox(header, g.title, 0, 28).Align(HAlign::Left, VAlign::Center);
     if (g.me) AddToHorizontalBox(header, g.me, 1, 20).Align(HAlign::Left, VAlign::Center);
     if (g.pillText) { skin::Paint(g.pill, skin::Art::Card); skin::Pad(g.pill, skin::Art::Card, {10, 6, 10, 6}); g.pill.Content(g.pillText); }
     g.pillFrame.Padding({1, 1, 1, 1});
     g.pillFrame.Content(g.pill);
     AddToHorizontalBox(header, g.pillFrame, 0, 18).Align(HAlign::Left, VAlign::Center);
-    if (g.badge) AddToHorizontalBox(header, g.badge, 0, 18).Align(HAlign::Left, VAlign::Center);
-    g.regionPick = MakeFlat("REGION: AUTO", 14, {12, 4, 12, 4});   // top right: steps Auto, NA East ... (Session::SetRegionPick)
-    AddFlatH(header, g.regionPick, 0);
+    if (g.badge) AddToHorizontalBox(header, g.badge, 0, 0).Align(HAlign::Left, VAlign::Center);
     rule.Height(3);
     rule.Content(ruleLine);
     ruleLine.Color(style::kMenuAccent);
     AddToVerticalBox(head, rule, 10);
-    g.status = NewText("", 15, style::kMenuDim);
+    g.status = NewText("", style::type::kBody, style::kMenuDim);
     if (g.status) AddToVerticalBox(head, g.status, 6);
-    g.notice = NewText("", 20, style::kMenuAccentInk);   // Session::TakeNotice: kicked, banned, refused; until the page closes
+    g.notice = NewText("", style::type::kEmphasis, style::kMenuAccentInk);   // Session::TakeNotice: kicked, banned, refused; until the page closes
     if (g.notice) { g.notice.Wrap(true); g.notice.Show(false); AddToVerticalBox(head, g.notice, 8); }
-    g.updateNote = NewText("", 15, style::kMenuOk);   // net/update_check.h: only when a newer release exists
+    g.updateNote = NewText("", style::type::kBody, style::kMenuOk);   // net/update_check.h: only when a newer release exists
     g.updateRow = g.kit.MakeRow();
-    g.updateNow = MakeFlat("UPDATE NOW", 15, {14, 5, 14, 5});
+    g.updateNow = MakeFlat("UPDATE NOW", style::type::kBody, {14, 5, 14, 5});
     if (g.updateNote && g.updateRow && g.updateNow.card) {
         g.updateNote.Wrap(true);
         AddToHorizontalBox(g.updateRow, g.updateNote, 1, 14).Align(HAlign::Fill, VAlign::Center);
@@ -1297,11 +1367,11 @@ bool BuildPanel() {
 
     // REPORT A BUG opens a text box over the footer: SEND and CANCEL; the text becomes a public GitHub issue
     // (net/report_client).
-    g.reportSend = MakeFlat("SEND", 15, {14, 5, 14, 5});
-    g.reportCancel = MakeFlat("CANCEL", 15, {14, 5, 14, 5});
+    g.reportSend = MakeFlat("SEND", style::type::kBody, {14, 5, 14, 5});
+    g.reportCancel = MakeFlat("CANCEL", style::type::kBody, {14, 5, 14, 5});
     g.reportText = g.kit.MakeEditBox();
     g.reportBox = g.kit.MakeRow();
-    g.reportNote = NewText("", 14, style::kMenuDim);
+    g.reportNote = NewText("", style::type::kHint, style::kMenuDim);
     if (g.reportBox && g.reportText) {
         g.reportText.Hint("What went wrong? One line is enough");
         AddToHorizontalBox(g.reportBox, g.reportText, 1, 8).Align(HAlign::Fill, VAlign::Center);
@@ -1313,14 +1383,16 @@ bool BuildPanel() {
 
     AddToVerticalBox(foot, footer, 8);
     AddToVerticalBox(page, footBand, 14);
-    g.close = MakeFlat("BACK", 16);
-    g.settingsOpen = MakeFlat("SETTINGS", 16);
-    g.classOpen = MakeFlat("YOUR CLASS", 16);
-    g.reportOpen = MakeFlat("REPORT A BUG", 16);
-    g.alone = MakeFlat("PLAY ALONE, MOD OFF", 16);   // restarts the game without the mod; the next ordinary start has it again
-    AddFlatH(footer, g.close, 10); AddFlatH(footer, g.classOpen, 10); AddFlatH(footer, g.settingsOpen, 10); AddFlatH(footer, g.alone, 10); AddFlatH(footer, g.reportOpen, 18);
-    g.reportHow = NewText("In a fight: press Enter and type /bug and what happened. Your HSMMod log goes with it.", 13, style::kMenuDim);
-    if (g.reportHow) { g.reportHow.Wrap(true); AddToHorizontalBox(footer, g.reportHow, 1, 0).Align(HAlign::Fill, VAlign::Center); }
+    // The bottom-left button says where it goes (FooterFor): BACK TO MAIN MENU on the lobby list, BACK TO LOBBY (LIST) from SETTINGS
+    // and the class page, and LEAVE LOBBY on the lobby itself (where BACK is hidden); INVITE FRIENDS is beside it, in a lobby.
+    g.close = MakeFlat("BACK TO MAIN MENU", style::type::kRow);
+    g.leave = MakeFlat("LEAVE LOBBY", style::type::kRow);
+    g.invite = MakeFlat("INVITE FRIENDS", style::type::kRow);
+    g.classOpen = MakeFlat("YOUR CLASS", style::type::kRow);
+    g.settingsOpen = MakeFlat("SETTINGS", style::type::kRow);
+    g.reportOpen = MakeFlat("REPORT A BUG", style::type::kRow);
+    AddFlatH(footer, g.close, 10); AddFlatH(footer, g.leave, 10); AddFlatH(footer, g.invite, 10); AddFlatH(footer, g.classOpen, 10);
+    AddFlatH(footer, g.settingsOpen, 10); AddFlatH(footer, g.reportOpen, 0);
     g.panel.Show(false);
     return true;
 }
@@ -1356,7 +1428,7 @@ LobbyPhase PhaseOf(game::Lobby::State s) {
     return LobbyPhase::Offline;
 }
 
-LobbyLocal Local(game::Lobby& lobby) {
+LobbyLocal Local(game::Lobby& lobby, const std::vector<JoinedBuild>& joined) {
     LobbyLocal l;
     l.phase = PhaseOf(lobby.state());
     l.host = lobby.IsHost();
@@ -1372,6 +1444,7 @@ LobbyLocal Local(game::Lobby& lobby) {
     if (lobby.InLobby()) {
         l.config = lobby.config();
         l.mapPick = lobby.MapPick();
+        l.fightPick = lobby.FightPick();
         for (const ModMapEntry& e : game::modmaps::Maps()) {
             const auto& paks = game::modmaps::Paks();
             l.modMaps.push_back({e.path, e.display, e.pak >= 0 && size_t(e.pak) < paks.size() ? paks[size_t(e.pak)].name : std::string()});
@@ -1385,12 +1458,14 @@ LobbyLocal Local(game::Lobby& lobby) {
             LobbyPlayer p;
             p.name = m.name; p.host = m.host; p.ready = m.ready; p.me = m.id == steam::MySteamId();
             p.team = m.team; p.hostOverride = m.hostOverride; p.build = m.build; p.steamName = m.steamName;
+            for (const JoinedBuild& j : joined)   // the host has this player's Hello: its build is what the session judges by, and none means an older HSMMod
+                if (j.key == m.id) { p.joined = true; p.build = j.build; }
             l.players.push_back(p);
         }
     }
     for (const game::LobbyListing& f : lobby.listings()) {
         LobbyFound o;
-        o.name = f.name; o.map = f.map; o.mode = f.mode; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
+        o.name = f.name; o.map = f.map; o.mode = f.mode; o.scenario = f.scenario; o.players = f.players; o.maxPlayers = f.maxPlayers; o.locked = f.locked; o.compatible = f.compatible; o.reason = f.reason;
         o.mods = f.mods; o.region = f.region;
         o.switchable = f.switchable;
         if (f.switchable) o.switchTag = SwitchTag(f.plan);
@@ -1405,48 +1480,84 @@ LobbyLocal Local(game::Lobby& lobby) {
 }
 
 
-// The tabs: the chosen one in the accent's ink and underlined, the others dim (brighter under the mouse).
+// What the page shows, for the footer: the lobby list or the lobby, or the Settings view or the class page opened over either.
+PageView ViewOf(const LobbyScene& s) {
+    return g.settingsShown ? PageView::Settings : g.classShown ? PageView::Class : s.in ? PageView::Lobby : PageView::List;
+}
+
+// The page a list was opened on, as one number: when it changes (another tab, a window over the page, the page closing) the list closes.
+uint32_t DropContext() {
+    return PageContextKey(g.panelOpen, ViewOf(g.scene), g.scene.in, g.tab, g.rulesTab, g.askOpen || g.pwOpen || g.warnOpen);
+}
+
+// A browser filter chip's text: the region and the mode open lists, and say so with the chevron (v closed, ^ open); the rest are the label.
+std::string ChipText(size_t i, const FilterChip& chip) {
+    if (!chip.choice || !g.drops) return chip.label;
+    return chip.label + (g.drops.IsOpen(dropdown_owner::kFilterChip + uint32_t(i)) ? "  ^" : "  v");
+}
+
+// The tab whose page is on screen. Outside a lobby, and while the class page is open apart, that column only ever holds the classes.
+size_t PageTab(const LobbyScene& s) { return g.classShown || !s.in ? kClassesTab : ClampTab(g.tab, ClassesTabShown(s)); }
+
+// The tabs: the chosen one in the accent's ink and underlined, the others dim (brighter under the mouse). CLASSES is there only
+// in a lobby that uses classes.
 void PaintTabs() {
+    const bool classesTab = ClassesTabShown(g.scene);
     for (size_t i = 0; i < kTabCount; ++i) {
         TabView& t = g.tabs[i];
         if (!t.card) continue;
-        const bool on = i == g.tab;
+        t.card.button.Show(TabShown(i, classesTab));
+        const bool on = i == ClampTab(g.tab, classesTab);
         const bool hover = t.card.button.Hovered() || t.card.button.Focused();
         t.card.frame.Color(kClear);
         t.card.face.Color(kClear);
         t.label.Color(on ? style::kMenuAccentInk : hover ? style::kMenuText : style::kMenuDim);
         t.line.Color(on ? style::kMenuAccent : kClear);
-        if (g.tabPages[i]) g.tabPages[i].Show(i == (g.scene.in ? g.tab : kClassesTab));   // outside a lobby this column only ever holds the classes
+        if (g.tabPages[i]) g.tabPages[i].Show(i == PageTab(g.scene));
     }
 }
 
-// The scene's row for the i-th stepper (a LobbyRow value): the Players row is the lobby's own, not a match setting.
+// The scene's row for the i-th stepper (a LobbyRow value). Every row, the lobby's own limit and the special ones too, is in the
+// scene's list.
 const SettingRow* RowFor(const LobbyScene& s, size_t i) {
-    if (i == size_t(LobbyRow::Players)) return s.hasPlayerLimit ? &s.playerLimit : nullptr;
-    if (i == size_t(LobbyRow::WinBy)) return s.hasWinBy ? &s.winBy : nullptr;           // the same
-    if (i == size_t(LobbyRow::Props)) return s.hasProps ? &s.props : nullptr;           // the same
-    if (i == size_t(LobbyRow::ClassPower)) return s.hasClassPower ? &s.classPower : nullptr;   // the same
-    if (i == size_t(LobbyRow::Strip)) return s.hasStrip ? &s.strip : nullptr;           // the same
-    if (i == size_t(LobbyRow::KeepKit)) return s.hasKeepKit ? &s.keepKit : nullptr;     // the same
-    if (i == size_t(LobbyRow::Scenario)) return s.hasScenario ? &s.scenario : nullptr;   // like the player limit, apart from the match settings
-    if (i == size_t(LobbyRow::TimeOfDay)) return s.hasTimeOfDay ? &s.timeOfDay : nullptr;
     for (const SettingRow& r : s.settings) if (size_t(r.id) == i) return &r;
     return nullptr;
 }
 
-bool ClassesOpen(const LobbyScene& s) { return !g.settingsShown && (s.in ? g.tab == kClassesTab : g.classShown); }
+// The rows of this RULES sub-tab are on screen (the host's sliders and boxes are live only then).
+bool RulesShown(LobbySection sct) { return g.tab == kRulesTab && !g.settingsShown && !g.classShown && g.rulesTab == sct; }
+
+// The class page is on screen: the CLASSES tab, or the page opened apart (outside a lobby, or in a lobby without the tab).
+bool ClassesOpen(const LobbyScene& s) { return !g.settingsShown && (g.classShown || (s.in && ClampTab(g.tab, ClassesTabShown(s)) == kClassesTab)); }
+
+// Chips under a stepper row (BuildChipRows): shown with the row's chips, the ones that are on in the accent.
+template <size_t N>
+void DrawChipRows(std::array<Box, 2>& rows, std::array<Flat, N>& chips, const std::vector<RowChip>* shown, bool enabled) {
+    const bool show = shown && !shown->empty();
+    for (Box& b : rows) if (b) b.Show(show);
+    for (size_t k = 0; k < chips.size(); ++k) {
+        Flat& c = chips[k];
+        if (!c.card) continue;
+        const bool on = show && k < shown->size() && (*shown)[k].on;
+        if (show && k < shown->size()) c.label.Set((*shown)[k].label);
+        c.label.Color(on ? style::kMenuOnPicked : style::kMenuText);
+        c.card.selected = on;
+        Dimmed(c.card, show && enabled);
+    }
+}
 
 void Draw(const LobbyScene& s) {
-    // Nobody lands on the classes by arriving in a lobby or by coming out of one.
-    if (s.in) g.classShown = false;
-    else if (g.tab == kClassesTab) g.tab = 0;
+    // Nobody lands on the classes by arriving in a lobby or by coming out of one: the class page closes at either, and a CLASSES
+    // tab that went away (we left, or the host turned Classes off) falls back to MODE.
+    if (s.in != g.wasIn) { g.wasIn = s.in; g.classShown = false; }
+    g.tab = ClampTab(g.tab, ClassesTabShown(s));
     g.pillText.Set(s.pill.text);
     g.pillText.Color(style::OnParchment(s.pill.color));
     // On the game's button art the ink says the state; the plain pill keeps its coloured outline.
     g.pillFrame.Color(skin::Loaded(skin::Art::Card) ? kClear : style::Faded(style::OnParchment(s.pill.color), 0.7f));
     g.me.Set(s.me);
     g.badge.Set(s.badge);
-    g.regionPick.label.Set("REGION: " + s.regionButton);
+    g.myRegion.label.Set(MyRegionText(s.regionButton));
     g.status.Set(s.status);
     g.status.Show(!s.status.empty());
 
@@ -1454,14 +1565,21 @@ void Draw(const LobbyScene& s) {
     g.settingsView.Show(g.settingsShown);
     g.settingsOpen.card.selected = g.settingsShown;
     g.classOpen.card.selected = ClassesOpen(s);
+    g.settingsOpen.label.Color(InkOn(g.settingsOpen.card, style::kMenuText));
+    g.classOpen.label.Color(InkOn(g.classOpen.card, style::kMenuText));
     g.idleLeft.Show(!s.in);
     g.idleRight.Show(!s.in && !g.classShown);
     g.inLeft.Show(s.in);
     g.inRight.Show(s.in || g.classShown);
-    if (g.tabBar) g.tabBar.Show(s.in);
-    if (g.tabRule) g.tabRule.Show(s.in);
-    if (g.tabFoot) g.tabFoot.Show(s.in);
-    if (g.classContinue.card) g.classContinue.card.button.Show(!s.in);
+    const bool tabs = s.in && !g.classShown;       // the class page opened apart has no tabs, and no START under it
+    if (g.tabBar) g.tabBar.Show(tabs);
+    if (g.tabRule) g.tabRule.Show(tabs);
+    if (g.tabFoot) g.tabFoot.Show(tabs);
+    const Footer foot = FooterFor(s.in, ViewOf(s));   // the bottom-left button says where it goes; LEAVE LOBBY and INVITE FRIENDS are the lobby's own
+    g.close.card.button.Show(!foot.back.empty());
+    if (!foot.back.empty()) g.close.label.Set(foot.back);
+    g.leave.card.button.Show(foot.leave);
+    g.invite.card.button.Show(foot.invite);
 
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Live(h->card, s.idle);
     g.idleHint.Show(!s.in);
@@ -1472,8 +1590,8 @@ void Draw(const LobbyScene& s) {
         const bool show = i < s.filters.size();
         c.card.button.Show(show);
         if (!show) continue;
-        c.label.Set(s.filters[i].label);
-        c.label.Color(s.filters[i].on ? style::kMenuAccentInk : style::kMenuText);
+        c.label.Set(ChipText(i, s.filters[i]));
+        c.label.Color(s.filters[i].on ? style::kMenuOnPicked : style::kMenuText);
         c.card.selected = s.filters[i].on;
     }
     g.browserCount.Set(s.browserCount);
@@ -1491,7 +1609,7 @@ void Draw(const LobbyScene& s) {
         v.players.Set(r.players);
         v.note.Set(r.joinable && !r.restart ? "JOIN" : r.note.text);   // a restart row keeps its "Restart: 2 mods off"
         v.note.Color(r.joinable && !r.restart ? style::kMenuOk : style::kMenuWarn);
-        Live(v.card, r.joinable, 0.55f);        // incompatible and full lobbies stay readable, dimmed, with the reason
+        Live(v.card, r.joinable);        // incompatible and full lobbies stay readable, dimmed, with the reason
     }
 
     g.playersTitle.Set(skin::Title(s.playersTitle.empty() ? "PLAYERS" : s.playersTitle));
@@ -1511,65 +1629,61 @@ void Draw(const LobbyScene& s) {
         v.card.selected = r.me;                 // our own row, framed
         v.card.live = r.movable;                // the host clicks a player to move them to the next team
     }
-    g.invite.card.button.Show(s.in);
     g.readyUp.card.button.Show(s.ready);
     g.readyUp.label.Set(s.readyLabel);
-    g.readyUp.label.Color(s.readyOn ? style::kMenuOk : style::kMenuText);   // the dot's green
+    g.readyUp.label.Color(s.readyOn ? style::kMenuOnPicked : style::kMenuText);
     g.readyUp.card.selected = s.readyOn;
     g.balance.card.button.Show(s.balance);
     if (g.shuffle.card) g.shuffle.card.button.Show(s.shuffle);
     if (g.classRow) { g.classRow.Show(!s.classLine.empty()); g.classRowText.Set(s.classLine); }
-    if (g.pwHostBox) { g.pwHostBox.Show(s.hostPassword); g.pwHostNote.Set(s.passwordNote); }
+    if (g.pwHostBox) g.pwHostBox.Show(s.hostPassword);
+    g.rulesNote.Set(s.rulesNote); g.rulesNote.Show(!s.rulesNote.empty());
     if (g.lobbyName.box) g.lobbyName.box.Show(s.hostPassword);   // the host's rows: password and name
-    g.leave.card.button.Show(s.in);
-    g.alone.card.button.Show(!s.in);   // not from a lobby: quitting there would drop everyone in it
 
     for (size_t i = 0; i < g.modes.size() && i < s.modes.size(); ++i) {
         ModeView& v = g.modes[i];
         const ModeCard& m = s.modes[i];
+        if (v.card) v.card.button.Show(m.shown);   // Crypt Royale and Grave Robbers only on the Crypts map; the CRYPTS card when not on it
         v.name.Set(m.name);
-        v.name.Color(m.selected ? style::kMenuAccentInk : style::kMenuText);
+        v.name.Color(m.selected ? style::kMenuOnPicked : style::kMenuText);
+        v.blurb.Color(m.selected ? style::kMenuOnPicked : style::kMenuDim);
         v.blurb.Set(m.hint.empty() ? m.description : m.description + "\n" + m.hint);   // a card the player count rules out says why
         v.card.selected = m.selected;
-        v.card.live = m.enabled;
-        v.card.button.Enabled(m.enabled);
+        Dimmed(v.card, m.enabled);         // a click on a card the player cannot use says why (HandleClicks)
     }
-    std::array<bool, kSectionCount> used{};
+    const std::vector<LobbySection> subs = RulesTabs(s);   // RULES: a sub-tab for each section the mode has rows in
+    g.rulesTab = ClampRulesTab(subs, g.rulesTab);
+    for (size_t sct = 0; sct < kSectionCount; ++sct) {
+        Flat& t = g.subTabs[sct];
+        const bool has = std::find(subs.begin(), subs.end(), LobbySection(sct)) != subs.end();
+        const bool on = has && LobbySection(sct) == g.rulesTab;
+        if (t.card) { t.card.button.Show(has); t.card.selected = on; t.label.Color(on ? style::kMenuOnPicked : style::kMenuText); }
+        if (g.sections[sct]) g.sections[sct].Show(LobbySection(sct) == g.rulesTab);   // only the chosen sub-tab's rows
+    }
     for (size_t i = 0; i < g.steppers.size(); ++i) {
         StepperView& v = g.steppers[i];
         if (!v.box) continue;
         const SettingRow* row = RowFor(s, i);
         v.box.Show(row != nullptr);
         if (!row) continue;
-        used[size_t(SectionOf(row->id))] = true;
         v.label.Set(row->label);
         v.label.Color(row->enabled ? style::kMenuText : style::kMenuDim);
         v.value.Set(row->value);
         v.hint.Set(row->hint);
         v.hint.Show(!row->hint.empty());
         for (Flat* f : {&v.prev, &v.next}) {
-            Live(f->card, row->enabled, 0.3f);
-            if (f->card) f->card.button.Show(row->chips.empty());   // a row of chips is changed by its chips, not the arrows
+            Dimmed(f->card, row->enabled);
+            // a row of chips is changed by its chips, and a dropdown row by its list (its arrows come back when no list could be built)
+            if (f->card) f->card.button.Show(RowHasArrows(*row) || (row->kind == RowKind::Choice && !v.plate.card));
         }
     }
-    {
-        const SettingRow* w = nullptr;
-        for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Weapons) w = &r;
-        const bool show = w && !w->chips.empty();
-        for (Box& b : g.weaponChipRows) if (b) b.Show(show);
-        for (size_t k = 0; k < g.weaponChips.size(); ++k) {
-            Flat& c = g.weaponChips[k];
-            if (!c.card) continue;
-            const bool on = show && k < w->chips.size() && w->chips[k].on;
-            if (show && k < w->chips.size()) c.label.Set(w->chips[k].label);
-            c.label.Color(on ? style::kMenuAccentInk : style::kMenuText);
-            c.card.selected = on;
-            Live(c.card, show && w->enabled, 0.3f);
-        }
-    }
-    for (size_t sct = 0; sct < kSectionCount; ++sct) {   // a section the mode has no rows in is not shown
-        if (g.sectionTitles[sct]) g.sectionTitles[sct].Show(used[sct]);
-        if (g.sections[sct]) g.sections[sct].Show(used[sct]);
+    {   // the chips under a row: the Weapons types, the tiers under Gear, the Crypts card's Starting tier
+        const SettingRow* w = RowFor(s, size_t(LobbyRow::Weapons));
+        const SettingRow* gear = RowFor(s, size_t(LobbyRow::Gear));
+        const SettingRow* start = RowFor(s, size_t(LobbyRow::Tier));
+        DrawChipRows(g.weaponChipRows, g.weaponChips, w ? &w->chips : nullptr, w && w->enabled);
+        DrawChipRows(g.gearTierRows, g.gearTierChips, gear ? &gear->tierChips : nullptr, gear && gear->enabled);
+        DrawChipRows(g.startTierRows, g.startTierChips, start ? &start->tierChips : nullptr, start && start->enabled);
     }
     for (size_t i = 0; i < g.maps.size(); ++i) {
         MapView& v = g.maps[i];
@@ -1578,22 +1692,21 @@ void Draw(const LobbyScene& s) {
         if (i >= s.maps.size()) continue;
         const MapCard& m = s.maps[i];
         if (m.modded) v.name.Set(m.name);
-        v.name.Color(m.selected ? style::kMenuAccentInk : style::kMenuText);
+        v.name.Color(m.selected ? style::kMenuOnPicked : style::kMenuText);
         v.tag.Set(m.allowed ? m.tag : m.reason);
-        v.tag.Color(m.allowed ? style::kMenuDim : style::kMenuWarn);
+        v.tag.Color(m.selected ? style::kMenuOnPicked : m.allowed ? style::kMenuDim : style::kMenuWarn);
         v.card.selected = m.selected;
-        v.card.live = m.enabled;
-        v.card.button.Enabled(m.enabled);
-        v.card.button.Opacity(m.allowed ? 1.f : 0.45f);
+        Dimmed(v.card, m.enabled);   // one dimmed look for a map the mode cannot use and one that is not a member's to pick (the tag says which)
     }
     g.noMaps.Show(s.in && s.maps.empty());
     g.summary.Set(s.summary);
     g.summary.Show(!s.summary.empty());
     g.hostOnly.Set(s.hostOnly);
     g.hostOnly.Show(!s.hostOnly.empty());
-    g.start.button.Show(s.start);
+    g.start.button.Show(s.in);                  // always on screen in a lobby; blocked, it is dimmed and a click says why
+    g.start.button.Opacity(s.start ? 1.f : style::kDisabledAlpha);
     g.waiting.Set(s.waiting);
-    g.waiting.Color(s.buildMismatch ? style::kMenuWarn : style::kMenuDim);
+    g.waiting.Color(s.waitingWarn ? style::kMenuWarn : style::kMenuDim);
     g.waiting.Show(!s.waiting.empty());
     g.scene = s;
 }
@@ -1668,6 +1781,7 @@ LobbyModsLocal ModsLocal(Session& session, game::Lobby& lobby) {
     if (l.host) {
         l.rule = game::modrules::HostRule(lobby);
         l.chosen = game::modrules::Chosen();
+        l.classPicked = session.ClassName() != kPlainClass;   // #3396: the Mods allowed hint says when it is off
     } else {
         l.rule = lobby.RoomRule(&l.hostHasRule);
         // A host with mod_rules=0 announces Anything with HS Enhancer allowed (modrules::LobbyTick) and sends no SessionMods.
@@ -1699,10 +1813,12 @@ void DrawMods(const LobbyModsScene& s) {
         v.value.Set(r.value);
         v.hint.Set(r.hint);
         v.hint.Show(!r.hint.empty());
-        for (Flat* f : {&v.prev, &v.next}) Live(f->card, r.enabled, 0.3f);
+        for (Flat* f : {&v.prev, &v.next}) {
+            Dimmed(f->card, r.enabled);
+            if (f->card) f->card.button.Show(!v.plate.card);       // Mods allowed and Classes are dropdowns: their plates, not the arrows
+        }
     }
-    g.modSummary.Set(s.summary);
-    g.modSummary.Show(!s.summary.empty());
+    g.modSummary.Show(false);                                  // the "In force" line repeated the rows (PR3); the widget stays
     g.modStatus.Set(s.status);
     g.modStatus.Show(!s.status.empty());
     static const std::string kDot = " \xC2\xB7 ";
@@ -1753,14 +1869,15 @@ void FixClassPick(Session& session) {
 
 void UpdatePanel(Session& session) {
     game::Lobby& lobby = session.lobby();
-    LobbyLocal local = Local(lobby);
+    LobbyLocal local = Local(lobby, session.JoinedBuilds());
     local.filter = g.filter;
     local.regionPick = session.RegionPick(); local.regionGuess = session.RegionGuessed();
     local.filter.mine = EffectiveRegion(local.regionPick, local.regionGuess);   // "my region" in the browser
     if (!session.Nickname().empty()) local.myName = session.Nickname();
     if (session.HideNames()) for (LobbyPlayer& p : local.players) p.steamName.clear();   // no Steam name beside "Player 2"
-    if (lobby.InClassesLobby()) local.myClass = session.ClassesOff() ? std::string(kHseClassName) : session.ClassLabel(session.ClassName());
-    local.classBudget = lobby.InClassesLobby() && !lobby.InUnrestrictedLobby();
+    // The CLASSES tab and YOUR CLASS follow the Classes row (On or Unrestricted, with any Mods allowed preset).
+    local.myClass = LobbyClassName(lobby.ClassesModeHere(), session.ClassesOff() ? std::string(kHseClassName) : session.ClassLabel(session.ClassName()));
+    local.classBudget = ClassBudgetApplies(lobby.ClassesModeHere());
     const LobbyScene scene = BuildLobbyScene(local);
     // Each shown row joins the listing it came from (the filters and the sort reorder them).
     const auto& list = lobby.listings();
@@ -1840,13 +1957,14 @@ void HandleDamage(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
     const bool numberClicked = Clicked(d.number.card);
     const SettingRow* row = nullptr;
     for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Damage) row = &r;
-    const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
+    const bool live = row && row->enabled && RulesShown(SectionOf(LobbyRow::Damage));   // the host's row; a client's is shown, not changed
     const DamageRange r = game::VanillaDamageRange();
     MatchConfig c = lobby.config();
     d.slider.Range(float(r.minPct), float(DamageSliderMax(r)), float(r.stepPct));
     d.slider.Colors(style::kMenuDim, live ? style::kMenuAccentInk : style::kMenuDim);
     d.slider.Enabled(live);
-    d.number.card.button.Enabled(live);
+    Dimmed(d.number.card, live);          // the number can say why a click does nothing; the slider (disabled) cannot
+    if (numberClicked && !live && row && !row->enabled) Explain(DisabledWhy(lobby.IsHost(), std::string()));
     if (d.editing) {
         const bool focused = d.edit.Focused();
         if (focused) d.hadFocus = true;
@@ -1907,8 +2025,8 @@ void HandleGather(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
     d.enterDown = enter; d.escDown = esc;
     const SettingRow* row = nullptr;
     for (const SettingRow& r : s.settings) if (r.id == LobbyRow::Gather) row = &r;
-    const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
-    d.number.card.button.Enabled(live);
+    const bool live = row && row->enabled && RulesShown(SectionOf(LobbyRow::Gather));   // the host's row; a client's is shown, not changed
+    Dimmed(d.number.card, live);          // dimmed, not disabled: a click on it says why when it is the host's alone
     if (d.editing) {
         const bool focused = d.edit.Focused();
         if (focused) d.hadFocus = true;
@@ -1928,7 +2046,9 @@ void HandleGather(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
         CloseGatherEdit();
         return;
     }
-    if (live && Clicked(d.number.card)) {
+    const bool numberClicked = Clicked(d.number.card);
+    if (numberClicked && !live && row && !row->enabled) Explain(DisabledWhy(lobby.IsHost(), std::string()));
+    if (live && numberClicked) {
         d.editing = true; d.hadFocus = false; d.focused = false;
         d.number.card.button.Show(false); d.edit.Show(true);
         d.edit.Hint("");
@@ -1947,7 +2067,7 @@ void HandleWeights(game::Lobby& lobby, const LobbyScene& s, bool& acted) {
         if (!w.slider) continue;
         const SettingRow* row = nullptr;
         for (const SettingRow& r : s.settings) if (r.id == w.id) row = &r;
-        const bool live = row && row->enabled && g.tab == 1 && !g.settingsShown;   // the host's row; a client's is shown, not changed
+        const bool live = row && row->enabled && RulesShown(SectionOf(w.id));   // the host's row; a client's is shown, not changed
         MatchConfig c = lobby.config();
         uint8_t& pct = *WeightField(c, w.id);
         w.slider.Range(0.f, float(kWeightMaxPct), float(kWeightStepPct));
@@ -1990,11 +2110,13 @@ void HandlePassword(Session& session, bool host) {
     Paint(g.pwSet.card); Paint(g.pwClear.card);
     if (set) {
         const std::string typed = CleanPassword(g.pwHostText.Value());
-        if (typed.empty()) { g.pwHostNote.Set("Type a password first, or press CLEAR to open the lobby."); return; }
+        if (typed.empty()) { g.pwHostNote.Set("Type a password first, or press CLEAR to open the lobby."); g.pwHostNote.Show(true); return; }
+        g.pwHostNote.Show(false);
         g.pwHostText.Clear();
         session.SetLobbyPassword(typed);
         g.nextText = 0;
     } else if (clear) {
+        g.pwHostNote.Show(false);
         g.pwHostText.Clear();
         session.SetLobbyPassword("");
         g.nextText = 0;
@@ -2022,17 +2144,19 @@ void HandleNameRow(NameRow& r, bool shown, const std::string& current, const std
         g.nextText = 0;
     }
     if (!focused && r.filled != current) { r.filled = current; r.text.Set(current); }
-    r.note.Set(r.refused.empty() ? idle : r.refused);
+    const std::string& said = r.refused.empty() ? idle : r.refused;
+    r.note.Set(said);
+    r.note.Show(!said.empty());
     r.note.Color(r.refused.empty() ? style::kMenuDim : style::kMenuWarn);
 }
 
 // START: the game's red button, brighter under the mouse (without the art: the accent face, a little toward its ink).
 void PaintStart() {
     if (!g.start) return;
-    const bool hover = g.start.button.Hovered() || g.start.button.Focused();
+    const bool hover = g.scene.start && (g.start.button.Hovered() || g.start.button.Focused());   // dimmed: no glow
     g.start.glow += ((hover ? 1.f : 0.f) - g.start.glow) * 0.18f;
     if (skin::Loaded(skin::Art::CardRed)) {
-        skin::Paint(g.start.frame, skin::Art::CardRed, mp::Mix({0.85f, 0.85f, 0.85f, 1}, {1, 1, 1, 1}, g.start.glow));
+        skin::Paint(g.start.frame, skin::Art::CardRed, mp::Mix(style::kStartTint, {1, 1, 1, 1}, g.start.glow));
         g.start.face.Color(kClear);
         return;
     }
@@ -2042,7 +2166,7 @@ void PaintStart() {
 }
 
 void ClosePage() {
-    g.panelOpen = false; g.panel.Show(false); g.notice.Show(false); g.voice.StopBinding();
+    g.panelOpen = false; g.panel.Show(false); g.notice.Show(false); g.voice.StopBinding(); g.drops.Close("page");
 }
 
 // Every frame while the page is open: each button is polled (a click is a press and a release seen in turn), the
@@ -2054,9 +2178,12 @@ void HandleClicks(Session& session) {
     auto openPage = [&] {
         g.panelOpen = true; g.panel.Show(true); g.nextText = 0; game::modmaps::Rescan();
         g.classShown = false;
-        if (g.tab == kClassesTab) g.tab = 0;   // MULTIPLAYER never opens on the classes
+        if (g.tab == kClassesTab) g.tab = kModeTab;   // MULTIPLAYER never opens on the classes
         g.settingsShown = false;
-        if (lobby.state() == game::Lobby::State::Idle) lobby.RefreshList();   // the browser is filled on arrival
+        if (lobby.state() == game::Lobby::State::Idle) {   // the browser is filled on arrival, as far as its region chip looks (Any region: the whole world)
+            lobby.SetListDistance(DistanceFor(g.filter));
+            lobby.RefreshList();
+        }
     };
     if (g.askOpen) {                            // the one-time question: nothing else on the menu until it is answered
         const bool esc = mp::KeyDown(VK_ESCAPE), escEdge = esc && !g.escDown && !game::fetchlink::KeysHeld();
@@ -2144,23 +2271,28 @@ void HandleClicks(Session& session) {
     if (!g.panelOpen) { SetLobbyTyping(false); g.reportTyping = false; return; }
     const LobbyScene& s = g.scene;
     bool acted = false;
-    auto act = [&](bool clicked, bool allowed) { bool go = clicked && allowed; acted = acted || go; return go; };
+    // A click on a dimmed control says why (`why`: empty, nothing to say); the clicked-and-allowed ones act.
+    auto act = [&](bool clicked, bool allowed, const std::string& why = std::string()) {
+        if (clicked && !allowed) Explain(why);
+        bool go = clicked && allowed; acted = acted || go; return go;
+    };
+    const bool host = lobby.IsHost();
+    auto why = [&](const std::string& own) { return DisabledWhy(host, own); };   // a member: "Only the host changes this."; the host: the control's own reason
 
     // The footer.
-    if (Clicked(g.close.card)) { ClosePage(); g.aloneArmed = false; g.alone.label.Set("PLAY ALONE, MOD OFF"); return; }
-    if (act(Clicked(g.alone.card), !s.in)) {   // two clicks: the first says what happens
-        if (!g.aloneArmed) { g.aloneArmed = true; g.alone.label.Set("SURE? THE GAME RESTARTS"); }
-        else { g.aloneArmed = false; g.alone.label.Set(session.RestartGame(true) ? "RESTARTING..." : "COULDN'T RESTART (SEE LOG)"); }
+    // The bottom-left button: BACK TO MAIN MENU closes the page; BACK TO LOBBY (LIST) closes SETTINGS or the class page, over either.
+    if (act(Clicked(g.close.card), !FooterFor(s.in, ViewOf(s)).back.empty())) {
+        if (ViewOf(s) == PageView::List) { ClosePage(); return; }
+        g.settingsShown = false; g.classShown = false; g.voice.StopBinding();
     }
-    if (act(Clicked(g.settingsOpen.card), true)) { g.settingsShown = !g.settingsShown; g.classShown = false; if (!g.settingsShown) g.voice.StopBinding(); }
+    if (act(Clicked(g.settingsOpen.card), !g.settingsShown)) { g.settingsShown = true; g.classShown = false; }   // a second click does not close it: BACK does
     if (act(Clicked(g.classOpen.card), true)) {
         g.settingsShown = false; g.voice.StopBinding();
-        if (s.in) g.tab = kClassesTab; else g.classShown = !g.classShown;
+        if (YourClassGoes(s.in, ClassesTabShown(s)) == ClassGoes::Tab) { g.tab = kClassesTab; g.classShown = false; }   // the lobby's CLASSES tab
+        else g.classShown = true;                                                                                         // no tab: the class page
     }
-    if (act(Clicked(g.classContinue.card), g.classShown)) g.classShown = false;
     if (act(Clicked(g.classChange.card), s.in && !s.classLine.empty())) g.tab = kClassesTab;
     g.reportOpen.card.button.Show(report::Enabled());
-    g.reportHow.Show(report::Enabled());
     if (act(Clicked(g.reportOpen.card), report::Enabled())) {
         g.reportOpenNow = !g.reportOpenNow;
         g.reportBox.Show(g.reportOpenNow);
@@ -2168,6 +2300,7 @@ void HandleClicks(Session& session) {
         if (g.reportOpenNow) g.reportText.Focus();
     }
     g.reportOpen.card.selected = g.reportOpenNow;
+    g.reportOpen.label.Color(InkOn(g.reportOpen.card, style::kMenuText));
     if (g.reportOpenNow && act(Clicked(g.reportCancel.card), true)) { g.reportOpenNow = false; g.reportBox.Show(false); g.reportText.Clear(); }
     if (g.reportOpenNow && act(Clicked(g.reportSend.card), true)) {
         std::string text = g.reportText.Value();
@@ -2185,42 +2318,60 @@ void HandleClicks(Session& session) {
         g.reportNote.Set(s.in ? std::string() : session.ReportStatus());
     }
 
-    // SETTINGS: HELP IMPROVE THE MOD (on: the accent frame and a green label, as Mark me ready) and voice.
+    // SETTINGS: HELP IMPROVE THE MOD (on: the picked card and its ink, as Mark me ready) and voice.
     const bool help = session.HelpImprove();
     g.helpToggle.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
-    g.helpToggle.label.Color(help ? style::kMenuOk : style::kMenuText);
+    g.helpToggle.label.Color(help ? style::kMenuOnPicked : style::kMenuText);
     g.helpToggle.card.selected = help;
     if (act(Clicked(g.updateNow.card), update::CanInstall())) update::StartInstall();
     if (act(Clicked(g.helpToggle.card), g.settingsShown)) session.SetHelpImprove(!help);
     const bool hide = session.HideNames();
     g.hideToggle.label.Set(hide ? "HIDE PLAYER NAMES: ON" : "HIDE PLAYER NAMES: OFF");
-    g.hideToggle.label.Color(hide ? style::kMenuOk : style::kMenuText);
+    g.hideToggle.label.Color(hide ? style::kMenuOnPicked : style::kMenuText);
     g.hideToggle.card.selected = hide;
     if (act(Clicked(g.hideToggle.card), g.settingsShown)) session.SetHideNames(!hide);
-    if (act(Clicked(g.regionPick.card), true)) session.SetRegionPick(NextRegion(session.RegionPick()));
-    if (g.lookToggle.card) {
-        if (act(Clicked(g.lookToggle.card), g.settingsShown)) {
-            g.look = style::NextMenuLook(g.look);
+    if (act(Clicked(g.myRegion.card), g.settingsShown)) session.SetRegionPick(NextRegion(session.RegionPick()));
+    if (g.myRegionPlate.card) {                     // MY REGION: Auto and the six regions in a list
+        const uint32_t owner = dropdown_owner::kMyRegion;
+        if (act(Clicked(g.myRegionPlate.card), g.settingsShown))
+            g.drops.Open(owner, "MY REGION", g.myRegionPlate.card.button, MyRegionChoices(session.RegionGuessed()), MyRegionChoiceAt(session.RegionPick()));
+        size_t pick = 0;
+        if (g.drops.TakePick(owner, pick) && g.settingsShown) session.SetRegionPick(MyRegionPicked(pick));
+        PaintPlate(g.myRegionPlate, RegionPickLabel(session.RegionPick(), session.RegionGuessed()), g.drops.IsOpen(owner), true);
+    }
+    if (g.lookToggle.card || g.lookPlate.card) {
+        auto setLook = [&](style::MenuLook look) {
+            g.look = look;
             g.lookSaved = SaveUiStyle(g.look);
             HSM_LOG("ui: menu look set to %s for the next start%s", UiStyleName(g.look), g.lookSaved ? "" : " (HSMMod.ini could not be written)");
+        };
+        if (g.lookToggle.card && act(Clicked(g.lookToggle.card), g.settingsShown)) setLook(style::NextMenuLook(g.look));
+        if (g.lookPlate.card) {                     // MENU LOOK: the three looks in a list
+            const uint32_t owner = dropdown_owner::kMenuLook;
+            if (act(Clicked(g.lookPlate.card), g.settingsShown))
+                g.drops.Open(owner, "MENU LOOK", g.lookPlate.card.button, style::MenuLookChoices(), style::MenuLookChoiceAt(g.look));
+            size_t pick = 0;
+            if (g.drops.TakePick(owner, pick) && g.settingsShown) setLook(style::MenuLookPicked(pick));
+            PaintPlate(g.lookPlate, style::MenuLookName(g.look), g.drops.IsOpen(owner), true);
         }
         g.lookToggle.label.Set(g.look == style::MenuLook::Classic ? "MENU LOOK: CLASSIC"
                                : g.look == style::MenuLook::Game ? "MENU LOOK: GAME ART" : "MENU LOOK: DARK");
         const bool pending = g.look != style::CurrentMenuLook();
-        g.lookNote.Set(!g.lookSaved ? "HSMMod.ini could not be written, so this will not stick. Set ui_style in it by hand."
-                       : pending ? "Restart the game to see it."
-                                 : "Classic: the mod's own dark look (the default). Game art: the game's own parchment "
-                                   "and lettering. Dark: that art, darkened.");
+        const std::string lookSays = !g.lookSaved ? "The menu look could not be saved, so it will not stick."
+                                   : pending ? "Restart the game to see it." : "";   // no note until a look is picked
+        g.lookNote.Set(lookSays);
+        g.lookNote.Show(!lookSays.empty());
         g.lookNote.Color(!g.lookSaved || pending ? style::kMenuWarn : style::kMenuDim);
     }
     // MODS: the checkboxes for this machine's lobbies, while that tab is what's on screen.
     if (s.in && g.tab == kModsTab && !g.settingsShown) {
         const bool unrestricted = session.ClassesUnrestricted();
-        // The checkbox. A guest sees the host's choice, and can't change it.
+        // The Classes row steps onto Unrestricted through here. A guest sees the host's choice, and can't change it.
         const bool canSet = session.CanSetUnrestricted();
         g.classUnrestricted.label.Set(std::string(unrestricted ? "[X]" : "[  ]") + " UNRESTRICTED");
         g.classUnrestricted.label.Color(canSet ? style::kMenuText : style::kMenuDim);
-        if (act(Clicked(g.classUnrestricted.card), canSet)) {
+        const bool asked = std::exchange(g.unrestrictedAsked, false);
+        if (act(asked, canSet)) {
             if (unrestricted) session.SetClassesUnrestricted(false);
             else if (g.warn) {   // it says what this is first. HandleWarn takes the answer
                 g.warnKind = State::WarnKind::Unrestricted;
@@ -2251,7 +2402,7 @@ void HandleClicks(Session& session) {
             const bool shown = !t.unrestrictedOnly || unrestricted, grey = !ClassTabUsable(int(i), wolverine);
             f.card.button.Show(shown);
             if (f.label) {
-                f.label.Color(grey ? style::kMenuDim : style::kMenuText);
+                f.label.Color(grey ? style::kMenuDim : int(i) == g.classTab ? style::kMenuOnPicked : style::kMenuText);
                 f.label.Set(std::string(t.title) + (!grey ? "" : wolverine ? "  (Half Wolverine is on)" : "  (needs Half Wolverine)"));
             }
             f.card.selected = int(i) == g.classTab;
@@ -2263,7 +2414,7 @@ void HandleClicks(Session& session) {
         }
         const std::vector<std::string> tabPicks = ClassTabPicks(g.classTab);
         if (g.classWhere) g.classWhere.Set(unrestricted ? "UNRESTRICTED: no class balance. Expect glitches, and possibly crashes, for everyone in the lobby."
-                                                        : "Classes only count in Classes lobbies. In any other lobby you fight as the game's plain fighter.");
+                                                        : "Used in lobbies with Classes on.");
         if (g.classNew.card) {
             g.classNew.card.button.Show(g.classTab == kClassTabCustom);
             if (act(Clicked(g.classNew.card), g.classTab == kClassTabCustom)) {
@@ -2308,7 +2459,7 @@ void HandleClicks(Session& session) {
             f.card.button.Show(inTab);
             if (!inTab) continue;
             const bool pickable = !classesOff && ClassPickable(name, wolverine);
-            if (f.label) { f.label.Set(session.ClassLabel(name)); f.label.Color(pickable ? style::kMenuText : style::kMenuDim); }
+            if (f.label) { f.label.Set(session.ClassLabel(name)); f.label.Color(name == picked ? style::kMenuOnPicked : pickable ? style::kMenuText : style::kMenuDim); }
             f.card.selected = name == picked;
             if (act(Clicked(f.card), pickable)) session.SetClassName(name);
             Paint(f.card);
@@ -2341,7 +2492,7 @@ void HandleClicks(Session& session) {
             if (Clicked(v.next.card)) dir = 1;
             if (dir != 0) g.classFieldSel = int(i);
             const bool locked = ClassFieldLocked(sheet, int(i), wolverine);
-            if (v.name.label) v.name.label.Color(locked ? style::kMenuDim : style::kMenuText);
+            if (v.name.label) v.name.label.Color(locked ? style::kMenuDim : InkOn(v.name.card, style::kMenuText));
             if (act(dir != 0, own && !locked)) { ClassFieldStep(sheet, int(i), dir, unrestricted); session.SetCustomClass(sheet); }
             v.prev.card.button.Show(own); v.next.card.button.Show(own);
             Paint(v.name.card); Paint(v.prev.card); Paint(v.next.card);
@@ -2350,16 +2501,15 @@ void HandleClicks(Session& session) {
         g.classInfo.Set(ClassFieldInfo(g.classFieldSel));
     }
     if (g.classOpen.card) Paint(g.classOpen.card);
-    if (g.classContinue.card) Paint(g.classContinue.card);
     if (g.classChange.card) Paint(g.classChange.card);
     if (g.settingsShown) g.voice.Tick(session);
     HandleChat(session, s.in && !g.settingsShown);
     HandlePassword(session, s.hostPassword && !g.settingsShown);
     HandleNameRow(g.lobbyName, s.hostPassword && !g.settingsShown, session.LobbyName(),
-                  session.LobbyName().empty() ? "Empty: the list shows \"your name's fight\". Seen in the public list." : "Seen in the public list.",
+                  "",                               // no note: the box says what to type
                   [&](const std::string& typed) { return session.SetLobbyName(typed); });
     HandleNameRow(g.nickname, g.settingsShown, session.Nickname(),
-                  "Seen by the other players instead of your Steam name; the host also sees your Steam name. Empty: your Steam name.",
+                  "The host still sees your Steam name.",
                   [&](const std::string& typed) { return session.SetNickname(typed); });
     HandleDamage(lobby, s, acted);               // after the two boxes: its own text box keeps the hotkeys off too
     HandleGather(lobby, s, acted);               // the same
@@ -2370,12 +2520,22 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.hostFriends.card), s.idle)) lobby.Host(steam::LobbyType::FriendsOnly);
     if (act(Clicked(g.hostPublic.card), s.idle)) lobby.Host(steam::LobbyType::Public);
     if (act(Clicked(g.refresh.card), s.idle)) lobby.RefreshList();
-    for (size_t i = 0; i < g.chips.size(); ++i)
-        if (act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) {
-            const LobbyDistance was = DistanceFor(g.filter);
-            g.filter = ToggleFilter(g.filter, i);
-            if (DistanceFor(g.filter) != was) { lobby.SetListDistance(DistanceFor(g.filter)); lobby.RefreshList(); }   // Steam looks farther (or not): ask again
+    auto setFilter = [&](const BrowserFilter& next) {
+        const LobbyDistance was = DistanceFor(g.filter);
+        g.filter = next;
+        if (DistanceFor(g.filter) != was) { lobby.SetListDistance(DistanceFor(g.filter)); lobby.RefreshList(); }   // Steam looks farther (or not): ask again
+    };
+    for (size_t i = 0; i < g.chips.size(); ++i) {
+        const bool listed = g.drops && i < s.filters.size() && s.filters[i].choice;      // the region and the mode open a list; the others are toggles
+        const uint32_t owner = dropdown_owner::kFilterChip + uint32_t(i);
+        if (!act(Clicked(g.chips[i].card), s.idle && i < s.filters.size())) {
+            size_t pick = 0;
+            if (listed && g.drops.TakePick(owner, pick) && s.idle) setFilter(WithFilterChoice(g.filter, i, pick));
+            continue;
         }
+        if (listed) g.drops.Open(owner, i == kRegionChip ? "region filter" : "mode filter", g.chips[i].card.button, FilterChoices(g.filter, i), FilterChoiceAt(g.filter, i));
+        else setFilter(ToggleFilter(g.filter, i));
+    }
     for (size_t i = 0; i < g.rows.size(); ++i)
         if (act(Clicked(g.rows[i].card), i < s.browser.size() && s.browser[i].joinable && g.rowLobbies[i])) {
             if (s.browser[i].locked) lobby.AskPassword(g.rowLobbies[i]);   // the question opens next frame; JOIN there joins
@@ -2388,7 +2548,9 @@ void HandleClicks(Session& session) {
     if (act(Clicked(g.balance.card), s.balance)) lobby.ClearOverrides();
     if (act(Clicked(g.shuffle.card), s.shuffle)) lobby.ShuffleTeamsNow();
     if (act(Clicked(g.leave.card), s.in)) lobby.Leave();
-    for (size_t i = 0; i < kTabCount; ++i) if (act(Clicked(g.tabs[i].card), s.in)) g.tab = i;
+    for (size_t i = 0; i < kTabCount; ++i) if (act(Clicked(g.tabs[i].card), s.in && TabShown(i, ClassesTabShown(s)))) { g.tab = i; g.classShown = false; }
+    for (size_t sct = 0; sct < kSectionCount; ++sct)   // RULES: the sub-tabs
+        if (act(Clicked(g.subTabs[sct].card), s.in && g.tab == kRulesTab && !g.settingsShown && !g.classShown)) g.rulesTab = LobbySection(sct);
 
     MatchConfig c = lobby.config();
     int teams = PicksTeams(c.format) ? TeamCount(c.format, c.teams) : 0;
@@ -2398,14 +2560,12 @@ void HandleClicks(Session& session) {
             if (m.id == g.memberIds[i]) lobby.SetOverride(m.id, NextTeamPick(int8_t(m.hostOverride >= 0 ? m.hostOverride : m.team), teams));
     }
     for (size_t i = 0; i < g.modes.size(); ++i) {
-        if (!act(Clicked(g.modes[i].card), g.tab == 0 && i < s.modes.size() && s.modes[i].enabled)) continue;
+        if (!act(Clicked(g.modes[i].card), g.tab == kModeTab && !g.settingsShown && !g.classShown && i < s.modes.size() && s.modes[i].enabled && s.modes[i].shown, why(i < s.modes.size() ? s.modes[i].hint : std::string()))) continue;
         if (s.modes[i].progression) { lobby.SetProgression(true); continue; }
         if (lobby.Progression()) lobby.SetProgression(false);
-        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl, s.modes[i].crypts);
-        if (next.format != c.format || next.gear != c.gear) {
-            const bool toCrypts = IsCrypts(next) && !IsCrypts(c);
-            lobby.SetConfig(next); lobby.ClearOverrides(); c = next;
-            if (const size_t m = CryptsDefaultMap(c.format); toCrypts && m < MapCount()) lobby.SetMapPick(MapAt(m).path);   // the Abyss first
+        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl, s.modes[i].crypts, s.modes[i].blossfechten, s.modes[i].graveRobbers);
+        if (next.format != c.format || next.gear != c.gear || next.scenario != c.scenario || next.graveRobbers != c.graveRobbers) {
+            lobby.SetConfig(next); lobby.ClearOverrides(); c = next;   // the Crypts modes play on the Crypts map by themselves (EffectiveMap)
         }
     }
     for (size_t i = 0; i < g.steppers.size(); ++i) {
@@ -2414,16 +2574,29 @@ void HandleClicks(Session& session) {
         int dir = Clicked(v.prev.card) ? -1 : 0;
         if (Clicked(v.next.card)) dir = 1;
         const SettingRow* row = RowFor(s, i);
-        if (!act(dir != 0, g.tab == 1 && row && row->enabled)) continue;
+        if (v.plate.card && row) {                  // a dropdown row: the plate opens its list, and a pick sets that option (to a member it is a plain value)
+            const uint32_t owner = dropdown_owner::kRulesRow + uint32_t(row->id);
+            const bool allowed = row->enabled && RulesShown(SectionOf(row->id));
+            PaintPlate(v.plate, row->value, g.drops.IsOpen(owner), row->enabled);
+            if (act(Clicked(v.plate.card), allowed, why(std::string()))) g.drops.Open(owner, row->label, v.plate.card.button, row->choices, row->choice);
+            size_t pick = 0;
+            if (!g.drops.TakePick(owner, pick) || !allowed) continue;
+            if (row->id == LobbyRow::MyTeam) lobby.SetTeamPick(lobby_detail::MyTeamPick(pick));
+            else if (row->id == LobbyRow::FightMap) {   // the lobby's own pick, not a config field
+                const std::vector<size_t> maps = lobby_detail::FightMaps(c.format);
+                if (pick < maps.size()) lobby.SetFightPick(MapAt(maps[pick]).path);
+            } else { c = lobby_detail::WithChoice(c, row->id, pick); lobby.SetConfig(c); }
+            HSM_LOG("lobby: %s picked from the list: %s", row->label.c_str(), pick < row->choices.size() ? row->choices[pick].label.c_str() : "?");
+            acted = true;
+            continue;
+        }
+        if (!act(dir != 0, row && row->enabled && RulesShown(SectionOf(row->id)), why(std::string()))) continue;
         if (row->id == LobbyRow::Players) {         // the lobby's own limit, not a MatchConfig field
             lobby.SetMaxPlayers(StepPlayerLimit(lobby.MaxPlayers(), lobby.PlayerCount(), dir));
         } else if (row->id == LobbyRow::MyTeam) {
             int mine = kNoTeam;
             for (const game::LobbyMember& m : lobby.members()) if (m.id == steam::MySteamId()) mine = m.team;
             lobby.SetTeamPick(StepTeamPick(int8_t(mine), teams, dir));
-        } else if (row->id == LobbyRow::Scenario) {  // the scenarios the picked map offers (match/hsm_scenarios.h)
-            c.scenario = StepScenario(s.scenarioMap, c.scenario, dir);
-            lobby.SetConfig(c);
         } else {
             c = StepSetting(c, row->id, dir, game::VanillaDamageRange());
             lobby.SetConfig(c);
@@ -2432,10 +2605,22 @@ void HandleClicks(Session& session) {
     {   // the Weapons row's chips: Any clears the ticks, a type toggles (match/hsm_match.h ToggleWeaponType)
         const SettingRow* w = RowFor(s, size_t(LobbyRow::Weapons));
         for (size_t k = 0; k < g.weaponChips.size(); ++k) {
-            if (!act(Clicked(g.weaponChips[k].card), g.tab == 1 && w && w->enabled && k < w->chips.size())) continue;
+            if (!act(Clicked(g.weaponChips[k].card), w && w->enabled && RulesShown(SectionOf(LobbyRow::Weapons)) && k < w->chips.size(), why(std::string()))) continue;
             c.weapons = ToggleWeaponType(c.weapons, uint8_t(k));
             lobby.SetConfig(c);
             HSM_LOG("lobby: weapons row: %s", WeaponMaskName(c.weapons).c_str());
+        }
+    }
+    {   // the tier chips, under Gear and under the Crypts card's Starting tier: a click sets the tier (match/hsm_lobby_scene.h WithTier)
+        struct TierRow { LobbyRow id; std::array<Flat, kTierChipCount>* chips; };
+        for (const TierRow& t : {TierRow{LobbyRow::Gear, &g.gearTierChips}, TierRow{LobbyRow::Tier, &g.startTierChips}}) {
+            const SettingRow* row = RowFor(s, size_t(t.id));
+            for (size_t k = 0; k < t.chips->size(); ++k) {
+                if (!act(Clicked((*t.chips)[k].card), row && row->enabled && RulesShown(SectionOf(t.id)) && k < row->tierChips.size(), why(std::string()))) continue;
+                c = WithTier(c, k);
+                lobby.SetConfig(c);
+                HSM_LOG("lobby: tier chip: %s", TierName(c.tier));
+            }
         }
     }
     for (size_t i = 0; i < kModRuleRows; ++i) {   // MODS: the host's rule steppers; written to HSMMod.ini [mod]
@@ -2444,11 +2629,26 @@ void HandleClicks(Session& session) {
         int dir = Clicked(v.prev.card) ? -1 : 0;
         if (Clicked(v.next.card)) dir = 1;
         const ModRuleView& row = g.modsScene.rules[i];
-        if (!act(dir != 0, g.tab == kModsTab && s.in && row.enabled && lobby.IsHost())) continue;
+        if (v.plate.card) {                         // Mods allowed and Classes: the plate opens the list, a pick sets one
+            const uint32_t owner = dropdown_owner::kModRule + uint32_t(i);
+            const bool allowed = g.tab == kModsTab && s.in && row.enabled && host;
+            PaintPlate(v.plate, row.value, g.drops.IsOpen(owner), row.enabled);
+            if (act(Clicked(v.plate.card), allowed, why(std::string()))) g.drops.Open(owner, row.label, v.plate.card.button, row.choices, row.choice);
+            size_t pick = 0;
+            if (!g.drops.TakePick(owner, pick) || !allowed || pick == row.choice) continue;
+            const ModChoice now = game::modrules::Chosen();
+            if (row.id == ModRuleRow::Classes) {
+                if (ClassesPickAsksFirst(now, pick) && g.warn) g.unrestrictedAsked = true;   // Unrestricted says what it is first; HandleWarn takes the answer
+                else game::modrules::SetChoice(WithClassesMode(now, pick));
+            } else game::modrules::SetChoice(WithModPreset(now, pick));
+            continue;
+        }
+        if (!act(dir != 0, g.tab == kModsTab && s.in && row.enabled && host, why(std::string()))) continue;
         const ModChoice next = StepModRule(game::modrules::Chosen(), row.id, dir);
+        if (row.id == ModRuleRow::Classes && next.classes == ClassesMode::Unrestricted && g.warn) { g.unrestrictedAsked = true; continue; }   // it says what this is first
         if (row.id != ModRuleRow::Hse) { game::modrules::SetChoice(next); continue; }
         // Allowing HS Enhancer where classes hold is the true unrestricted: the warning says so first, HandleWarn takes the answer.
-        if (!next.blockHse && IsClassesPreset(next.preset) && g.warn && session.CanSetUnrestricted()) {
+        if (!next.blockHse && ClassesOn(next.classes) && g.warn && session.CanSetUnrestricted()) {
             g.warnKind = State::WarnKind::Hse;
             g.warnOn.label.Set("TURN IT ON"); g.warnCancel.label.Set("CANCEL");
             g.warnTitle.Set(skin::Title("ALLOW HS ENHANCER"));
@@ -2459,14 +2659,21 @@ void HandleClicks(Session& session) {
         } else session.SetAllowHse(!next.blockHse);
     }
     for (size_t i = 0; i < g.maps.size(); ++i)
-        if (act(Clicked(g.maps[i].card), g.tab == 2 && i < s.maps.size() && s.maps[i].enabled))
+        if (act(Clicked(g.maps[i].card), g.tab == kMapTab && !g.settingsShown && !g.classShown && i < s.maps.size() && s.maps[i].enabled, why(i < s.maps.size() ? s.maps[i].reason : std::string())))
+        {
             lobby.SetMapPick(s.maps[i].modded ? s.maps[i].path : std::string(MapAt(s.maps[i].index).path));
-    if (act(Clicked(g.start), s.start)) {
-        if (s.modes.size() == kModeCardCount && s.modes.back().selected) session.StartProgression();
+            // The Crypts map enters the Crypts modes; another map while in them leaves (match/hsm_lobby_scene.h MapPicked)
+            const MatchConfig next = MapPicked(c, !s.maps[i].modded && MapAt(s.maps[i].index).crypts);
+            if (next.format != c.format || next.gear != c.gear || next.graveRobbers != c.graveRobbers) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
+        }
+    if (act(Clicked(g.start), s.start, s.startWhy)) {
+        bool progression = false;                        // the Progression card is not the last card any more: look for it
+        for (const ModeCard& mc : s.modes) progression = progression || (mc.progression && mc.selected);
+        if (progression) session.StartProgression();
         else {
             const MapCard* custom = nullptr;                 // a modded map is the pick: it is open by its package path
             for (const MapCard& mc : s.maps) if (mc.modded && mc.selected) custom = &mc;
-            size_t m = EffectiveMap(c.format, c.gear, lobby.MapPick());
+            size_t m = EffectiveMap(c.format, c.gear, lobby.MapPick(), IsBlossfechten(c));
             if (custom) session.StartOnMap(custom->path);
             else if (m < MapCount()) session.StartOnMap(MapAt(m).path);
         }
@@ -2474,15 +2681,18 @@ void HandleClicks(Session& session) {
 
     // Paint after the polls (a card's Hovered() is the one its Clicked() just saw).
     for (Flat& f : g.weaponChips) Paint(f.card);
-    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.shuffle, &g.leave, &g.close, &g.settingsOpen, &g.alone, &g.reportOpen,
-                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.lookToggle, &g.updateNow, &g.hideToggle, &g.regionPick}) Paint(f->card);
+    for (Flat* f : {&g.refresh, &g.invite, &g.readyUp, &g.balance, &g.shuffle, &g.leave, &g.close, &g.settingsOpen, &g.reportOpen,
+                    &g.reportSend, &g.reportCancel, &g.chatSend, &g.helpToggle, &g.lookToggle, &g.updateNow, &g.hideToggle, &g.myRegion, &g.myRegionPlate, &g.lookPlate}) Paint(f->card);
+    for (Flat& f : g.subTabs) Paint(f.card);
+    for (Flat& f : g.gearTierChips) Paint(f.card);
+    for (Flat& f : g.startTierChips) Paint(f.card);
     for (Flat& f : g.chips) Paint(f.card);
     for (HostView* h : {&g.hostFriends, &g.hostPublic}) Paint(h->card);
     for (BrowserView& v : g.rows) Paint(v.card);
     for (MemberView& v : g.members) Paint(v.card);
     for (ModeView& v : g.modes) Paint(v.card);
-    for (StepperView& v : g.steppers) { Paint(v.prev.card); Paint(v.next.card); }
-    for (StepperView& v : g.modRules) { Paint(v.prev.card); Paint(v.next.card); }
+    for (StepperView& v : g.steppers) { Paint(v.prev.card); Paint(v.next.card); Paint(v.plate.card); }
+    for (StepperView& v : g.modRules) { Paint(v.prev.card); Paint(v.next.card); Paint(v.plate.card); }
     Paint(g.damage.number.card);
     Paint(g.gather.number.card);
     for (MapView& v : g.maps) Paint(v.card);
@@ -2517,12 +2727,16 @@ void Tick(Session& session, UObject* worldContext) {
         }
     }
     if (!g.built) Build();
+    NoticesMenuTick(g.menu, g.panelOpen);
     if (!g.openButton) return;
     // Turned away by a host: the page opens on its own with the reason in large type, so it is not missed.
     if (std::string why = session.TakeNotice(); !why.empty() && g.notice) {
         g.notice.Set(why); g.notice.Show(true);
         g.panelOpen = true; g.panel.Show(true); g.nextText = 0;
     }
+    // Back from a match with the lobby kept (the host's BACK TO LOBBY): the page opens, on the lobby.
+    if (session.TakeLobbyPage()) { g.panelOpen = true; g.panel.Show(true); g.nextText = 0; }
+    g.drops.Tick(DropContext());                 // an open list takes its clicks and Esc before the page reads its own
     if (!HandleWarn(session)) HandleClicks(session);
     if (now >= g.nextText) {
         g.nextText = now + 250;
@@ -2545,7 +2759,7 @@ void LeaveMenus() {
     next = now + 2000;
     SetLobbyTyping(false);
     g.reportTyping = false;
-    if (g.panelOpen && StillAlive(g.menu, g.menuIndex, g.menuClass)) { g.panelOpen = false; g.panel.Show(false); }
+    if (g.panelOpen && StillAlive(g.menu, g.menuIndex, g.menuClass)) { g.panelOpen = false; g.panel.Show(false); g.drops.Close("page"); }
     for (const char* name : {"UI_Startup_Menu_C", "UI_MainMenuSNF_C"})
         for (UObject* o : FindInstances(name))
             if (InViewport(o)) {

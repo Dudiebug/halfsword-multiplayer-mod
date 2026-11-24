@@ -15,7 +15,7 @@ static void TestPlanValues() {
     CHECK(Same(kSmoke, {0.02f, 0.017f, 0.014f, 0.82f}));
     CHECK(Same(kBone, {0.93f, 0.89f, 0.80f, 1}));
     CHECK(Same(kBlood, {0.70f, 0.05f, 0.04f, 1}));
-    CHECK(Same(kIron, {0.45f, 0.47f, 0.50f, 1}));
+    CHECK(Same(kIron, {0.4851f, 0.5029f, 0.5395f, 1}));   // raised from 0.45 0.47 0.50 (PR8): 4.3:1 over a white scene was not enough
     CHECK(Same(kOk, {0.35f, 0.65f, 0.25f, 1}));
     CHECK(Same(kWarn, {0.85f, 0.62f, 0.05f, 1}));
     CHECK(Same(kSceneGrey, {0.18f, 0.18f, 0.18f, 1}));
@@ -106,6 +106,121 @@ static void TestClassicMenus() {
     UseMenuLook(MenuLook::Game);
 }
 
+// The type scale: eight sizes, in this order, and the typeface goes by role (a section and up is the heading face).
+static void TestTypeScale() {
+    using namespace hsm::style::type;
+    CHECK(kHint == 14 && kBody == 15 && kRow == 17 && kEmphasis == 20 && kSection == 23 && kCard == 28 && kModal == 36 && kPage == 44);
+    CHECK(sizeof(kScale) / sizeof(kScale[0]) == 8);
+    const float want[8] = {14, 15, 17, 20, 23, 28, 36, 44};
+    for (int i = 0; i < 8; ++i) CHECK(kScale[i] == want[i]);
+    for (int i = 1; i < 8; ++i) CHECK(kScale[i] > kScale[i - 1]);                   // strictly rising
+    for (float dropped : {13.f, 16.f, 19.f, 21.f, 22.f, 25.f, 30.f, 50.f})
+        for (float s : kScale) CHECK(s != dropped);                                  // the sizes the scale retired
+    CHECK(kBannerSub == 26 && kScore == 34 && kDeadTitle == 38 && kBanner == 80);   // the HUD's display sizes stay
+    for (float s : {kBannerSub, kScore, kDeadTitle, kBanner}) for (float t : kScale) CHECK(s != t);
+    CHECK(IsHeading(kSection) && IsHeading(kCard) && IsHeading(kModal) && IsHeading(kPage));
+    CHECK(IsHeading(kBannerSub) && IsHeading(kScore) && IsHeading(kDeadTitle) && IsHeading(kBanner));
+    CHECK(!IsHeading(kHint) && !IsHeading(kBody) && !IsHeading(kRow) && !IsHeading(kEmphasis));
+    CHECK(IsHeading(kSection) && !IsHeading(kSection - 1));                         // the boundary is the section size
+}
+
+// A grey on black that reads exactly `ratio`:1: (g + 0.05) / 0.05.
+static Rgba GreyFor(double ratio) { const float g = float(ratio * 0.05 - 0.05); return {g, g, g, 1}; }
+
+// The thresholds: 4.5:1 for text and 3:1 for disabled text, each way round (a hair under fails, a hair over passes).
+static void TestContrastThresholds() {
+    const Rgba black{0, 0, 0, 1};
+    CHECK(kMinTextContrast == 4.5 && kMinDisabledContrast == 3.0);
+    CHECK(!ReadableText(Contrast(GreyFor(4.45), black)) && ReadableText(Contrast(GreyFor(4.55), black)));
+    CHECK(!ReadableDisabled(Contrast(GreyFor(2.95), black)) && ReadableDisabled(Contrast(GreyFor(3.05), black)));
+    CHECK(!ReadableText(Contrast(GreyFor(3.2), black)) && ReadableDisabled(Contrast(GreyFor(3.2), black)));   // 3:1 is the lower bar
+    CHECK(!ReadableDisabled(Contrast(GreyFor(1), black)));
+}
+
+// The display-space blend: a plain mix of the sRGB values, which is not the linear mix.
+static void TestDisplayBlend() {
+    CHECK(Near(FromDisplay(ToDisplay(0.2)), 0.2) && Near(ToDisplay(0), 0) && Near(ToDisplay(1), 1));
+    CHECK(Near(ToDisplay(0.5), 0.7354, 1e-3) && Near(FromDisplay(0.5), 0.2140, 1e-3));
+    CHECK(Same(OverDisplay({0.2f, 0.4f, 0.6f, 1}, kSceneWhite), {0.2f, 0.4f, 0.6f, 1}));
+    CHECK(Same(OverDisplay({0.2f, 0.4f, 0.6f, 0}, {0.5f, 0.5f, 0.5f, 1}), {0.5f, 0.5f, 0.5f, 1}));
+    CHECK(Same(OverDisplay({1, 1, 1, 0}, {1, 1, 1, 0}), {0, 0, 0, 0}));
+    const Rgba half = OverDisplay({0, 0, 0, 0.5f}, kSceneWhite);                       // half black over white: sRGB 0.5
+    CHECK(Near(half.r, FromDisplay(0.5), 1e-4) && half.r < Over({0, 0, 0, 0.5f}, kSceneWhite).r);
+}
+
+// The panel over a bright scene: every ink the HUD prints on it (the plan's worst case is white), with the two inks
+// that failed there (iron 4.3, blood ink 4.1) raised to the mock's sRGB #b9bcc2 and #fba597.
+static void TestHudInksOverWhite() {
+    CHECK(Same(PanelOverWhite(), OverDisplay(kSmoke, kSceneWhite)) && PanelOverWhite().a == 1.f);
+    for (Rgba c : {kBone, kIron, kOk, kWarn, kBloodInk, kInfectedInk}) CHECK(ReadableText(TextContrastOverWhite(c)));
+    for (int t = -1; t <= 4; ++t) CHECK(ReadableText(TextContrastOverWhite(TeamInk(t))));
+    CHECK(TextContrastOverWhite(Rgba{0.45f, 0.47f, 0.50f, 1}) < 4.5);                   // kIron before this change
+    CHECK(TextContrastOverWhite(Rgba{0.95f, 0.32f, 0.26f, 1}) < 4.5);                   // kBloodInk before this change
+    CHECK(!ReadableText(TextContrastOverWhite(kBlood)));                                 // the accent is still not text
+    CHECK(Near(kIron.r, 0.4851, 5e-4) && Near(kIron.g, 0.5029, 5e-4) && Near(kIron.b, 0.5395, 5e-4));             // #b9bcc2
+    CHECK(Near(kBloodInk.r, 0.9647, 5e-4) && Near(kBloodInk.g, 0.3763, 5e-4) && Near(kBloodInk.b, 0.3095, 5e-4));   // #fba597
+    CHECK(TextContrastOverWhite(kBone) < TextContrast(kBone));                           // white is worse than the reference grey
+    const Rgba halfBone{kBone.r, kBone.g, kBone.b, 0.5f};                                 // a faded ink counts as drawn
+    CHECK(TextContrastOverWhite(halfBone) < TextContrastOverWhite(kBone));
+    CHECK(Near(TextContrastOverWhite(halfBone), Contrast(OverDisplay(halfBone, PanelOverWhite()), PanelOverWhite())));
+}
+
+// Text on a picked card and a picked plate, in every look, and a disabled control's label.
+static void TestPickedAndDisabled() {
+    for (MenuLook look : {MenuLook::Classic, MenuLook::Game, MenuLook::Dark}) {
+        const MenuPalette& m = PaletteOf(look);
+        // A picked card: its ink on its face (and on the panel behind it when the face is see-through).
+        CHECK(ReadableText(Contrast(m.onPicked, m.picked)));
+        CHECK(ReadableText(Contrast(m.onPicked, OverDisplay(m.picked, OverDisplay(m.panel, kSceneGrey)))));
+        // A picked plate (your own kill-feed line) over the reference scene; the opaque ones over white as well.
+        CHECK(ReadableText(Contrast(m.onPicked, OverDisplay(m.platePicked, kSceneGrey))));
+        if (look != MenuLook::Classic) CHECK(ReadableText(Contrast(m.onPicked, OverDisplay(m.platePicked, kSceneWhite))));
+        // A disabled control: the label, its card and the panel behind it all at the disabled opacity.
+        Rgba bg = m.bg; bg.a = 1;
+        const Rgba behind = OverDisplay(m.panel, bg);
+        CHECK(ReadableDisabled(DisabledContrast(m.text, m.card, behind)));
+        // A dimmed card that is also the picked one (a member sees the host's pick dimmed): dark ink on the faded amber reads
+        // about 1.8:1 in the dark look. Known and left: the mock does not cover it either (docs/UI_STYLE.md).
+        if (look != MenuLook::Dark) CHECK(ReadableDisabled(DisabledContrast(m.onPicked, m.picked, behind)));
+        CHECK(DisabledContrast(m.text, m.card, behind) < Contrast(m.text, m.card));       // it does look fainter
+    }
+    CHECK(Same(kClassicMenus.onPicked, kClassicMenus.text));
+    CHECK(ReadableText(Contrast(kClassicMenus.onPicked, kClassicMenus.accent)));         // the classic fallback paint of a picked card
+    // Before this change: bone on the shaded amber read about 2.5:1 in the dark look.
+    CHECK(!ReadableText(Contrast(kDarkMenus.text, kDarkMenus.picked)));
+    CHECK(!ReadableText(Contrast(kDarkMenus.text, kDarkMenus.platePicked)));
+    CHECK(Same(kDarkMenus.picked, Keep(kAmber, kDarkKeepPicked)) && Same(kDarkMenus.platePicked, Keep(kAmber, kDarkKeepPlate)));
+    CHECK(Same(kGameMenus.picked, kAmber) && Same(kGameMenus.platePicked, kAmber) && Same(kGameMenus.pickedFrame, kAmber));
+    CHECK(Same(kClassicMenus.pickedFrame, kClassicMenus.accent) && Same(kClassicMenus.picked, kClassicMenus.card));
+    CHECK(Same(kClassicMenus.platePicked, kPlateMineClassic) && Same(kPlateMineClassic, {0.22f, 0.025f, 0.02f, 0.80f}));
+    CHECK(Same(kAmber, {0.85f, 0.45f, 0.03f, 1}) && kDarkKeepPicked == 0.55f && kDarkKeepPlate == 0.50f);   // what the skin shades by
+    // One opacity for every disabled control: the lowest of the old four that keeps the label at 3:1 in all three looks.
+    CHECK(kDisabledAlpha == 0.55f);
+    CHECK(kDisabledAlpha < 0.7f);                                                         // still plainly faded
+    Rgba gameBg = kGameMenus.bg; gameBg.a = 1;
+    const Rgba gameBehind = OverDisplay(kGameMenus.panel, gameBg);
+    for (float old : {0.3f, 0.4f, 0.45f}) CHECK(!ReadableDisabled(DisabledContrast(kGameMenus.text, kGameMenus.card, gameBehind, old)));
+    // The numbers themselves (the label, its card and the panel all faded): the game look is the tight one.
+    Rgba classicBg = kClassicMenus.bg, darkBg = kDarkMenus.bg; classicBg.a = darkBg.a = 1;
+    CHECK(Near(DisabledContrast(kGameMenus.text, kGameMenus.card, gameBehind), 3.50, 0.03));
+    CHECK(Near(DisabledContrast(kClassicMenus.text, kClassicMenus.card, OverDisplay(kClassicMenus.panel, classicBg)), 4.92, 0.03));
+    CHECK(Near(DisabledContrast(kDarkMenus.text, kDarkMenus.card, OverDisplay(kDarkMenus.panel, darkBg)), 4.77, 0.03));
+}
+
+// The new palette roles are set by UseMenuLook, one set per look.
+static void TestPickedRoles() {
+    for (MenuLook look : {MenuLook::Classic, MenuLook::Game, MenuLook::Dark, MenuLook::Classic}) {
+        UseMenuLook(look);
+        const MenuPalette& m = PaletteOf(look);
+        CHECK(Same(kMenuPicked, m.picked) && Same(kMenuPickedFrame, m.pickedFrame) && Same(kMenuOnPicked, m.onPicked));
+        CHECK(Same(kMenuPlatePicked, m.platePicked) && Same(kMenuField, m.field));
+    }
+    CHECK(kGameMenus.field.a == 1.f && kClassicMenus.field.a == 1.f && kDarkMenus.field.a < 1.f);
+    CHECK(Same(kSmokeDense, {kSmoke.r, kSmoke.g, kSmoke.b, 0.92f}) && kOutlineInk.a == 0.9f && kOutlineInk.r == 0.f);
+    CHECK(Same(kCardTint, {0.86f, 0.84f, 0.80f, 1}) && Same(kCardTintHover, {1, 0.97f, 0.88f, 1}) && Same(kStartTint, {0.85f, 0.85f, 0.85f, 1}));
+    UseMenuLook(MenuLook::Game);
+}
+
 // Headings: title case in the game look, capitals in the classic one. HS Enhancer keeps its name in both.
 static void TestMenuTitle() {
     UseMenuLook(MenuLook::Game);
@@ -184,6 +299,12 @@ int main() {
     TestPlanValues();
     TestContrastMath();
     TestTextIsReadable();
+    TestTypeScale();
+    TestContrastThresholds();
+    TestDisplayBlend();
+    TestHudInksOverWhite();
+    TestPickedAndDisabled();
+    TestPickedRoles();
     TestTeamInk();
     TestDarkMenus();
     TestMenuPalette();

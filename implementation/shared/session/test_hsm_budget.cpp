@@ -19,6 +19,8 @@ static void TestClasses() {
     CHECK(BudgetClassOf(MsgType::ModMap) == BudgetClass::Control);
     CHECK(BudgetClassOf(MsgType::LevelSeed) == BudgetClass::Control);
     CHECK(BudgetClassOf(MsgType::LobbySecret) == BudgetClass::Control);
+    CHECK(BudgetClassOf(MsgType::BackToLobby) == BudgetClass::Control);   // rev 49
+    CHECK(BudgetClassOf(MsgType::CryptRoom) == BudgetClass::Control && BudgetClassOf(MsgType::CryptRoomsBuilt) == BudgetClass::Control);   // rev 50
     CHECK(BudgetClassOf(MsgType::ModList) == BudgetClass::Control && BudgetClassOf(MsgType::ModAnswer) == BudgetClass::Control);
     CHECK(BudgetClassOf(MsgType::SessionMods) == BudgetClass::Control && BudgetClassOf(MsgType::ModChallenge) == BudgetClass::Control);
     CHECK(BudgetClassOf(MsgType::Forward) == BudgetClass::Detour);

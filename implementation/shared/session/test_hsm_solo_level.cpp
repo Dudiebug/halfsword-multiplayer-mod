@@ -54,8 +54,28 @@ static void TestGatherRun() {
     CHECK(opened == 1);                                                                   // one stock solo map opens for a gather
 }
 
+// The bare Crypts level is both things now: Crypt Royale Apart opens it as each machine's own run, and Grave Robbers (or a Together
+// run) opens it as the one shared dungeon. The name says "dungeon level" either way; the run decides whether it may open.
+static void TestSoloVersusShared() {
+    const std::string level = "/Game/Maps/Test/ProceduralBlocksTest/Map_Procedural_Block_Test_Main";
+    CHECK(IsSoloLevel(level) && std::string(kCryptsLevel) == level);                    // still the dungeon level by name
+    CHECK(!SoloLevelAllowed(level, false, false));                                      // a menu or a lobby fight: never
+    CHECK(SoloLevelAllowed(level, true, false));                                        // Apart: this machine's own run
+    CHECK(SoloLevelAllowed(level, false, true));                                        // shared: the host's dungeon for everyone
+    CHECK(SoloLevelAllowed(level, true, true));
+    CHECK(SoloLevelAllowed(level, true) == SoloLevelAllowed(level, true, false));       // the old two-argument call is the Apart one
+    for (bool g : {false, true})
+        for (bool sh : {false, true}) {
+            CHECK(!SoloLevelAllowed("/Game/Maps/Test/ProceduralBlocksTest/Dungeon_Probe", g, sh));   // another solo level: never
+            CHECK(SoloLevelAllowed("/Game/Maps/Abyss/Abyss_Map_Open_EA", g, sh));
+        }
+    // The old layout tags are not a thing any more: the dungeon level with a tag is still the dungeon level, and nothing opens it by tag.
+    CHECK(IsSoloLevel(level + "#Descent") && IsSoloLevel(level + "#Kitchen"));
+}
+
 int main() {
     TestDungeonIsSolo();
+    TestSoloVersusShared();
     TestGatherRun();
     TestOtherLevelsAreNot();
     TestStockMaps();

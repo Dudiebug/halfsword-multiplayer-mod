@@ -873,6 +873,34 @@ static void TestBiteNormal() {
     CHECK(!IsBiteNormal(ReplayInputs(MakeClaim(in, standIn, 2, 10, 2, 1000, StrikeSource::Body, "", ""), victimBone).normal));
 }
 
+// ---------------------------------------------------------------- hit velocity bound (#3845)
+static void TestCapBlowSpeed() {
+    V3 v{ 1000, -2000, 500 };
+    CHECK(!CapBlowSpeed(v));                       // 2291 cm/s: a fast swing, untouched
+    CHECK(EqV3(v, V3{ 1000, -2000, 500 }));
+    v = V3{ 0, 0, 3500 };
+    CHECK(!CapBlowSpeed(v));                       // exactly the bound: untouched
+    v = V3{ 0, 0, 0 };
+    CHECK(!CapBlowSpeed(v) && EqV3(v, V3{ 0, 0, 0 }));
+    // The blow of the report: a contact impulse of a servo-driven stand-in read as a speed of 13,858 cm/s.
+    v = V3{ 6000, -8000, 9000 };
+    const double before = Len(v);
+    CHECK(CapBlowSpeed(v));
+    CHECK(Near(Len(v), kMaxBlowSpeed, 1e-6));
+    CHECK(Near(v.x / v.y, 6000.0 / -8000.0) && Near(v.z / v.x, 9000.0 / 6000.0));   // direction kept
+    CHECK(before > kMaxBlowSpeed);
+    // The damage the game's formula gives at the bound with the widest rigidity (1.666) stays in the thousands.
+    CHECK(kMaxBlowSpeed * 1.666 > 5000);
+    v = V3{ 100, 0, 0 };
+    CHECK(CapBlowSpeed(v, 50.0) && Near(v.x, 50.0));   // a custom bound
+    v = V3{ 100, 0, 0 };
+    CHECK(!CapBlowSpeed(v, 0.0) && Near(v.x, 100.0));  // 0 or less: off
+    v = V3{ std::numeric_limits<double>::quiet_NaN(), 0, 0 };
+    CHECK(!CapBlowSpeed(v));                       // not a number: left to the sanity guard
+    v = V3{ std::numeric_limits<double>::infinity(), 0, 0 };
+    CHECK(!CapBlowSpeed(v));
+}
+
 int main() {
     TestBoneFrameRoundTrip();
     TestBiteNormal();
@@ -901,6 +929,7 @@ int main() {
     TestPropClaimDecode();
     TestStuckClaimDecode();
     TestDecidePropContact();
+    TestCapBlowSpeed();
     if (g_fail) { std::printf("test_hsm_claim: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_claim: all passed\n");
     return 0;

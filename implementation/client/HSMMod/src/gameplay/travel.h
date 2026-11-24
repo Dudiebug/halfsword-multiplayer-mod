@@ -4,6 +4,7 @@
 #include "hsm_protocol.h"
 #include "ue/engine.h"
 #include <functional>
+#include <source_location>
 #include <string>
 #include <vector>
 
@@ -13,8 +14,11 @@ namespace hsm::game {
 using OpenLevelFilter = std::function<bool(const std::string& level, bool absolute, const std::string& options)>;
 
 bool InstallTravelHook(OpenLevelFilter filter);
-// Opens a level from mod code; bypasses the filter. Game thread only.
-void OpenLevel(ue::UObject* worldContext, const std::string& level, bool absolute, const std::string& options);
+// Opens a level from mod code; bypasses the filter. Game thread only. worldContext goes through worldctx::For
+// (gameplay/world_context.h): a stale game mode is replaced by the live one; with none alive nothing opens. `at` names
+// the caller in that log line.
+void OpenLevel(ue::UObject* worldContext, const std::string& level, bool absolute, const std::string& options,
+               std::source_location at = std::source_location::current());
 
 // GI_Settings fields that define what a level load means (mode, foes, progression event...).
 std::vector<Setting> CaptureGameSettings();

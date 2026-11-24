@@ -27,14 +27,15 @@ namespace hsm {
 // PlayersVsBots is "Survival": endless bot waves. Zombies: the same rules with the game's zombie Willies, one at a time
 // per player. TwoTeams is "Teams": MatchConfig::teams (2..4) says how many; ThreeTeams is only the old value of 3 teams
 // (Sanitize turns it into TwoTeams with teams = 3), never produced. LastManStanding: Duel's rounds for any number of
-// fighters; Duel itself is for exactly 2. The team rounds (IsTeamRound) take Duel's rounds to teams: the last TEAM
-// standing takes the round, scores are per team. TeamDuel: MatchConfig::teams (2..4) teams, picked in the lobby. Riot and
+// fighters; Duel itself is for exactly 2 (0.9.0: one lobby card, both ids stay on the wire, FormatForPlayers picks). The team
+// rounds (IsTeamRound) take Duel's rounds to teams: the last TEAM standing takes the round, scores are per team. TeamDuel: MatchConfig::teams (2..4) teams, picked in the lobby. Riot and
 // Juggernaut: two fixed teams that the roles decide (match/hsm_roles.h). CaptureTheFlag (10) was removed in 0.8.0: like
 // ThreeTeams it is only an old value (Sanitize turns it into TwoTeams), never produced; the number is never reused. Wave 3 (match/hsm_modes.h): Tag (rounds, one fighter
 // is "it" and carries a fuse; no teams), Infection (survivors against the infected: two fixed teams, the infected respawn),
 // Crossbow TDM (Teams with a crossbow for everyone). Tournament (14): a 1v1 bracket over everybody, the pairing being fought
 // and the rest on the bench (match/hsm_bracket.h). PitBridgeDuel (15): the Pit's bridge, the winner stays and the loser goes
-// to the back of the queue (match/hsm_kingqueue.h). Both are round formats with a bench: IsQueueFormat. Chaos (16): Last Man
+// to the back of the queue (match/hsm_kingqueue.h); it has no lobby card since 0.9.0 (an older host can still run it, so the
+// engine and the HUD keep playing it). Both are round formats with a bench: IsQueueFormat. Chaos (16): Last Man
 // Standing's rounds, each fighter dealt a new rank of gear, weapon type, height and weight every round and the round its own
 // damage and weights (match/hsm_roles.h).
 enum class Format : uint8_t { FreeForAll = 0, TwoTeams = 1, ThreeTeams = 2, PlayersVsBots = 3, Duel = 4, Zombies = 5, LastManStanding = 6,
@@ -158,7 +159,7 @@ inline uint8_t WeightFromSlider(float at) {
     if (!(at >= 0.f)) return 0;
     return uint8_t(std::min<int>(int(at / kWeightStepPct + 0.5f) * kWeightStepPct, kWeightMaxPct));
 }
-inline std::string WeightLabel(uint8_t pct) { return std::to_string(pct) + "%" + (pct == kWeightStockPct ? " (stock)" : ""); }
+inline std::string WeightLabel(uint8_t pct) { return std::to_string(pct) + "%"; }
 
 // The Tagger speed row (Tag): whoever is "it" runs and walks this percent of their normal speed while they carry the fuse
 // (lobby key hsm_tspd; gameplay/session.cpp applies it through the class stats). 100 is no bonus.
@@ -185,37 +186,67 @@ struct MatchConfig {
     uint8_t deadWeightPct = kWeightDefaultPct;     // the Dead weight row (lobby key hsm_dwt): Dead Weight Scale for everyone, percent of 1.0
     uint8_t weaponWeightPct = kWeightDefaultPct;   // the Weapon weight row (lobby key hsm_wwt): Weapon Weight Scale for everyone, percent of 1.0
     uint16_t waveBreakS = 0;          // bot formats: the pause between waves (kWaveBreakOptions); 0 = the format's own (Match::kWaveBreakMs, kZombieBreakMs)
-    uint8_t clearGroundMin = 0;       // free-for-all, teams, Brawl: every this many minutes each machine clears the dropped weapons and loose armour (kClearGroundOptions); 0 = never
-    bool freeCam = true;              // dead players may fly a free camera (F, lobby key hsm_fcam); false: they only follow the living (MatchInfo.freeCam)
+    uint16_t clearGroundS = 0;        // free-for-all, teams, Brawl: every this many seconds each machine clears the dropped weapons and loose armour (kClearGroundOptionsS); 0 = never.
+                                      // The struct's 0 is what a solo or dedicated match runs; a new lobby starts at kClearGroundDefaultS (lobby key hsm_clrs; MatchInfo carries ClearGroundWireMin)
+    bool freeCam = true;              // always on since 0.9.0: Sanitize sets it, every read ignores a 0, the lobby key hsm_fcam and MatchInfo.freeCam are written as on (an older host may still send 0)
     uint8_t classPower = kClassPowerDefault;   // the class power limit where the lobby uses classes (#2125, lobby key hsm_cpow): match/hsm_class_power.h; never a wire field
     bool stripOff = false;            // the Stripping row Off (#1931, lobby key hsm_strip): a downed fighter's armour cannot be pulled off (match/hsm_strip.h); never a wire field
+    bool biteOff = false;             // the Biting row Off (lobby key hsm_bite): a player's bite on another fighter is stopped before it holds (match/hsm_bite.h); never a wire field
     bool ownBodies = false;           // the Bodies row Own (#1410, lobby key hsm_body): with own loadouts every player keeps their own character's build, not the tier's (ForcesBuild); MatchInfo.forceStrength carries the outcome
     bool keepKit = false;             // the Loadouts row (#2112, lobby key hsm_keep): a Tournament with random loadouts keeps each player's first one for the bracket (match/hsm_kept_kit.h); never a wire field
-    uint8_t scenario = 0;             // hsm::Scenario: the world settings for the picked map (lobby key hsm_scen); host-side, the clients get the settings with the Travel, never a wire field
-    uint8_t timeOfDay = 0;            // hsm::TimeOfDay: the lighting of an arena with a day cycle (lobby key hsm_tod); host-side like the scenario, the Travel carries it
+    uint8_t scenario = 0;             // hsm::Scenario (lobby key hsm_scen), never a wire field: 4 is the Blossfechten card (IsBlossfechten); an older host may still advertise Brawling, the retired Fenced ring (1) and Carnage (2) read Standard
+    uint8_t timeOfDay = 2;            // hsm::TimeOfDay: the lighting of an arena with a day cycle (lobby key hsm_tod), Midday by default; host-side like the scenario, the Travel carries it
     uint8_t winBy = 0;                // hsm::WinBy (match/hsm_win_by.h): what loses a round besides death (lobby key hsm_winby); every machine reads it from the lobby, never a wire field
     bool propsOff = false;            // the Props row Off (#1252, lobby key hsm_props): every machine removes the map's loose props during the match (PropsOffClears); never a wire field
     bool hostPhysics = false;         // 0.9.0: the host runs every fighter's physics and every screen shows its copy (SyncMode::Host); false: each player its own (SyncMode::Owner)
     uint16_t gatherS = 600;           // Crypts gear: the Gather time in seconds (kGatherMinS..kGatherMaxS, lobby key hsm_gather); host-side, the Gather message carries the clock
+    uint8_t cryptsTier = 1;           // Crypts gear: the Dungeon tier row (#3350, lobby key hsm_ctier), the highest tier each run reaches (kCryptsTierCap Peasant; kCryptsTierTop: the game's own); every machine reads it from the lobby, never a wire field
+    bool cryptsTogether = false;      // Crypts gear: the Crypts run row (lobby key hsm_ctog): Apart (each machine its own Crypts run) or Together (everyone in the one
+                                      // shared dungeon, docs/PLAN_CRYPTS_COOP.md); hidden by [mod] crypts_coop=0 (g_cryptsCoopOffered); the host reads it at the gather's start
+    bool graveRobbers = false;        // Crypts gear: the mode (lobby key hsm_grave): Grave Robbers (everyone loots the same crypt, no fight after) rather than Crypt Royale
+                                      // (loot, then the Battle in the found kits); a missing key is Crypt Royale; held back like Together; never a wire field
 };
 inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
-inline constexpr uint8_t kClearGroundOptions[4] = {0, 2, 3, 5};       // minutes, 0 = off
+// The Clear ground row: every 30 s, 1, 2, 3, 5 or 10 min, 2 min for a new lobby, and no Off. 0 is only what a format without the row
+// (Sanitize) and an older host's Off read as: "Never", not a stop the host can pick.
+inline constexpr uint16_t kClearGroundOptionsS[6] = {30, 60, 120, 180, 300, 600};   // seconds
+inline constexpr uint16_t kClearGroundDefaultS = 120;
+// The wire (MatchInfo.clearGroundMin) still carries whole minutes, 0/2/3/5 (ValidClearGroundMin; it is only for show, the host's timer
+// decides and every machine clears when clearCount changes). Round the seconds up to the nearest of those: 30 s to 2 min is 2, 3 min 3,
+// 5 and 10 min 5. Nothing on the wire changes, so no revision.
+inline uint8_t ClearGroundWireMin(uint16_t s) { return s == 0 ? 0 : s <= 120 ? 2 : s <= 180 ? 3 : 5; }
+inline bool ValidClearGroundS(uint16_t s) {
+    if (s == 0) return true;
+    for (uint16_t o : kClearGroundOptionsS) if (s == o) return true;
+    return false;
+}
+// The lobby's Clear ground in seconds from its keys: hsm_clrs (seconds, since the 30 s step) when it is there, else an older host's hsm_clr
+// (whole minutes, 0 = off): 2, 3 and 5 min read as 120, 180 and 300 s, Off as 0.
+inline uint16_t ClearGroundFromKeys(bool haveSeconds, int seconds, int minutes) {
+    if (haveSeconds) return uint16_t(std::clamp(seconds, 0, 65535));
+    return uint16_t(std::clamp(minutes, 0, 1000) * 60);
+}
 inline bool ValidWaveBreakS(uint16_t s) { return s == 0 || s == 10 || s == 30 || s == 60 || s == 120; }
 inline bool ValidClearGroundMin(uint8_t m) { return m == 0 || m == 2 || m == 3 || m == 5; }
 // The Time of day row (#2): the lighting an arena with a day cycle loads. The game keeps it in GI_Settings "Current FreeMode
 // Time", an Enum_DayTime (0 morning, 1 day, 2 evening, 3 night); each such arena picks its lighting level and ambience from it
-// when Free Mode is on (decomp Map_Arena_Pit and the others). Map: the host's own Free Mode time, untouched.
-enum class TimeOfDay : uint8_t { Map = 0, Morning = 1, Day = 2, Evening = 3, Night = 4 };
+// when Free Mode is on (decomp Map_Arena_Pit and the others). There is no "Map's own" any more: the row is Morning, Midday,
+// Evening, Night, and Midday for a new lobby. 0 is what an older host's Map's own wrote; every read takes it (and a stale value) as Midday.
+enum class TimeOfDay : uint8_t { Retired = 0, Morning = 1, Midday = 2, Evening = 3, Night = 4 };
 inline constexpr uint8_t kTimeOfDayCount = 5;
-// The game's Enum_DayTime byte for a pick; -1 for Map and for a value past the last (nothing is set).
-inline int GameDayTime(uint8_t t) { return t >= 1 && t < kTimeOfDayCount ? int(t) - 1 : -1; }
+inline uint8_t TimeOfDayRead(uint8_t t) { return t >= 1 && t < kTimeOfDayCount ? t : uint8_t(TimeOfDay::Midday); }
+// The row's four picks, Morning to Night: pick i (0..3) is the stored value i + 1; a stored value reads as its pick.
+inline constexpr size_t kTimeOfDayPicks = kTimeOfDayCount - 1;
+inline size_t TimeOfDayPickAt(uint8_t t) { return size_t(TimeOfDayRead(t)) - 1; }
+inline uint8_t TimeOfDayOfPick(size_t i) { return uint8_t(1 + (i < kTimeOfDayPicks ? i : size_t(TimeOfDay::Midday) - 1)); }
+// The game's Enum_DayTime byte for a pick (always one: 0 morning .. 3 night).
+inline int GameDayTime(uint8_t t) { return int(TimeOfDayRead(t)) - 1; }
 inline const char* TimeOfDayName(uint8_t t) {
-    switch (TimeOfDay(t)) {
+    switch (TimeOfDay(TimeOfDayRead(t))) {
         case TimeOfDay::Morning: return "Morning";
-        case TimeOfDay::Day: return "Day";
         case TimeOfDay::Evening: return "Evening";
         case TimeOfDay::Night: return "Night";
-        default: return "Map's own";
+        default: return "Midday";
     }
 }
 // Brawl: free-for-all where every fighter spawns bare (no armour, no weapons) and fights with fists. A mode card, not a
@@ -229,7 +260,20 @@ inline bool IsBare(const MatchConfig& c) { return IsBare(c.gear); }
 // for the Gather time; then the format is fought in the gathered kits (match/hsm_crypts.h).
 inline bool IsCrypts(Gear g) { return g == Gear::Crypts; }
 inline bool IsCrypts(const MatchConfig& c) { return IsCrypts(c.gear); }
+// The two Crypts modes, played on the Crypts map: Grave Robbers (co-op, no fight after) and Crypt Royale (a loot run, then the Battle).
+inline bool IsGraveRobbers(const MatchConfig& c) { return IsCrypts(c) && c.graveRobbers; }
+inline bool IsCryptRoyale(const MatchConfig& c) { return IsCrypts(c) && !c.graveRobbers; }
+// Whether the lobby offers the co-op half of the Crypts (Grave Robbers and the Crypts run's Together). The mod turns it on by default and
+// [mod] crypts_coop=0 turns it off (client/HSMMod/src/config.cpp sets it; docs/PLAN_CRYPTS_COOP.md). The Crypts map and Crypt Royale
+// Apart are always there. The flag itself starts off here so a test sets what it needs.
+inline bool g_cryptsCoopOffered = false;
+// A Crypts lobby whose run is one dungeon for everyone (not each player's own): Grave Robbers, or Crypt Royale Together.
+inline bool SharedCryptsRun(const MatchConfig& c) { return IsCrypts(c) && (c.graveRobbers || c.cryptsTogether); }
 constexpr uint16_t kGatherMinS = 120, kGatherMaxS = 3600, kGatherDefaultS = 600;   // 2 to 60 minutes, whole minutes (typed or stepped)
+// The Crypts' tier during a gather (Enum_Ranks 0 Beggar .. 8 Lord; match/hsm_crypts.h CappedCryptsTier): held at Peasant
+// unless the host's Dungeon tier row says otherwise. Lord, the top rank, is no cap: the game's own tiers.
+constexpr uint8_t kCryptsTierCap = 1;             // Peasant
+constexpr uint8_t kCryptsTierTop = 8;             // Lord: no cap
 // The formats a Crypts gather can end in: the ones that fight in each player's own loadout. The formats that deal their
 // own gear or roles (Tag, Riot, Chaos, Hide and Seek, ...), the Abyss-only Zombies and the bridge are left out.
 inline bool CryptsBattleFormat(Format f) {
@@ -270,11 +314,38 @@ inline double MassScaleFor(double weight) { return 1.0 + 0.25 * weight; }
 inline double GripScaleFor(double weight) { return 1.0 + 0.5 * weight; }
 
 inline bool IsBotFormat(Format f) { return f == Format::PlayersVsBots || f == Format::Zombies; }
-// The scenario row (hsm_scenarios.h) for a match: what the format lets it do, and what it does on this map for `players` humans.
+// The scenario (hsm_scenarios.h) for a match: what the format lets it do, and what it does on this map.
 inline ScenarioFormat ScenarioFormatOf(Format f) { return {f == Format::FreeForAll, IsBotFormat(f)}; }
-inline ScenarioEffects ScenarioEffectsFor(const MatchConfig& c, std::string_view mapPath, int players) {
-    return EffectsOf(EffectiveScenario(mapPath, c.scenario), ScenarioFormatOf(c.format), players);
+inline ScenarioEffects ScenarioEffectsFor(const MatchConfig& c, std::string_view mapPath) {
+    return EffectsOf(EffectiveScenario(mapPath, c.scenario), ScenarioFormatOf(c.format));
 }
+// Blossfechten: swords only, no armour. The game's Blossfechten Gear flag takes the armour off and leaves the left hand empty,
+// but swaps the weapon for a sword only outside Free Mode (decomp Willie_BP), and a lobby match is Free Mode: the host deals
+// the swords. The match's gear becomes random by tier where the host rolls none (own, the host's kit), and every roll holds a
+// sword (the Weapons row's sword ticks, else both). Bare (Brawl, Tag) and the Crypts stay as they are.
+inline constexpr WeaponMask kSwordWeapons = WeaponMask(WeaponBit(1) | WeaponBit(2));
+inline WeaponMask SwordsOnly(WeaponMask m) {
+    const WeaponMask s = WeaponMask(m & kSwordWeapons);
+    return s ? s : kSwordWeapons;
+}
+inline MatchConfig BlossfechtenKit(MatchConfig c) {
+    if (IsBare(c) || IsCrypts(c)) return c;
+    if (!GearRolled(c.gear)) c.gear = Gear::RandomTier;
+    c.weapons = SwordsOnly(c.weapons);
+    return c;
+}
+// Blossfechten is a lobby mode with a card of its own (0.9.0), carried without a new wire id: the Last man standing rounds
+// (Duel is the same card with exactly two players) with the Blossfechten scenario value (lobby key hsm_scen 4, which revision 48
+// builds already play). The card's gear is BlossfechtenKit's and has no rows. A Blossfechten scenario another format got from an
+// older host is no card (the scenario still takes effect there, ScenarioEffects::blossfechten).
+inline bool IsBlossfechten(const MatchConfig& c) {
+    return c.scenario == uint8_t(Scenario::Blossfechten) && (c.format == Format::LastManStanding || c.format == Format::Duel) && !IsBare(c) && !IsCrypts(c);
+}
+// Duel and Last man standing are one lobby card (0.9.0) and both ids stay on the wire: the match is a Duel when exactly two
+// players are in, else Last man standing. The one rule of the lobby (StartConfig), the browser and the dedicated server
+// (ServerFormatFor). Any other format is the same.
+inline bool IsDuelCard(Format f) { return f == Format::Duel || f == Format::LastManStanding; }
+inline Format FormatForPlayers(Format f, int players) { return IsDuelCard(f) ? (players == 2 ? Format::Duel : Format::LastManStanding) : f; }
 // The gear settings a format takes: own / random by tier / identical anywhere (Survival and Zombies too, 0.8.0-pre20);
 // Fists only for the Brawl card (free-for-all) and Tag; Crypts only for its battle formats.
 inline bool GearAllowed(Format f, Gear g) {
@@ -324,6 +395,9 @@ inline bool PicksTeams(Format f) { return HasTeams(f) && !HasRoles(f) && !IsInfe
 // The Duel rules: rounds, the last one standing takes the round (Duel for two fighters, Last Man Standing for any number;
 // the team rounds count the last team).
 inline bool IsRoundFormat(Format f) { return IsRoulette(f) || f == Format::Duel || f == Format::LastManStanding || IsChaos(f) || IsOneCrossbow(f) || IsTag(f) || IsTeamRound(f) || IsQueueFormat(f) || IsHideSeek(f); }
+// The formats that have the Clear ground row: free-for-all, teams and Brawl. Bots despawn idle drops, a round format clears each round,
+// and Infection has its own pace (Sanitize zeroes it for those, the lobby scene leaves the row out).
+inline bool ClearGroundApplies(Format f) { return !(IsBotFormat(f) || IsRoundFormat(f) || IsInfection(f)); }
 // Scores kept per fighter (free-for-all, Duel, Last Man Standing) rather than per team.
 inline bool ScoresPerFighter(Format f) { return f == Format::FreeForAll || (IsRoundFormat(f) && !IsTeamRound(f)); }
 // Teams in a match: `teams` (2..4) for Teams, Team Duel and Crossbow TDM, 3 for the old ThreeTeams value, 2 for Riot, Juggernaut,

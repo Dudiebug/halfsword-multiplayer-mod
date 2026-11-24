@@ -158,10 +158,11 @@ static void TestPanelAndFloor() {
     PanelRow a; a.name = "Bob"; a.rttMs = 62; a.relayed = 0; a.quality = 0.99; a.staleP50 = 48; a.lateShare = 0.03;
     PanelRow b; b.name = "Al";
     const std::vector<std::string> p = NetPanel(50, true, {a, b});
-    CHECK(p.size() == 3 && p[0] == "netcode: input delay 50 ms, poses sent right after physics");
+    CHECK(p.size() == 3 && p[0] == "Input delay: 50 ms, positions sent right after each physics step");
+    CHECK(NetPanel(50, false, {a}).front() == "Input delay: 50 ms" && p[0].find("netcode") == std::string::npos);
     CHECK(p[1] == "Bob: 62 ms direct, loss 1% | shown 48 ms late | inputs late 3%");
     CHECK(p[2] == "Al: ping ?");
-    CHECK(NetPanel(0, false, {}).back() == "netcode: no other players");
+    CHECK(NetPanel(0, false, {}).back() == "No other players.");
     FrameFloor off;
     CHECK(!off.Push(100, 0) && !off.Push(100, 10000));
     FrameFloor f(60);

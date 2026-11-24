@@ -1,5 +1,6 @@
 #include "gameplay/gear.h"
 #include "gameplay/owner_sync.h"
+#include "gameplay/world_context.h"
 #include "log.h"
 #include "match/hsm_gear_names.h"
 #include "match/hsm_match.h"
@@ -102,7 +103,7 @@ std::vector<uint8_t> RandomPassportBlob(Adapter& a, int tier, WeaponMask weapons
     double tSpawn = t0, tMake = t0, tSave = t0;
     FTransform t;
     Call begin(statics, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", a.World()).set<UClass*>("ActorClass", gen).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(a.World())).set<UClass*>("ActorClass", gen).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 0).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* g = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!g) { HSM_LOG("gear: generator spawn failed (tier %d)", rank); return blob; }

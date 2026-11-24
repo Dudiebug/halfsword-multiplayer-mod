@@ -1,6 +1,7 @@
 #include "ui/build_card.h"
 #include "ui/umg.h"
 #include "ui/skin.h"
+#include "ui/hud_host.h"
 #include "log.h"
 #include <windows.h>
 
@@ -8,19 +9,16 @@ namespace hsm::ui {
 using namespace hsm::ue;
 namespace {
 
-constexpr ULONGLONG kScanEveryMs = 1000;
 constexpr int kZOrder = 55;           // under the chat and the banners
 constexpr float kWidth = 430;
-constexpr float kTextSize = 15;
-// Ink on the game's parchment: the player's name dark, the rest in the rubric. Classic look: the launcher's terminal
-// palette as linear colours, #E8C8A0 and #C07040.
-Rgba Bright() { return style::ClassicMenus() ? Rgba{0.807f, 0.578f, 0.352f, 1} : style::kMenuText; }
-Rgba Main() { return style::ClassicMenus() ? Rgba{0.527f, 0.162f, 0.051f, 1} : style::kMenuAccentInk; }
+constexpr float kTextSize = style::type::kBody;
+// Ink on the card: the player's name in the text colour, the rest in the rubric, in every look.
+Rgba Bright() { return style::kMenuText; }
+Rgba Main() { return style::kMenuAccentInk; }
+
+HudHost host{"buildcard"};   // the UI_HUD the card sits on (kept when the widgets are made again)
 
 struct Widgets {
-    UClass* hudClass = nullptr;
-    UObject* hud = nullptr; int32_t hudIndex = -1;
-    ULONGLONG nextScan = 0, nextLive = 0;
     bool built = false;
     Kit kit;
     Fixed box;
@@ -32,7 +30,7 @@ BuildCardQueue g_queue;
 Text MakeLine(Box& column, Rgba color) {
     Text t = w.kit.MakeText();
     if (!t) return t;
-    if (!style::ParchmentMenus()) t.Font(kTextSize, 1, {0, 0, 0, 0.9f}); else t.Font(kTextSize);
+    if (!style::ParchmentMenus()) t.Font(kTextSize, 1, style::kOutlineInk); else t.Font(kTextSize);
     skin::Font(t, skin::Face::Body);
     t.Color(color);
     t.Align(Justify::Left);
@@ -43,10 +41,10 @@ Text MakeLine(Box& column, Rgba color) {
 
 bool Build() {
     w.built = true;
-    w.kit = Kit(w.hud, Vis::HitTestInvisible);
+    w.kit = Kit(host.Obj(), Vis::HitTestInvisible);
     Canvas root = w.kit.Root();
     if (!root) { HSM_LOG("buildcard: UI_HUD root is not a CanvasPanel; cards are off"); return false; }
-    ProbeFont(w.kit, w.hud);
+    ProbeFont(w.kit, host.Obj());
     w.box = w.kit.MakeFixed();
     w.box.Width(kWidth);
     root.Add(w.box).Anchor({{0.012, 0.03}, {0.012, 0.03}}, {0, 0}).AutoSize().Z(kZOrder);
@@ -62,7 +60,7 @@ bool Build() {
         w.head.Set("> FIGHTER ENTRY");
     } else {
         w.head.Set("Fighter Entry");
-        w.head.Font(20);
+        w.head.Font(style::type::kEmphasis);
         skin::Font(w.head, skin::Face::Heading);
     }
     w.player = MakeLine(column, Bright());
@@ -74,29 +72,10 @@ bool Build() {
     return true;
 }
 
-// Sits on the UI_HUD that is on screen, as the chat does: the game swaps it on a respawn or a new round.
+// Sits on the UI_HUD that is on screen: the game swaps it on a respawn or a new round, and the widgets went with the old one.
 bool Attach() {
-    const ULONGLONG now = GetTickCount64();
-    if (!w.hudClass) {
-        if (now < w.nextScan) return false;
-        if (!(w.hudClass = FindClass("UI_HUD_C"))) { w.nextScan = now + kScanEveryMs; return false; }
-    }
-    if (!w.hud || ObjectAt(w.hudIndex) != w.hud || ClassOf(w.hud) != w.hudClass) {
-        if (w.hud) { UClass* cls = w.hudClass; w = Widgets{}; w.hudClass = cls; }
-        if (now < w.nextScan) return false;
-        w.nextScan = now + kScanEveryMs;
-        w.hud = OnScreen(FindInstances("UI_HUD_C"));
-        if (!w.hud) return false;
-        w.hudIndex = ObjectIndex(w.hud);
-    }
-    if (w.built && now >= w.nextLive) {
-        w.nextLive = now + kScanEveryMs;
-        if (!InViewport(w.hud))
-            if (UObject* on = OnScreen(FindInstances("UI_HUD_C")); on && on != w.hud) {
-                UClass* cls = w.hudClass; w = Widgets{}; w.hudClass = cls; w.hud = on; w.hudIndex = ObjectIndex(on);
-                w.nextLive = now + kScanEveryMs;
-            }
-    }
+    if (host.Follow(true, w.built) == HudHost::Step::Changed) w = Widgets{};
+    if (!host.Obj()) return false;
     return w.built || Build();
 }
 

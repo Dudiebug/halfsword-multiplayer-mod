@@ -33,6 +33,39 @@ inline InputMode ChooseInputMode(const InputModeState& s) {
     return InputMode::Leave;
 }
 
+// After a respawn the game can leave UI-only input behind once the mod's own restore has run (#3490: the fighter
+// stands but W and the mouse do nothing until Esc). The game mode's stale "Player DED" is cleared a tick after the
+// respawn, and the game's death flow keys on it. So the restore is repeated: 0.3 s, 1 s and 3 s after the respawn,
+// and once more on the tick after the Player DED clear (Extra). For kRespawnWatchMs after a respawn, a controller that
+// reads no mouse movement re-asserts game input too (Watching). Times are wrap-safe GetTickCount milliseconds.
+inline constexpr uint32_t kRespawnInputShotsMs[] = {300, 1000, 3000};
+inline constexpr int kRespawnInputShots = 3;
+inline constexpr uint32_t kRespawnWatchMs = 10000;   // the Esc presses of #3490 came 3 to 11 s after the respawn
+class RespawnInputFix {
+public:
+    void Arm(uint32_t nowMs) { at_ = nowMs; next_ = 0; armed_ = true; extra_ = false; }
+    void Clear() { armed_ = false; extra_ = false; next_ = kRespawnInputShots; }
+    // One more restore on the next decision (the Player DED clear); only within a respawn's watch.
+    void Extra(uint32_t nowMs) { if (Watching(nowMs)) extra_ = true; }
+    bool Due(uint32_t nowMs) const {
+        return armed_ && (extra_ || (next_ < kRespawnInputShots && uint32_t(nowMs - at_) >= kRespawnInputShotsMs[next_]));
+    }
+    // Takes the due restore: the index of the scheduled shot taken (shots whose time has passed are taken as one), or
+    // -1 for an Extra one or when none was due.
+    int Take(uint32_t nowMs) {
+        if (!Due(nowMs)) return -1;
+        if (extra_) { extra_ = false; return -1; }
+        int taken = -1;
+        while (next_ < kRespawnInputShots && uint32_t(nowMs - at_) >= kRespawnInputShotsMs[next_]) taken = next_++;
+        return taken;
+    }
+    bool Watching(uint32_t nowMs) const { return armed_ && uint32_t(nowMs - at_) < kRespawnWatchMs; }
+private:
+    uint32_t at_ = 0;
+    int next_ = kRespawnInputShots;
+    bool armed_ = false, extra_ = false;
+};
+
 // The stock pause menu (UI_Pause_Eng) and the settings screens it opens: its SETTINGS button adds UI_DisplaySettings2
 // and removes itself, whose tabs open UI_GameSettings, UI_AudioSettings, UI_CameraSettings, ... (decomp
 // UI_Pause_Eng.cpp LatentResume_Lf). While a settings screen is up the menu counts as open, or closing it would hand
@@ -46,14 +79,14 @@ inline PauseScreen PauseScreenOf(std::string_view cls) {
     return PauseScreen::None;
 }
 
-// Who owns the Esc key in a multiplayer session match (mod_pause=1). The game's own Esc pause toggle is blocked there, so
-// the key is the mod's: it opens the mod's pause panel, unless something else on screen already uses Esc. The caller fills
-// the context (the busy flags OR'd with their value one tick earlier, so the press that closes the chat or a screen does
-// not also open the panel) and acts on the answer. Outside a session match, or with mod_pause=0, nothing changes: the
-// game's own Esc applies and the mod does not log.
+// Who owns the Esc key in a multiplayer session match. The game's own Esc pause toggle is blocked there, so the key is the
+// mod's: it opens the mod's pause panel, unless something else on screen already uses Esc. The caller fills the context
+// (the busy flags OR'd with their value one tick earlier, so the press that closes the chat or a screen does not also open
+// the panel) and acts on the answer. Outside a session match nothing changes: the game's own Esc applies and the mod does
+// not log.
 struct EscContext {
     bool sessionMatch = false;     // joined a session and on a match level (the game's own pause toggle is blocked there)
-    bool modPause = true;          // mod_pause=1
+    bool dropdownOpen = false;     // a dropdown list is open (ui/dropdown.cpp): Esc closes the list and nothing else
     bool chatOpen = false;         // a chat line is being typed: Esc cancels it
     bool textFocused = false;      // some other text box has the keyboard (report box, lobby password): Esc leaves it
     bool fetchMenu = false;        // Fetch's own menu is up and uses Esc
@@ -63,6 +96,7 @@ struct EscContext {
 };
 enum class EscOwner : uint8_t {
     Game,        // not ours: the game's own Esc handling applies
+    Dropdown,    // an open dropdown list closes (the page, the chat and the panel under it stay as they are)
     Chat,        // the chat closes itself
     TextBox,     // a text box lets go of the keyboard
     Fetch,       // Fetch's menu closes itself
@@ -72,7 +106,8 @@ enum class EscOwner : uint8_t {
     OpenPanel,   // the pause panel opens
 };
 inline EscOwner EscOwnerOf(const EscContext& c) {
-    if (!c.sessionMatch || !c.modPause) return EscOwner::Game;
+    if (!c.sessionMatch) return EscOwner::Game;
+    if (c.dropdownOpen) return EscOwner::Dropdown;
     if (c.chatOpen) return EscOwner::Chat;
     if (c.textFocused) return EscOwner::TextBox;
     if (c.fetchMenu) return EscOwner::Fetch;
@@ -84,6 +119,7 @@ inline EscOwner EscOwnerOf(const EscContext& c) {
 // The log line for one Esc press, "pause: Esc -> <this>". Game has no line: the mod does nothing then.
 inline const char* EscOwnerText(EscOwner o) {
     switch (o) {
+        case EscOwner::Dropdown: return "dropdown (it closes)";
         case EscOwner::Chat: return "chat (it closes)";
         case EscOwner::TextBox: return "text box (it lets go)";
         case EscOwner::Fetch: return "Fetch's menu (it closes)";

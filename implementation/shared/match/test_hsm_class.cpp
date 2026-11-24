@@ -1,5 +1,6 @@
 #include "match/hsm_class.h"
 #include "match/hsm_online_rules.h"
+#include "match/hsm_ui_text.h"
 #include "session/hsm_ue4ss.h"
 #include <cstdio>
 #include <limits>
@@ -56,6 +57,14 @@ int main() {
 
     // A class gives no edge in a lobby without the rule.
     CHECK(ClassAppliesHere(false, false) && ClassAppliesHere(true, true) && !ClassAppliesHere(true, false));
+    // #3396: the picker says so, names the rule, and says who can turn classes on.
+    CHECK(ClassesOffNote(true, true) == "Classes are off in this lobby. Turn them on with the Classes row in the lobby's MODS tab.");
+    CHECK(ClassesOffNote(true, false) == "Classes are off in this lobby. The host turns them on with the Classes row in the MODS tab. "
+                                         "Until then you fight as the game's plain fighter.");
+    CHECK(ClassesOffNote(false, true) == "Classes are off in this lobby (it has no mod rule). Mod rules are switched off on this computer, "
+                                         "so Classes cannot be turned on here.");   // no INI key in player text
+    CHECK(ClassesOffNote(false, false) == "Classes are off in this lobby (it has no mod rule). The host turns them on with the Classes row "
+                                          "in the MODS tab. Until then you fight as the game's plain fighter.");
 
     // A stat never compounds, follows the game when it changes, and 1.0 leaves it alone.
     ClassStatTrack t;
@@ -91,7 +100,8 @@ int main() {
     CHECK(ClassNameStep("Man-at-Arms", 1) == "Revenant" && ClassNameStep("Man-at-Arms", -1) == "Custom 8" && ClassNameStep("Flagellant", 1) == "Landsknecht" && ClassNameStep("Custom 3", 1) == "Custom 4" && ClassNameStep("Custom 8", 1) == "Man-at-Arms" && ClassNameStep("nonsense", 1) == "Revenant");
     CHECK(ClassPickCount() == 28 && ClassPickName(0) == "Man-at-Arms" && ClassPickName(20) == "Custom 1" && ClassPickName(27) == "Custom 8");
     // The CLASSES tab: every row explains itself, and the bars sit in the middle for the plain fighter and follow the stats.
-    for (int i = 0; i < kClassFieldCount; ++i) CHECK(std::string_view(ClassFieldInfo(i)).size() > 20);
+    for (int i = 0; i < kClassFieldCount; ++i) CHECK(std::string_view(ClassFieldInfo(i)).size() > 20 && HintFits(ClassFieldInfo(i)));   // each within kHintMax
+    CHECK(std::string_view(ClassFieldInfo(0)).find("50/80 power") != std::string_view::npos && std::string_view(ClassFieldInfo(18)).find("Earns 5 power") != std::string_view::npos);
     // Bite is the game's own key now. The Forge has no row for it and no built-in has it; a class saved with it still
     // reads, and comes back without it (it would only cost power). A built-in is as it is.
     for (int i = 0; i < kClassFieldCount; ++i) CHECK(std::string_view(ClassField(ClassSheet{}, i).label) != "BITE");
@@ -276,6 +286,11 @@ int main() {
     ClassSheet shown; shown.claws = true; shown.metalClaws = true; shown.run = 0.7; shown.noPain = true;
     const std::string sum = ClassSummary(shown);
     CHECK(sum.find("ADAMANTIUM CLAWS") != std::string::npos && sum.find("run 70%") != std::string::npos && sum.find("no pain") != std::string::npos && sum.find("walk") == std::string::npos && sum.find("power +") != std::string::npos);
+
+    // The healing options in plain words, not the names of the game's characters.
+    ClassSheet logan; logan.heal = ClassHeal::Logan; ClassSheet weathered; weathered.heal = ClassHeal::Weathered;
+    CHECK(ClassSummary(logan).find("heals slowly") == 0 && ClassSummary(weathered).find("heals fast") == 0);
+    CHECK(ClassSummary(logan).find("Logan") == std::string::npos && ClassSummary(weathered).find("Weathered") == std::string::npos);
 
     // The game's own values pass, and a trainer's don't.
     CHECK(ClassBasesFair(35.0, 2.0) && !ClassBasesFair(350.0, 2.0) && !ClassBasesFair(35.0, 5.0));

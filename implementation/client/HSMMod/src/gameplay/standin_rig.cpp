@@ -1187,8 +1187,11 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
 // when they change (at most every kHandsLogMs). The owner's line and its stand-in's, on two machines, show which field the
 // stand-in lacks.
 void FighterRig::LogHands(const char* side, uint8_t gripR, uint8_t gripL) {
-    if (!sync::ShieldHandGrip(gripR) && !sync::ShieldHandGrip(gripL)) { handsLogged_.clear(); return; }
     const double now = SteadyMs();
+    const unsigned grips = unsigned(gripR) | (unsigned(gripL) << 8);
+    if (grips != dumpGrips_) { dumpGrips_ = grips; handDump_.GripChanged(now); }
+    if (handDump_.Due(now)) LogHandProps(side, gripR, gripL);
+    if (!sync::ShieldHandGrip(gripR) && !sync::ShieldHandGrip(gripL)) { handsLogged_.clear(); return; }
     if (now - handsReadMs_ < kHandsReadMs) return;
     handsReadMs_ = now;
     std::string t = HandFields(willie_);
@@ -1197,6 +1200,101 @@ void FighterRig::LogHands(const char* side, uint8_t gripR, uint8_t gripL) {
     handsLoggedMs_ = now;
     HSM_LOG("rig: %s %s hands, grips R %u L %u: %s", ObjectName(willie_).c_str(), side, unsigned(gripR), unsigned(gripL),
             handsLogged_.c_str());
+}
+
+// #3282: the fields LogHands reads stay at 0 on owners whose hand shows closed, so the one that closes it is elsewhere.
+// Every member of the Willie class (and its supers) whose name is about hands (sync::IsHandFieldName) and whose value here
+// differs from the class default is logged, on the owner and on its stand-in alike, at each grip change (every grip, not
+// only shields) and again once the hand has settled (sync::HandDump). The two machines' lines for one fighter then name
+// the field the stand-in lacks. An object member logs the object's name, or "none". No field name is written here.
+void FighterRig::LogHandProps(const char* side, uint8_t gripR, uint8_t gripL) {
+    if (!willie_) return;
+    const UClass* cls = ClassOf(willie_);
+    const UObject* cdo = cls ? DefaultObject(cls) : nullptr;
+    if (!cdo) return;
+    const int32_t clsIndex = ObjectIndex(reinterpret_cast<const UObject*>(cls));
+    if (cls != handPropsClass_ || clsIndex != handPropsClassIndex_) {
+        handPropsClass_ = cls;
+        handPropsClassIndex_ = clsIndex;
+        handProps_.clear();
+        for (const UClass* c = cls; c; c = SuperOf(c))
+            for (FProperty* p : StructProperties(c)) {
+                if (PropertyArrayDim(p) != 1 || !sync::IsHandFieldName(PropertyName(p))) continue;
+                const std::string type = PropertyType(p);
+                const int32_t size = PropertySize(p);
+                char kind = 0;
+                if (type == "BoolProperty") kind = 'b';
+                else if (type == "DoubleProperty" && size == 8) kind = 'd';
+                else if (type == "FloatProperty" && size == 4) kind = 'f';
+                else if (type == "IntProperty" && size == 4) kind = 'i';
+                else if ((type == "ByteProperty" || type == "EnumProperty") && size == 1) kind = 'y';
+                else if (type == "ObjectProperty" && size == int32_t(sizeof(void*))) kind = 'o';
+                if (kind) handProps_.push_back({p, kind});
+            }
+    }
+    const auto* here = reinterpret_cast<const uint8_t*>(willie_);
+    const auto* def = reinterpret_cast<const uint8_t*>(cdo);
+    std::vector<std::string> parts(1);
+    int differ = 0;
+    for (const HandProp& h : handProps_) {
+        const int32_t off = PropertyOffset(h.prop);
+        char v[160];
+        switch (h.kind) {
+        case 'b': {
+            bool a = false, b = false;
+            if (!GetBoolValue(h.prop, here + off, a) || !GetBoolValue(h.prop, def + off, b) || a == b) continue;
+            std::snprintf(v, sizeof v, "%d", a ? 1 : 0);
+            break;
+        }
+        case 'd': {
+            double a, b;
+            std::memcpy(&a, here + off, sizeof a);
+            std::memcpy(&b, def + off, sizeof b);
+            if (a == b || (std::isnan(a) && std::isnan(b))) continue;
+            std::snprintf(v, sizeof v, "%.3g", a);
+            break;
+        }
+        case 'f': {
+            float a, b;
+            std::memcpy(&a, here + off, sizeof a);
+            std::memcpy(&b, def + off, sizeof b);
+            if (a == b || (std::isnan(a) && std::isnan(b))) continue;
+            std::snprintf(v, sizeof v, "%.3g", double(a));
+            break;
+        }
+        case 'i': {
+            int32_t a, b;
+            std::memcpy(&a, here + off, sizeof a);
+            std::memcpy(&b, def + off, sizeof b);
+            if (a == b) continue;
+            std::snprintf(v, sizeof v, "%d", int(a));
+            break;
+        }
+        case 'y':
+            if (here[off] == def[off]) continue;
+            std::snprintf(v, sizeof v, "%u", unsigned(here[off]));
+            break;
+        default: {   // 'o': set or not, against the default (whose components are its own, so a pointer compare says nothing)
+            UObject* a = nullptr;
+            UObject* b = nullptr;
+            std::memcpy(&a, here + off, sizeof a);
+            std::memcpy(&b, def + off, sizeof b);
+            if ((a == nullptr) == (b == nullptr)) continue;
+            std::snprintf(v, sizeof v, "%s", a ? ObjectName(a).c_str() : "none");
+            break;
+        }
+        }
+        ++differ;
+        std::string item = PropertyName(h.prop) + "=" + v;
+        if (!parts.back().empty() && parts.back().size() + item.size() > 1500) parts.emplace_back();
+        if (!parts.back().empty()) parts.back() += ", ";
+        parts.back() += item;
+    }
+    const std::string name = ObjectName(willie_);
+    for (size_t i = 0; i < parts.size(); ++i)
+        HSM_LOG("rig: %s %s hand fields, grips R %u L %u (%d of %zu off the default, line %zu of %zu, dump %d): %s", name.c_str(),
+                side, unsigned(gripR), unsigned(gripL), differ, handProps_.size(), i + 1, parts.size(), handDump_.Count(),
+                parts[i].empty() ? "none" : parts[i].c_str());
 }
 
 // The polearm hand switch (X: Willie_BP Polearm Hands Switch, :16393) slides the hands along the shaft by moving the grip

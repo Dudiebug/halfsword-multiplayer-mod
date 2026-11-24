@@ -32,7 +32,7 @@ static void TestRule() {
             for (bool alive : {false, true}) CHECK(CanChangeLoadout(g, p, alive, true) == V::NotOwnGear);
     CHECK(LoadoutAllowed(V::RespawnNow) && LoadoutAllowed(V::AtNextRespawn) && !LoadoutAllowed(V::InFight) && !LoadoutAllowed(V::NotOwnGear));
     CHECK(std::string(LoadoutVerdictText(V::InFight)) == "Change loadout when you are out of the fight");
-    CHECK(std::string(LoadoutVerdictText(V::NotOwnGear)).find("Own loadouts only") == 0);
+    CHECK(std::string(LoadoutVerdictText(V::NotOwnGear)).find("Own kits only") == 0);
     CHECK(std::string(LoadoutVerdictLog(V::InFight)) == "in the fight" && std::string(LoadoutVerdictLog(V::NotOwnGear)) == "gear is not own");
 }
 

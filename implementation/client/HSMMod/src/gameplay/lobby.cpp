@@ -1,10 +1,12 @@
 #include "gameplay/lobby.h"
+#include "gameplay/game_check.h"
 #include "file_hash.h"
 #include "gameplay/mod_pack.h"
 #include "gameplay/mod_rules.h"
 #include "hsm_protocol.h"
 #include "log.h"
 #include "match/hsm_build_card.h"
+#include "match/hsm_mode_merge.h"
 #include "session/hsm_build.h"
 #include "session/hsm_game_build.h"
 #include "session/hsm_global_bans.h"
@@ -12,6 +14,7 @@
 #include "session/hsm_version_refusal.h"
 #include "session/hsm_player_limit.h"
 #include "session/hsm_player_names.h"
+#include "steam/hsm_steam_result.h"
 #include "ue/engine.h"
 #include <algorithm>
 #include <chrono>
@@ -56,19 +59,35 @@ int SteamBuild() {
     known = steam::AppBuildId();
     if (known) {
         const SteamBuildCheck c = CheckSteamBuild(known);
-        HSM_LOG("game: Half Sword Steam build %d (%s; this HSMMod is made for %d)", known,
-                c == SteamBuildCheck::Target ? "the build this HSMMod is made for" : c == SteamBuildCheck::Older ? "older: update the game in Steam" : "newer than this HSMMod",
-                kTargetSteamBuild);
+        if (c == SteamBuildCheck::Verified) HSM_LOG("game: Half Sword Steam build %d (the build this HSMMod was checked on)", known);
+        else
+            HSM_LOG("game: Half Sword Steam build %d (%s than %d, the build this HSMMod was checked on%s)", known,
+                    c == SteamBuildCheck::Older ? "older" : "newer", kVerifiedSteamBuild,
+                    c == SteamBuildCheck::Older ? ": update the game in Steam" : "; the game check says what it changed");
     }
     return known;
 }
 
-std::string GameBuildNotice() { return SteamBuildNotice(SteamBuild()); }
+std::string GameBuildNotice() {
+    std::string notice = SteamBuildNotice(SteamBuild());
+    if (const std::string changed = GameCheckNotice(SteamBuild()); !changed.empty()) notice += (notice.empty() ? "" : "\n") + changed;
+    return notice;
+}
 
 namespace {
 std::string BuildKeyHex() { char b[32]; std::snprintf(b, sizeof b, "%016llx", (unsigned long long)ue::BuildKey()); return b; }
 std::string ProtocolStr() { return std::to_string(int(kProtocolRevision)); }
 }  // namespace
+
+// For the log: a friends lobby is never in the public list, so a report of "they could not find my lobby" needs this.
+static const char* LobbyTypeKey(steam::LobbyType t) {
+    switch (t) {
+        case steam::LobbyType::Public: return "public";
+        case steam::LobbyType::FriendsOnly: return "friends";
+        case steam::LobbyType::Private: return "private";
+        default: return "invisible";
+    }
+}
 
 void Lobby::SetStatus(const std::string& s) {
     if (s == status_) return;
@@ -101,18 +120,23 @@ void Lobby::Tick() {
     while (steam::Poll(e)) {
         switch (e.kind) {
             case steam::Event::LobbyCreated:
-                if (!e.ok) { state_ = State::Idle; SetStatus("Could not create lobby"); break; }
+                if (!e.ok) { state_ = State::Idle; SetStatus("Could not create lobby: " + steam::ResultText(e.result)); break; }
                 steam::SetLobbyData(e.lobby, "hsm_proto", ProtocolStr());
                 steam::SetLobbyData(e.lobby, "hsm_build", BuildKeyHex());
                 if (SteamBuild()) steam::SetLobbyData(e.lobby, "hsm_sbuild", std::to_string(SteamBuild()));   // pre51: the content build too
                 steam::SetLobbyData(e.lobby, "hsm_ver", kModVersion);
                 steam::SetLobbyData(e.lobby, "name", LobbyTitleNow());
                 if (RegionKnown(region_)) steam::SetLobbyData(e.lobby, "hsm_region", RegionKey(region_));
-                HSM_LOG("lobby: created as \"%s\" region=%s", LobbyTitleNow().c_str(), RegionKey(region_));
+                HSM_LOG("lobby: created as \"%s\" type=%s region=%s", LobbyTitleNow().c_str(), LobbyTypeKey(type_), RegionKey(region_));
                 steam::SetLobbyData(e.lobby, "state", "menu");
                 steam::SetLobbyData(e.lobby, "hsm_srv", server_ ? "1" : "0");
                 steam::SetLobbyData(e.lobby, "hsm_max", std::to_string(maxPlayers_));
                 steam::SetLobbyData(e.lobby, "hsm_lock", "0");
+                // A new lobby starts with Clear ground every 2 min and Midday (match/hsm_match.h); the keys are written now because the
+                // others come only with the first change of a setting. hsm_clr is the whole minutes an older build reads.
+                steam::SetLobbyData(e.lobby, "hsm_clrs", std::to_string(kClearGroundDefaultS));
+                steam::SetLobbyData(e.lobby, "hsm_clr", std::to_string(ClearGroundWireMin(kClearGroundDefaultS)));
+                steam::SetLobbyData(e.lobby, "hsm_tod", std::to_string(int(TimeOfDay::Midday)));
                 Enter(e.lobby);
                 break;
             case steam::Event::LobbyEntered:
@@ -162,7 +186,7 @@ void Lobby::Tick() {
                 listings_.clear();
                 for (steam::SteamId id : e.lobbies) if (LobbyListing l = Describe(id); !l.banned) listings_.push_back(std::move(l));
                 std::stable_sort(listings_.begin(), listings_.end(), [](const LobbyListing& a, const LobbyListing& b) { return a.compatible > b.compatible; });
-                SetStatus(e.ok ? std::to_string(listings_.size()) + " public lobbies found" : "Could not list lobbies");
+                SetStatus(e.ok ? std::to_string(listings_.size()) + " public lobbies found" : "Could not list lobbies: " + steam::ResultText(e.result));
                 break;
             }
             case steam::Event::SessionRequest: {   // a (re)opened session from a lobby member must be accepted again
@@ -185,6 +209,7 @@ void Lobby::Tick() {
 LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     LobbyListing l; l.id = lobby;
     l.name = steam::LobbyData(lobby, "name"); l.map = steam::LobbyData(lobby, "map"); l.mode = steam::LobbyData(lobby, "mode");
+    l.scenario = ScenarioFromKey(steam::LobbyData(lobby, "hsm_scen"));   // peer-written: a value that is no scenario reads Standard
     l.region = LobbyRegion(steam::LobbyData(lobby, "hsm_region"));   // peer-written: only a region this build lists counts
     const std::vector<steam::SteamId> members = steam::LobbyMembers(lobby);
     const bool server = steam::LobbyData(lobby, "hsm_srv") == "1";
@@ -204,7 +229,8 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
     l.pack = ReadLobbyPack(steam::LobbyData(lobby, "hsm_pack"), steam::LobbyData(lobby, "hsm_packv"), steam::LobbyData(lobby, "hsm_packh"));   // peer-written: validated
     if (!proto.empty()) {   // mod rules: the lobby's rule against this machine's own report (the host checks again after the join)
         const ModRule rule = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyBlockHseKey),
-                                              steam::LobbyData(lobby, kLobbyModOfficialKey), steam::LobbyData(lobby, kLobbyModListKey)});   // peer-written: DecodeLobbyRule reads it strictly
+                                              steam::LobbyData(lobby, kLobbyModOfficialKey), steam::LobbyData(lobby, kLobbyModListKey),
+                                              steam::LobbyData(lobby, kLobbyClassesKey)});   // peer-written: DecodeLobbyRule reads it strictly
         const LobbyModView v = ViewLobbyRule(rule, modrules::OwnAsGuest(), modrules::OwnOfficial());
         l.mods = v.tag;   // names "HS Enhancer ok" when the host allows it, so nobody joins one by accident
         l.ruleText = RuleSummary(rule);
@@ -227,7 +253,7 @@ LobbyListing Lobby::Describe(steam::SteamId lobby) const {
 }
 
 void Lobby::Host(steam::LobbyType type, bool server) {
-    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostPreset, modrules::HostRule(*this).blockHse, ClassPowerPoints(kClassPowerDefault)); !why.empty()) { SetStatus(why); return; }
+    if (!server && onlineBlock) if (const std::string why = onlineBlock(hostClasses, modrules::HostRule(*this).blockHse, ClassPowerPoints(kClassPowerDefault)); !why.empty()) { SetStatus(why); return; }
     if (state_ != State::Idle) return;
     password_.clear(); passwordLobby_ = 0; askLobby_ = 0; askNote_.clear();
     type_ = type; server_ = server; state_ = State::Creating; SetStatus("Creating lobby...");
@@ -239,7 +265,7 @@ ModRule Lobby::RoomRule(bool* named) const {
     if (named) *named = !rule.empty();
     if (rule.empty()) return NoRule();
     return DecodeLobbyRule({rule, steam::LobbyData(lobby_, kLobbyBlockHseKey), steam::LobbyData(lobby_, kLobbyModOfficialKey),
-                            steam::LobbyData(lobby_, kLobbyModListKey)});   // peer-written: DecodeLobbyRule reads it strictly
+                            steam::LobbyData(lobby_, kLobbyModListKey), steam::LobbyData(lobby_, kLobbyClassesKey)});   // peer-written: DecodeLobbyRule reads it strictly
 }
 
 bool Lobby::ServerLobby() const { return InLobby() && steam::LobbyData(lobby_, "hsm_srv") == "1"; }
@@ -328,12 +354,13 @@ void Lobby::SetMaxPlayers(int n) {
 void Lobby::Join(steam::SteamId lobby, const std::string& password) {
     if (state_ != State::Idle || !lobby) return;
     if (onlineBlock) {
-        const ModRule r = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyBlockHseKey), "", ""});   // peer-written: read strictly
+        const ModRule r = DecodeLobbyRule({steam::LobbyData(lobby, kLobbyModRuleKey), steam::LobbyData(lobby, kLobbyBlockHseKey), "", "",
+                                           steam::LobbyData(lobby, kLobbyClassesKey)});   // peer-written: read strictly
         // A lobby that blocks HS Enhancer: once in, Describe offers the restart that locks it (LobbyEntered). Refused
         // here only where none comes: the lobby this game restarted for already, or no pre-check (mod_rules=0).
         const bool lockLater = modrules::Enabled() && lobby != rejoinLobby_;
         const double power = ClassPowerPoints(IntOr(steam::LobbyData(lobby, "hsm_cpow"), kClassPowerDefault));   // the host's class power limit
-        if (const std::string why = onlineBlock(r.preset, r.blockHse && !lockLater, power); !why.empty()) { SetStatus(why); return; }
+        if (const std::string why = onlineBlock(r.classes, r.blockHse && !lockLater, power); !why.empty()) { SetStatus(why); return; }
     }
     password_ = CleanPassword(password); passwordLobby_ = password_.empty() ? 0 : lobby;
     askLobby_ = 0; askNote_.clear();
@@ -398,11 +425,12 @@ MatchConfig Lobby::config() const {
     c.fuseS = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_fuse"), kFuseDefaultS), int(kFuseMinS), int(kFuseMaxS)));   // none: 30 s (Tag)
     c.taggerSpeedPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tspd"), kTaggerSpeedDefault), 0, 255));   // none: 110% (Sanitize snaps it to a stop)
     c.shuffle = TeamShuffle(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_shuf"), 0), 0, 255));   // none: Off (Sanitize)
-    c.timeOfDay = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tod"), 0), 0, 255));          // none: the map's own (Sanitize)
+    c.timeOfDay = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_tod"), int(TimeOfDay::Midday)), 0, 255));   // none, and an older host's Map's own (0): Midday (Sanitize)
     c.winBy = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_winby"), 0), 0, 2));                     // none: Death
     c.propsOff = steam::LobbyData(lobby_, "hsm_props") == "0";                                              // none: On
     c.classPower = SnapClassPower(IntOr(steam::LobbyData(lobby_, "hsm_cpow"), kClassPowerDefault));   // none: +15
     c.stripOff = steam::LobbyData(lobby_, "hsm_strip") == "0";                                              // none: On
+    c.biteOff = steam::LobbyData(lobby_, "hsm_bite") == "0";                                                // none: On (an older host has no row)
     c.ownBodies = steam::LobbyData(lobby_, "hsm_body") == "1";                                             // none: Same for all
     c.keepKit = steam::LobbyData(lobby_, "hsm_keep") == "1";                                               // none: New each fight
     c.scenario = ScenarioFromKey(steam::LobbyData(lobby_, "hsm_scen"));                              // none: Standard
@@ -410,11 +438,16 @@ MatchConfig Lobby::config() const {
     c.deadWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_dwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));     // none: 50%
     c.weaponWeightPct = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wwt"), kWeightDefaultPct), 0, int(kWeightMaxPct)));   // none: 50%
     c.waveBreakS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_wbrk"), 0), 0, 600));      // 0: the format's own
-    c.clearGroundMin = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0), 0, 255));    // 0: off
-    c.freeCam = steam::LobbyData(lobby_, "hsm_fcam") != "0";                                       // none: on
+    {   // hsm_clrs is the seconds (the 30 s step); an older host wrote only hsm_clr, whole minutes (ClearGroundFromKeys). Neither: never.
+        const std::string secs = steam::LobbyData(lobby_, "hsm_clrs");
+        c.clearGroundS = ClearGroundFromKeys(!secs.empty(), IntOr(secs, 0), IntOr(steam::LobbyData(lobby_, "hsm_clr"), 0));
+    }
     c.hostPhysics = steam::LobbyData(lobby_, "hsm_sync") == "host";                                  // none: per player
     c.gatherS = uint16_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_gather"), 600), int(kGatherMinS), int(kGatherMaxS)));   // none: 10 min (Crypts)
-    return Sanitize(c);
+    c.cryptsTier = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_ctier"), kCryptsTierCap), 0, int(kCryptsTierTop)));   // none: Peasant (Crypts)
+    c.cryptsTogether = steam::LobbyData(lobby_, "hsm_ctog") == "1";                                        // none: Apart (Crypts)
+    c.graveRobbers = steam::LobbyData(lobby_, "hsm_grave") == "1";                                         // none: Crypt Royale (Crypts)
+    return Sanitize(LobbyConfigOf(c));   // an older host's Duel, Pit bridge duels, Fenced ring and Carnage scenarios read as the modes that are left; Free camera is always on
 }
 
 void Lobby::SetConfig(const MatchConfig& in) {
@@ -436,6 +469,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_shuf", std::to_string(int(c.shuffle)));
     steam::SetLobbyData(lobby_, "hsm_cpow", std::to_string(c.classPower));
     steam::SetLobbyData(lobby_, "hsm_strip", c.stripOff ? "0" : "1");
+    steam::SetLobbyData(lobby_, "hsm_bite", c.biteOff ? "0" : "1");
     steam::SetLobbyData(lobby_, "hsm_keep", c.keepKit ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_body", c.ownBodies ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_scen", std::to_string(c.scenario));
@@ -446,13 +480,19 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_dwt", std::to_string(c.deadWeightPct));
     steam::SetLobbyData(lobby_, "hsm_wwt", std::to_string(c.weaponWeightPct));
     steam::SetLobbyData(lobby_, "hsm_wbrk", std::to_string(c.waveBreakS));
-    steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(c.clearGroundMin));
-    steam::SetLobbyData(lobby_, "hsm_fcam", c.freeCam ? "1" : "0");
+    steam::SetLobbyData(lobby_, "hsm_clrs", std::to_string(c.clearGroundS));
+    steam::SetLobbyData(lobby_, "hsm_clr", std::to_string(ClearGroundWireMin(c.clearGroundS)));   // the whole minutes an older build reads
+    steam::SetLobbyData(lobby_, "hsm_fcam", "1");   // Free camera is always on (no row): an older build still reads the key
     steam::SetLobbyData(lobby_, "hsm_sync", c.hostPhysics ? "host" : "owner");
     steam::SetLobbyData(lobby_, "hsm_gather", std::to_string(c.gatherS));
+    steam::SetLobbyData(lobby_, "hsm_ctier", std::to_string(c.cryptsTier));
+    steam::SetLobbyData(lobby_, "hsm_ctog", c.cryptsTogether ? "1" : "0");
+    steam::SetLobbyData(lobby_, "hsm_grave", c.graveRobbers ? "1" : "0");
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }
+std::string Lobby::FightPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_fmap") : std::string(); }
+void Lobby::SetFightPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_fmap", path); }
 LobbyPack Lobby::Pack() const {
     return InLobby() ? ReadLobbyPack(steam::LobbyData(lobby_, "hsm_pack"), steam::LobbyData(lobby_, "hsm_packv"), steam::LobbyData(lobby_, "hsm_packh")) : LobbyPack{};
 }
@@ -472,6 +512,7 @@ void Lobby::SetModRule(const ModRule& rule) {
         changed = true;
     };
     put(kLobbyModRuleKey, d.rule); put(kLobbyBlockHseKey, d.hse); put(kLobbyModOfficialKey, d.official); put(kLobbyModListKey, d.list);
+    put(kLobbyClassesKey, d.classes);
     if (changed) HSM_LOG("lobby: mod rule announced: %s", RuleSummary(rule).c_str());
 }
 
@@ -512,8 +553,11 @@ void Lobby::ShuffleTeamsNow() {
 }
 
 bool Lobby::BlockHse() const { return InLobby() ? RoomRule().blockHse : modrules::Chosen().blockHse; }
-bool Lobby::InUnrestrictedLobby() const { return InLobby() && steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Unrestricted)); }
-bool Lobby::InClassesLobby() const { return InLobby() && (InUnrestrictedLobby() || steam::LobbyData(lobby_, kLobbyModRuleKey) == std::to_string(int(ModPreset::Classes))); }
+ClassesMode Lobby::ClassesModeHere() const {
+    return InLobby() ? LobbyClassesMode(steam::LobbyData(lobby_, kLobbyModRuleKey), steam::LobbyData(lobby_, kLobbyClassesKey)) : ClassesMode::Off;   // peer-written: read strictly
+}
+bool Lobby::InUnrestrictedLobby() const { return ClassesModeHere() == ClassesMode::Unrestricted; }
+bool Lobby::InClassesLobby() const { return ClassesOn(ClassesModeHere()); }
 
 void Lobby::RepublishMyCard() {
     if (!InLobby() || !myCard) return;

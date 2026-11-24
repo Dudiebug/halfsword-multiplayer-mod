@@ -1,7 +1,7 @@
-// The mod's pause panel (mod_pause=1): in a multiplayer session match Esc opens this instead of the game's pause menu. It is
+// The mod's pause panel: in a multiplayer session match Esc opens this instead of the game's pause menu. It is
 // built into the game's UI_HUD widget tree, as the chat and the build card are, and shows the buttons of
-// match/hsm_pause_panel.h: RESUME, MULTIPLAYER MENU, SETTINGS, MOD SETTINGS, REPORT A BUG, LEAVE MATCH, QUIT TO MAIN MENU,
-// QUIT TO DESKTOP (and LOADOUT with loadout_trial=1). MULTIPLAYER MENU and MOD SETTINGS are pages of the panel itself;
+// match/hsm_pause_panel.h: RESUME, PLAYERS, CHANGE LOADOUT, GAME SETTINGS, MOD SETTINGS, REPORT A BUG, BACK TO LOBBY, LEAVE TO
+// MAIN MENU, QUIT TO DESKTOP (and LOADOUT with loadout_trial=1). PLAYERS and MOD SETTINGS are pages of the panel itself;
 // every other button is reported to the session (gameplay/session.cpp ModPauseTick), which carries it out. Esc ownership
 // is match/hsm_input_mode.h. Game thread only.
 #pragma once
@@ -13,16 +13,20 @@ class Session;
 namespace ui {
 
 struct PausePanelWant {
-    bool match = false;      // a session match with mod_pause=1: keep the panel built on the HUD, ready for Esc
+    bool match = false;      // a session match: keep the panel built on the HUD, ready for Esc
     bool open = false;       // the player has the panel open
-    bool hidden = false;     // open, but one of the game's screens (SETTINGS) is in front: the panel waits out of sight
+    bool hidden = false;     // open, but one of the game's screens (GAME SETTINGS) is in front: the panel waits out of sight
     bool reportOn = false;   // bug reports are on and this is a session fight: REPORT A BUG, HELP IMPROVE THE MOD
     bool loadoutTrial = false;   // loadout_trial=1: the LOADOUT button shows
+    bool host = false;       // this machine hosts the lobby: BACK TO LOBBY takes everyone back (a guest's leaves its own match)
+    bool cryptsRun = false;  // a Crypts gather is on (Apart or Together): BACK TO LOBBY is dimmed, it would strand the others
+    bool lobby = false;      // a Steam lobby is kept: BACK TO LOBBY has a lobby to go to (a direct connection has none)
+    bool coop = false;       // a guest in a Progression co-op fight: BACK TO LOBBY is dimmed (the run is the host's)
 };
 
 // Once per frame. Builds the panel on the UI_HUD that is on screen (again when the game swaps the HUD), shows or hides it,
 // runs its pages and returns the button the player chose this frame (once per click, after the second click where the
-// button needs one). The pages (MULTIPLAYER MENU, MOD SETTINGS) are handled inside and report nothing.
+// button needs one). The pages (PLAYERS, MOD SETTINGS) are handled inside and report nothing.
 std::optional<PauseButton> PausePanelTick(Session& session, const PausePanelWant& want);
 
 // The panel is built on the UI_HUD it found. onScreen: and that UI_HUD is in the viewport right now (one engine call; asked when

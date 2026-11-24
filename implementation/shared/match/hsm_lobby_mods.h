@@ -1,9 +1,10 @@
-// The lobby's MODS tab (docs/PLAN_MOD_RULES.md 5), as data: the lobby's mod rule (three rows the host steps: preset,
-// block HS Enhancer, official builds only), then one row per mod anyone in the session runs, from the host's SessionMods
+// The lobby's MODS tab (docs/PLAN_MOD_RULES.md 5), as data: the lobby's mod rule (four rows the host steps: preset,
+// classes, block HS Enhancer, official builds only), then one row per mod anyone in the session runs, from the host's SessionMods
 // (session/hsm_mod_rules.h): its kind, who runs it, and why this lobby's rule refuses it. No mod is judged good or bad
 // here: HS Enhancer is named, the rest are the player's mods. The host also sees who it is still checking and who must
 // fix their mods. ui/menu.cpp fills a LobbyModsLocal and draws the scene; the stepper arithmetic is here too.
 #pragma once
+#include "match/hsm_dropdown.h"
 #include "session/hsm_mod_rules.h"
 #include <algorithm>
 #include <array>
@@ -37,13 +38,48 @@ struct LobbyModsLocal {
     std::array<std::string, kModSlots> names;   // by slot, empty when unknown
     uint32_t present = 0;        // the slots in the session (bit = slot)
     std::vector<ModPending> pending;            // host only
+    bool classPicked = false;    // host: its class pick is not the game's plain fighter (#3396)
 };
 
-enum class ModRuleRow : uint8_t { Preset, Hse, Official };
-inline constexpr size_t kModRuleRows = 3;
+enum class ModRuleRow : uint8_t { Preset, Classes, Hse, Official };
+inline constexpr size_t kModRuleRows = 4;
 enum class ModTone : uint8_t { Ok, Dim, Warn, Bad };   // the page: green, dim, amber, the accent's red
 
-struct ModRuleView { ModRuleRow id = ModRuleRow::Preset; std::string label, value, hint; bool enabled = false; };
+// choices / choice: the dropdown of the Mods allowed row (ModPresetChoices) and of the Classes row (ClassesModeChoices) and the option
+// picked; empty on the two switches.
+struct ModRuleView { ModRuleRow id = ModRuleRow::Preset; std::string label, value, hint; bool enabled = false;
+                     std::vector<DropOption> choices; size_t choice = 0; };
+
+// Which rows are dropdowns: Mods allowed and Classes name their values; Block HS Enhancer and Official builds only are switches.
+inline bool ModRuleIsChoice(ModRuleRow r) { return r == ModRuleRow::Preset || r == ModRuleRow::Classes; }
+
+// The Mods allowed row's list: the five presets the host picks, Vanilla to Anything. Classes is its own row.
+inline constexpr size_t kModPresetChoices = size_t(kMaxModPreset) + 1;
+inline std::vector<DropOption> ModPresetChoices() {
+    std::vector<DropOption> v;
+    for (size_t i = 0; i < kModPresetChoices; ++i) v.push_back({ModPresetName(ModPreset(i)), true, ""});
+    return v;
+}
+inline size_t ModPresetChoiceAt(ModPreset p) { return std::min<size_t>(size_t(p), kModPresetChoices - 1); }
+inline ModChoice WithModPreset(ModChoice c, size_t i) {
+    if (i < kModPresetChoices) c.preset = ModPreset(i);
+    return c;
+}
+// The Classes row's list: Off, On, Unrestricted, with any Mods allowed preset. Only the Classes setting moves.
+inline constexpr size_t kClassesChoices = size_t(kMaxClassesMode) + 1;
+inline std::vector<DropOption> ClassesModeChoices() {
+    std::vector<DropOption> v;
+    for (size_t i = 0; i < kClassesChoices; ++i) v.push_back({ClassesModeName(ClassesMode(i)), true, ""});
+    return v;
+}
+inline size_t ClassesModeChoiceAt(ClassesMode m) { return std::min<size_t>(size_t(m), kClassesChoices - 1); }
+inline ModChoice WithClassesMode(ModChoice c, size_t i) {
+    if (i < kClassesChoices) c.classes = ClassesMode(i);
+    return c;
+}
+// Whether picking option `i` of the Classes row asks first: Unrestricted shows its disclaimer before it is set (ui/menu.cpp).
+// Picking the option already on asks nothing.
+inline bool ClassesPickAsksFirst(const ModChoice& now, size_t i) { return i == size_t(ClassesMode::Unrestricted) && now.classes != ClassesMode::Unrestricted; }
 struct ModRowView {
     std::string name, kind, verdict, holders, note;   // note: why this lobby refuses it, or who lacks a required one
     ModTone tone = ModTone::Dim;
@@ -52,7 +88,6 @@ struct ModRowView {
 
 struct LobbyModsScene {
     std::array<ModRuleView, kModRuleRows> rules{};
-    std::string summary;                 // "In force: Maps only, HS Enhancer blocked."
     std::string status;                  // why there is no list or no rule; empty when all is well
     std::vector<ModRowView> items;       // refused first, then by kind and name, then required mods nobody runs; UE4SS's stock mods left out unless refused
     std::string empty;                   // a list came and nobody runs a mod
@@ -136,18 +171,19 @@ inline std::string ModPendingLine(const ModPending& p) {
     return p.name + ": " + why + ", leaving in " + std::to_string(p.graceSeconds) + " s unless fixed";
 }
 
+// A hint only where the value cannot say it: Bundle and Custom (which mods).
 inline const char* ModPresetHint(ModPreset p, bool host) {
     switch (p) {
-        case ModPreset::Vanilla: return "No mods: no paks, no UE4SS mods, no proxy DLLs.";
-        case ModPreset::MapsOnly: return "Map paks only.";
-        case ModPreset::Bundle: return host ? "Exactly your modpack, or with none announced, exactly the mods you run: everyone needs them all."
-                                            : "Exactly the host's modpack, or with none announced, exactly the host's mods: you need them all.";
-        case ModPreset::Custom: return host ? "Same as host: the mods you run (or the list in mod_allow in HSMMod.ini)." : "The host's own mods (or the list it set).";
-        case ModPreset::Anything: return "Any mods.";
-        case ModPreset::Classes: return "Native classes. Any mods.";
-        case ModPreset::Unrestricted: return "Native classes without the power budget. Set with UNRESTRICTED below.";
+        case ModPreset::Vanilla: case ModPreset::MapsOnly: case ModPreset::Anything: return "";
+        case ModPreset::Bundle: return host ? "Everyone needs exactly your mods." : "You need exactly the host's mods.";
+        case ModPreset::Custom: return host ? "The mods you run, or the list you set." : "The host's mods, or the list it set.";
     }
     return "";
+}
+
+// The Classes row's hint: only Unrestricted has anything to say (the power limit is gone).
+inline const char* ClassesModeHint(ClassesMode m) {
+    return m == ClassesMode::Unrestricted ? "No class balance. Expect glitches, and possibly crashes, for everyone." : "";
 }
 
 inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
@@ -160,18 +196,23 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
     ModRuleView& preset = s.rules[0];
     preset.id = ModRuleRow::Preset; preset.label = "Mods allowed"; preset.value = ModPresetName(shown.preset);
     preset.hint = ModPresetHint(shown.preset, l.host);
-    ModRuleView& hse = s.rules[1];
+    ModRuleView& classes = s.rules[1];
+    classes.id = ModRuleRow::Classes; classes.label = "Classes"; classes.value = ClassesModeName(shown.classes);
+    classes.hint = ClassesModeHint(shown.classes);
+    if (l.host && l.classPicked && !ClassesOn(shown.classes)) classes.hint = "Classes are off: your class does not apply. Turn them on to use it.";
+    ModRuleView& hse = s.rules[2];
     hse.id = ModRuleRow::Hse; hse.label = "Block HS Enhancer"; hse.value = onOff(shown.blockHse);
-    hse.hint = "Refuses players who run Half Sword Enhancer.";
     if (l.host && l.rulesOn && shown.blockHse && !l.rule.blockHse) hse.hint = "You run HS Enhancer yourself, so this lobby allows it.";
-    ModRuleView& official = s.rules[2];
+    ModRuleView& official = s.rules[3];
     official.id = ModRuleRow::Official; official.label = "Official builds only"; official.value = onOff(shown.officialOnly);
-    official.hint = "Only the release HSMMod from GitHub may join.";
     if (l.host && l.rulesOn && shown.officialOnly && !l.rule.officialOnly) official.hint = "Your HSMMod is not an official release, so this is off.";
     for (ModRuleView& r : s.rules) r.enabled = enabled;
+    preset.choices = ModPresetChoices();
+    preset.choice = ModPresetChoiceAt(shown.preset);
+    classes.choices = ClassesModeChoices();
+    classes.choice = ClassesModeChoiceAt(shown.classes);
 
-    if (live) s.summary = "In force: " + RuleSummary(l.rule) + ".";
-    if (l.host && !l.rulesOn) s.status = "Mod rules are off (mod_rules=0 in HSMMod.ini): anyone may join with any mods.";
+    if (l.host && !l.rulesOn) s.status = "Mod rules are off: anyone may join with any mods.";
     else if (!l.host && !l.hostHasRule) s.status = "The host does not check mods.";
     else if (!l.haveList) s.status = "Waiting for the session's mod list...";
 
@@ -217,14 +258,19 @@ inline LobbyModsScene BuildLobbyMods(const LobbyModsLocal& l) {
     return s;
 }
 
-// A host's click on a rule row: the preset steps round its six, the switches flip.
+// A host's click on a rule row: the preset steps round its five, Classes round Off, On, Unrestricted, the switches flip.
+// (Stepping Classes onto Unrestricted is the caller's to confirm: ui/menu.cpp shows the disclaimer first.)
 inline ModChoice StepModRule(ModChoice c, ModRuleRow row, int dir) {
+    const int d = dir < 0 ? -1 : 1;
     switch (row) {
         case ModRuleRow::Preset: {
-            // Vanilla to Classes. Unrestricted is set with this tab's checkbox (it has its disclaimer there), so it steps as Classes.
-            if (c.preset == ModPreset::Unrestricted) c.preset = ModPreset::Classes;
-            const int n = int(ModPreset::Classes) + 1;
-            c.preset = ModPreset(((int(c.preset) + (dir < 0 ? -1 : 1)) % n + n) % n);
+            const int n = int(ModPreset::Anything) + 1;
+            c.preset = ModPreset(((int(c.preset) + d) % n + n) % n);
+            break;
+        }
+        case ModRuleRow::Classes: {
+            const int n = int(ClassesMode::Unrestricted) + 1;
+            c.classes = ClassesMode(((int(c.classes) + d) % n + n) % n);
             break;
         }
         case ModRuleRow::Hse: c.blockHse = !c.blockHse; break;

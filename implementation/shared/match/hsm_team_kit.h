@@ -88,7 +88,12 @@ inline bool HasAny(const std::string& s, std::initializer_list<const char*> word
 }
 }  // namespace kit_detail
 
-// A weapon class that is ammunition, not a weapon to dress: a crossbow bolt (BP_Weapon_Ranged_Projectle_Bolt1_C; "Projectle" is the
+// The game's crossbow and the bolt it fires, by their Blueprint class names as the game spells them ("Projectle" too). The adapter
+// finds the classes by these names: a misspelt one was found only by a walk over every object, on every call.
+inline constexpr const char* kCrossbowClassName = "BP_Weapon_Ranged_Weapon_Crossbow_Light_C";
+inline constexpr const char* kCrossbowBoltClassName = "BP_Weapon_Ranged_Projectle_Bolt_1_C";
+
+// A weapon class that is ammunition, not a weapon to dress: a crossbow bolt (BP_Weapon_Ranged_Projectle_Bolt_1_C; "Projectle" is the
 // game's spelling), an arrow or any projectile. The kit never touches it, whatever its meshes are called (a bolt's "shaft" is no grip).
 inline bool IsProjectileClass(const std::string& className) {
     const std::string n = kit_detail::Compact(className);

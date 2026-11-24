@@ -60,6 +60,22 @@ static void TestSeveralMismatchesAndUnknowns() {
     CHECK(BuildWarning("0.6.4", unknown).empty() && MayStartMatch("0.6.4", unknown, false));
 }
 
+static void TestJoinedWithoutABuildIsOlder() {
+    // The host has Ann's Hello (joined) and it carried no build: an HSMMod too old to send one.
+    const std::vector<PeerBuild> others{{"Ann", "", true}, {"Bob", "0.6.4", true}};
+    CHECK(BuildStateOf("0.6.4", others[0]) == BuildState::Older && BuildStateOf("0.6.4", others[1]) == BuildState::Same);
+    CHECK(BuildStateOf("0.6.4", {"Cy", "", false}) == BuildState::Unknown);   // Hello not come yet: still no mismatch
+    CHECK(BuildStateOf("0.6.4", {"Di", "0.6.3", false}) == BuildState::Other);
+    const std::vector<std::string> m = BuildMismatches("0.6.4", others);
+    CHECK(m.size() == 1 && m[0] == "Ann on an older build");
+    CHECK(BuildWarning("0.6.4", others) == "Ann on an older build - update");
+    CHECK(!MayStartMatch("0.6.4", others, false));
+    CHECK(MayStartMatch("0.6.4", others, true));
+    // The same player before its Hello: not a mismatch (a join in progress never blocks START).
+    CHECK(MayStartMatch("0.6.4", {{"Ann", "", false}, {"Bob", "0.6.4", true}}, false));
+    CHECK(BuildWarning("", {{"", "", true}}) == "another player on an older build - update");
+}
+
 static void TestSameVersionOtherCommitDiffers() {   // two dev builds of one version are two builds
     const std::vector<PeerBuild> others{{"Bob", ModBuildString("0.6.4", "v0.6.3-11-g15c0495")}};
     CHECK(!MayStartMatch(ModBuildString("0.6.4", "v0.6.3-12-gdb82570"), others, false));
@@ -71,6 +87,7 @@ int main() {
     TestMismatchIsNamed();
     TestSeveralMismatchesAndUnknowns();
     TestSameVersionOtherCommitDiffers();
+    TestJoinedWithoutABuildIsOlder();
     TestBinaryHash();
     if (g_fail) { std::printf("test_hsm_build: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_build: ok\n");

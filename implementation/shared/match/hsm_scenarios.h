@@ -1,5 +1,8 @@
-// Combat scenarios per map (0.9.0, lobby row Scenario in RULES > WORLD, lobby key hsm_scen): what the host's pick does to the
-// match on the map it picked. Every machine reads the pick from the lobby (hsm_scen), so no wire field is needed.
+// Combat scenarios per map (lobby key hsm_scen): what the host's pick does to the match on the map it picked. Every machine
+// reads the pick from the lobby (hsm_scen), so no wire field is needed. The lobby has no Scenario row since the modes merge
+// (0.9.0): Brawling is the Brawl card and Blossfechten is a mode card of its own (IsBlossfechten, hsm_match.h: the Last man
+// standing rounds with scenario 4). The numbers stay as they were, because a host on an older build may still advertise any of
+// them (hsm_lobby_scene.h BrowserModeFor, lobby.cpp Lobby::config read them).
 //
 // The game's own Free Mode has BP_CombatEvent_{Alley,Cellar,Forest,Hall,Pit,Slums,Yard,Tourney,TourneyBaron}_C, each with a
 // Scenario Name, Available Combat Modes, Available Lose Conditions and a Combatants Amount. The game's Free Mode switches for
@@ -7,12 +10,19 @@
 // own computer-fighter spawners (decomp BP_LevelManager Clean_Up_and_Spawn_Actors, BP_SpawnerPoint_Willies), and a lobby match
 // turns those off (Session::StopStockFoes), so setting them did nothing (public issue #1407). The mod does the effects itself:
 //   Standard      nothing: the host's Free Mode setup stays as it is (today's behaviour).
-//   Fenced ring   "Current Lose Condition" = 3 on the game instance (ScenarioWorld, carried by the Travel). The level scripts
-//                 of the Pit, Yard and Cellar spawn BP_Fence_Bags for it (audit item 39); no other map reads it, so only
-//                 those three offer it. Its behaviour is unchanged; the DLL only logs what the game does (session.cpp).
-//   Carnage       the host adds 3 to 5 computer fighters (CarnageBotCount) at the start of a free-for-all round, on no team,
-//                 as Survival's host bots (ScenarioEffects::carnageBots). They score nothing.
+//   Fenced ring   RETIRED. It set "Current Lose Condition" = 3 on the game instance; the level scripts of the Pit, Yard and
+//                 Cellar spawn BP_Fence_Bags for it. No map offers it any more (EffectiveScenario reads it as Standard), but a
+//                 client still builds the fence when the Travel of an older host carries lose condition 3 (the fence helpers below).
+//   Carnage       RETIRED. The host added 3 to 5 computer fighters to a free-for-all round. Reads as Standard.
 //   Brawling      every body spawns bare: no armour, no weapons (ScenarioEffects::bare), as the Brawl card's Fists gear does.
+//                 No row sets it any more; a lobby of an older host that does is still played that way.
+//   Blossfechten  swords only, no armour (ScenarioEffects::blossfechten). Every body spawns with the Willie flag "Blossfechten
+//                 Gear", set before the body finishes spawning, as a career Blossfechten fight (combat mode 10,
+//                 session/hsm_career.h) does: no armour, the right hand only. The game swaps the weapon for a sword only
+//                 outside Free Mode (decomp Willie_BP), and a lobby match is Free Mode, so the host deals the swords itself
+//                 (BlossfechtenKit, hsm_match.h). The game's "Free Mode Blossfechten" switch only steers its own spawners,
+//                 like Carnage's and Brawling's. A bare body (Brawl, Tag, Brawling, a hider) stays bare. The Blossfechten
+//                 mode is offered on the arenas below (ScenariosFor).
 // The time of day (Day Time / Current FreeMode Time) is left out on purpose: its enum values are unknown (audit 0.7.0 #2).
 // The Abyss (Zombies) and modded maps are not combat-event arenas and offer Standard only. The client logs the game's actual
 // combat-event objects at each level load ("scenario: map ..."), the spike output this table is extended from.
@@ -28,22 +38,19 @@
 
 namespace hsm {
 
-enum class Scenario : uint8_t { Standard, FencedRing, Carnage, Brawling };
-constexpr uint8_t kScenarioCount = 4;
+enum class Scenario : uint8_t { Standard, FencedRing, Carnage, Brawling, Blossfechten };
+constexpr uint8_t kScenarioCount = 5;
 inline bool ValidScenario(uint8_t s) { return s < kScenarioCount; }
 
 // The setting a scenario sets on the game instance before the travel (the Travel carries it to every client). loseCondition <
-// 0: left as it is. Carnage and Brawling set nothing here: the game's switches for them do nothing in a lobby match.
+// 0: left as it is, which is every scenario now that the Fenced ring is retired: the game's switches for the others do nothing
+// in a lobby match.
 struct ScenarioWorld {
     int loseCondition = -1;     // "Current Lose Condition" (Enum_CombatEvent_LoseConditions)
 };
-constexpr int kLoseConditionFence = 3;   // BP_Fence_Bags in the Pit, Yard and Cellar (travel.cpp)
+constexpr int kLoseConditionFence = 3;   // BP_Fence_Bags in the Pit, Yard and Cellar: what an older host's Fenced ring travels with (travel.cpp)
 
-inline ScenarioWorld WorldOf(Scenario s) {
-    ScenarioWorld w;
-    if (s == Scenario::FencedRing) w.loseCondition = kLoseConditionFence;
-    return w;
-}
+inline ScenarioWorld WorldOf(Scenario) { return {}; }
 
 // What a match format lets a scenario do. Plain bools: hsm_match.h includes this header, so the Format enum is not known here
 // (ScenarioFormatOf in hsm_match.h fills it).
@@ -54,28 +61,25 @@ struct ScenarioFormat {
 // false: the scenario does nothing in this format and the match plays as Standard (the row says so).
 inline bool ScenarioApplies(Scenario s, const ScenarioFormat& f) {
     switch (s) {
-        case Scenario::Carnage: return f.freeForAll;
-        case Scenario::Brawling: return !f.botFormat;
+        case Scenario::Brawling:
+        case Scenario::Blossfechten: return !f.botFormat;
+        case Scenario::Carnage:
         case Scenario::FencedRing:
         case Scenario::Standard: break;
     }
     return true;
 }
 
-// Carnage's computer fighters: one more than the players, 3 to 5.
-constexpr int kCarnageBotsMin = 3, kCarnageBotsMax = 5;
-inline int CarnageBotCount(int players) { return std::clamp(players + 1, kCarnageBotsMin, kCarnageBotsMax); }
-
-// What the mod itself does for a scenario in a match of `players` humans; the DLL only applies it.
+// What the mod itself does for a scenario; the DLL only applies it. (Carnage's computer fighters are gone with the Carnage scenario.)
 struct ScenarioEffects {
     bool bare = false;          // every body spawns with no armour and no weapons (Brawling)
-    int carnageBots = 0;        // computer fighters the host adds when the round goes live, on no team (Carnage); 0 = none
+    bool blossfechten = false;  // swords only, no armour: the Blossfechten Gear flag on every body, a sword dealt to each (Blossfechten)
 };
-inline ScenarioEffects EffectsOf(Scenario s, const ScenarioFormat& f, int players) {
+inline ScenarioEffects EffectsOf(Scenario s, const ScenarioFormat& f) {
     ScenarioEffects e;
     if (!ScenarioApplies(s, f)) return e;
     if (s == Scenario::Brawling) e.bare = true;
-    if (s == Scenario::Carnage) e.carnageBots = CarnageBotCount(players);
+    if (s == Scenario::Blossfechten) e.blossfechten = true;
     return e;
 }
 
@@ -84,42 +88,26 @@ inline const char* ScenarioName(Scenario s) {
         case Scenario::FencedRing: return "Fenced ring";
         case Scenario::Carnage: return "Carnage";
         case Scenario::Brawling: return "Brawling";
+        case Scenario::Blossfechten: return "Blossfechten";
         case Scenario::Standard: break;
     }
     return "Standard";
 }
-// What the row says a scenario does. It only promises what the mod does (EffectsOf); the Fenced ring is the game's own fence and
-// lose condition, which a test run is still checking.
-inline const char* ScenarioHint(Scenario s) {
-    switch (s) {
-        case Scenario::FencedRing: return "Sandbag fences close the ring. Experimental: leaving the ring should put you out.";
-        case Scenario::Carnage: return "3 to 5 computer fighters join the arena and attack everyone, you included. They score nothing. Free-for-all only.";
-        case Scenario::Brawling: return "Everyone starts every round in pants with no weapons. Not used in Survival or Zombies.";
-        case Scenario::Standard: break;
-    }
-    return "The map as the game's Free Mode setup has it.";
-}
-// The row's hint for a format: where the scenario does nothing, it says so instead of promising its effect.
-inline std::string ScenarioHintFor(Scenario s, const ScenarioFormat& f) {
-    if (ScenarioApplies(s, f)) return ScenarioHint(s);
-    return s == Scenario::Carnage ? "Carnage works in Free-for-all only. In this mode the match plays as Standard."
-                                  : "Brawling does not work in Survival or Zombies. Here the match plays as Standard.";
-}
 
 namespace scenario_detail {
 constexpr uint8_t Bit(Scenario s) { return uint8_t(1u << uint8_t(s)); }
-constexpr uint8_t kBase = Bit(Scenario::Standard) | Bit(Scenario::Carnage) | Bit(Scenario::Brawling);   // every arena
-constexpr uint8_t kFenced = kBase | Bit(Scenario::FencedRing);                                           // arenas whose script builds the fence
+// Every arena offers these. Carnage and the Fenced ring are retired (no map offers them, so a pick of either reads Standard).
+constexpr uint8_t kBase = Bit(Scenario::Standard) | Bit(Scenario::Brawling) | Bit(Scenario::Blossfechten);
 struct MapScenarios { const char* shortName; uint8_t mask; };
 // The arenas of the lobby's map picker (hsm_maps.h kMaps), by the last segment of the package path.
 constexpr MapScenarios kTable[] = {
     {"Map_Arena_Alley", kBase},
-    {"Map_Arena_Cellar", kFenced},
+    {"Map_Arena_Cellar", kBase},
     {"Map_Arena_EastTower", kBase},
     {"Map_Arena_LordsHall", kBase},
-    {"Map_Arena_Pit", kFenced},
+    {"Map_Arena_Pit", kBase},
     {"Map_Arena_Slums", kBase},
-    {"Map_Arena_Yard", kFenced},
+    {"Map_Arena_Yard", kBase},
 };
 inline std::string_view Tail(std::string_view path) {
     const size_t dot = path.rfind('.');                       // a soft object path: ".../Map_Arena_Yard.Map_Arena_Yard"
@@ -159,14 +147,10 @@ inline Scenario EffectiveScenario(std::string_view mapPath, uint8_t pick) {
     return (scenario_detail::MaskOf(mapPath) & scenario_detail::Bit(Scenario(pick))) ? Scenario(pick) : Scenario::Standard;
 }
 
-// The row's stepper: the next (dir >= 0) or previous scenario the map offers, wrapping; from what runs now.
-inline uint8_t StepScenario(std::string_view mapPath, uint8_t pick, int dir) {
-    const std::vector<Scenario> all = ScenariosFor(mapPath);
-    const Scenario cur = EffectiveScenario(mapPath, pick);
-    size_t at = 0;
-    for (size_t i = 0; i < all.size(); ++i) if (all[i] == cur) at = i;
-    at = (at + (dir < 0 ? all.size() - 1 : 1)) % all.size();
-    return uint8_t(all[at]);
+// Whether a map offers the Blossfechten mode: the arenas of the table above. The mode card's map list (hsm_maps.h) asks this
+// instead of keeping a second list.
+inline bool OffersBlossfechten(std::string_view mapPath) {
+    return (scenario_detail::MaskOf(mapPath) & scenario_detail::Bit(Scenario::Blossfechten)) != 0;
 }
 
 // Where a map's own level script builds the Fenced ring (BP_Fence_Bags at this location, with this Radius; decomp

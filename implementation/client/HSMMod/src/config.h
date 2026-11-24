@@ -198,6 +198,13 @@ struct Config {
     bool standInTwoHandLock = true;
     // true: the host starts a match even while another player runs a different mod build (testing only).
     bool allowBuildMismatch = false;
+    // force_unknown_build (testing only, not in the default file): 1 starts as if this HSMMod did not know the game exe,
+    // so the engine layer checks each known address and finds the ones that moved (ue/engine.cpp FindAddresses), as after
+    // a game update; 2 also searches for the ones that did not move.
+    int forceUnknownBuild = 0;
+    // game_check_test=1 (testing only, not in the default file): the game name check (gameplay/game_check.cpp) also looks
+    // for two names no Half Sword build has, so its log lines and the multiplayer page's notice can be seen.
+    bool gameCheckTest = false;
     // In-game bug reports ("/bug" in the chat; net/report_client.h). Nothing is sent without the player's command.
     // true: other fighters' names float over their heads in a match (name_tags=0 turns them off).
     bool nameTags = true;
@@ -211,9 +218,6 @@ struct Config {
     // published). buildName: the build named by a launcher with -hsmbuild=, shown on your card; empty: none.
     bool buildCards = true;
     bool joinSound = true;    // join_sound: the game's menu click sound when a player joins
-    // mod_pause=0: Esc in a session match opens the game's own pause menu (with the mod's overlay on it) as before. 1 (default): the game's
-    // Esc pause toggle is blocked there and Esc opens the mod's own pause panel (ui/pause_panel.h).
-    bool modPause = true;
     // loadout_trial=1: a trial. LOADOUT shows in the mod's pause menu and opens the game's own inventory screen over the
     // match (match/hsm_pause_panel.h). The screen was made for the Tavern; the trial is there to see what it does in an arena.
     bool loadoutTrial = false;
@@ -266,7 +270,6 @@ struct Config {
     // before HSMMod's ProcessEvent hook is installed, after (default) once the hook is in.
     bool ue4ss = true;
     bool ue4ssBefore = false;
-    std::string ue4ssKeep;   // ue4ss_keep: the hash of a UE4SS.dll the player chose to keep over the bundled build
     bool ue4ssConsole = false;   // ue4ss_console=1: leave UE4SS's console mods as mods.txt has them; 0 (default): turn them off at every start
     // ---- competitive netcode (protocol rev 42; docs/PLAN_COMPETITIVE_NETCODE.md). On by default: competitive=0 goes back to the old behaviour. ----
     // competitive=1: the competitive preset. Every netcode key below takes its competitive default (playout 0.85 / 4 ms,
@@ -296,35 +299,47 @@ struct Config {
     // claim_check = off | log (default) | on: the victim checks each blow against where its fighter really was when the
     // attacker's screen showed it (combat/hsm_claimcheck.h): log counts and logs, on also drops a far one. Victim's.
     combat::ClaimCheckMode claimCheck = combat::ClaimCheckMode::Log;
+    // blow_speed_cap = cm/s (default 3500, 0 = off): a blow whose hit velocity on a stand-in is faster than this is sent
+    // at this speed (combat::kMaxBlowSpeed, #3845). Sender's setting.
+    double blowSpeedCap = combat::kMaxBlowSpeed;
     // deflect=1: a blade clash on my screen is sent to the other weapon's owner, who gives its real weapon the knock
     // (sync/hsm_remote.h Deflect). Sender's setting; the receiver applies what comes.
     bool deflect = false;
     // [mod] record=1: the recorder (gameplay/recorder.h) writes each fight level to HSMRec-<date>-<time>.hsmrec. Dev only.
     bool record = false;
-    // [mod] crypts_max_tier: the highest tier the Crypts reach during a gather (Enum_Ranks 0 Beggar .. 8 Lord; match/hsm_crypts.h).
-    // 1 Peasant by default; 8 leaves the game's own tiers.
-    int cryptsMaxTier = 1;
+    // [mod] crypts_max_tier: the highest tier the Crypts reach during this machine's gather runs (Enum_Ranks 0 Beggar .. 8 Lord;
+    // match/hsm_crypts.h), over the lobby's Dungeon tier row (#3350). -1 (not set): the row's; 8 leaves the game's own tiers.
+    int cryptsMaxTier = -1;
     // [mod] crypts_probe=1: logs how the Crypts are built (gameplay/crypts_probe.h), for the shared Crypts map. Dev only.
     bool cryptsProbe = false;
+    // [mod] crypts_coop=1 (the default): offers Grave Robbers and the Crypts run's Together choice in the lobby (hsm::g_cryptsCoopOffered, match/hsm_match.h).
+    // START opens them (the shared run: the host's dungeon rooms, enemies, loot and doors on every machine, and the run's end);
+    // =0: neither shows and START refuses them.
+    bool cryptsCoop = true;
+    // [mod] crypts_layout_names=auto|short|long|engine: the form of the instance name each shared Crypts map level loads under
+    // (gameplay/crypts_layout.h SetNameForm). Dev only; auto (the default) finds it on each build's first level.
+    std::string cryptsLayoutNames = "auto";
     // [mod] pack=<name>: the modpack in Paks/~mods/<name>/ (HSMPack.ini) a host announces in its lobby; off: none; empty: the only
     // valid one installed (gameplay/mod_pack.h, docs/MODPACK.md).
     std::string modPack;
     // [mod] mod rules (gameplay/mod_rules.h, session/hsm_mod_rules.h). modRules=0 (mod_rules=0): no mod report, no lobby
     // rule, no host check, no HSMMod build gate. modChallenge=0: the host sends no code challenges. The host's rule:
-    // mod_rule= vanilla (default) | maps | bundle | custom | anything | classes, block_hse=1 (default; HS Enhancer refused) | 0,
-    // mod_official=1 (official builds only), mod_allow= the Custom list ("A, B*1a2b3c4d, +Required"; empty: what the
-    // host runs).
+    // mod_rule= vanilla (default) | maps | bundle | custom | anything, mod_classes= off (default) | on | unrestricted (the Classes
+    // row, with any mod_rule; the older words mod_rule=classes and =unrestricted still mean Anything with that row),
+    // block_hse=1 (default; HS Enhancer refused) | 0, mod_official=1 (default: official builds only) | 0, mod_allow= the
+    // Custom list ("A, B*1a2b3c4d, +Required"; empty: what the host runs).
     bool modRules = true;
     bool modChallenge = true;
     std::string modRule = "vanilla";
+    std::string modClasses = "off";
     bool blockHse = true;     // in lobbies you host, HS Enhancer is refused. Guests go by the host
     bool hseShareKeys = true; // [mod] hse_share_keys (#1290): HS Enhancer gets no input while an HSMMod text box is open; an open HS Enhancer menu holds HSMMod's keys
-    bool modOfficialOnly = false;
+    bool modOfficialOnly = true;
     std::string modAllow;
 };
 
 Config LoadConfig();          // writes a commented default file if none exists
-// Re-reads only the lobby mod rule keys ([mod] mod_rule, block_hse, mod_official, mod_allow) into c: the host may edit
+// Re-reads only the lobby mod rule keys ([mod] mod_rule, mod_classes, block_hse, mod_official, mod_allow) into c: the host may edit
 // them while the game runs (gameplay/mod_rules.cpp).
 void ReadModRuleKeys(Config& c);
 const char* RoleName(Role r);

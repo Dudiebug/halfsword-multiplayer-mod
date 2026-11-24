@@ -22,10 +22,21 @@ struct FTransform { FQuat rotation; FVector translation; double pad0 = 0; FVecto
 static_assert(sizeof(FTransform) == 0x60, "UE 5.4 FTransform (double, SIMD-aligned)");
 
 // Lifecycle ---------------------------------------------------------------
-bool Init();                       // build gate + engine globals; false = unsupported, stay vanilla
+// Build gate + engine globals; false = unsupported, stay vanilla. An exe outside kBuilds (a game update) is still run when
+// it is Unreal 5.4 and its addresses check out or are found again (engine.cpp FindAddresses). force_unknown_build in
+// HSMMod.ini tests that path on a known exe: 1 takes it (each known address is checked and kept), 2 keeps none of them
+// (every address is searched for, as when a game update moved them all).
+bool Init(int forceUnknownBuild = 0);
 bool SelfTest();                   // reflection layout checks; call once Kismet classes are loaded
 uint64_t BuildKey();               // PE TimeDateStamp << 32 | SizeOfImage
+bool KnownExe();                   // the exe is one kBuilds lists, so every address in the source is this exe's
 void* ProcessEventAddress();
+// The function at exe+rva when its bytes start with `prologue` (or, on a known exe, with another mod's hook jump); else nullptr.
+void* CheckedFunction(uintptr_t rva, const uint8_t* prologue, size_t prologueSize);
+// On an unknown exe whose script VM moved: true until enough script functions are loaded to read it from reflection.
+bool ScriptVmPending();
+// The one function a native UFunction's exec thunk calls whose bytes start with `prologue`; nullptr for none or several.
+void* CalleeOfNative(const UFunction* f, const uint8_t* prologue, size_t prologueSize);
 
 // Names and objects --------------------------------------------------------
 std::string NameToString(FName n);
@@ -49,6 +60,10 @@ UObject* DefaultObject(const UClass* c);
 
 // Reflection -----------------------------------------------------------------
 UFunction* FindFunction(const UClass* c, const std::string& name);              // walks super classes (cached)
+// The same walks, uncached: for a look that must not leave a miss behind for the mod's own lookups (gameplay/game_check.cpp
+// looks at classes that may still be loading).
+UFunction* FindFunctionNow(const UClass* c, const std::string& name);
+FProperty* FindPropertyNow(const void* ustruct, const std::string& name);
 std::vector<UFunction*> FunctionsWithPrefix(const UClass* c, const std::string& prefix);
 FProperty* FindProperty(const void* ustruct, const std::string& name);         // walks super structs (cached)
 // FindFunction and FindProperty remember every (struct, name) answer, a miss included: test 5's hit hook spent 0.146 ms
@@ -173,6 +188,12 @@ std::string ReadFString(const void* fstring);          // copy an engine FString
 // Engine-side helpers --------------------------------------------------------
 uintptr_t ModuleBase();
 UClass* FindClass(const std::string& name);            // native or Blueprint class by object name
+// The classes of a class object: native, Blueprint, widget and anim Blueprint classes (FindClass looks in each).
+inline constexpr const char* kClassKinds[] = {"Class", "BlueprintGeneratedClass", "WidgetBlueprintGeneratedClass", "AnimBlueprintGeneratedClass"};
+// Called each time FindClass finds a class by scanning the object array (not from its cache), on the caller's thread,
+// with no engine lock held: gameplay/game_check.cpp looks at that class's names then.
+using ClassFoundHook = void (*)(const std::string& name, UClass* cls);
+void SetClassFoundHook(ClassFoundHook hook);
 UObject* SpawnObject(UClass* cls, UObject* outer);     // GameplayStatics.SpawnObject (UObjects incl. UMG widgets)
 // Deep copy of one reflected value (structs with TMap/TArray included) via FProperty::CopyValuesInternal.
 void CopyPropertyValue(const FProperty* prop, void* dest, const void* src);

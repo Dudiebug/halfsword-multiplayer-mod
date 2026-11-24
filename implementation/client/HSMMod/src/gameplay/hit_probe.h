@@ -29,6 +29,9 @@ public:
                double nowMs);
     std::string DrainLine() { return tally_.DrainLine(); }   // the health report's line; empty when nothing was seen
     void Census(uint8_t entity, ue::UObject* willie, ue::UObject* mesh);
+    // Where each of a fighter's armour collision pieces sits (combat/hsm_armor_audit.h), on its first sight and when its
+    // place or verdict changes. Entity 0 is my own fighter: what a piece does on a body the game built itself.
+    void ArmorAudit(uint8_t entity, ue::UObject* willie, ue::UObject* mesh);
 
 private:
     struct Offsets { int32_t hitComponent = -1, otherComp = -1, impulse = -1, hit = -1; };
@@ -44,6 +47,7 @@ private:
     ue::UClass* primitive_ = nullptr;
     struct Seen { std::map<std::string, std::string> state; int lines = 0; bool full = false; };
     std::map<uint8_t, Seen> census_;
+    std::map<uint8_t, Seen> armor_;
 };
 
 }  // namespace hsm::game

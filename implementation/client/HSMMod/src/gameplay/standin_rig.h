@@ -13,6 +13,7 @@
 // this layer does not read), so a held weapon that stops being driven after its grip was freed is held still instead.
 #pragma once
 #include "gameplay/standin_slots.h"
+#include "sync/hsm_hand_dump.h"
 #include "sync/hsm_held.h"
 #include "sync/hsm_reconcile.h"
 #include "sync/hsm_standin.h"
@@ -89,6 +90,7 @@ public:
     void ApplyGrip(const sync::GripState& g);
     void ApplySwitch(bool on, ue::UObject* weaponR);   // the polearm hand switch's joint positions
     void LogHands(const char* side, uint8_t gripR, uint8_t gripL);   // #3282: a shield hand's pose fields (sync::ShieldHandGrip)
+    void LogHandProps(const char* side, uint8_t gripR, uint8_t gripL);   // #3282: every hand-named field off its default
     bool ApplySeat(const sync::GripState& g, ue::UObject* weaponR);   // the right hand's seat on the weapon (hsm_grip.h)
     // Stand-in: when this weapon has sat in the right hand differently from the owner's for a while (hsm_held.h), the joint
     // is made again at the owner's seat, read from the target pose's hand_r and weapon. Call after ApplyGrip.
@@ -232,6 +234,14 @@ private:
     static constexpr double kHandsReadMs = 500.0, kHandsLogMs = 2000.0;   // LogHands: read, and log a change at most, this often
     std::string handsLogged_;                                // LogHands: the fields last logged ("" none since a grip change)
     double handsReadMs_ = -1e9, handsLoggedMs_ = -1e9;
+    // LogHandProps: when to dump (any grip), the grips last seen (R | L << 8), and the hand-named members of the Willie
+    // class, listed once per class: the property and how to read it.
+    sync::HandDump handDump_;
+    unsigned dumpGrips_ = 0xFFFFFFFFu;
+    struct HandProp { ue::FProperty* prop; char kind; };   // b bool, d double, f float, i int32, y byte, o object
+    const ue::UClass* handPropsClass_ = nullptr;
+    int32_t handPropsClassIndex_ = -1;
+    std::vector<HandProp> handProps_;
     ue::UObject* offJoint_ = nullptr;                        // the off hand's joint Attach L Hand To Offhand Position made
     bool offTornLogged_ = false;                             // "left hand torn off" was logged for this stretch
     double offTryMs_ = -1e18;                                // its last attempt (kOffhandRetryMs apart)

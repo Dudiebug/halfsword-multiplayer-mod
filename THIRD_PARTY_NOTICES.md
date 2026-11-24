@@ -70,7 +70,7 @@ Built into `dwmapi.dll`; each keeps its license file in its directory.
 ## UE4SS
 
 `dwmapi.dll` carries an unchanged build of RE-UE4SS (https://github.com/UE4SS-RE/RE-UE4SS),
-`implementation/client/HSMMod/third_party/ue4ss/UE4SS_v3.0.1-1217-g4fb9b615.zip`, and unpacks it next to the game. Its
+`implementation/client/HSMMod/third_party/ue4ss/UE4SS_v4.0.0.zip`, and unpacks it next to the game. Its
 `ue4ss/LICENSE` goes with it:
 
 > MIT License

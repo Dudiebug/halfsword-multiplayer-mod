@@ -49,7 +49,7 @@ inline NameTagView NameTagLayout(bool projectedOk, float sx, float sy, float vie
     const float t = std::clamp((distanceCm - kNameTagNearCm) / (kNameTagFarCm - kNameTagNearCm), 0.f, 1.f);
     v.visible = true;
     v.x = sx / scale; v.y = sy / scale;
-    v.fontSize = 22.f - 8.f * t;
+    v.fontSize = style::type::kEmphasis - (style::type::kEmphasis - style::type::kHint) * t;   // 20 near, 14 far: the scale's ends
     v.alpha = (1.f - 0.65f * t) * std::min(seen, 1.f);
     v.ink = NameTagInk(format, team, it);
     return v;

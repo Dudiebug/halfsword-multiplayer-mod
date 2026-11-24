@@ -156,17 +156,71 @@ static void TestLastProbe() {
 // Test 4: the client's own 15 s fallback and the gate's 15 s timeout both spawned its fighter, 60 ms apart.
 static void TestLocalFighterGrace() {
     double grace = -1;
-    CHECK(!LocalFighterGrace(true, false, grace));   // owner-sync client, gate closed: the gate's exit spawns it
+    CHECK(!LocalFighterGrace(true, false, false, false, grace));   // owner-sync client, gate closed: the gate's exit spawns it
     grace = -1;
-    CHECK(LocalFighterGrace(true, true, grace));
+    CHECK(LocalFighterGrace(true, true, false, false, grace));
     CHECK(grace == kAnnouncedGraceMs);               // gate open: a fighter lost later comes back soon
     grace = -1;
-    CHECK(LocalFighterGrace(false, false, grace));
+    CHECK(LocalFighterGrace(false, false, false, false, grace));
     CHECK(grace == kLocalFighterGraceMs);            // host, solo, host-sync client: after the stock spawner
     grace = -1;
-    CHECK(LocalFighterGrace(false, true, grace));
+    CHECK(LocalFighterGrace(false, true, false, false, grace));
     CHECK(grace == kLocalFighterGraceMs);
     CHECK(kAnnouncedGraceMs < kLocalFighterGraceMs);
+    // a shared Crypts map whose rooms still stream: nobody spawns, the host and an open gate included
+    for (bool owner : {false, true})
+        for (bool open : {false, true}) { grace = -1; CHECK(!LocalFighterGrace(owner, open, true, true, grace) && grace == -1); }
+    // its rooms shown: nothing of the game's spawns a player there, so the host and solo take the short grace too
+    grace = -1;
+    CHECK(LocalFighterGrace(false, false, true, false, grace));
+    CHECK(grace == kAnnouncedGraceMs);
+    grace = -1;
+    CHECK(LocalFighterGrace(true, true, true, false, grace));
+    CHECK(grace == kAnnouncedGraceMs);
+    grace = -1;
+    CHECK(!LocalFighterGrace(true, false, true, false, grace) && grace == -1);   // an owner-sync client still waits for its gate
+}
+
+static LevelProbe Rooms(int pending, bool manager = false, bool pawn = false) {
+    LevelProbe p; p.layout = true; p.layoutPending = pending; p.manager = manager; p.pawn = pawn; return p;
+}
+
+// A shared Crypts map: the gate opens when the last room is shown, with no pawn and no "Player Spawned"; not before,
+// and not on the 5 s no-manager rule.
+static void TestLayoutOpensOnRooms() {
+    LevelSpawnGate g; g.OnLevel(1000);
+    CHECK(!g.Update(1000, Rooms(33)));
+    CHECK(!g.Update(1000 + LevelSpawnGate::kNoManagerMs + 1, Rooms(12)));       // no level manager: still waits
+    CHECK(!g.Update(1000 + LevelSpawnGate::kMaxWaitMs + 1, Rooms(1)));          // past the usual 15 s: the rooms' limit is longer
+    CHECK(g.waitingFor() == LevelSpawnGate::Waiting::Rooms && !g.Open());
+    CHECK(g.Update(1000 + LevelSpawnGate::kMaxWaitMs + 2, Rooms(0)));
+    CHECK(g.why() == LevelSpawnGate::Why::LayoutShown && g.waitingFor() == LevelSpawnGate::Waiting::Nothing);
+    CHECK(!g.Update(1000 + LevelSpawnGate::kMaxWaitMs + 3, Rooms(0)));          // once
+    // a level manager's flags do not matter on a layout map
+    LevelSpawnGate m; m.OnLevel(0);
+    CHECK(!m.Update(10, Rooms(3, true, true)));
+    CHECK(m.Update(20, Rooms(0, true, false)) && m.why() == LevelSpawnGate::Why::LayoutShown);
+}
+
+static void TestLayoutTimeout() {
+    LevelSpawnGate g; g.OnLevel(0);
+    CHECK(!g.Update(kLayoutMaxWaitMs - 1, Rooms(2)));
+    CHECK(g.Update(kLayoutMaxWaitMs, Rooms(2)));
+    CHECK(g.why() == LevelSpawnGate::Why::TimedOut && g.waitingFor() == LevelSpawnGate::Waiting::Rooms);
+    CHECK(g.lastProbe().layout && g.lastProbe().layoutPending == 2);
+    CHECK(kLayoutMaxWaitMs > LevelSpawnGate::kMaxWaitMs && LevelSpawnGate::kLayoutWaitMs == kLayoutMaxWaitMs);
+    // the next level is an ordinary one again
+    g.OnLevel(100000);
+    CHECK(!g.Update(100000 + LevelSpawnGate::kNoManagerMs - 1, P(false, false, true)));
+    CHECK(g.Update(100000 + LevelSpawnGate::kNoManagerMs, P(false, false, true)) && g.why() == LevelSpawnGate::Why::NoManager);
+}
+
+static void TestLayoutHolds() {
+    CHECK(LayoutHolds(Rooms(1), 0) && LayoutHolds(Rooms(30), kLayoutMaxWaitMs - 1));
+    CHECK(!LayoutHolds(Rooms(1), kLayoutMaxWaitMs));                            // the rooms' time is up: fight anyway
+    CHECK(!LayoutHolds(Rooms(0), 0));
+    LevelProbe plain; plain.layoutPending = 5;                                  // not a layout map: never
+    CHECK(!LayoutHolds(plain, 0));
 }
 
 static void TestRecreateLimiter() {
@@ -194,6 +248,9 @@ int main() {
     TestWaitingFor();
     TestLastProbe();
     TestLocalFighterGrace();
+    TestLayoutOpensOnRooms();
+    TestLayoutTimeout();
+    TestLayoutHolds();
     TestRecreateLimiter();
     if (g_fail) { std::printf("test_hsm_level_gate: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_level_gate: ok\n");

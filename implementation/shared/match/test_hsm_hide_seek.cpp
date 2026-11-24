@@ -181,6 +181,46 @@ static void TestMatch() {
     clock.Tick(t + 121000); CHECK(clock.phase() != MatchPhase::Live);
 }
 
+// #3549: the results of a Hide and Seek match ran out into nothing (an empty branch of the tick swallowed them), so the host
+// never rematched. Drives a match to its results and ticks past them, next to Last Man Standing, which always rematched.
+static void DriveToResults(Match& m, const MatchConfig& c, uint32_t& t) {
+    m.Start(c, {{1, kNoTeam, true}, {2, kNoTeam, true}, {3, kNoTeam, true}}, 0);
+    t = Match::kCountdownMs; m.Tick(t);                                        // the countdown is over: Live
+    if (c.format == Format::HideSeek) {
+        const std::vector<uint8_t> one = {1};
+        for (int i = 0; i < int(c.scoreLimit); ++i) { m.AwardRound(one, t); if (m.phase() == MatchPhase::Results) break; t += 5000; m.Tick(t); }
+    } else {
+        for (int i = 0; i < int(c.scoreLimit); ++i) { m.OnDeath(2, 1, t); m.OnDeath(3, 1, t); if (m.phase() == MatchPhase::Results) break; t += 5000; m.Tick(t); }
+    }
+}
+static void TestRematch() {
+    MatchConfig lms; lms.format = Format::LastManStanding; lms.scoreLimit = 2;
+    for (const MatchConfig& c : {Sanitize(lms), Cfg()}) {
+        MatchConfig cc = c; cc.scoreLimit = 2;
+        Match m; uint32_t t = 0; DriveToResults(m, cc, t);
+        CHECK(m.phase() == MatchPhase::Results && m.winner() == 1 && m.Score(1) >= 2);
+        auto ev = m.Tick(t + 1);
+        CHECK(ev.ended && !ev.rematch && m.phase() == MatchPhase::Results);       // the results show first
+        ev = m.Tick(t + Match::kResultsMs - 1);
+        CHECK(!ev.rematch && m.phase() == MatchPhase::Results);
+        ev = m.Tick(t + Match::kResultsMs);
+        CHECK(ev.rematch && m.phase() == MatchPhase::Countdown && m.winner() == Match::kNoWinner);   // then the rematch, in both modes
+        CHECK(m.Score(1) == 0 && m.round() == 1 && m.roundWinner() == 0 && m.Alive(1) && m.Alive(2) && m.Alive(3));
+        const uint32_t r = t + Match::kResultsMs;
+        ev = m.Tick(r + Match::kCountdownMs);
+        CHECK(ev.live && m.phase() == MatchPhase::Live && m.RoundInPlay());      // and the new match goes live
+    }
+    Match m; uint32_t t = 0; DriveToResults(m, Sanitize([] { MatchConfig c; c.format = Format::HideSeek; c.scoreLimit = 2; return c; }()), t);
+    for (int k = 1; k <= 3; ++k) {                                                // and again, several times in a row
+        const uint32_t at = t + Match::kResultsMs * uint32_t(k) * 100;
+        m.Tick(at); CHECK(m.phase() != MatchPhase::Results);
+        m.Tick(at + Match::kCountdownMs);
+        const std::vector<uint8_t> one = {1};
+        m.AwardRound(one, at + Match::kCountdownMs + 10); m.Tick(at + Match::kCountdownMs + 5100); m.AwardRound(one, at + Match::kCountdownMs + 5200);
+        CHECK(m.phase() == MatchPhase::Results); t = at + Match::kCountdownMs + 5200;
+    }
+}
+
 // The wire: the two role ids travel in the MatchInfo, the Hide time in the fuse and the round's clock in the time left.
 static void TestWire() {
     MatchInfo m; m.format = uint8_t(Format::HideSeek); m.teams = 2; m.timeLimitS = 300; m.timeLeftMs = 330000; m.tagIt = 1; m.fuseLeftMs = 30000;
@@ -228,14 +268,14 @@ static void TestScreens() {
 // The lobby: its card, its rows with their own stops and names, three players, Slums; the two clocks come and go with it.
 static void TestLobby() {
     const Format f = Format::HideSeek;
-    CHECK(FormatName(f) == "Hide and seek" && Has(FormatBlurb(f), "Slums or a custom map"));
-    CHECK(SettingsFor(Cfg()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Fuse, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight,
+    CHECK(FormatName(f) == "Hide and seek" && std::string(FormatBlurb(f)) == "Seekers against hiders.");
+    CHECK(SettingsFor(Cfg()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::Damage, LobbyRow::DeadWeight,
                                                       LobbyRow::WeaponWeight, LobbyRow::Sync}));
     CHECK(!ModeAvailable(f, 2).ok && ModeAvailable(f, 3).ok && ModeAvailable(f, 20).ok && std::string(ModeAvailable(f, 2).hint) == "Needs 3 or more players");
     bool card = false, browser = false;
-    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || kModeOrder[i] == f;
+    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || (kModeOrder[i].format == f && !kModeOrder[i].blossfechten);
     for (const std::string& n : BrowserModes()) browser = browser || n == "Hide and seek";
-    CHECK(card && browser && kModeOrderCount == 18 && kModeCardCount == 21);
+    CHECK(card && browser && kModeOrderCount == 17 && kModeCardCount == 22);
     Format parsed = Format::FreeForAll;
     CHECK(ParseServerFormat("hideseek", &parsed) && parsed == f);
     int allowed = 0;
@@ -254,8 +294,8 @@ static void TestLobby() {
     LobbyLocal l; l.phase = LobbyPhase::InLobby; l.host = true; l.myName = "Ann"; l.version = "0.2.0"; l.config = Cfg();
     for (const char* name : {"Ann", "Bob", "Cat"}) { LobbyPlayer p; p.name = name; p.me = l.players.empty(); p.host = l.players.empty(); l.players.push_back(p); }
     const SettingRow time = lobby_detail::Row(l, LobbyRow::Time), fuse = lobby_detail::Row(l, LobbyRow::Fuse);
-    CHECK(time.label == "Seek time" && time.value == "5 min" && Has(time.hint, "hiders still standing"));
-    CHECK(fuse.label == "Hide time" && fuse.value == "30 s" && Has(fuse.hint, "stand still"));
+    CHECK(time.label == "Time limit" && time.value == "5 min a round" && time.hint.empty());
+    CHECK(fuse.label == "Hide time" && fuse.value == "30 s" && fuse.hint.empty());
     { LobbyLocal o = l; o.config = Sanitize(tag); CHECK(lobby_detail::Row(o, LobbyRow::Fuse).label == "Fuse time" && !Has(lobby_detail::Row(o, LobbyRow::Fuse).hint, "stand still")); }
     { LobbyLocal o = l; o.config = Sanitize(lms); CHECK(lobby_detail::Row(o, LobbyRow::Time).label == "Time limit" && !Has(lobby_detail::Row(o, LobbyRow::Time).hint, "hiders")); }
     MatchConfig from; from.timeLimitS = 1200; from.fuseS = 45;                 // picking the card, and leaving it
@@ -275,7 +315,7 @@ static void TestLobby() {
 }
 
 int main() {
-    TestFormat(); TestRoles(); TestHeldAndTags(); TestGame(); TestMatch(); TestWire(); TestScreens(); TestLobby();
+    TestFormat(); TestRoles(); TestHeldAndTags(); TestGame(); TestMatch(); TestRematch(); TestWire(); TestScreens(); TestLobby();
     if (g_fail) { std::printf("%d check(s) failed\n", g_fail); return 1; }
     std::printf("hide and seek tests passed\n");
     return 0;

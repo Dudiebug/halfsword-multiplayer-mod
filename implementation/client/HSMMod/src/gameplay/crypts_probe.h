@@ -9,8 +9,10 @@
 //   rooms    each room the game builds as the player walks: where it sits, its parent, and what its levels hold
 //            (doors, spawn points, bounds), in the room's own frame
 //   measure  every distinct room Module level, loaded far from the dungeon one at a time with its Lighting and Logic
-//            levels, measured, then unloaded: so every room type is measured once without walking into it
-// It only reads, apart from the far loads; the far rooms are 4 km away and unloaded after.
+//            levels, and measured: so every room type is measured once without walking into it
+// It only reads, apart from the far loads. The far rooms are 3 to 7 km away and stay loaded until the Crypts close:
+// unloading one crashed the game (crypts_probe.cpp, FarTick). The far measure is skipped in a progression run, where a far
+// spawn point would take the player.
 #pragma once
 #include "ue/engine.h"
 #include <cstdint>

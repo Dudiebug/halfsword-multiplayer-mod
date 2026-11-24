@@ -20,6 +20,7 @@ static LobbyLocal Lobby(Format f, bool host = true) {
     return l;
 }
 static bool Listed(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return true; return false; }
+static SettingRow Row(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return r; CHECK(false); return SettingRow{}; }   // a copy: the scene is often a temporary
 static PropCandidate Level(bool unmoved) { PropCandidate c; c.level = true; c.haveStart = true; c.unmoved = unmoved; return c; }
 
 int main() {
@@ -31,14 +32,18 @@ int main() {
     { PropCandidate c; c.spawned = true; c.bornInMatch = true; CHECK(PropsOffClears(c)); }
     { PropCandidate c; c.spawned = true; c.bornInMatch = false; CHECK(!PropsOffClears(c)); }
     // Held, denied, detached bodies and structures stay, level or spawned.
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 5; ++k) {
         PropCandidate a = Level(false), b; b.spawned = true; b.bornInMatch = true;
-        bool* fa[] = {&a.held, &a.denied, &a.sub, &a.structure};
-        bool* fb[] = {&b.held, &b.denied, &b.sub, &b.structure};
+        bool* fa[] = {&a.held, &a.denied, &a.sub, &a.structure, &a.worn};
+        bool* fb[] = {&b.held, &b.denied, &b.sub, &b.structure, &b.worn};
         *fa[k] = true; *fb[k] = true;
         CHECK(!PropsOffClears(a));
         CHECK(!PropsOffClears(b));
+        CHECK(!ClearableProp(a) && !ClearableProp(b));               // /clear rocks spares them too
     }
+    // #3909: the bolt quiver a fighter wears is a spawned object (Attach Empty Quiver) born in the match; worn, it stays, and
+    // dropped (Drop Attached Quiver clears MyWillie) it is a loose spawned object again.
+    { PropCandidate q; q.spawned = q.bornInMatch = true; q.worn = true; CHECK(!PropsOffClears(q)); q.worn = false; CHECK(PropsOffClears(q)); }
     { PropCandidate c = Level(true); c.fence = true; CHECK(!PropsOffClears(c)); CHECK(!ClearableProp(c)); }
     { PropCandidate c; c.spawned = c.bornInMatch = c.fence = true; CHECK(!PropsOffClears(c)); }      // fence bags built late stay
     CHECK(!PropsOffClears(PropCandidate{}));                          // neither a level prop nor a spawned object
@@ -56,30 +61,29 @@ int main() {
         CHECK(Sanitize(c).propsOff);
     }
 
-    // The row: every lobby fight but Progression, in WORLD, apart from `settings` (their lists stay as they were).
+    // The row: every lobby fight but Progression, in WORLD.
     CHECK(SectionOf(LobbyRow::Props) == LobbySection::World);
-    CHECK(size_t(LobbyRow::Props) < size_t(LobbyRow::Scenario) && size_t(LobbyRow::Scenario) + 1 == size_t(LobbyRow::Sync));
+    CHECK(size_t(LobbyRow::Props) < size_t(LobbyRow::Sync));
     for (Format f : {Format::FreeForAll, Format::Duel, Format::TwoTeams, Format::Tag, Format::PlayersVsBots, Format::Zombies}) {
         LobbyLocal l = Lobby(f);
         LobbyScene on = BuildLobbyScene(l);
-        CHECK(on.hasProps && on.props.id == LobbyRow::Props && on.props.label == "Props" && on.props.value == "On" && on.props.enabled);
-        CHECK(on.props.hint.find("stay") != std::string::npos);
-        CHECK(!Listed(on, LobbyRow::Props));
+        CHECK(Listed(on, LobbyRow::Props) && Row(on, LobbyRow::Props).id == LobbyRow::Props && Row(on, LobbyRow::Props).label == "Props" && Row(on, LobbyRow::Props).value == "On" && Row(on, LobbyRow::Props).enabled);
+        CHECK(Row(on, LobbyRow::Props).hint.empty());
         l.config.propsOff = true;
         LobbyScene off = BuildLobbyScene(l);
-        CHECK(off.props.value == "Off" && off.props.hint.find("removed") != std::string::npos);
+        CHECK(Row(off, LobbyRow::Props).value == "Off" && Row(off, LobbyRow::Props).hint.empty());
         CHECK(off.settings.size() == on.settings.size());             // the pick changes no other row
     }
     {
         LobbyLocal l = Lobby(Format::Duel, false);                     // a member reads it, cannot step it
         l.config.propsOff = true;
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasProps && s.props.value == "Off" && !s.props.enabled);
+        CHECK(Listed(s, LobbyRow::Props) && Row(s, LobbyRow::Props).value == "Off" && !Row(s, LobbyRow::Props).enabled);
     }
     {
         LobbyLocal l = Lobby(Format::Duel);
         l.progression = true;
-        CHECK(!BuildLobbyScene(l).hasProps);
+        CHECK(!Listed(BuildLobbyScene(l), LobbyRow::Props));
     }
 
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }

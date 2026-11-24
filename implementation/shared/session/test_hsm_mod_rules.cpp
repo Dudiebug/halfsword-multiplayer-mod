@@ -18,6 +18,7 @@ static ModReport Report(std::vector<ModItem> items, bool ue4ss = false) {
     ModReport r; r.items = std::move(items); r.ue4ss = ue4ss; r.complete = true; NormalizeReport(r); return r;
 }
 static ModRule Rule(ModPreset p, bool blockHse = true) { ModRule r; r.preset = p; r.blockHse = blockHse; return r; }
+static ModRule ClassRule(ModPreset p, ClassesMode c, bool blockHse = true) { ModRule r = Rule(p, blockHse); r.classes = c; return r; }
 static std::vector<ModItem> Ue4ssStock() {
     std::vector<ModItem> v;
     for (const char* n : {"BPModLoaderMod", "BPML_GenericFunctions", "Keybinds", "CheatManagerEnablerMod", "ConsoleEnablerMod", "ConsoleCommandsMod"})
@@ -73,7 +74,13 @@ static void TestHse() {
     // RuleRefusesHse: a loaded HS Enhancer refused by the switch or by the preset (its guests hold HSE's keys)
     const auto rule = [](ModPreset p, bool block) { ModRule r; r.preset = p; r.blockHse = block; return r; };
     CHECK(RuleRefusesHse(rule(ModPreset::Anything, true)) && !RuleRefusesHse(rule(ModPreset::Anything, false)));
-    CHECK(!RuleRefusesHse(rule(ModPreset::Classes, false)) && !RuleRefusesHse(rule(ModPreset::Unrestricted, false)));
+    // The Classes row loosens nothing: it neither lets HS Enhancer in under another preset nor blocks it under Anything.
+    for (const ClassesMode m : {ClassesMode::Off, ClassesMode::On, ClassesMode::Unrestricted}) {
+        ModRule open = rule(ModPreset::Anything, false); open.classes = m;
+        ModRule shut = rule(ModPreset::Anything, true); shut.classes = m;
+        ModRule vanilla = rule(ModPreset::Vanilla, false); vanilla.classes = m;
+        CHECK(!RuleRefusesHse(open) && RuleRefusesHse(shut) && RuleRefusesHse(vanilla));
+    }
     CHECK(RuleRefusesHse(rule(ModPreset::Vanilla, false)) && RuleRefusesHse(rule(ModPreset::MapsOnly, false)));
     ModRule custom = rule(ModPreset::Custom, false);
     CHECK(RuleRefusesHse(custom));                       // Same as host, and the host has no HS Enhancer
@@ -154,10 +161,27 @@ static void TestPresets() {
 
     // Nothing at all fits everything.
     for (uint8_t p = 0; p <= kMaxModPreset; ++p) CHECK(CheckMods(Rule(ModPreset(p)), Report({})).ok());
-    // Unrestricted Classes judges mods exactly as Classes does: it lifts the class budget, and nothing else.
-    CHECK(IsClassesPreset(ModPreset::Unrestricted) && IsClassesPreset(ModPreset::Classes) && !IsClassesPreset(ModPreset::Anything));
-    { ModPreset parsed = ModPreset::Vanilla; CHECK(ParseModPreset("unrestricted", parsed) && parsed == ModPreset::Unrestricted); CHECK(DecodeLobbyRule(EncodeLobbyRule(Rule(ModPreset::Unrestricted))).preset == ModPreset::Unrestricted); }
-    CHECK(std::string(ModPresetName(ModPreset::Unrestricted)) == "Unrestricted Classes");
+    // Classes is no Mods allowed value any more (it is its own row): five presets, and the old words are not among them.
+    CHECK(kMaxModPreset == 4 && ModPreset::Anything == ModPreset(kMaxModPreset));
+    { ModPreset parsed = ModPreset::Vanilla; CHECK(!ParseModPreset("classes", parsed) && !ParseModPreset("unrestricted", parsed) && parsed == ModPreset::Vanilla); }
+    // The Classes row changes no verdict on any mod: every preset judges a report the same with classes Off, On or Unrestricted.
+    {
+        const std::vector<ModReport> reports = {Report({}), Report({map}), Report({map, face}), Report({helper, killcam}), Report({winmm}), Report({module}),
+                                                Report({weapons, enhancer}), Report({Item(ModKind::HseLocked, "HSEnhancer", 4)})};
+        for (uint8_t p = 0; p <= kMaxModPreset; ++p)
+            for (const bool block : {true, false})
+                for (const ModReport& rep : reports) {
+                    const RuleResult base = CheckMods(Rule(ModPreset(p), block), rep);
+                    for (const ClassesMode m : {ClassesMode::On, ClassesMode::Unrestricted}) {
+                        const RuleResult withClasses = CheckMods(ClassRule(ModPreset(p), m, block), rep);
+                        CHECK(withClasses.fail == base.fail && withClasses.mod == base.mod && withClasses.more == base.more);
+                    }
+                }
+        // Anything + Classes still takes any mod, and Vanilla + Classes still takes none.
+        CHECK(CheckMods(ClassRule(ModPreset::Anything, ClassesMode::On), Report({helper, killcam, map, face})).ok());
+        CHECK(CheckMods(ClassRule(ModPreset::Vanilla, ClassesMode::On), Report({map})).fail == RuleFail::NoMods);
+        CHECK(CheckMods(ClassRule(ModPreset::Vanilla, ClassesMode::Unrestricted), Report({helper})).fail == RuleFail::NoMods);
+    }
     // A scan still running: ask again.
     ModReport running; CHECK(CheckMods(Rule(ModPreset::Anything), running).fail == RuleFail::Pending);
 
@@ -185,19 +209,19 @@ static void TestPresets() {
     CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({helper})).fail == RuleFail::NotAllowed);
     // Proxy DLLs (ReShade, ASI loaders) are reported and pass every preset but Vanilla.
     const ModItem dxgi = Item(ModKind::Proxy, "dxgi.dll", 8);
-    for (const ModPreset p : {ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom, ModPreset::Anything, ModPreset::Classes})
+    for (const ModPreset p : {ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom, ModPreset::Anything})
         CHECK(CheckMods(Rule(p), Report({winmm, dxgi})).ok());
     r = CheckMods(Rule(ModPreset::Vanilla), Report({dxgi, map}));
     CHECK(r.fail == RuleFail::NoMods && r.mod == "Tavern.pak" && r.more == 1);                     // map paks sort first
     CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({dxgi, module})).fail == RuleFail::Hse);
 
-    // HS Enhancer comes first, whatever the preset, Classes included.
+    // HS Enhancer comes first, whatever the preset (and whatever the Classes row says).
     r = CheckMods(Rule(ModPreset::Anything), Report({weapons, enhancer}));
     CHECK(r.fail == RuleFail::Hse && r.mod == "HSEnhancer");
     CHECK(CheckMods(Rule(ModPreset::Anything), Report({module})).fail == RuleFail::Hse);
-    CHECK(CheckMods(Rule(ModPreset::Classes), Report({module})).fail == RuleFail::Hse);
+    CHECK(CheckMods(ClassRule(ModPreset::Anything, ClassesMode::On), Report({module})).fail == RuleFail::Hse);
     CHECK(CheckMods(Rule(ModPreset::Anything, false), Report({weapons, enhancer, module, winmm})).ok());
-    CHECK(CheckMods(Rule(ModPreset::Classes, false), Report({weapons, enhancer, module, winmm})).ok());
+    CHECK(CheckMods(ClassRule(ModPreset::Anything, ClassesMode::On, false), Report({weapons, enhancer, module, winmm})).ok());
     CHECK(CheckMods(Rule(ModPreset::MapsOnly, false), Report({enhancer})).fail == RuleFail::NotAllowed);   // HSE allowed, still not a map
     // Locked HS Enhancer passes every preset, blocked or not, as the item alone and beside a map
     const ModItem locked = Item(ModKind::HseLocked, "HSEnhancer", 4);
@@ -214,11 +238,11 @@ static void TestPresets() {
     // Other mods are nobody's business but the preset's: no cheat list.
     CHECK(CheckMods(Rule(ModPreset::Anything), Report({Item(ModKind::Ue4ssMod, "BiteMod"), Item(ModKind::Ue4ssMod, "InfiniteStamina")})).ok());
 
-    // Anything and Classes take a cut list; the others refuse it.
+    // Anything takes a cut list (with or without Classes); the others refuse it.
     ModReport big;
     for (size_t i = 0; i < kMaxModItems + 1; ++i) big.items.push_back(Item(ModKind::MapPak, ("m" + std::to_string(100 + i) + ".pak").c_str()));
     big.complete = true; NormalizeReport(big);
-    CHECK(CheckMods(Rule(ModPreset::Anything), big).ok() && CheckMods(Rule(ModPreset::Classes), big).ok());
+    CHECK(CheckMods(Rule(ModPreset::Anything), big).ok() && CheckMods(ClassRule(ModPreset::Anything, ClassesMode::On), big).ok());
     CHECK(CheckMods(Rule(ModPreset::MapsOnly), big).fail == RuleFail::TooMany && CheckMods(Rule(ModPreset::Vanilla), big).fail == RuleFail::TooMany);
 }
 
@@ -281,13 +305,14 @@ static void TestEffective() {
     ModReport clean = Report({});
     ModReport cheater = Report({Item(ModKind::Module, "HSEnhancer")});
     CHECK(EffectiveRule(chosen, clean, Official::Yes) == chosen);
-    {   // Classes takes any mod, like Anything; HS Enhancer follows the one switch there too. A host that runs HSE cannot block it.
-        const ModRule classes = Rule(ModPreset::Classes, false);
+    {   // Anything with Classes takes any mod; HS Enhancer follows the one switch there too. A host that runs HSE cannot block it.
+        const ModRule classes = ClassRule(ModPreset::Anything, ClassesMode::On, false);
         CHECK(CheckMods(classes, Report({Item(ModKind::Module, "HSEnhancer"), Item(ModKind::Ue4ssMod, "HSEnhancer"), Item(ModKind::Ue4ssMod, "HalfWolverine"), Item(ModKind::Proxy, "winmm.dll")})).ok());
         CHECK(CheckMods(classes, Report({Item(ModKind::MapPak, "Arena.pak"), Item(ModKind::ContentPak, "Armour.pak")})).ok());
         CHECK(CheckMods(classes, Report({Item(ModKind::Ue4ssMod, "BiteMod"), Item(ModKind::Ue4ssMod, "HulkMod")})).ok());
-        CHECK(CheckMods(Rule(ModPreset::Classes), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);
-        CHECK(!EffectiveRule(Rule(ModPreset::Classes), cheater, Official::Yes).blockHse);
+        CHECK(CheckMods(ClassRule(ModPreset::Anything, ClassesMode::On), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);
+        CHECK(!EffectiveRule(ClassRule(ModPreset::Anything, ClassesMode::Unrestricted), cheater, Official::Yes).blockHse);
+        CHECK(EffectiveRule(ClassRule(ModPreset::Anything, ClassesMode::Unrestricted), cheater, Official::Yes).classes == ClassesMode::Unrestricted);   // the row survives the host's own report
         CHECK(CheckMods(Rule(ModPreset::MapsOnly), Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);   // the other rules are unchanged
     }
     CHECK(!EffectiveRule(chosen, cheater, Official::Yes).blockHse);
@@ -307,10 +332,10 @@ static void TestLobbyData() {
     // No rule published: Anything with HS Enhancer blocked.
     CHECK(DecodeLobbyRule({}) == NoRule() && NoRule().preset == ModPreset::Anything && NoRule().blockHse && !NoRule().officialOnly);
     // Garbage reads strict.
-    LobbyModData bad{"9", "x", "", ""};
+    LobbyModData bad{"9", "x", "", "", ""};
     ModRule b = DecodeLobbyRule(bad);
     CHECK(b.preset == ModPreset::Vanilla && b.blockHse && !b.officialOnly);
-    CHECK(DecodeLobbyRule({"12", "0", "1", ""}).preset == ModPreset::Vanilla);
+    CHECK(DecodeLobbyRule({"12", "0", "1", "", ""}).preset == ModPreset::Vanilla);
     // A list too long for lobby data publishes its hash only; the browser leaves the check to the host.
     ModRule longList = Rule(ModPreset::Custom);
     for (int i = 0; i < 64; ++i) longList.list.push_back({std::string(70, char('a' + i % 26)) + std::to_string(i), "", false});
@@ -321,6 +346,94 @@ static void TestLobbyData() {
     RuleResult res = CheckMods(seen, Report({Item(ModKind::ContentPak, "x.pak", 1)}));
     CHECK(res.fail == RuleFail::Unchecked && res.ok());
     CHECK(CheckMods(seen, Report({Item(ModKind::Module, "HSEnhancer")})).fail == RuleFail::Hse);   // HS Enhancer still caught
+}
+
+// The Classes row (its own row since PR13): names, the INI's two keys, the lobby data and what an older host's lobby means.
+static void TestClassesRow() {
+    const ClassesMode all[3] = {ClassesMode::Off, ClassesMode::On, ClassesMode::Unrestricted};
+    // Names, keys, parse.
+    CHECK(kMaxClassesMode == 2);
+    CHECK(std::string(ClassesModeName(ClassesMode::Off)) == "Off" && std::string(ClassesModeName(ClassesMode::On)) == "On" && std::string(ClassesModeName(ClassesMode::Unrestricted)) == "Unrestricted");
+    CHECK(std::string(ClassesModeKey(ClassesMode::Off)) == "off" && std::string(ClassesModeKey(ClassesMode::On)) == "on" && std::string(ClassesModeKey(ClassesMode::Unrestricted)) == "unrestricted");
+    CHECK(!ClassesOn(ClassesMode::Off) && ClassesOn(ClassesMode::On) && ClassesOn(ClassesMode::Unrestricted));
+    CHECK(ClassesModeLabel(ClassesMode::Off).empty() && ClassesModeLabel(ClassesMode::On) == "Classes" && ClassesModeLabel(ClassesMode::Unrestricted) == "Unrestricted Classes");
+    for (const ClassesMode m : all) { ClassesMode got = ClassesMode::Off; CHECK(ParseClassesMode(ClassesModeKey(m), got) && got == m); }
+    { ClassesMode got = ClassesMode::On; CHECK(ParseClassesMode("UNRESTRICTED", got) && got == ClassesMode::Unrestricted); }
+    { ClassesMode got = ClassesMode::On; CHECK(!ParseClassesMode("", got) && !ParseClassesMode("classes", got) && !ParseClassesMode("2", got) && got == ClassesMode::On); }
+    { ClassesMode got = ClassesMode::Off; CHECK(LegacyClassesMode("classes", got) && got == ClassesMode::On); CHECK(LegacyClassesMode("Unrestricted", got) && got == ClassesMode::Unrestricted); CHECK(!LegacyClassesMode("anything", got) && !LegacyClassesMode("on", got)); }
+
+    // The INI: mod_rule + mod_classes -> a choice. The old words mod_rule=classes / =unrestricted mean Anything with that row, and win.
+    for (uint8_t p = 0; p <= kMaxModPreset; ++p)
+        for (const ClassesMode m : all) {
+            const ModChoice c{ModPreset(p), m, true, true};
+            const ModChoiceStrings k = KeysOfChoice(c);
+            const ModChoiceKeys back = ChoiceFromKeys(k.modRule, k.modClasses);
+            CHECK(back.known && back.preset == ModPreset(p) && back.classes == m);   // every pair survives a save and a read
+            CHECK(k.modClasses == ClassesModeKey(m));
+        }
+    CHECK(KeysOfChoice({ModPreset::Anything, ClassesMode::On, true, true}).modRule == "classes");              // the launcher reads mod_rule alone
+    CHECK(KeysOfChoice({ModPreset::Anything, ClassesMode::Unrestricted, true, true}).modRule == "unrestricted");
+    CHECK(KeysOfChoice({ModPreset::Anything, ClassesMode::Off, true, true}).modRule == "anything");
+    CHECK(KeysOfChoice({ModPreset::Vanilla, ClassesMode::Unrestricted, true, true}).modRule == "vanilla");     // no old word for it: the preset, and mod_classes
+    CHECK(KeysOfChoice({ModPreset::Bundle, ClassesMode::On, true, true}).modRule == "bundle");
+    {   const ModChoiceKeys k = ChoiceFromKeys("classes", ""); CHECK(k.known && k.preset == ModPreset::Anything && k.classes == ClassesMode::On); }
+    {   const ModChoiceKeys k = ChoiceFromKeys("unrestricted", "off"); CHECK(k.known && k.preset == ModPreset::Anything && k.classes == ClassesMode::Unrestricted); }   // the old word wins
+    {   const ModChoiceKeys k = ChoiceFromKeys("maps", "on"); CHECK(k.known && k.preset == ModPreset::MapsOnly && k.classes == ClassesMode::On); }
+    {   const ModChoiceKeys k = ChoiceFromKeys("vanilla", ""); CHECK(k.known && k.preset == ModPreset::Vanilla && k.classes == ClassesMode::Off); }   // no mod_classes: Off
+    {   const ModChoiceKeys k = ChoiceFromKeys("anything", "garbage"); CHECK(k.known && k.preset == ModPreset::Anything && k.classes == ClassesMode::Off); }
+    {   const ModChoiceKeys k = ChoiceFromKeys("nonsense", "on"); CHECK(!k.known && k.preset == ModPreset::Vanilla && k.classes == ClassesMode::On); }   // never looser than Vanilla
+
+    // Lobby data. hsm_mrule is the Mods allowed digit; hsm_mcls the row. An older build reads only hsm_mrule, where 5 and 6 were
+    // Classes and Unrestricted Classes (Anything's mods), so those two are written only for Anything.
+    CHECK(EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::On)).rule == "5" && EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::On)).classes == "1");
+    CHECK(EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::Unrestricted)).rule == "6" && EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::Unrestricted)).classes == "2");
+    CHECK(EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::Off)).rule == "4" && EncodeLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::Off)).classes == "0");
+    for (uint8_t p = 0; p < kMaxModPreset; ++p)                      // any other preset keeps its own digit: an older host reads the preset, classes off
+        for (const ClassesMode m : all) {
+            const LobbyModData d = EncodeLobbyRule(ClassRule(ModPreset(p), m));
+            CHECK(d.rule == std::to_string(p) && d.classes == std::to_string(unsigned(m)));
+        }
+    for (uint8_t p = 0; p <= kMaxModPreset; ++p)
+        for (const ClassesMode m : all) {
+            if (p == 2 || p == 3) continue;                          // Bundle and Custom carry their list; the round trip is TestLobbyData's
+            const ModRule x = ClassRule(ModPreset(p), m);
+            CHECK(DecodeLobbyRule(EncodeLobbyRule(x)) == x);
+        }
+    // What an older host's lobby means (it never wrote hsm_mcls): 0..4 are the presets with classes off; 5 and 6 are Anything with Classes / Unrestricted.
+    for (uint8_t p = 0; p <= kMaxModPreset; ++p) {
+        const ModRule r = DecodeLobbyRule({std::to_string(p), "1", "1", "", ""});
+        CHECK(r.preset == ModPreset(p) && r.classes == ClassesMode::Off);
+    }
+    { const ModRule r = DecodeLobbyRule({"5", "1", "1", "", ""}); CHECK(r.preset == ModPreset::Anything && r.classes == ClassesMode::On && r.blockHse && r.officialOnly); }
+    { const ModRule r = DecodeLobbyRule({"6", "0", "0", "", ""}); CHECK(r.preset == ModPreset::Anything && r.classes == ClassesMode::Unrestricted && !r.blockHse && !r.officialOnly); }
+    // The new key wins where both speak; a bad one is ignored, not guessed.
+    CHECK(DecodeLobbyRule({"5", "1", "1", "", "0"}).classes == ClassesMode::Off);
+    CHECK(DecodeLobbyRule({"1", "1", "1", "", "2"}).classes == ClassesMode::Unrestricted && DecodeLobbyRule({"1", "1", "1", "", "2"}).preset == ModPreset::MapsOnly);
+    for (const char* bad : {"3", "9", "x", "-1", "11", " 1"}) {
+        CHECK(DecodeLobbyRule({"5", "1", "1", "", bad}).classes == ClassesMode::On);        // falls back to the old digit's meaning
+        CHECK(DecodeLobbyRule({"2", "1", "1", "", bad}).classes == ClassesMode::Off);
+    }
+    CHECK(DecodeLobbyRule({"7", "1", "1", "", "1"}).preset == ModPreset::Vanilla);          // an unknown digit is Vanilla, strict, but the row is read
+    CHECK(DecodeLobbyRule({"7", "1", "1", "", "1"}).classes == ClassesMode::On);
+    CHECK(DecodeLobbyRule({"", "1", "1", "", "2"}) == NoRule() && DecodeLobbyRule({"", "1", "1", "", "2"}).classes == ClassesMode::Off);   // no rule, no classes
+    // What Lobby::InClassesLobby asks, from the raw keys.
+    CHECK(LobbyClassesMode("", "") == ClassesMode::Off && LobbyClassesMode("", "1") == ClassesMode::Off);
+    CHECK(LobbyClassesMode("0", "") == ClassesMode::Off && LobbyClassesMode("4", "") == ClassesMode::Off);
+    CHECK(LobbyClassesMode("5", "") == ClassesMode::On && LobbyClassesMode("6", "") == ClassesMode::Unrestricted);
+    CHECK(LobbyClassesMode("0", "1") == ClassesMode::On && LobbyClassesMode("1", "2") == ClassesMode::Unrestricted && LobbyClassesMode("4", "0") == ClassesMode::Off);
+    CHECK(LobbyClassesMode("5", "0") == ClassesMode::Off && LobbyClassesMode("6", "1") == ClassesMode::On);
+    CHECK(LobbyClassesMode("5", "7") == ClassesMode::On && LobbyClassesMode("55", "") == ClassesMode::Off && LobbyClassesMode("0", "11") == ClassesMode::Off);
+    // The effective rule a client builds is the host's, row included (ChoiceOf keeps it).
+    for (uint8_t p = 0; p <= kMaxModPreset; ++p)
+        for (const ClassesMode m : all) CHECK(ChoiceOf(ClassRule(ModPreset(p), m)).classes == m && ChoiceOf(ClassRule(ModPreset(p), m)).preset == ModPreset(p));
+    // Two rules that differ only in the row are different rules.
+    CHECK(!(ClassRule(ModPreset::Anything, ClassesMode::On) == ClassRule(ModPreset::Anything, ClassesMode::Off)));
+    CHECK(!(ClassRule(ModPreset::Anything, ClassesMode::On) == ClassRule(ModPreset::Anything, ClassesMode::Unrestricted)));
+    CHECK(!(ModChoice{ModPreset::Vanilla, ClassesMode::Off, true, true} == ModChoice{ModPreset::Vanilla, ClassesMode::On, true, true}));
+    // Texts.
+    CHECK(RuleSummary(ClassRule(ModPreset::MapsOnly, ClassesMode::On)) == "Maps only, Classes, HS Enhancer blocked, official builds only");
+    CHECK(RuleSummary(ClassRule(ModPreset::Anything, ClassesMode::Unrestricted, false)) == "Anything, Unrestricted Classes, HS Enhancer allowed, official builds only");
+    CHECK(RuleSummary(ClassRule(ModPreset::Anything, ClassesMode::Off, false)) == "Anything, HS Enhancer allowed, official builds only");
 }
 
 static void TestBuildGate() {
@@ -368,8 +481,8 @@ static void TestGrace() {
 // A host who changed nothing allows no mods; a bad mod_rule= falls back to the same, never to something looser.
 static void TestDefaultIsNoMods() {
     const ModChoice c;
-    CHECK(c.preset == ModPreset::Vanilla && c.blockHse && !c.officialOnly);
-    CHECK(ModRule{}.preset == ModPreset::Vanilla && ModRule{}.blockHse);
+    CHECK(c.preset == ModPreset::Vanilla && c.classes == ClassesMode::Off && c.blockHse && c.officialOnly);   // official builds only is on by default
+    CHECK(ModRule{}.preset == ModPreset::Vanilla && ModRule{}.classes == ClassesMode::Off && ModRule{}.blockHse && ModRule{}.officialOnly);
     ModPreset bad = c.preset;
     CHECK(!ParseModPreset("nonsense", bad) && bad == ModPreset::Vanilla);
     const ModRule rule = Rule(c.preset);
@@ -379,16 +492,18 @@ static void TestDefaultIsNoMods() {
 }
 
 static void TestLobbyView() {
-    const auto Rule = [](ModPreset p, bool blockHse = true) { ModRule r = ::Rule(p, blockHse); r.officialOnly = false; return r; };   // the INI default
+    const auto Rule = [](ModPreset p, bool blockHse = true) { return ::Rule(p, blockHse); };   // the default: official builds only
     CHECK(LobbyRuleTag(Rule(ModPreset::Vanilla)).empty());
     CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly)) == "mods: Maps only");
     CHECK(LobbyRuleTag(Rule(ModPreset::Vanilla, false)) == "mods: Vanilla, HS Enhancer ok");
-    { ModRule r = Rule(ModPreset::Vanilla); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Vanilla, official only"); }
+    { ModRule r = Rule(ModPreset::Vanilla); r.officialOnly = false; CHECK(LobbyRuleTag(r) == "mods: Vanilla, unofficial builds ok"); }
     CHECK(LobbyRuleTag(Rule(ModPreset::Anything, false)) == "mods: Anything, HS Enhancer ok");
     CHECK(LobbyRuleTag(Rule(ModPreset::MapsOnly, false)) == "mods: Maps only, HS Enhancer ok");
-    { ModRule r = Rule(ModPreset::MapsOnly); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Maps only, official only"); }
-    { ModRule r = Rule(ModPreset::Classes, false); r.officialOnly = true; CHECK(LobbyRuleTag(r) == "mods: Classes, HS Enhancer ok, official only"); }
-    CHECK(LobbyRuleTag(NoRule()) == "mods: Anything");
+    { ModRule r = Rule(ModPreset::MapsOnly); r.officialOnly = false; CHECK(LobbyRuleTag(r) == "mods: Maps only, unofficial builds ok"); }
+    { ModRule r = ClassRule(ModPreset::Anything, ClassesMode::On, false); r.officialOnly = false; CHECK(LobbyRuleTag(r) == "mods: Anything, Classes, HS Enhancer ok, unofficial builds ok"); }
+    CHECK(LobbyRuleTag(ClassRule(ModPreset::Vanilla, ClassesMode::On)) == "mods: Vanilla, Classes");               // the row works with any preset
+    CHECK(LobbyRuleTag(ClassRule(ModPreset::Bundle, ClassesMode::Unrestricted)) == "mods: Bundle, Unrestricted Classes");
+    CHECK(LobbyRuleTag(NoRule()) == "mods: Anything, unofficial builds ok");
     CHECK(ViewLobbyRule(Rule(ModPreset::Anything, false), Report({}), Official::Yes).tag == "mods: Anything, HS Enhancer ok");
     const ModReport clean = Report({Item(ModKind::MapPak, "Arena_P.pak", 3)});
     const ModReport cheat = Report({Item(ModKind::Module, "HSEnhancer")});
@@ -398,7 +513,8 @@ static void TestLobbyView() {
         CHECK(v.reason == "Blocks HS Enhancer" && v.text == "This lobby blocks HS Enhancer unless HSMMod can lock it: remove it, or join a lobby that allows it." && v.tag == "mods: Maps only");
     }
     CHECK(ViewLobbyRule(Rule(ModPreset::Anything, false), cheat, Official::Yes).reason.empty());
-    CHECK(ViewLobbyRule(Rule(ModPreset::Classes, false), cheat, Official::Yes).reason.empty());
+    CHECK(ViewLobbyRule(ClassRule(ModPreset::Anything, ClassesMode::On, false), cheat, Official::Yes).reason.empty());
+    CHECK(ViewLobbyRule(ClassRule(ModPreset::Vanilla, ClassesMode::Unrestricted), cheat, Official::Yes).reason == "Blocks HS Enhancer");   // Classes does not let it in
     // Still scanning: no verdict (the host decides).
     { ModReport scanning = cheat; scanning.complete = false; CHECK(ViewLobbyRule(Rule(ModPreset::Vanilla), scanning, Official::No).reason.empty()); }
     // Official only: an unofficial build is turned away, an unknown one is not.
@@ -602,6 +718,7 @@ int main() {
     TestLists();
     TestEffective();
     TestLobbyData();
+    TestClassesRow();
     TestBuildGate();
     TestOfficial();
     TestGrace();

@@ -1,10 +1,14 @@
 // The host's watchdog over the bots of a wave. A wave ends only when every bot is dead, so one bot that spawned before its
 // floor tile existed (it fell for ever), or that is wedged somewhere it cannot leave, stopped the wave for good (#2413).
 //
-// Two rules, both conservative (a fight lasts seconds, a wave minutes):
+// Three rules, all conservative (a fight lasts seconds, a wave minutes):
 //   BotWatch   one bot: it is below the floor when it is far under the height it spawned at, and stuck when it has not
 //              moved from one spot for a long time with no living player close by (a bot beside a player is fighting, or
 //              waiting to; the wave rule covers it if it never comes to anything).
+//   OutBelow   one bot that gave up while well under its spawn height: it fell into a pit. A level's lose volume (the
+//              Pit's pit) runs the stock Event Lose Match on a bot, which only sets Give Up, so the bot never dies and the
+//              wave waits for it for good (#3370). Give Up is also the game's plain yield, so a bot yielding on the
+//              floor is left alone: only one that is also under the floor counts.
 //   WaveStalled the whole wave: nothing has spawned or died for a long time while bots are alive.
 // The DLL kills what the verdict names (the normal death path, so the match scores it as the bots' own death, no killer).
 // Times are the 32-bit millisecond clock, wrap-safe.
@@ -21,9 +25,11 @@ struct BotWatchLimits {
     uint32_t stillMs = 90000;         // not moved for this long
     double engagedCm = 600;           // a living player this close: the bot is in a fight, never stuck
     uint32_t waveStallMs = 300000;    // a wave with bots alive where nothing spawned or died for this long
+    double outBelowCm = 300;          // OutBelow: this far under its spawn height (a fighter lying on the floor is ~1 m)
+    uint32_t outMs = 3000;            // ... and given up, for this long
 };
 
-enum class BotVerdict : uint8_t { Ok, BelowFloor, Still };
+enum class BotVerdict : uint8_t { Ok, BelowFloor, Still, GaveUpBelow };
 
 class BotWatch {
 public:
@@ -47,6 +53,26 @@ public:
         if (nearestPlayerCm >= 0 && nearestPlayerCm <= lim.engagedCm) { m.at = nowMs; return BotVerdict::Ok; }
         return uint32_t(nowMs - m.at) >= lim.stillMs ? BotVerdict::Still : BotVerdict::Ok;
     }
+    // The stock Event Lose Match ran on the bot (a lose volume touched it): from now on it counts as given up for
+    // OutBelow, a zombie too (the event gives a zombie only its AI controller's flag, not Give Up).
+    void NoteLoseMatch(uint8_t entity) { marks_[entity].loseSeen = true; }
+    // One look at whether a bot is out in a pit: `gaveUp` (its Give Up flag) and its height `z`. True once given up (or
+    // NoteLoseMatch) and under the floor have held for lim.outMs; climbing back up or Give Up going off starts the
+    // count again.
+    bool OutBelow(uint8_t entity, double z, bool gaveUp, uint32_t nowMs, const BotWatchLimits& lim = BotWatchLimits{}) {
+        Mark& m = marks_[entity];
+        if (!m.armed) { m.spawnZ = z; m.armed = true; }
+        if (!(gaveUp || m.loseSeen) || z > m.spawnZ - lim.outBelowCm) { m.out = false; return false; }
+        if (!m.out) { m.out = true; m.outAt = nowMs; }
+        return uint32_t(nowMs - m.outAt) >= lim.outMs;
+    }
+    // The height the bot spawned at (for the log); false for a bot not armed yet.
+    bool SpawnZ(uint8_t entity, double& z) const {
+        const auto it = marks_.find(entity);
+        if (it == marks_.end() || !it->second.armed) return false;
+        z = it->second.spawnZ;
+        return true;
+    }
     void Forget(uint8_t entity) { marks_.erase(entity); }
     void Clear() { marks_.clear(); }
     size_t Size() const { return marks_.size(); }
@@ -56,6 +82,9 @@ private:
         bool armed = false, placed = false;
         double spawnZ = 0, x = 0, y = 0, z = 0;
         uint32_t at = 0;              // when the bot arrived at its mark
+        bool loseSeen = false;        // NoteLoseMatch
+        bool out = false;             // OutBelow: given up under the floor since outAt
+        uint32_t outAt = 0;
     };
     std::map<uint8_t, Mark> marks_;
 };

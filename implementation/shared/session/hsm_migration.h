@@ -98,4 +98,16 @@ private:
     uint32_t since_ = 0;
 };
 
+// Whether a client whose host is gone waits for a new one (host migration), or goes back to the menu. Never from the shared
+// Crypts run: the dungeon, its enemies and its loot are the host's alone, so "a host who leaves ends the run"
+// (docs/PLAN_CRYPTS_COOP.md); in the pre56 test the client migrated into an empty menu lobby instead. Nor once the host has
+// said it ended the run (results with RunEnd::HostLeft).
+inline bool MigrateWhenHostGone(bool migrationOn, bool sharedCryptsRun, bool hostEndedRun) {
+    return migrationOn && !sharedCryptsRun && !hostEndedRun;
+}
+
+// A host leaving the shared Crypts run from the menu sends the results, then waits this long before it closes its sessions:
+// closing them drops the reliable messages still queued.
+constexpr uint32_t kHostLeaveGraceMs = 750;
+
 }  // namespace hsm

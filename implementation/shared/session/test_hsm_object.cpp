@@ -270,6 +270,17 @@ static void TestGhosts() {
     for (size_t i = 0; i < kMaxGhosts; ++i) CHECK(g.Note(MakeSpawnedId(0, uint32_t(i + 1)), 0));
     CHECK(!g.Note(MakeSpawnedId(1, 1), 0) && g.Note(MakeSpawnedId(0, 1), 1) && g.Size() == kMaxGhosts);
     g.Clear(); CHECK(g.Size() == 0);
+    // The pre56 Crypts test: the host announced a room's props 24-91 s before the client built the room, and every ghost had
+    // expired by then. Held while rooms are still to build, the ghost is there when the actor appears.
+    CHECK(g.Note(id, 0));
+    CHECK(g.Expire(60000, true).empty() && g.IsGhost(id));       // a minute in, rooms still building
+    CHECK(g.Expire(69999).empty() && g.IsGhost(id));             // built: kGhostTtlMs from the last held pass
+    CHECK(g.Expire(70000).size() == 1 && !g.IsGhost(id));
+    CHECK(g.Note(id, 0));
+    CHECK(g.Expire(kGhostHoldMaxMs - 1, true).empty());
+    CHECK(g.Expire(kGhostHoldMaxMs, true).empty());              // the hold has run out: the ordinary TTL from the last held pass
+    CHECK(g.Expire(kGhostHoldMaxMs + kGhostTtlMs - 1, true).size() == 1);
+    g.Clear();
 }
 
 static void TestMotionHelpers() {

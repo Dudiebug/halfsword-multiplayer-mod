@@ -83,6 +83,8 @@ public:
     // Rev 42 (combat/hsm_claimcheck.h, HSMMod.ini claim_check): how a blow against my fighter is checked against where my
     // fighter really was when the attacker's screen showed it.
     void SetClaimCheck(combat::ClaimCheckMode mode) { checkMode_ = mode; }
+    // #3845 (HSMMod.ini blow_speed_cap, cm/s, 0 = off): a hit velocity on a stand-in faster than this is sent at this speed.
+    void SetBlowSpeedCap(double cmPerSec) { blowSpeedCap_ = cmPerSec; }
     std::string AuditLine();
 
 private:
@@ -97,11 +99,16 @@ private:
     };
     bool OnDealComplexDamage(ue::ScriptCall& c);
     bool OnGetDamage(ue::ScriptCall& c);
+    void CapHitSpeed(ue::ScriptCall& c, ue::UObject* comp, uint8_t attacker, uint8_t victim);   // #3845: blow_speed_cap
     void OnStuckDamage(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim);   // a lodged blade of mine, on a stand-in
     void AfterDealComplexDamage(ue::ScriptCall& c);
     void GatherPush(ue::ScriptCall& c, ue::UObject* striker, uint8_t attacker, uint8_t victim);   // item 3: its impulse, for the owner
     void OnGetUpPal(ue::ScriptCall& c);                              // item 22: my fighter helps a stand-in up
     void OnHealAndRestore(ue::ScriptCall& c);                        // a hold of mine presses a stand-in's wound
+    void AfterNutrients(ue::ScriptCall& c);                          // food or drink (a bottle's sip), logged
+    void LogHeal(ue::UObject* willie, uint8_t standIn, const char* what, double amount, double medicine);
+    std::array<double, kMaxWillies + 1> healLogAt_{};               // per fighter: when its last heal line was written
+    uint64_t healLines_ = 0;
     void OnTalk(ue::ScriptCall& c);                                  // my fighter spoke at a stand-in
     void SendPending(ue::ScriptCall& c);                             // the claim made before the body ran, coalesced by its damage
     void MakeClaim(ue::ScriptCall& c, ue::UObject* standIn, uint8_t victim, uint8_t attacker, ue::UObject* attackerWillie, ue::UObject* comp,
@@ -158,6 +165,8 @@ private:
     std::map<int, Box> boxes_;                                       // victim entity -> its private Hit Box
     Counters n_, reported_;
     combat::ClaimCheckMode checkMode_ = combat::ClaimCheckMode::Log;
+    double blowSpeedCap_ = combat::kMaxBlowSpeed;
+    uint64_t speedCapped_ = 0;   // blows on stand-ins sent below their speed (blow_speed_cap)
     sync::ClaimNetStats check_;   // rev 42: the claim check's verdicts and distances
     // C0: blows on stand-ins by what struck them, and their fate; claims replayed on my fighter by striking component.
     struct Strike { uint32_t contacts = 0, blocked = 0, gated = 0, limited = 0, noClaim = 0, coalesced = 0, zero = 0, capped = 0, sent = 0;

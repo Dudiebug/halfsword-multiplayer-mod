@@ -33,9 +33,15 @@ static void TestPlanByKind() {
     SwitchPlan m = PlanSwitch(Rule(ModPreset::MapsOnly), mine);   // map paks and proxies pass; the content pak and the UE4SS mod go
     CHECK(m.Switchable() && m.Count() == 2 && m.paks.size() == 1 && m.paks[0] == "Skins.pak" && m.modsTxt.size() == 1 && m.exeDlls.empty());
 
-    for (ModPreset p : {ModPreset::Anything, ModPreset::Classes, ModPreset::Unrestricted}) {
-        SwitchPlan a = PlanSwitch(Rule(p), mine);
+    for (ClassesMode c : {ClassesMode::Off, ClassesMode::On, ClassesMode::Unrestricted}) {   // Anything takes every mod, whatever the Classes row says
+        ModRule r = Rule(ModPreset::Anything); r.classes = c;
+        SwitchPlan a = PlanSwitch(r, mine);
         CHECK(a.Empty() && !a.Switchable());
+    }
+    for (ClassesMode c : {ClassesMode::On, ClassesMode::Unrestricted}) {                     // ...and Classes lets in nothing Vanilla would not
+        ModRule r = Rule(ModPreset::Vanilla); r.classes = c;
+        SwitchPlan a = PlanSwitch(r, mine);
+        CHECK(a.Switchable() && a.Count() == v.Count() && a.paks == v.paks && a.modsTxt == v.modsTxt && a.exeDlls == v.exeDlls);
     }
 }
 
@@ -67,7 +73,7 @@ static void TestPlanHseLock() {
     ModReport locked = hse;
     LockReportHse(locked);
     CHECK(!HasHse(locked) && HasLockedHse(locked));
-    for (ModPreset p : {ModPreset::Vanilla, ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom, ModPreset::Anything, ModPreset::Classes})
+    for (ModPreset p : {ModPreset::Vanilla, ModPreset::MapsOnly, ModPreset::Bundle, ModPreset::Custom, ModPreset::Anything})
         CHECK(!PlanSwitch(Rule(p), locked).lockHse);
     CHECK(PlanSwitch(Rule(ModPreset::Anything), locked).Empty());
 }

@@ -1,4 +1,4 @@
-// Unit tests for hsm_gather.h (the Crypts gather's wire, protocol rev 47). Run via implementation/shared/run_tests.sh test_hsm_gather.
+// Unit tests for hsm_gather.h (the Crypts gather's wire, protocol rev 47; the flags byte rev 48). Run via implementation/shared/run_tests.sh test_hsm_gather.
 #include "session/hsm_gather.h"
 #include "session/hsm_budget.h"
 #include <cstdio>
@@ -21,7 +21,13 @@ static void TestClockMsg() {
     { GatherMsg z = m; z.leftMs = uint32_t(kGatherMaxS) * 1000u; auto e = Encode(z); CHECK(Decode(e.data(), e.size(), y) && y.leftMs == 3600000); }
     { GatherMsg z = m; z.leftMs = uint32_t(kGatherMaxS) * 1000u + 1; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), y)); }
     { GatherMsg z = m; z.seq = 0; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), y)); }
-    { auto x = b; x.back() = 1; CHECK(!Decode(x.data(), x.size(), y)); }                 // the spare byte is 0
+    CHECK(b.back() == 0 && !y.together);                                                 // Apart: no flag
+    { GatherMsg z = m; z.together = true; auto e = Encode(z); CHECK(e.size() == b.size() && e.back() == kGatherTogether);
+      CHECK(Decode(e.data(), e.size(), y) && y.together && y.phase == GatherPhase::Gathering && y.leftMs == 599999 && y.seq == 0x1234); }
+    { auto x = b; x.back() = kGatherTogether; CHECK(Decode(x.data(), x.size(), y) && y.together); }
+    for (int f = 2; f < 256; ++f) { auto x = b; x.back() = uint8_t(f); CHECK(!Decode(x.data(), x.size(), y)); }   // no other flag
+    { GatherMsg z = m; z.together = true; auto e = Encode(z); e.back() = 3; CHECK(!Decode(e.data(), e.size(), y)); }
+    { auto x = b; x.back() = kGatherTogether; CHECK(Decode(x.data(), x.size(), y)); x.back() = 0; CHECK(Decode(x.data(), x.size(), y) && !y.together); }   // a reused message reads afresh
     { GatherMsg z; z.phase = GatherPhase::Off; z.leftMs = 0; z.seq = 1; auto e = Encode(z); CHECK(Decode(e.data(), e.size(), y) && y.phase == GatherPhase::Off); }
 }
 
@@ -42,7 +48,7 @@ static void TestNoteMsg() {
 
 static void TestBudget() {
     CHECK(BudgetClassOf(MsgType::Gather) == BudgetClass::Control);
-    CHECK(kProtocolRevision == 47 && kLastDecodedMsgType == uint8_t(MsgType::Gather));
+    CHECK(kProtocolRevision == 51 && kLastDecodedMsgType >= uint8_t(MsgType::Gather));
 }
 
 int main() {

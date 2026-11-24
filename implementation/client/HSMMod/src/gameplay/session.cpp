@@ -23,7 +23,11 @@
 #include "gameplay/abyss_coop.h"
 #include "gameplay/chest_lids.h"
 #include "gameplay/fighter_boxes.h"
+#include "gameplay/game_check.h"
 #include "gameplay/claims.h"
+#include "gameplay/crypts_layout.h"
+#include "gameplay/crypts_coop.h"
+#include "gameplay/crypts_loot.h"
 #include "gameplay/crypts_probe.h"
 #include "gameplay/hit_probe.h"
 #include "gameplay/combat_sync.h"
@@ -51,6 +55,7 @@
 #include "gameplay/session.h"
 #include "gameplay/travel.h"
 #include "gameplay/voice.h"
+#include "gameplay/world_context.h"
 #include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
@@ -85,9 +90,11 @@
 #include "match/hsm_modes.h"
 #include "match/hsm_respawn_retry.h"
 #include "match/hsm_scenarios.h"
+#include "match/hsm_start_gate.h"
 #include "match/hsm_freecam.h"
 #include "match/hsm_spectate.h"
 #include "match/hsm_win_by.h"
+#include "match/hsm_bite.h"
 #include "match/hsm_strip.h"
 #include "match/hsm_kept_kit.h"
 #include "net/report_client.h"
@@ -118,12 +125,20 @@
 #include "session/hsm_level_gate.h"
 #include "session/hsm_solo_level.h"
 #include "session/hsm_gather.h"
+#include "session/hsm_bench.h"
+#include "session/hsm_crypt_rooms.h"
+#include "session/hsm_crypt_run.h"
+#include "session/hsm_crypt_enemies.h"
+#include "session/hsm_crypt_walk.h"
 #include "match/hsm_crypts.h"
+#include "match/hsm_crypts_marker.h"
+#include "match/hsm_crypts_start.h"
 #include "match/hsm_hud_text.h"
 #include "session/hsm_ground_clear.h"
 #include "session/hsm_loadout_change.h"
 #include "session/hsm_moderation.h"
 #include "session/hsm_reconnect.h"
+#include "match/hsm_notice_text.h"
 #include "session/hsm_report.h"
 #include "session/hsm_roster.h"
 #include "session/hsm_password.h"
@@ -147,6 +162,8 @@
 #include <set>
 #include "util/hsm_sha256.h"
 #include "ui/chat.h"
+#include "ui/dropdown.h"
+#include "ui/notices.h"
 #include "ui/hud.h"
 #include "ui/menu.h"
 #include "ui/pause.h"
@@ -222,6 +239,7 @@ const char* GateWaitingName(LevelSpawnGate::Waiting w) {
         case LevelSpawnGate::Waiting::PlayerSpawnedCleared: return "\"Player Spawned\" to clear";
         case LevelSpawnGate::Waiting::PlayerSpawned: return "\"Player Spawned\"";
         case LevelSpawnGate::Waiting::Pawn: return "a player pawn";
+        case LevelSpawnGate::Waiting::Rooms: return "the shared Crypts rooms";
         case LevelSpawnGate::Waiting::Nothing: break;
     }
     return "nothing";
@@ -242,6 +260,11 @@ bool ValidateForHost(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
         case MsgType::LoadoutChange: { LoadoutChangeMsg m; return Decode(d, n, m); }   // rev 36: the chunks of a new passport; the host's answer is client-bound
         case MsgType::Gather: { GatherNoteMsg m; return Decode(d, n, m); }   // rev 47: a Crypts gather note; the clock is client-bound
+        case MsgType::BackToLobby: { BackToLobbyMsg m; return Decode(d, n, m); }   // rev 49: a guest left the match for the lobby
+        case MsgType::CryptRoomsBuilt: { crypt::CryptRoomsBuiltMsg m; return Decode(d, n, m); }   // rev 50: a guest built its rooms 1..count
+        case MsgType::CryptLoot: { crypt::CryptLootMsg m; return Decode(d, n, m); }   // rev 50: a guest took a placed item
+        case MsgType::CryptRun: { crypt::CryptRunMsg m; return Decode(d, n, m); }   // rev 50: a guest's item count (the results are client-bound)
+        case MsgType::CryptDoor: { crypt::CryptDoorMsg m; return Decode(d, n, m); }   // rev 50: a guest unlocked a gate
         case MsgType::Chat: { ChatLine m; return Decode(d, n, m); }
         case MsgType::Ping: case MsgType::Pong: { Ping m; bool p; return DecodePing(d, n, m, p); }
         case MsgType::Pose: { PoseMsg m; return DecodePoseEnvelope(d, n, m); }   // fully decoded once, after the receive budget
@@ -286,6 +309,10 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::GroundClear: { GroundClearMsg m; return Decode(d, n, m); }
         case MsgType::LevelSeed: { dice::LevelSeedMsg m; return Decode(d, n, m); }
         case MsgType::LobbySecret: { LobbySecretMsg m; return Decode(d, n, m); }   // rev 35: from the host only (never in ValidateForHost)
+        case MsgType::CryptRoom: { crypt::CryptRoomMsg m; return Decode(d, n, m); }   // rev 50: host -> client only (never in ValidateForHost)
+        case MsgType::CryptDoor: { crypt::CryptDoorMsg m; return Decode(d, n, m); }
+        case MsgType::CryptLoot: { crypt::CryptLootMsg m; return Decode(d, n, m); }
+        case MsgType::CryptRun: { crypt::CryptRunMsg m; return Decode(d, n, m); }
         case MsgType::Spawn: { Spawn m; return Decode(d, n, m); }
         case MsgType::Despawn: { Despawn m; return Decode(d, n, m); }
         case MsgType::BlobChunk: { BlobChunk m; return Decode(d, n, m); }
@@ -345,6 +372,7 @@ public:
     explicit SessionImpl(const Config& c) : cfg_(c) {
         lobby_.onEntered = [this] { OnLobbyEntered(); };
         lobby_.onLeft = [this] {
+            if (menuAfterResults_ && crypt::ResultsShowing(NowMs(), cryptResultsAt_)) { HSM_LOG("client: lobby gone; the run's results first, then the main menu"); return; }
             bool strandedInFight = welcomed_ && InFightLevel();   // a client whose host left: back to the menu
             ResetNetwork("left lobby");
             if (strandedInFight) { HSM_LOG("client: lobby gone; returning to the main menu"); game::OpenLevel(lastGameMode_, kMenuLevel, true, ""); }
@@ -357,10 +385,10 @@ public:
         lobby_.SetNickname(cfg_.nickname); lobby_.SetHideNames(cfg_.hideNames); lobby_.SetName(cfg_.lobbyName);   // the region follows once Auto has a guess (RegionTick)
         if (cfg_.region != Region::Auto) lobby_.SetRegion(cfg_.region);
         lobby_.myCard = [this] { return MyBuildCard(); };
-        { ModPreset p = ModChoice{}.preset; lobby_.hostPreset = ParseModPreset(cfg_.modRule, p) ? p : ModChoice{}.preset; }
-        lobby_.onlineBlock = [this](ModPreset preset, bool blockHse, double powerLimit) { return OnlineBlockReason(preset, blockHse, powerLimit); };
+        lobby_.hostClasses = ChoiceFromKeys(cfg_.modRule, cfg_.modClasses).classes;
+        lobby_.onlineBlock = [this](ClassesMode classes, bool blockHse, double powerLimit) { return OnlineBlockReason(classes, blockHse, powerLimit); };
         lobby_.restartGame = [this] { return RestartGame(false); };
-        lobby_.onRuleChanged = [](const std::string& text) { ui::ShowLine("HSMMod", style::kBone, text); };
+        lobby_.onRuleChanged = [](const std::string& text) { ui::Notify(notices::RuleChanged(text)); };
         lobby_.myRuleSheet = [this] { return MyRuleSheet(); };
         lobby_.onBuildCard = [this](const std::string& name, const std::string& card) {
             BuildCard decoded = DecodeCard(name, card);
@@ -379,13 +407,15 @@ public:
                             const bool past = LivePastLimits(*live);
                             decoded.mods = std::string(past ? "PAST THE LIMITS: " : "Running: ") + ClassSummary(*live) + (decoded.mods.empty() ? "" : " | ") + decoded.mods;
                             HSM_LOG("rules: %s reports %s", name.c_str(), ClassSummary(*live).c_str());
-                            if (past && warnedPast_.insert(m.id).second) ui::ShowLine("HSMMod", style::kWarn, name + "'s stats are past the limits: " + ClassSummary(*live));
+                            if (past && warnedPast_.insert(m.id).second) ui::Notify(notices::StatsPastLimits(name, ClassSummary(*live)));
                         }
             if (cfg_.buildCards) ui::BuildCardPush(std::move(decoded));
         };
         lobby_.onPresence = [this](const std::string& name, bool joined) {
-            ui::ShowLine("HSMMod", style::kBone, (name.empty() ? "?" : name) + (joined ? " joined" : " left"));
-            if (joined && cfg_.joinSound) adapter_.PlayUiSound("ButtonSound");   // HSMBot 1977: heard with the game in the background too
+            ui::Notify(notices::Presence(name, joined));
+            // HSMBot 1977: heard with the game in the background too. Played after the tick resolved the level: the lobby
+            // ticks before it, and on a new level's first tick the adapter still held the old level's mode (public #855).
+            if (joined && cfg_.joinSound) joinSoundDue_ = true;
         };
         ui::ChatSetup(cfg_.chatKey, [this](bool on) {   // in a menu level the chat closing gives the menu its cursor back
                 adapter_.CaptureInput(on); if (!on && !InFightLevel()) adapter_.ShowPauseCursor(); }, [this] { return adapter_.GamePaused() || adapter_.PauseMenuOpen(); });
@@ -399,14 +429,22 @@ public:
     // traffic (no port forwarding). Needs Steam running and signed in on that machine.
     bool SteamServer() const { return cfg_.role == Role::Server; }
     void StartOnMap(const std::string& path) override {
-        if (!lastGameMode_ || (net_ && !IsHost())) return;
-        if (net_ && !BuildsAllowStart()) return;
-        if (GatherOn()) { HSM_LOG("session: not starting: the Crypts gather is running"); ui::ShowLine("HSMMod", style::kBone, "The Crypts gather is still running."); return; }
-        if (!IsServer() && lobby_.IsHost() && !lobby_.Progression()) {   // Duel is for exactly 2 players, Last Man Standing needs 2 or more
-            const ModeAvail av = ModeAvailable(lobby_.config().format, lobby_.PlayerCount());
-            if (!av.ok) { HSM_LOG("session: not starting: %s", av.hint); ui::ShowLine("HSMMod", style::kBone, av.hint); return; }
+        if (const StartVerdict v = HostStartVerdict(true, lobby_.Progression()); !v.ok) {   // the page's rule: who hosts, the game mode, the builds, Duel's exactly 2, Last Man Standing's 2 or more
+            HSM_LOG("session: not starting on %s: %s", path.c_str(), v.text.c_str());
+            ui::Notify(notices::StartWhy(v.text));
+            return;
         }
-        if (net_ && CryptsStart()) { StartGather(path); return; }   // Crypts (#3199): everyone gathers first; `path` is the battle map
+        if (GatherOn()) StopGatherForStart(path);        // the host picked another map or mode (or wants a new gather): START wins
+        if (IsCrypts(lobby_.config()) && !CryptsStart()) {   // the Crypts modes are played in a Steam lobby this machine hosts
+            HSM_LOG("session: not starting the Crypts on %s: not a Steam lobby this machine hosts", path.c_str());
+            ui::Notify(notices::StartWhy("The Crypts need a lobby you host"));
+            return;
+        }
+        if (net_ && CryptsStart()) {   // Crypt Royale (#3199): everyone gathers first; the battle is on the Fight map (`path` is the Crypts map)
+            const size_t fm = EffectiveFightMap(lobby_.config().format, lobby_.FightPick());
+            StartGather(fm < MapCount() ? std::string(MapAt(fm).path) : path);
+            return;
+        }
         HSM_LOG("session: starting on %s", path.c_str());
         // The level manager destroys every spawner whose "Required Combatants Amount" exceeds foes + 1 (decomp
         // BP_LevelManager.cpp:385), the player's included: keep at least 2 until our fighters exist (StopStockFoes).
@@ -422,27 +460,77 @@ public:
     // then waits in the main menu. When the time is up (or nobody is still in the Crypts) the host asks for the last kits,
     // then travels everyone to the battle map, where the match deals each player their kit (RegearSlots).
     bool GatherOn() const { return gatherClock_.Active(); }
-    bool InCryptsRun() const { return GatherOn() && IsSoloLevel(currentLevel_); }
+    bool InCryptsRun() const { return GatherOn() && SoloHere(); }
+    // The shared run (Grave Robbers, Crypt Royale Together; docs/PLAN_CRYPTS_COOP.md): this level is the Crypts and it is the host's
+    // one dungeon for everyone, not this machine's own run. The Crypts level is "solo" by name only (hsm_solo_level.h).
+    bool SharedCryptsHere() const { return net_ && GatherOn() && gatherClock_.together() && IsSoloLevel(currentLevel_); }
+    // A level that is this machine's own single-player dungeon: the Crypts level, but not in a shared run.
+    bool SoloHere() const { return IsSoloLevel(currentLevel_) && !SharedCryptsHere(); }
+    // Host: opening `level` is the shared run's own travel (the Crypts, sent to every client), not a machine's own run.
+    bool SharedHostOpen(const std::string& level) const { return IsHost() && GatherOn() && gatherClock_.together() && SoloLevelAllowed(level, false, true); }
     bool CryptsStart() const {
         return steamMode() && lobby_.InLobby() && lobby_.IsHost() && !IsServer() && !lobby_.Progression() && IsCrypts(lobby_.config());
     }
+    // Together (the Crypts run row): the gather is on and this machine is in its one shared Crypts (a table of rooms the loader built).
+    bool TogetherRun() const { return GatherOn() && gatherClock_.together() && (game::cryptslayout::Active() || SharedCryptsHere()); }
 
     void StartGather(const std::string& map) {
         const uint32_t now = NowMs();
         const MatchConfig c = lobby_.config();
+        const bool together = SharedCryptsRun(c);   // Crypt Royale Together and Grave Robbers: one dungeon, the host's
         battleMap_ = map; gatherKits_.clear(); freshKits_.clear();
-        gather_.Start(now, c.gatherS, AllSlots());
+        gather_.Start(now, c.gatherS, AllSlots(), together);
         gatherRunSeq_ = gather_.seq();
-        HSM_LOG("crypts: gather started (%u min %u s, %d player(s), battle on %s)", unsigned(c.gatherS / 60), unsigned(c.gatherS % 60), gather_.Players(), map.c_str());
+        graveRun_ = together && IsGraveRobbers(c); runHostLeft_ = runTimeUp_ = false; cryptResultsAt_ = 0; cryptResults_ = {};
+        runBook_.Begin(gather_.seq());
+        if (together) for (uint8_t sl : AllSlots()) runBook_.Add(sl, RealNameOfSlot(sl));
+        HSM_LOG("crypts: gather started (%u min %u s, %d player(s), %s, battle on %s)", unsigned(c.gatherS / 60), unsigned(c.gatherS % 60), gather_.Players(),
+                together ? "together in one shared Crypts" : "each in their own Crypts", map.c_str());
         SendGatherClock(now);
-        lobby_.SetPublicState("playing", "Crypts", ModeName(c.format, c.gear, c.teams));
+        lobby_.SetPublicState("playing", "Crypts", ModeNameFor(c, lobby_.PlayerCount(), lobby_.MaxPlayers()));
+        if (together) { OpenTogetherCrypts(); return; }
         if (localFighter_) OpenOwnCrypts();
+    }
+
+    // Together / Grave Robbers: the host's own player is set up as a fresh Crypts run is (PrepareCryptsRun), then the host travels
+    // everyone to the dungeon level. The host's game builds the dungeon as it always does; the clients build the rooms the host's
+    // director places (crypts_coop.cpp reads them, CryptRoom sends them). A set-up that failed ends the gather at once.
+    void OpenTogetherCrypts() {
+        gatherSelf_ = GatherSelf::Opening;
+        ResetOwnRun();
+        SendGatherNote(GatherNote::Loading);
+        if (!PrepareCryptsRun()) {
+            HSM_LOG("crypts: a fresh Crypts run could not be set up for the shared run; the gather is stopped");
+            gather_.Stop();
+            SendGatherClock(NowMs());
+            gatherSelf_ = GatherSelf::None;
+            ui::Notify(notices::Id::CryptsNoRoom);
+            return;
+        }
+        HSM_LOG("crypts: opening the shared Crypts (%u s left)", gatherClock_.LeftMs(NowMs()) / 1000);
+        HostTravel(kCryptsLevel);
+    }
+
+    // Host: START during a gather. A Crypts lobby is in a gather most of the time (each rematch is a new one), and START used
+    // to be refused until it was over, so another map or mode took a new lobby. The gather is stopped without its battle:
+    // every machine is told it is over (Off), then follows the START's travel, as at the battle (GatherBattle).
+    void StopGatherForStart(const std::string& path) {
+        const uint32_t now = NowMs();
+        HSM_LOG("crypts: START during the gather (%u s left, %d player(s), %s); the gather is stopped, starting on %s",
+                gatherClock_.LeftMs(now) / 1000, gather_.Players(), gather_.together() ? "together" : "apart", path.c_str());
+        gather_.Stop();
+        SendGatherClock(now);                           // Off: every machine's run is over
+        gatherSelf_ = GatherSelf::None; gatherOpening_ = false; gatherMenuAt_ = 0;
+        gatherClock_.Clear();
+        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
+        ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");   // the run is over: those two are settled
+        ui::Notify(notices::Id::CryptsStopped);
     }
 
     // The host's clock, to every machine (reliable), and the host's own view of it.
     void SendGatherClock(uint32_t now) {
-        const GatherMsg m{gather_.phase(), gather_.LeftMs(now), gather_.seq()};
-        gatherClock_.Set(now, m.phase, m.leftMs, m.seq);
+        const GatherMsg m{gather_.phase(), gather_.LeftMs(now), gather_.seq(), gather_.together()};
+        gatherClock_.Set(now, m.phase, m.leftMs, m.seq, m.together);
         gatherClockSentAt_ = now;
         if (net_) net_->Broadcast(kChanReliable, Encode(m), true);
     }
@@ -455,16 +543,23 @@ public:
     // it, and the run, out of the player's own save.
     void OpenOwnCrypts() {
         gatherSelf_ = GatherSelf::Opening;
-        gatherKit_.clear(); gatherKitSent_.clear(); kitSnapNever_ = true; gatherMinuteWarned_ = false;
-        tierHeldLogged_ = false; tierLowered_ = 0; tierRoomsAt_ = 0;
+        ResetOwnRun();
         SendGatherNote(GatherNote::Loading);
-        if (!adapter_.StartFreshCrypts()) {
+        if (!PrepareCryptsRun()) {
             HSM_LOG("crypts: a fresh Crypts run could not be set up; waiting in the menu");
             gatherSelf_ = GatherSelf::Waiting;
             SendGatherNote(GatherNote::Waiting);
-            ui::ShowLine("HSMMod", style::kWarn, "The Crypts could not be opened here: you fight in what the host deals.");
+            ui::Notify(notices::Id::CryptsNoRoom);
             return;
         }
+        gatherOpening_ = true;
+        HSM_LOG("crypts: opening a fresh Crypts run (%u s left)", gatherClock_.LeftMs(NowMs()) / 1000);
+        game::OpenLevel(lastGameMode_, kCryptsLevel, true, "");
+    }
+
+    // The game instance for a fresh Crypts run and this machine's new random character of the tier (false: the set-up failed).
+    bool PrepareCryptsRun() {
+        if (!adapter_.StartFreshCrypts()) return false;
         if (cfg_.cryptsRandomCharacter) {
             const MatchConfig c = lobby_.config();
             const std::vector<uint8_t> who = game::RandomPassportBlob(adapter_, c.tier, c.weapons);
@@ -472,9 +567,15 @@ public:
                 HSM_LOG("crypts: a new random %s character for this run (weapons %s)", TierName(c.tier), WeaponMaskName(c.weapons).c_str());
             else HSM_LOG("crypts: no random %s character made; this run starts as the blank peasant", TierName(c.tier));
         } else HSM_LOG("crypts: crypts_random_character=0: this run starts as the blank peasant");
-        gatherOpening_ = true;
-        HSM_LOG("crypts: opening a fresh Crypts run (%u s left)", gatherClock_.LeftMs(NowMs()) / 1000);
-        game::OpenLevel(lastGameMode_, kCryptsLevel, true, "");
+        return true;
+    }
+
+    // A new run's state, Apart or Together: no kit read yet, no key, no warning given; the tier cap read once a run.
+    void ResetOwnRun() {
+        gatherKit_.clear(); gatherKitSent_.clear(); kitSnapNever_ = true; gatherMinuteWarned_ = false; togetherAlive_ = false;
+        tierHeldLogged_ = false; tierLowered_ = 0; tierRoomsAt_ = 0;
+        keyHeld_.clear(); keyLine_.clear(); keyDoors_.clear(); keyHandSeen_.clear(); keyLoggedDoors_ = keyLoggedLocked_ = -1; keyLineTold_ = false;
+        runTierCap_ = CryptsRunCap(cfg_.cryptsMaxTier, lobby_.config().cryptsTier);   // the host's Dungeon tier row, read once a run
     }
 
     // What this machine's player is doing, to the host (the host notes its own).
@@ -482,7 +583,7 @@ public:
         const uint16_t seq = gatherClock_.seq();
         if (!net_ || !seq) return;
         if (IsHost()) {
-            if (gather_.Active() && gather_.seq() == seq) gather_.OnNote(kHostSlot, n);
+            if (gather_.Active() && gather_.seq() == seq) { gather_.OnNote(kHostSlot, n); runBook_.OnNote(kHostSlot, n); }
             HSM_LOG("crypts: %s: %s", MyName().c_str(), GatherNoteLog(n));
             return;
         }
@@ -491,16 +592,20 @@ public:
 
     // Host, every tick on any level: the clock, the last kits, then the battle.
     void HostGatherTick() {
+        if (cryptResultsAt_ && IsHost() && !crypt::ResultsShowing(NowMs(), cryptResultsAt_)) EndCryptResults();   // Grave Robbers: the results had their time
         if (!gather_.Active()) return;
         const uint32_t now = NowMs();
         const bool timeUp = gather_.LeftMs(now) == 0;
         switch (gather_.Update(now)) {
             case GatherStep::Collect:
+                if (timeUp) runTimeUp_ = true;
                 HSM_LOG("crypts: %s; collecting the last kits (%d of %d in)", timeUp ? "time is up" : "nobody is still in the Crypts", gather_.Kits(), gather_.Players());
                 SendGatherClock(now);
                 OwnFinalKit();
                 return;
-            case GatherStep::Battle: GatherBattle(); return;
+            case GatherStep::Battle:
+                if (graveRun_ && gather_.together()) CryptRunResults(); else GatherBattle();
+                return;
             case GatherStep::None: break;
         }
         if (now - gatherClockSentAt_ >= kGatherClockEveryMs) SendGatherClock(now);
@@ -511,10 +616,12 @@ public:
         int kits = 0;
         for (uint8_t s : slots) if (auto it = gatherKits_.find(s); it != gatherKits_.end() && !it->second.empty()) ++kits;
         const MatchConfig cfg = lobby_.config();
-        if (const std::string map = BattleMapFor(cfg.format, cfg.gear, battleMap_); map != battleMap_) {   // the Battle row changed during the gather
+        if (const std::string map = BattleMapFor(cfg.format, battleMap_); map != battleMap_) {   // the Battle row changed during the gather
             HSM_LOG("crypts: %s does not take %s; the battle goes to %s", battleMap_.c_str(), FormatName(cfg.format).c_str(), map.c_str());
             battleMap_ = map;
         }
+        if (gather_.together())
+            HSM_LOG("crypt coop: run over (%s): %d got out; Crypt Royale Together goes to the battle on %s", crypt::RunEndName(CryptRunReason()), runBook_.GotOut(), battleMap_.c_str());
         HSM_LOG("crypts: battle on %s, kits for %d of %zu players", battleMap_.c_str(), kits, slots.size());
         SendGatherClock(NowMs());                       // Off: every machine's run is over
         gatherSelf_ = GatherSelf::None;
@@ -531,7 +638,7 @@ public:
         const uint32_t now = NowMs();
         const GatherPhase was = gatherClock_.phase();
         const bool fresh = m.phase == GatherPhase::Gathering && (m.seq != gatherRunSeq_ || gatherSelf_ == GatherSelf::None);
-        gatherClock_.Set(now, m.phase, m.leftMs, m.seq);
+        gatherClock_.Set(now, m.phase, m.leftMs, m.seq, m.together);
         if (m.phase == GatherPhase::Off) {
             if (was != GatherPhase::Off) HSM_LOG("crypts: the gather is over");
             gatherSelf_ = GatherSelf::None;
@@ -540,12 +647,19 @@ public:
         }
         if (fresh) {
             gatherRunSeq_ = m.seq;
-            HSM_LOG("crypts: gather #%u: %u s left", unsigned(m.seq), m.leftMs / 1000);
+            graveRun_ = m.together && IsGraveRobbers(lobby_.config()); cryptResultsAt_ = 0;
+            HSM_LOG("crypts: gather #%u: %u s left%s", unsigned(m.seq), m.leftMs / 1000, m.together ? ", together in one shared Crypts" : "");
+            if (m.together && m.leftMs >= kGatherJoinMinMs) {   // the host's Travel to the shared Crypts follows (a joiner's came first)
+                ResetOwnRun();
+                gatherSelf_ = GatherSelf::Opening;
+                SendGatherNote(GatherNote::Loading);
+                return;
+            }
             if (m.leftMs >= kGatherJoinMinMs) { OpenOwnCrypts(); return; }
             gatherSelf_ = GatherSelf::Waiting;
             SendGatherNote(GatherNote::Waiting);
             HSM_LOG("crypts: under a minute left; waiting in the menu, fighting as a fresh character");
-            ui::ShowLine("HSMMod", style::kBone, "The Crypts gather is nearly over: you fight as a fresh character.");
+            ui::Notify(notices::Id::CryptsLate);
             return;
         }
         if (m.phase == GatherPhase::Collecting && was == GatherPhase::Gathering) OwnFinalKit();
@@ -557,6 +671,7 @@ public:
         else peerSilence_.Loaded(peerId, NowMs());
         if (!gather_.Active() || m.seq != gather_.seq()) return;
         gather_.OnNote(slot, m.note);
+        runBook_.OnNote(slot, m.note);
         HSM_LOG("crypts: %s: %s", NameOfSlot(slot).c_str(), GatherNoteLog(m.note));
     }
 
@@ -585,31 +700,147 @@ public:
             gatherSelf_ = GatherSelf::Gathering;
             SendGatherNote(GatherNote::InCrypts);
             HSM_LOG("crypts: in the Crypts (%u s left)", gatherClock_.LeftMs(now) / 1000);
-            ui::ShowLine("HSMMod", style::kBone, "CRYPTS: gather your kit. When the time is up, you fight in what you carry.");
+            ui::Notify(notices::Id::CryptsStartApart);
         }
         if (gatherSelf_ != GatherSelf::Gathering) return;
         if (!gatherMinuteWarned_ && gatherClock_.phase() == GatherPhase::Gathering && gatherClock_.LeftMs(now) < 60000) {
             gatherMinuteWarned_ = true;
-            ui::ShowLine("HSMMod", style::kWarn, "CRYPTS: 1 minute left");
+            ui::Notify(notices::Id::CryptsMinute);
         }
         if (adapter_.TakeSurfaceFades() > 0) { EndOwnRun(GatherSelf::Extracted); return; }
         if (adapter_.TakeDeathScreens() > 0 || (me && adapter_.IsDead(me))) { EndOwnRun(GatherSelf::Died); return; }
         if (KitSnapshotDue(gatherSelf_, alive, now, kitSnapAt_, kitSnapNever_)) OwnKitSnapshot(me, false);
+        if (alive) KeyMarkerTick(now, me);
     }
 
-    // The Crypts held at Peasant while this machine's run is open (match/hsm_crypts.h kCryptsTierCap, [mod] crypts_max_tier): the
+    // Every machine in the shared Crypts (Together), every tick: in once the match is live and this player's fighter is up
+    // in its dealt kit (not the level's stock pawn), the one-minute warning, down and back (a fallen player keeps the last kit
+    // read alive and comes back in it when a wave is cleared), the kit, the key marker. No exit and no death ends the run
+    // there; the layout loader builds the rooms, so there is no dungeon tier to hold.
+    void TogetherTick() {
+        if (!net_ || !TogetherRun()) return;
+        const uint32_t now = NowMs();
+        UObject* me = adapter_.PlayerWillie(0);
+        const bool live = info_.phase == uint8_t(MatchPhase::Live) && (IsHost() || !ownDeadPending_);
+        const bool alive = live && me && !adapter_.IsDead(me);
+        if (gatherSelf_ == GatherSelf::Opening && alive) {
+            if (graveRun_) { adapter_.TakeSurfaceFades(); adapter_.TakeDeathScreens(); }   // counted before this run's player was in: not its own
+            gatherSelf_ = GatherSelf::Gathering;
+            SendGatherNote(GatherNote::InCrypts);
+            HSM_LOG("crypts: in the shared Crypts (%u s left)", gatherClock_.LeftMs(now) / 1000);
+            ui::Notify(notices::Id::CryptsStartTogether);
+        }
+        if (gatherSelf_ != GatherSelf::Gathering) return;
+        if (!gatherMinuteWarned_ && gatherClock_.phase() == GatherPhase::Gathering && gatherClock_.LeftMs(now) < 60000) {
+            gatherMinuteWarned_ = true;
+            ui::Notify(notices::Id::CryptsMinute);
+        }
+        if (graveRun_) {                                // Grave Robbers: an exit or a fall ends this player's run, on its own
+            if (adapter_.TakeSurfaceFades() > 0) { GraveRunEnds(GatherSelf::Extracted); return; }
+            if (live && me && adapter_.IsDead(me)) { GraveRunEnds(GatherSelf::Died); return; }
+        }
+        if (alive != togetherAlive_) {
+            togetherAlive_ = alive;
+            HSM_LOG(alive ? "crypts: up in the shared Crypts (kit so far %zu bytes)" : "crypts: down in the shared Crypts - the last kit read is kept (%zu bytes)",
+                    gatherKit_.size());
+        }
+        if (KitSnapshotDue(gatherSelf_, alive, now, kitSnapAt_, kitSnapNever_)) OwnKitSnapshot(me, false);
+        if (alive) KeyMarkerTick(now, me);
+    }
+    // Together: the kit once more before it is locked: read from the living player, else the last one read alive again.
+    void TogetherFinalKit() {
+        UObject* me = adapter_.PlayerWillie(0);
+        if (togetherAlive_ && me && !adapter_.IsDead(me)) OwnKitSnapshot(me, true);
+        else SendOwnKit(true);
+    }
+    // Together, host: a level other than the shared Crypts during the gather (the menu): everyone goes with the Travel, and
+    // the run is over before its time: the last kits are collected, then the battle.
+    void TogetherHostLeaves(const std::string& level) {
+        runHostLeft_ = true;
+        if (TogetherRun() && gatherSelf_ == GatherSelf::Gathering) {
+            TogetherFinalKit();
+            gatherSelf_ = GatherSelf::Extracted;
+            SendGatherNote(GatherNote::Extracted);
+        }
+        const uint32_t now = NowMs();
+        if (!gather_.CollectNow(now)) return;
+        HSM_LOG("crypts: the host left the shared Crypts for %s; collecting the last kits (%d of %d in)", level.c_str(), gather_.Kits(), gather_.Players());
+        SendGatherClock(now);
+    }
+
+    // The key marker (match/hsm_crypts_marker.h, a Discord request): while this machine's player holds a Crypts key, a chip
+    // under the pill (KeyChip) names the nearest locked gate door and where it is. Doors are looked for every kKeyScanMs (a full
+    // object scan, only while a key is held), their Locked read every kKeyLockMs, the line redone every kKeyLineMs; a
+    // door's place is read once. Every class seen in a hand is logged once a run, so a first game shows the key's class.
+    static constexpr uint32_t kKeyScanMs = 2000, kKeyLockMs = 500, kKeyLineMs = 100, kKeyLogMs = 5000;
+    static constexpr size_t kKeyDoorsMax = 512;
+    void KeyMarkerTick(uint32_t now, UObject* me) {
+        std::string handR, handL;
+        const std::string key = adapter_.HeldCryptsKey(me, &handR, &handL);
+        for (const std::string* c : {&handR, &handL})
+            if (!c->empty() && keyHandSeen_.size() < 32 && std::find(keyHandSeen_.begin(), keyHandSeen_.end(), *c) == keyHandSeen_.end()) {
+                keyHandSeen_.push_back(*c);
+                HSM_LOG("crypts: a hand holds %s%s", c->c_str(), IsCryptsKeyClass(*c) ? " (a key)" : "");
+            }
+        if (key != keyHeld_) {
+            if (key.empty()) HSM_LOG("crypts: key put down");
+            else HSM_LOG("crypts: key held (%s)", key.c_str());
+            if (keyHeld_.empty()) { keyScanAt_ = now - kKeyScanMs; keyLockAt_ = now - kKeyLockMs; keyLineAt_ = now - kKeyLineMs; }   // look at once
+            keyHeld_ = key;
+        }
+        if (keyHeld_.empty()) { keyLine_.clear(); return; }
+        if (now - keyScanAt_ >= kKeyScanMs) {
+            keyScanAt_ = now;
+            std::vector<UObject*> live;
+            adapter_.CryptsDoors(live);
+            for (UObject* o : live) {
+                if (keyDoors_.size() >= kKeyDoorsMax) break;
+                if (std::any_of(keyDoors_.begin(), keyDoors_.end(), [o](const KeyDoor& d) { return d.obj == o; })) continue;
+                const ue::FVector p = adapter_.ActorLocation(o);
+                if (p.x == 0 && p.y == 0 && p.z == 0) continue;   // the location call failed: next scan
+                KeyDoor d; d.obj = o; d.index = ObjectIndex(o); d.spot.x = p.x; d.spot.y = p.y; d.spot.z = p.z;
+                GetBool(o, "Locked", d.spot.locked);
+                keyDoors_.push_back(d);
+            }
+        }
+        if (now - keyLockAt_ >= kKeyLockMs) {
+            keyLockAt_ = now;
+            keyDoors_.erase(std::remove_if(keyDoors_.begin(), keyDoors_.end(), [this](const KeyDoor& d) { return !adapter_.StillValid(d.obj, d.index); }),
+                            keyDoors_.end());   // a room streamed out
+            for (KeyDoor& d : keyDoors_) GetBool(d.obj, "Locked", d.spot.locked);
+        }
+        if (now - keyLineAt_ < kKeyLineMs) return;
+        keyLineAt_ = now;
+        std::vector<DoorSpot> spots;
+        spots.reserve(keyDoors_.size());
+        int locked = 0;
+        for (const KeyDoor& d : keyDoors_) { spots.push_back(d.spot); locked += d.spot.locked ? 1 : 0; }
+        ue::FVector eye{};
+        float yaw = 0, pitch = 0;
+        const bool view = adapter_.CameraLocation(eye) && adapter_.ControlRotation(0, yaw, pitch);
+        if (!view) eye = adapter_.ActorLocation(me);
+        keyLine_ = KeyMarkerLine(true, spots, eye.x, eye.y, eye.z, view ? double(yaw) : std::nan(""));
+        if (KeyLineNeedsNotice(keyLine_, keyLineTold_)) { keyLineTold_ = true; ui::Notify(notices::Id::CryptsKeyLine); }   // the chip is short; the notice says the rest, once a run
+        if ((int(spots.size()) != keyLoggedDoors_ || locked != keyLoggedLocked_) && now - keyLogAt_ >= kKeyLogMs) {
+            keyLogAt_ = now; keyLoggedDoors_ = int(spots.size()); keyLoggedLocked_ = locked;
+            HSM_LOG("crypts: doors seen %zu, locked %d: \"%s\"", spots.size(), locked, keyLine_.c_str());
+        }
+    }
+
+    // The Crypts held at the lobby's Dungeon tier (Peasant by default; [mod] crypts_max_tier over it) while this machine's run is open: the
     // director's tier every tick, so every enemy it generates and every room it picks is of the cap or below, and its rooms'
     // tiers every kTierRoomsEveryMs, so the tier it takes from a room walked into is too.
     static constexpr uint32_t kTierRoomsEveryMs = 250;
     void CryptsTierTick(uint32_t now) {
-        const uint8_t cap = uint8_t(cfg_.cryptsMaxTier);
+        const uint8_t cap = runTierCap_;
         if (cap >= kCryptsTierTop) return;
         const bool rooms = now - tierRoomsAt_ >= kTierRoomsEveryMs;
         if (rooms) tierRoomsAt_ = now;
         const game::Adapter::CryptsTierHold h = adapter_.HoldCryptsTier(cap, rooms);
         if (h.director && !tierHeldLogged_) {
             tierHeldLogged_ = true;
-            HSM_LOG("crypts: the dungeon held at %s (crypts_max_tier=%u)", TierName(cap), unsigned(cap));
+            if (cfg_.cryptsMaxTier >= 0) HSM_LOG("crypts: the dungeon held at %s (crypts_max_tier=%u on this machine)", TierName(cap), unsigned(cap));
+            else HSM_LOG("crypts: the dungeon held at %s (the lobby's Dungeon tier)", TierName(cap));
         }
         if (h.lowered >= 0 && ++tierLowered_ % 20 == 1)
             HSM_LOG("crypts: tier %s brought down to %s (%u time(s), %d room(s))", TierName(h.lowered), TierName(cap), tierLowered_, h.rooms);
@@ -634,19 +865,31 @@ public:
         if (gatherKit_.empty() || (!force && !KitUploadDue(gatherKit_, gatherKitSent_))) return;
         gatherKitSent_ = gatherKit_;
         size_t carried = 0;
-        if (UObject* me = adapter_.PlayerWillie(0)) carried = adapter_.CarriedActors(me).size();
+        if (UObject* me = adapter_.PlayerWillie(0)) {
+            carried = adapter_.CarriedActors(me).size();
+            if (!adapter_.IsDead(me)) kitItems_ = uint8_t(std::min<size_t>(carried, 255));   // a fallen body carries nothing: the last count alive stands
+        }
         if (IsHost()) {
             if (!gather_.TakesKit(kHostSlot)) return;
             gatherKits_[kHostSlot] = gatherKit_;
             gather_.OnKit(kHostSlot);
+            runBook_.OnItems(kHostSlot, kitItems_);
         } else {
             if (!net_ || !hostPeer_) return;
             if (!SendLoadoutChange(gatherKit_)) { HSM_LOG("crypts: kit too large to send (%zu bytes)", gatherKit_.size()); return; }
+            if (TogetherRun()) {                       // PR E: the item count the results screen shows (the host cannot read a passport)
+                crypt::CryptRunMsg k; k.kind = crypt::kRunKit; k.seq = gatherClock_.seq(); k.items = kitItems_;
+                if (k.seq) net_->Send(hostPeer_, kChanReliable, Encode(k), true);
+            }
         }
         HSM_LOG("crypts: kit uploaded (%zu bytes, %zu item(s) carried)%s", gatherKit_.size(), carried, force ? " - final" : "");
     }
 
-    void OwnFinalKit() { if (InCryptsRun() && gatherSelf_ == GatherSelf::Gathering) OwnKitSnapshot(adapter_.PlayerWillie(0), true); }
+    void OwnFinalKit() {
+        if (gatherSelf_ != GatherSelf::Gathering) return;
+        if (InCryptsRun()) OwnKitSnapshot(adapter_.PlayerWillie(0), true);
+        else if (TogetherRun()) TogetherFinalKit();
+    }
 
     // The run is over for this player: an exit locks the kit (read once more), a death keeps the last one read alive.
     void EndOwnRun(GatherSelf how) {
@@ -656,16 +899,23 @@ public:
         SendGatherNote(died ? GatherNote::Died : GatherNote::Extracted);
         HSM_LOG(died ? "crypts: died - kit kept (%zu bytes)" : "crypts: exit reached - kit locked (%zu bytes)", gatherKit_.size());
         if (died) gatherMenuAt_ = NowMs() + 4000;      // the death screen's own button opens the menu too (UI_DED, Play Mode 2)
-        const char* line = gatherKit_.empty() ? "Nothing gathered: you fight as a fresh character. Wait in the menu for the battle."
-                         : died ? "You died in the Crypts. Your kit is kept: wait in the menu for the battle."
-                                : "Out of the Crypts with your kit. Wait in the menu for the battle.";
-        ui::ShowLine("HSMMod", style::kBone, line);
+        const notices::Id line = gatherKit_.empty() ? notices::Id::CryptsEndNothing : died ? notices::Id::CryptsEndDied : notices::Id::CryptsEndOut;
+        ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");   // the run is over: those two are settled
+        ui::Notify(line);
     }
 
     // A level the game opens during a gather (OnOpenLevel): the main menu, to wait in; anything else is refused and the menu
     // opens instead. Leaving the Crypts mid-run ends it: a death (the death screen, a dead body) or an exit (the pause
     // menu's quit too). This machine only: no Travel for the lobby.
     bool GatherLevelOpen(const std::string& level) {
+        if (TogetherRun() && gatherSelf_ == GatherSelf::Gathering && IsMenuLevel(level)) {   // Together: leaving the shared Crypts locks the kit
+            TogetherFinalKit();
+            gatherSelf_ = GatherSelf::Extracted;
+            SendGatherNote(GatherNote::Extracted);
+            HSM_LOG("crypts: left the shared Crypts - kit locked (%zu bytes)", gatherKit_.size());
+            ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");   // the run is over: those two are settled
+            ui::Notify(notices::Id::CryptsEndOutTogether);
+        }
         if (InCryptsRun() && gatherSelf_ == GatherSelf::Gathering) {
             UObject* me = adapter_.PlayerWillie(0);
             EndOwnRun(adapter_.TakeDeathScreens() > 0 || (me && adapter_.IsDead(me)) ? GatherSelf::Died : GatherSelf::Extracted);
@@ -694,16 +944,96 @@ public:
     HudScene CryptsHud() {
         HudScene h; h.visible = true;
         h.pill.visible = true;
-        h.pill.text = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()));
+        h.pill.text = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together());
+        h.chip = KeyChip(gatherSelf_ == GatherSelf::Gathering, !keyHeld_.empty(), keyLine_);   // the key marker: a chip of its own under the pill
         return h;
     }
+    // The results board of a shared run (Grave Robbers): one row per player, how their run ended and the things they carried.
+    HudScene CryptResultsHud() const {
+        HudScene h; h.visible = true;
+        h.pill.visible = true;
+        h.pill.text = crypt::ResultsTitle(cryptResults_.reason, crypt::GotOutOf(cryptResults_));
+        h.board.visible = true; h.board.results = true;
+        h.board.title = "CRYPTS RESULTS";
+        const uint32_t ran = NowMs() - cryptResultsAt_;
+        h.board.footer = ran >= crypt::kRunResultsMs ? std::string() : "Back to the lobby in " + std::to_string((crypt::kRunResultsMs - ran + 999) / 1000) + " s";
+        h.board.heads.player = "PLAYER"; h.board.heads.score = "ITEMS";
+        for (const crypt::RunRow& r : cryptResults_.rows) {
+            BoardRow b; b.name = r.name + " - " + crypt::OutcomeName(r.outcome); b.score = r.items; b.host = r.slot == kHostSlot;
+            b.dead = r.outcome != crypt::Outcome::Out;
+            b.ink = r.outcome == crypt::Outcome::Out ? style::kBone : style::kIron;
+            h.board.rows.push_back(b);
+        }
+        return h;
+    }
+    crypt::RunEnd CryptRunReason() const { return runHostLeft_ ? crypt::RunEnd::HostLeft : runTimeUp_ ? crypt::RunEnd::TimeUp : crypt::RunEnd::AllOut; }
+    // This player's run in a Grave Robbers run is over: an exit locks the kit (read once more), a fall keeps the last one read alive.
+    void GraveRunEnds(GatherSelf how) {
+        const bool died = how == GatherSelf::Died;
+        TogetherFinalKit();
+        gatherSelf_ = how;
+        SendGatherNote(died ? GatherNote::Died : GatherNote::Extracted);
+        HSM_LOG(died ? "crypt coop: %s went down - the last kit read alive is kept (%zu bytes, %u item(s))" : "crypt coop: %s reached an exit - kit locked (%zu bytes, %u item(s))",
+                MyName().c_str(), gatherKit_.size(), unsigned(kitItems_));
+        ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");
+        ui::Notify(NoticeKind::Info, "CRYPTS", died ? "You went down. Your run is over; the results show when everyone is out or down." : "You are out with your kit. The results show when everyone is out or down.", "crypts-end");
+    }
+    // Host: a client's item count for its kit.
+    void OnCryptRunKit(uint8_t slot, const crypt::CryptRunMsg& m) {
+        if (!gather_.Active() || m.seq != gather_.seq()) return;
+        runBook_.OnItems(slot, m.items);
+    }
+    // Host, Grave Robbers: the last kits are in (or their time is up): the results go to everyone and are shown for a while, then
+    // the lobby (EndCryptResults). The host already in the menu (it left): the chat lines are the screen, and the end is at once.
+    void CryptRunResults() {
+        const crypt::CryptRunMsg m = runBook_.Results(CryptRunReason());
+        if (net_) net_->Broadcast(kChanReliable, Encode(m), true);
+        ShowCryptResults(m);
+        if (!SharedCryptsHere()) EndCryptResults();
+    }
+    // Every machine: the run's results, in the log and the chat, and (while still in the shared Crypts) on the board.
+    void ShowCryptResults(const crypt::CryptRunMsg& m) {
+        if (cryptResultsAt_ && cryptResults_.seq == m.seq) return;
+        cryptResults_ = m;
+        cryptResultsAt_ = NowMs() ? NowMs() : 1;
+        HSM_LOG("crypt coop: run over (%s): %d got out", crypt::RunEndName(m.reason), crypt::GotOutOf(m));
+        ui::ShowLine("CRYPTS", style::kBone, crypt::ResultsTitle(m.reason, crypt::GotOutOf(m)));
+        for (const crypt::RunRow& r : m.rows) {
+            HSM_LOG("crypt coop: result: %s", crypt::RowText(r).c_str());
+            ui::ShowLine("CRYPTS", style::kIron, crypt::RowText(r));
+        }
+        ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start"); ui::NoticeClear("crypts-end");
+    }
+    // Host: the results had their time (or the host was already gone): the gather is over for everyone and the match goes back to the
+    // lobby, the travel BACK TO LOBBY makes.
+    void EndCryptResults() {
+        HSM_LOG("crypt coop: results over; everyone goes back to the lobby");
+        cryptResultsAt_ = 0;
+        SendGatherClock(NowMs());                       // Off: every machine's run is over
+        gatherSelf_ = GatherSelf::None; gatherOpening_ = false; gatherMenuAt_ = 0;
+        gatherClock_.Clear();
+        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
+        graveRun_ = false;
+        if (SharedCryptsHere()) HostTravel(kMenuLevel);   // the host that left already took everyone to the menu
+    }
+    // Together: the match's HUD with the gather's clock under the pill (at most 80 characters) and the key marker beside it as a
+    // chip; before the match's HUD is up, the gather's pill alone.
+    void TogetherHud(HudScene& h) {
+        if (crypt::ResultsShowing(NowMs(), cryptResultsAt_) && cryptResults_.kind == crypt::kRunResults) { h = CryptResultsHud(); return; }
+        if (!h.visible) { h = CryptsHud(); return; }
+        const std::string line = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), true);
+        if (!line.empty()) h.info = {true, FitInfo(line), style::kBone, 1, 1};
+        h.chip = KeyChip(gatherSelf_ == GatherSelf::Gathering, !keyHeld_.empty(), keyLine_);
+    }
 
-    // The lobby's Scenario row (match/hsm_scenarios.h): the world settings for the picked map, set on the game instance so the
-    // Travel carries them to every client. A pick the map does not offer is Standard. The host's own values come back at the menu.
+    // The lobby's scenario (match/hsm_scenarios.h; no row since 0.9.0, the Blossfechten card and an older host's Brawling carry
+    // it): the world settings for the picked map, set on the game instance so the Travel carries them to every client. A pick
+    // the map does not offer is Standard. The host's own values come back at the menu.
     void ApplyLobbyScenario(const std::string& mapPath) {
         if (IsServer() || !steamMode() || !lobby_.InLobby() || lobby_.Progression()) return;
         adapter_.RestoreScenario();                     // the last match's scenario goes first: Standard leaves the host's own setup
-        if (const int day = MapHasDayTime(mapPath) ? GameDayTime(lobby_.config().timeOfDay) : -1; day >= 0) {   // the Time of day row
+        // Midday unless the host picked another; a dedicated server's lobby has no row, so its maps keep their own light.
+        if (const int day = MapHasDayTime(mapPath) && !lobby_.ServerLobby() ? GameDayTime(lobby_.config().timeOfDay) : -1; day >= 0) {   // the Time of day row
             const bool set = adapter_.ApplyDayTime(day);
             HSM_LOG("scenario: time of day %s on %s (Current FreeMode Time %d)%s", TimeOfDayName(lobby_.config().timeOfDay), mapPath.c_str(), day,
                     set ? "" : ": the game instance has no such field; the map's own light");
@@ -711,36 +1041,30 @@ public:
         const Scenario sc = EffectiveScenario(mapPath, lobby_.config().scenario);
         if (sc == Scenario::Standard) return;
         const ScenarioWorld w = WorldOf(sc);
-        const ScenarioEffects fx = ScenarioEffectsFor(lobby_.config(), mapPath, lobby_.PlayerCount());
+        const ScenarioEffects fx = ScenarioEffectsFor(lobby_.config(), mapPath);
         const bool ok = w.loseCondition < 0 || adapter_.ApplyScenario(w);
-        HSM_LOG("scenario: %s on %s (lose condition %d; bare %d, carnage bots %d)%s%s", ScenarioName(sc), mapPath.c_str(), w.loseCondition, int(fx.bare),
-                fx.carnageBots, ok ? "" : ": the game instance has no lose condition field; no fence",
+        HSM_LOG("scenario: %s on %s (lose condition %d; bare %d, blossfechten %d)%s%s", ScenarioName(sc), mapPath.c_str(), w.loseCondition,
+                int(fx.bare), int(fx.blossfechten), ok ? "" : ": the game instance has no lose condition field; no fence",
                 ScenarioApplies(sc, ScenarioFormatOf(lobby_.config().format)) ? "" : "; this format does not use it: Standard");
     }
     // Brawling (match/hsm_scenarios.h): every body of a lobby match spawns bare, as the Brawl card's Fists do.
     bool ScenarioBare(const MatchConfig& c) const {
-        return steamMode() && lobby_.InLobby() && !lobby_.Progression() && ScenarioEffectsFor(c, currentLevel_, 0).bare;
+        return steamMode() && lobby_.InLobby() && !lobby_.Progression() && ScenarioEffectsFor(c, currentLevel_).bare;
     }
-    // Duel is for 2 players: a lobby set to Duel that gets a third becomes Last Man Standing (the round count and the gear rows
-    // stay), and the host says so in the lobby chat. Checked when the player count changes; role=server sets its own format.
-    void LobbyPlayersTick() {
-        if (!lobby_.InLobby() || !lobby_.IsHost() || IsServer()) { lobbyPlayersSeen_ = -1; return; }
-        const int players = lobby_.PlayerCount();
-        if (players == lobbyPlayersSeen_) return;
-        lobbyPlayersSeen_ = players;
-        const MatchConfig c = lobby_.config();
-        if (!DuelOutgrown(c, players)) return;
-        lobby_.SetConfig(AdjustForPlayers(c, players));
-        lobby_.SendChat(kDuelOutgrownLine);
-        HSM_LOG("lobby: %d players: Duel switched to Last man standing", players);
+    // Blossfechten (match/hsm_scenarios.h): swords only, no armour. Every body of a lobby match spawns with the game's Blossfechten
+    // Gear flag (Adapter::SetBlossfechten: no armour, right hand only), and the host deals each a sword (StartConfig, RegearSlots).
+    bool ScenarioBlossfechten(const MatchConfig& c) const {
+        return steamMode() && lobby_.InLobby() && !lobby_.Progression() && ScenarioEffectsFor(c, currentLevel_).blossfechten;
     }
-    int lobbyPlayersSeen_ = -1;
 
     // The lobby's Progression card: the stock Tavern hub with Free Mode off, so the game runs its own Progression
     // (the level manager and OnLevelLoaded key off the GI's "Free Mode Activated").
     void StartProgression() override {
-        if (!lastGameMode_ || (net_ && !IsHost())) return;
-        if (net_ && !BuildsAllowStart()) return;
+        if (const StartVerdict v = HostStartVerdict(true, true); !v.ok) {
+            HSM_LOG("session: not starting Progression: %s", v.text.c_str());
+            ui::Notify(notices::StartWhy(v.text));
+            return;
+        }
         HSM_LOG("session: starting Progression in the hub");
         adapter_.ClearFreeMode();
         HostTravel(kHubLevel);
@@ -814,7 +1138,7 @@ public:
     void ShowProfilerMessage(const std::string& msg) {
         if (msg.empty()) return;
         MessageBeep(ue::prof::Recording() ? MB_ICONASTERISK : MB_OK);
-        ui::ShowLine("HSMMod", style::kBone, msg);
+        ui::Notify(notices::Plain(NoticeKind::Info, "PROFILER", msg, "profiler"));
     }
 
     void PumpAgentEarly() {
@@ -824,6 +1148,8 @@ public:
         ProfilerTick(false);
         // Paused game (actors frozen, widgets still tick) in a level we already know: the full command set is safe.
         if (lastGameMode_ && ObjectAt(lastGameModeIndex_) == lastGameMode_ && adapter_.World() == lastGameMode_) {   // never reads a freed mode
+            // Leave to Main Menu from the pause menu: the mode does not tick, so LeaveSession's grace ends here.
+            if (leaveDueAt_ && int32_t(now - leaveDueAt_) >= 0) { HSM_LOG("session: the grace to leave ended while paused"); FinishLeave(); return; }
             agent::Tick([this](const AgentCommand& c) { return HandleAgent(c); });
             return;
         }
@@ -880,7 +1206,7 @@ public:
         }
     }
 
-    // mod_pause=1: in a session match Esc opens the mod's own pause panel (ui/pause_panel.h) in place of the game's pause menu.
+    // In a session match Esc opens the mod's own pause panel (ui/pause_panel.h) in place of the game's pause menu.
     // The game's Esc toggle (Willie_BP InpActEvt_Pause_) is blocked by BlockPauseInput while the panel is built on the HUD, so
     // a press is seen two ways: the key edge read from the OS, and the blocked event (which P and the gamepad's Start also
     // make). match/hsm_input_mode.h says whose the press is; each one is logged once. Nothing here runs outside a session match.
@@ -913,20 +1239,27 @@ public:
         } else if (esc) {
             const bool ready = ui::PausePanelReady(true);
             EscContext c;
-            c.sessionMatch = ready; c.modPause = cfg_.modPause;
+            c.sessionMatch = ready;
             c.chatOpen = chat || escBusyWas_[0]; c.textFocused = textBox || escBusyWas_[1]; c.fetchMenu = fetch || escBusyWas_[2];
             c.lobbyPage = lobby || escBusyWas_[3]; c.settingsScreen = settings || escBusyWas_[4]; c.panelOpen = modPanel_;
+            c.dropdownOpen = ui::DropdownOpen() || escBusyWas_[5];   // an open list takes the key and closes
             const EscOwner owner = EscOwnerOf(c);
             if (!ready) HSM_LOG("pause: Esc -> the game's menu (the mod panel is not on the HUD yet)");
             else if (owner != EscOwner::Game) HSM_LOG("pause: Esc -> %s", owner == EscOwner::Fetch && photoOn_.load() ? "photo mode (the key is its screen's)" : EscOwnerText(owner));
+            if (owner == EscOwner::Dropdown) ui::CloseDropdowns("esc");
             if (owner == EscOwner::OpenPanel) OpenModPanel();
             else if (owner == EscOwner::ClosePanel) CloseModPanel("Esc");
         }
         escBusyWas_[0] = chat; escBusyWas_[1] = textBox; escBusyWas_[2] = fetch; escBusyWas_[3] = lobby; escBusyWas_[4] = settings;
+        escBusyWas_[5] = ui::DropdownOpen();
         ui::PausePanelWant want;
         want.match = true; want.open = modPanel_; want.hidden = settingsVisit_ || loadoutVisit_;
         want.reportOn = report::Enabled() && net_ && InFightLevel();
         want.loadoutTrial = cfg_.loadoutTrial;
+        want.host = IsHost();                                      // BACK TO LOBBY: the host takes everyone back, a guest leaves its own match
+        want.lobby = steamMode() && lobby_.InLobby();              // ... where a lobby is kept
+        want.cryptsRun = GatherOn();                               // ... and not during a Crypts run: its battle follows
+        want.coop = oneFight_ || lobby_.Progression();             // ... and a guest not in a Progression fight (the host's Travel works there)
         if (const std::optional<PauseButton> b = ui::PausePanelTick(*this, want)) PausePanelAction(*b);
     }
     void OpenModPanel() {
@@ -956,7 +1289,7 @@ public:
         UObject* w = adapter_.OpenStockScreen(kInventoryScreenPath);
         if (!w) {
             HSM_LOG("loadout trial: the game's inventory screen would not open");
-            ui::ShowLine("HSMMod", style::kBone, "The game's inventory screen would not open. See the log.");
+            ui::Notify(notices::Id::InventoryFailed);
             return;
         }
         loadoutVisit_ = true; loadoutVisitAt_ = NowMs();
@@ -993,7 +1326,7 @@ public:
         const std::string line = ChangeLoadout();
         HSM_LOG("loadout trial: CHANGE LOADOUT after the visit: %s", line.empty() ? "(no answer)" : line.c_str());
     }
-    // What a pause panel button does (the panel's own pages, MULTIPLAYER MENU and MOD SETTINGS, never get here).
+    // What a pause panel button does (the panel's own pages, PLAYERS and MOD SETTINGS, never get here).
     void PausePanelAction(PauseButton b) {
         switch (b) {
             case PauseButton::Resume:
@@ -1002,23 +1335,29 @@ public:
             case PauseButton::Loadout:   // only shown with loadout_trial=1
                 if (cfg_.loadoutTrial) OpenLoadoutTrial();
                 break;
-            case PauseButton::Settings:
+            case PauseButton::ChangeLoadout:   // the panel stays; the answer is a notice (key "loadout")
+                HSM_LOG("pause: CHANGE LOADOUT: %s", ChangeLoadout().c_str());
+                break;
+            case PauseButton::GameSettings:
                 // The game's own settings screen, opened as its pause menu opens it; its Back makes the pause class, which is
                 // swallowed (adapter.cpp SuppressStockScreens), so the panel shows again.
                 if (adapter_.OpenStockScreen("/Game/UI/UI_DisplaySettings2.UI_DisplaySettings2_C", game::Adapter::kStockPauseClassPath)) {
                     settingsVisit_ = true; settingsVisitAt_ = NowMs();
                 } else {
-                    HSM_LOG("pause: SETTINGS: the game's settings screen would not open");
-                    ui::ShowLine("HSMMod", style::kBone, "The game's settings screen would not open. See the log.");
+                    HSM_LOG("pause: GAME SETTINGS: the game's settings screen would not open");
+                    ui::Notify(notices::Id::SettingsFailed);
                 }
                 break;
             case PauseButton::ReportBug:
                 CloseModPanel("REPORT A BUG");
                 ui::ChatOpenWith("/bug ");
                 break;
-            case PauseButton::LeaveMatch:
-            case PauseButton::QuitMainMenu:   // the game's own button also saves the career; a session fight never touched it (the save guard)
-                CloseModPanel(PauseButtonLabel(b));
+            case PauseButton::BackToLobby:
+                CloseModPanel("BACK TO LOBBY");
+                if (IsHost()) HostBackToLobby(); else GuestBackToLobby();
+                break;
+            case PauseButton::LeaveToMainMenu:   // the game's own button also saves the career; a session fight never touched it (the save guard)
+                CloseModPanel("LEAVE TO MAIN MENU");
                 LeaveSession();
                 break;
             case PauseButton::QuitDesktop:
@@ -1029,6 +1368,35 @@ public:
             default:
                 break;
         }
+    }
+
+    // BACK TO LOBBY (the host's button): the match ends for everyone and every machine is in the menu level again, the lobby and
+    // the network kept. It is the travel the dedicated server makes when it empties (ServerFlowTick): OnOpenLevel tells the lobby
+    // "menu" and sends the Travel, each client follows it (FollowTravel) and OnLevelLoaded opens the lobby page on every machine.
+    // Not during a Crypts run (the panel dims the button, PauseRowOf): the gather carries on to its battle, so the travel would
+    // open the host's menu alone (Apart) or end in the battle within seconds (Together), never a lobby for everyone.
+    void HostBackToLobby() {
+        if (!IsHost() || !steamMode() || !lobby_.InLobby()) { HSM_LOG("pause: BACK TO LOBBY: this machine does not host a lobby; nothing done"); return; }
+        if (GatherOn()) { HSM_LOG("pause: BACK TO LOBBY: a Crypts run is on; nothing done"); return; }
+        HSM_LOG("pause: BACK TO LOBBY: travelling %zu player(s) to the menu, the lobby kept", roster_.size() + 1);
+        HostTravel(kMenuLevel);
+    }
+
+    // BACK TO LOBBY (a guest's button, protocol rev 49): this guest leaves the match alone. The host benches its slot
+    // (OnBackToLobby, session/hsm_bench.h) and this machine opens the menu level with the Steam lobby and the host connection
+    // kept (no LeaveSession): OnLevelLoaded opens the lobby page, and the host's next Travel brings it back into a match. The panel
+    // dims the button where it cannot work (BackToLobbyBlock): no lobby, a Crypts run, a Progression fight.
+    void GuestBackToLobby() {
+        const BackBlock block = BackToLobbyBlock(false, steamMode() && lobby_.InLobby(), GatherOn(), oneFight_ || lobby_.Progression());
+        if (IsHost() || !net_ || !welcomed_ || !hostPeer_ || !travelSeq_ || !MatchLevel() || block != BackBlock::None) {
+            HSM_LOG("pause: BACK TO LOBBY: not a guest in a match here (block %d); nothing done", int(block));
+            return;
+        }
+        BackToLobbyMsg m; m.seq = travelSeq_;
+        net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+        benchedFrom_ = currentLevel_; pendingLevel_ = kMenuLevel;
+        HSM_LOG("pause: BACK TO LOBBY: leaving %s for the lobby (travel #%u); the lobby and the host kept", currentLevel_.c_str(), m.seq);
+        game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
     std::string WidgetsJson() {
@@ -1077,6 +1445,7 @@ public:
     }
 
     void Tick(UObject* gameMode, float dt) {
+        game::worldctx::NoteTicking(gameMode);   // first: the world context every mod call below checks (public #855)
         lastModeTick_ = NowMs();
         NoteLongFrame();
         fighterOfFrame_.clear();
@@ -1091,11 +1460,14 @@ public:
             test::Begin(selfTestOk_);
             if (!selfTestOk_) { HSM_LOG("session: self-test failed; disabling multiplayer for this run"); ResetNetwork("self-test failed"); return; }
             InstallClientSuppression();
+            game::StartGameCheck(cfg_.gameCheckTest);   // the game names this HSMMod uses, against this build
             game::InstallTravelHook([this](const std::string& l, bool a, const std::string& o) { return OnOpenLevel(l, a, o); });
             vmHookAskedAt_ = NowMs();
         }
         if (!selfTestOk_) return;
+        if (leaveDueAt_ && int32_t(NowMs() - leaveDueAt_) >= 0) { FinishLeave(); return; }   // LeaveSession's grace is over
         InstallVmHook(false);
+        game::GameCheckTick();
         // Fetch (dsound.dll) on the link page: what this mod is doing, in the menus and solo play too, and whether Fetch's
         // menu has the keyboard, before any of the mod's keys are read below (gameplay/fetch_link.h).
         {
@@ -1112,7 +1484,6 @@ public:
         TickLaps laps(*this);
         if (steamMode()) { lobby_.Tick(); game::modpack::Tick(lobby_); game::modrules::LobbyTick(lobby_); }
         game::modrules::HoldTick(lobby_);   // HS Enhancer's keys held while joining, or in, a lobby that blocks it
-        if (steamMode()) LobbyPlayersTick();
         if (steamMode()) RegionTick();
         if (steamMode()) MigrationTick();
         if (SteamServer()) ServerLobbyTick();
@@ -1123,6 +1494,11 @@ public:
         if (levelChanged) ShowProfilerMessage(ue::prof::StopCapture());
         if (!adapter_.Resolve(gameMode)) return;     // retried next tick, with the level change still pending
         if (levelChanged) { lastGameMode_ = gameMode; lastGameModeIndex_ = ObjectIndex(gameMode); OnLevelLoaded(); }
+        if (joinSoundDue_) {
+            joinSoundDue_ = false;
+            if (levelChanged) HSM_LOG("session: a member joined during the level change; the join sound plays in the new level");
+            adapter_.PlayUiSound("ButtonSound");
+        }
         inFight_ = InFightLevel();
         if (inFight_ != delayFight_) { delayFight_ = inFight_; AdoptMatchDelay(); }   // rev 42: fixed for the whole fight
         if (hostPending_) { hostPending_ = false; if (!ScriptHookMissing()) BecomeHost(); }
@@ -1156,7 +1532,7 @@ public:
             std::snprintf(b, sizeof b, "Your frame rate is %.0f FPS, under %d: the others see your fighter in bigger steps.",
                           frameFloor_.LastFps(), frameFloor_.MinFps());
             HSM_LOG("session: %s", b);
-            ui::ShowLine("HSMMod", style::kBone, b);
+            ui::Notify(notices::FrameRate(frameFloor_.LastFps(), frameFloor_.MinFps()));
         }
         InputProbeTick();
         bool joined = net_ && (steamMode() ? lobby_.InLobby() : true);
@@ -1165,14 +1541,15 @@ public:
         saveGuard_.Tick(adapter_, joined, MatchLevel(),   // a session never touches the player's own save; a Crypts run holds it too
                         hsm::session::GuardHoldsLevel(MatchLevel(), IsSoloLevel(currentLevel_)));
         game::TickDamagePin(joined, SessionDamage(), IsHost());       // one player damage for everyone, the host's
-        game::TickPhysicsPin(!joined ? kUnpinnedPhysics : IsHost() ? HostWeights() : info_.physics);   // and its gore, bodies and weights
+        if (!(joined && !IsHost() && game::cryptslayout::CoopLive() && game::cryptslayout::Loading()))   // #3846: not before the shared Crypts rooms are in
+            game::TickPhysicsPin(!joined ? kUnpinnedPhysics : IsHost() ? HostWeights() : info_.physics);   // and its gore, bodies and weights
         adapter_.SetDestroyAware(net_ != nullptr);
         adapter_.SetSubclassWeapons(true);   // offline too, so the mirror bench sees the weapons owner sync sees
         stockFlowGuard_ = joined && MatchLevel();
         if (photoGuardWas_ && !stockFlowGuard_) adapter_.SetPhotoUnpaused(adapter_.PlayerWillie(0), false);   // #2624: outside a session match photo mode pauses as the game ships it
         photoGuardWas_ = stockFlowGuard_;
         pauseLiftArmed_ = stockFlowGuard_ || (cfg_.cryptsPauseLift && joined && InCryptsRun());   // Crypts: a paused world stops the keep-alive
-        modPauseMatch_ = cfg_.modPause && joined && MatchLevel() && FighterLevel();
+        modPauseMatch_ = joined && MatchLevel() && FighterLevel();
         adapter_.SwallowTavernHub(cfg_.loadoutTrial && modPauseMatch_);   // the trial's inventory screen makes the Tavern's hub menu on its way out
         adapter_.SuppressStockScreens(joined && MatchLevel(), true, modPauseMatch_ && ui::PausePanelReady());   // the panel is the pause menu: a pause screen the game makes is skipped
         if (stockFlowGuard_ && adapter_.ResetTimeDilation() && ++timeReset_ % 100 == 1)
@@ -1185,6 +1562,8 @@ public:
         ModPauseTick();
         ReportTick();   // before the solo return: reports work in the menus and offline too (R1)
         game::CryptsProbeTick(NowMs());   // crypts_probe=1 only; in single player too
+        game::cryptslayout::Tick(adapter_, NowMs());   // an armed table's rooms (nothing arms one yet)
+        ReadyHoldTick();
         UpdateNoticeTick();
         if (scenarioLogAt_ && DueAt(NowMs(), scenarioLogAt_)) {   // the spike: what the game's combat events offer on this map
             scenarioLogAt_ = 0;
@@ -1198,6 +1577,10 @@ public:
         laps.Lap(TickPart::Guards);
         if (IsHost()) HostTick(dt); else ClientTick(dt);
         CryptsTick();
+        TogetherTick();
+        CryptsCoopTick();
+        CryptsCoopClientTick();
+        CryptsLootTick();
         laps.Lap(TickPart::Net);
         AbyssTick();
         VoiceTick();
@@ -1211,8 +1594,23 @@ public:
             ms.typing = typing; ms.menuOpen = menu; ms.wasMenuOpen = pauseMenuWas_; ms.fightLevel = FighterLevel();
             ms.delayedFixDue = inputFixAt_ && NowMs() >= inputFixAt_;
             if (ms.delayedFixDue && !typing) { inputFixAt_ = inputFixRepeat_ ? 0 : NowMs() + 3000; inputFixRepeat_ = !inputFixRepeat_; }
+            // The respawn's repeated restores (#3490): never while typing or while the multiplayer page or a text box
+            // wants the cursor (the shot waits); under the open menu ChooseInputMode leaves the menu's cursor and the
+            // shot is spent.
+            ms.respawnHappened = respawnInput_.Due(NowMs()) && !ui::PanelOpen() && !ui::MenuTyping();
+            int respawnShot = -2;   // -2: none this tick, -1: the one after the Player DED clear, 0..2: the scheduled ones
+            if (ms.respawnHappened && !typing) {
+                respawnShot = respawnInput_.Take(NowMs());
+                if (!menu) RespawnInputCheck(respawnShot);
+            }
             switch (ChooseInputMode(ms)) {
-                case InputMode::GameOnly: adapter_.RestoreGameInput(); HSM_LOG("session: game input mode restored"); break;
+                case InputMode::GameOnly:
+                    adapter_.RestoreGameInput();
+                    if (respawnShot == -2 || ms.wasMenuOpen || ms.delayedFixDue) HSM_LOG("session: game input mode restored");
+                    else if (++respawnRestores_ <= 30)
+                        HSM_LOG("session: game input mode restored (%s, %u ms after the respawn)",
+                                respawnShot < 0 ? "Player DED was cleared" : "respawn", unsigned(NowMs() - lastRespawnAt_));
+                    break;
                 case InputMode::GameAndUI: adapter_.ShowPauseCursor(); HSM_LOG("session: pause menu open; cursor shown"); break;
                 case InputMode::Leave: break;
             }
@@ -1226,6 +1624,7 @@ public:
                     if (++pauseCursorFixes_ <= 5) HSM_LOG("session: pause menu open with the cursor hidden; cursor shown again");
                 }
             }
+            if (!typing && !menu) RespawnInputWatch();
         }
         if (net_) { BenchedBodyTick(); PhotoTick(); SpectateTick(); RouletteKeysTick(); }
         laps.Lap(TickPart::Voice);
@@ -1233,7 +1632,7 @@ public:
         if (bugHintAt_ && NowMs() >= bugHintAt_) {
             bugHintAt_ = 0; bugHintShown_ = true;
             if (report::Enabled())
-                ui::ShowLine("HSMMod", style::kBone, "Found a bug? Open the chat, type /bug and what happened, press Enter. Your log goes with it.");
+                ui::Notify(notices::Id::BugHint);
         }
         if (net_ && InFightLevel() && NowMs() >= nextHealth_) { nextHealth_ = NowMs() + 5000; LogHealth(); VoiceHealth(); }
         if (info_.phase != chatPhase_) {   // the results: a line being typed is dropped, a new one may be opened
@@ -1246,6 +1645,7 @@ public:
         MapResetTick();
         const bool cryptsHud = InCryptsRun();
         HudScene hud = cryptsHud ? CryptsHud() : BuildHud();   // Crypts: the gather's pill alone
+        if (TogetherRun()) TogetherHud(hud);
         ui::HudTick(hud, NameTags(hud), Format(info_.format));
         HudScene chatHud = hud;   // the chat runs in any session fight, a match or not (match/hsm_chat_scene.h ChatRuns)
         chatHud.visible = ChatRuns({hud.visible, net_ != nullptr, MatchLevel(), localFighter_});
@@ -1539,7 +1939,7 @@ public:
         if (cmd.kind == ReportCommandKind::None) return false;
         auto say = [](const std::string& msg) { ui::ShowLine("HSMMod", style::kBone, msg); };
         const uint32_t now = NowMs();
-        if (!report::Enabled()) { say("Bug reports are off (reports= and report_url= in HSMMod.ini)."); return true; }
+        if (!report::Enabled()) { say("Bug reports are not available."); return true; }
         if (cmd.kind == ReportCommandKind::NoLog) {          // answers an offer, so it works while a send is busy too (R10)
             if (reportOffer_.Open(now)) say("OK, your log stays here.");
             reportOffer_.Decline();
@@ -1564,7 +1964,7 @@ public:
     // the player (also when it was refused).
     std::string SubmitReport(const std::string& text) override {
         const uint32_t now = NowMs();
-        if (!report::Enabled()) return "Bug reports are off (reports= and report_url= in HSMMod.ini).";
+        if (!report::Enabled()) return "Bug reports are not available.";
         if (report::Busy()) return "Still sending the last report...";
         if (text.empty()) return "Type what went wrong first.";
         if (reportedOnce_ && now - lastReportAt_ < kReportCooldownMs)
@@ -1588,9 +1988,9 @@ public:
             else ui::ShowLine("HSMMod", style::kBone, "Kick, ban and vote commands work once you are connected to the host.");
             return;
         }
-        if (!lobby_.InLobby()) { ui::ShowLine("HSMMod", style::kBone, "Join a lobby to chat."); return; }
-        if (!lobbyChatOut_.Allow(NowMs())) { ui::ShowLine("HSMMod", style::kBone, "Slow down."); return; }
-        if (!lobby_.SendChat(line)) ui::ShowLine("HSMMod", style::kBone, "The chat line could not be sent.");
+        if (!lobby_.InLobby()) { ui::Notify(notices::Id::NotInLobby); return; }
+        if (!lobbyChatOut_.Allow(NowMs())) { ui::Notify(notices::Id::ChatSlow); return; }
+        if (!lobby_.SendChat(line)) ui::Notify(notices::Id::ChatNotSent);
     }
 
     // A line from a member (ours comes back the same way, and is limited when it is sent). Shown in the chat history,
@@ -1835,7 +2235,7 @@ public:
         HSM_LOG("progression: vote %u: '%s' wins (%s)", unsigned(progSeq_), res.name.c_str(), ProgWinText(r.how));
         std::string how;
         if (adapter_.StartOfferedFight(r.winner, how)) { HSM_LOG("progression: started '%s' through %s", res.name.c_str(), how.c_str()); return; }
-        ui::ShowLine("HSMMod", style::kBone, ProgStartByHandLine(res.name));
+        ui::Notify(notices::Plain(NoticeKind::Warn, "VOTE", ProgStartByHandLine(res.name), "vote-start"));
         HSM_LOG("progression: could not start '%s' through the game (%s); the host was told to start it from the Fencer", res.name.c_str(), how.c_str());
     }
 
@@ -2087,17 +2487,25 @@ public:
         HSM_LOG("client: rejected by the host (reason %d%s%s); leaving", int(why), detail.empty() ? "" : ": ", detail.c_str());
         const bool fight = InFightLevel();
         const steam::SteamId lobbyId = lobby_.id();
+        EndMigrationOnLeave("rejected by the host");
         welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
         if (steamMode()) lobby_.Leave();
         ResetNetwork("rejected by the host");
-        ui::ShowLine("HSMMod", style::kBone, text);
+        ui::Notify(notices::Plain(NoticeKind::Error, "LOBBY", text, "rejected"));
         if (why == RejectReason::WrongPassword && steamMode() && lobbyId) lobby_.AskPassword(lobbyId, msg);   // the page asks again (menu.cpp)
         else notice_ = text;                           // shown on the multiplayer page, which opens for it (menu.cpp)
         if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
     std::string TakeNotice() override { std::string n; n.swap(notice_); return n; }
-    std::string CryptsStatus() override { return GatherOn() ? CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs())) : std::string(); }
+    bool TakeLobbyPage() override {
+        const bool due = lobbyPageUntil_ && !DueAt(NowMs(), lobbyPageUntil_);
+        lobbyPageUntil_ = 0;
+        return due;
+    }
+    std::string CryptsStatus() override {
+        return GatherOn() ? CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together()) : std::string();
+    }
 
     // ------------------------------------------------------------------ the multiplayer menus (match/hsm_mp_scene.h)
     bool InSession() const override { return net_ && (IsHost() || welcomed_); }
@@ -2204,6 +2612,12 @@ public:
         return out;
     }
 
+    std::vector<JoinedBuild> JoinedBuilds() const override {
+        std::vector<JoinedBuild> out;
+        for (const auto& [peer, p] : peers_) if (!(p.key >> 63)) out.push_back({p.key, p.modBuild});   // a key with the top bit has no Steam ID
+        return out;
+    }
+
     LobbyModsLocal ModsView() override {
         LobbyModsLocal l;
         if (!InSession()) return l;
@@ -2295,7 +2709,7 @@ public:
         }
         out.push_back(std::string("Direct client links (mesh): ") + (IsHost() ? (MeshHost() ? "offered" : "off") : (meshOn_ ? "on" : "off")));
         if (IsHost()) {
-            out.push_back(std::string("Detours: ") + (DetourHost() ? "on, plan " + std::to_string(detourEpoch_) : "off (detour=1 with mesh=1)"));
+            out.push_back(std::string("Detours: ") + (DetourHost() ? "on, plan " + std::to_string(detourEpoch_) : "off (needs direct links between players)"));
         } else if (DetourClientOn()) {
             int via = 0;
             for (uint8_t s = 1; s < kMaxFighters; ++s) if (detour_.RelayFor(s)) ++via;
@@ -2310,7 +2724,26 @@ public:
 
     void LeaveSession() override {
         if (!net_ && !(steamMode() && lobby_.InLobby())) return;
+        if (leaveDueAt_) return;                       // already leaving (the results of the shared run are on their way)
         HSM_LOG("session: leaving from the menu (%s)", net_ && IsHost() ? "host" : "client");
+        // The host of the shared Crypts run: a host who leaves ends the run (docs/PLAN_CRYPTS_COOP.md). The results go to
+        // everyone first, with the reason, and the sessions close a moment later so they arrive; the clients show them and go
+        // back to the menu instead of waiting for a new host (MigrateWhenHostGone).
+        if (net_ && IsHost() && TogetherRun() && graveRun_) {
+            runHostLeft_ = true;
+            const crypt::CryptRunMsg m = runBook_.Results(crypt::RunEnd::HostLeft);
+            net_->Broadcast(kChanReliable, Encode(m), true);
+            leaveDueAt_ = NowMs() + kHostLeaveGraceMs;
+            if (!leaveDueAt_) leaveDueAt_ = 1;
+            HSM_LOG("crypt coop: the host leaves the shared run: its results (%zu row(s), the host left) went to everyone; leaving in %u ms",
+                    m.rows.size(), kHostLeaveGraceMs);
+            return;
+        }
+        FinishLeave();
+    }
+    void FinishLeave() {
+        leaveDueAt_ = 0;
+        EndMigrationOnLeave("left from the menu");
         const bool fight = InFightLevel();
         welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
         if (steamMode()) lobby_.Leave();
@@ -2387,11 +2820,11 @@ public:
     bool ClassesUnrestricted() const override { return UnrestrictedHere(); }
     bool CanSetUnrestricted() const override { return !lobby_.InLobby() || lobby_.IsHost(); }
     double ClassPowerLimit() const override { return PowerLimitHere(); }
-    // The rule of this machine's lobbies, the same setting as mod_rule=. mod_rules watches the file, so a lobby it's hosting changes too.
+    // The Classes row of this machine's lobbies, the same setting as mod_classes=. mod_rules watches the file, so a lobby it's hosting changes too.
     void SetClassesUnrestricted(bool on) override {
         if (!CanSetUnrestricted()) return;
         ModChoice c = game::modrules::Chosen();
-        c.preset = on ? ModPreset::Unrestricted : ModPreset::Classes;
+        c.classes = on ? ClassesMode::Unrestricted : ClassesMode::On;
         if (!on) c.blockHse = true;   // Classes holds everyone to the budget; HS Enhancer allowed is the true unrestricted
         ChooseRule(c, "classes");
         if (!on && IsHackerClass(cfg_.className)) SetClassName(kPlainClass);   // its tab is hidden now, so it can't stay picked out of sight
@@ -2404,14 +2837,15 @@ public:
         if (!CanSetUnrestricted()) return;
         ModChoice c = game::modrules::Chosen();
         c.blockHse = !on;
-        if (on && IsClassesPreset(c.preset)) c.preset = ModPreset::Unrestricted;   // the rest of the lobby isn't held to the budget against them
+        if (on && ClassesOn(c.classes)) c.classes = ClassesMode::Unrestricted;   // the rest of the lobby isn't held to the budget against them
         ChooseRule(c, "hse");
     }
     // The rule of this machine's lobbies, through the MODS tab's choice (one INI write, no re-read; the lobby it's hosting changes too).
     void ChooseRule(const ModChoice& c, const char* who) {
         if (c == game::modrules::Chosen()) return;
-        cfg_.modRule = ModPresetKey(c.preset);
-        lobby_.hostPreset = c.preset;
+        const ModChoiceStrings keys = KeysOfChoice(c);
+        cfg_.modRule = keys.modRule; cfg_.modClasses = keys.modClasses;
+        lobby_.hostClasses = c.classes;
         const bool saved = game::modrules::SetChoice(c);
         HSM_LOG("%s: my lobbies are now %s%s", who, RuleSummary(game::modrules::HostRule(lobby_)).c_str(), saved ? "" : " (could not save the mod rule)");
     }
@@ -2440,10 +2874,15 @@ public:
         const ClassSheet sheet = MyClass();
         const NamedClass* named = FindClassNamed(ClassName());
         std::string note = named ? named->note : "Your own class. Change it below.";
+        if (!lobby_.InClassesLobby() && lobby_.InLobby()) {   // #3396: said first, naming the rule and who can change it
+            bool ruled = false;
+            const ModRule rule = lobby_.RoomRule(&ruled);
+            if (lobby_.IsHost() && !ModRulesOn()) ruled = false;   // it names Anything, but its rows are off (mod_rules=0)
+            note = ClassesOffNote(ruled, lobby_.IsHost()) + " " + note;
+        }
         const int shownPower = ClassPowerShown(ClassPoints(sheet));
         note += " Power " + std::string(shownPower > 0 ? "+" : "") + std::to_string(shownPower) + ".";
         const std::vector<std::string> problems = ClassProblems(sheet, UnrestrictedHere(), PowerLimitHere());
-        if (!lobby_.InClassesLobby() && lobby_.InLobby()) note += " This lobby doesn't use classes, so you fight as the game's plain fighter.";
         if (!problems.empty()) note += " Can't be used: " + problems[0] + " (the limit is +" + std::to_string(ClassPowerShown(PowerLimitHere())) + ").";
         if (ClassNeedsWolverine(sheet)) {
             if (ue4ss::ReportMods().find("HalfWolverine") == std::string::npos) note += " Needs Half Wolverine, which isn't on.";
@@ -2567,7 +3006,7 @@ public:
                 else if (ShareReport(v.id, v.token)) shared = true;
                 else if (r->job == ReportJob::Crash) pendingShare_.Hold(v.id, v.token, now);   // filed in the menu: the next session gets it
             }
-            ReportOutcomeToPlayer(ReportOutcomeLine(r->job, v, shared));
+            ReportOutcomeToPlayer(ReportOutcomeLine(r->job, v, shared), notices::ReportResult(r->job, v, shared));
         }
         ReportOutcomeFlush();
         if (!report::Busy() && SessionUp()) {              // a crash report filed before this session: shared once
@@ -2581,12 +3020,13 @@ public:
         }
     }
 
-    // The outcome line goes to the chat history once the player can see it: the match chat is up, or the multiplayer page
-    // is open (its lobby chat box, or the note under REPORT A BUG outside a lobby). Until then it waits, so an answer
-    // that comes back during a level change or with the pause menu up is not missed. The log says what the player saw.
-    void ReportOutcomeToPlayer(const std::string& line) {
+    // The outcome goes to the player once they can see it: the match chat is up, or the multiplayer page is open. The line
+    // (with the issue link) is for the note under REPORT A BUG and the log; the notice is the short answer on screen. Until
+    // then it waits, so an answer that comes back during a level change or with the pause menu up is not missed. The log
+    // says what the player saw.
+    void ReportOutcomeToPlayer(const std::string& line, const notices::Msg& notice) {
         if (line.empty()) return;
-        reportHeld_.push_back(line);
+        reportHeld_.push_back({line, notice});
         while (reportHeld_.size() > 4) reportHeld_.pop_front();
         if (!ReportOutcomeVisible()) HSM_LOG("report: outcome held until the chat or the multiplayer page is on screen: %s", line.c_str());
     }
@@ -2595,9 +3035,9 @@ public:
 
     void ReportOutcomeFlush() {
         if (reportHeld_.empty() || !ReportOutcomeVisible()) return;
-        for (const std::string& line : reportHeld_) {
+        for (const auto& [line, notice] : reportHeld_) {
             HSM_LOG("report: told the player: %s", line.c_str());
-            ui::ShowLine("HSMMod", style::kBone, line);
+            ui::Notify(notice);
             reportStatus_ = line; ++reportStatusSeq_;
         }
         reportHeld_.clear();
@@ -2638,7 +3078,7 @@ public:
             // Said once, where the player can see it (held like a report outcome until the chat or the page is up).
             if (report::Enabled())
                 ReportOutcomeToPlayer("The game crashed last session. Turn on HELP IMPROVE THE MOD on the multiplayer page "
-                                      "(or the Esc menu in a match) to send crash reports automatically.");
+                                      "(or the Esc menu in a match) to send crash reports automatically.", notices::Make(notices::Id::CrashHint));
             return;
         }
         if (!report::Enabled() || report::Busy()) { HSM_LOG("report: the last session crashed; reports are off or busy, not sent"); return; }
@@ -2667,15 +3107,14 @@ public:
         if (!reportOffer_.Take(NowMs(), id, token)) return;
         if (!report::Attach(id, token, ReportFactsNow())) { HSM_LOG("report: could not add the log to report %s", id.c_str()); return; }
         HSM_LOG("report: help_improve is on; sending this log to report %s", id.c_str());
-        ui::ShowLine("HSMMod", style::kBone, "Help improve the mod is on: sending your HSMMod log too (Steam IDs, IPs and your "
-                                             "Windows user name removed; player names stay).");
+        ui::Notify(notices::Id::HelpImproveSending);
     }
 
-    // A newer HSMMod release (net/update_check.h), said once in the chat a few seconds into the first fight level, when the HUD is up.
+    // A newer HSMMod release (net/update_check.h), said once as a notice a few seconds into the first fight level, when the HUD is up.
     void UpdateNoticeTick() {
         if (!FighterLevel() || NowMs() - levelLoadedAt_ < 4000) return;
         const std::string notice = update::TakeChatNotice();
-        if (!notice.empty()) ui::ShowLine("HSMMod", style::kBone, notice);
+        if (!notice.empty()) ui::Notify(notices::Plain(NoticeKind::Info, "UPDATE", notice, "update"));
     }
 
     // Another player's report: this player may add their own log with /sendlog (nothing is sent otherwise).
@@ -2684,13 +3123,13 @@ public:
         reportOffer_.Offer(m.id, m.token, NowMs());
         if (cfg_.helpImprove) {                            // opted in: no question, the log goes along
             HSM_LOG("report: %s filed report %s; help_improve is on", NameOfSlot(m.fromSlot).c_str(), m.id.c_str());
-            ui::ShowLine("HSMMod", style::kBone, NameOfSlot(m.fromSlot) + " filed a bug report.");
+            ui::Notify(notices::ReportFiled(NameOfSlot(m.fromSlot), true));
             if (report::Busy()) autoAttachDue_ = true;
             else AutoAttach();
             return;
         }
         HSM_LOG("report: %s filed report %s; offered /sendlog", NameOfSlot(m.fromSlot).c_str(), m.id.c_str());
-        ui::ShowLine("HSMMod", style::kBone, NameOfSlot(m.fromSlot) + " filed a bug report. Type /sendlog to add your log, or /nolog.");
+        ui::Notify(notices::ReportFiled(NameOfSlot(m.fromSlot), false));
     }
 
     ReportFacts ReportFactsNow() const {
@@ -2792,12 +3231,12 @@ private:
     bool InFightLevel() const { return !currentLevel_.empty() && !IsMenuLevel(currentLevel_); }
     // Matches run in fight levels, not in the Tavern hub where players walk around between fights.
     // Not the procedural dungeon either (Game Mode 6, build 26568321): single-player content, hsm_solo_level.h.
-    bool MatchLevel() const { return InFightLevel() && currentLevel_.find("Hub") == std::string::npos && !IsSoloLevel(currentLevel_); }
+    bool MatchLevel() const { return InFightLevel() && currentLevel_.find("Hub") == std::string::npos && !SoloHere(); }
     // A level with fighters in it. Not the Progression hub: outside Free Mode the Tavern is the game's menu-like hub
     // (character creation, the next fight's pick), with no pawn and a mouse cursor. Test 2026-10-25: the mod spawned a
     // fighter there after 15 s, took the cursor away (game-only input) and set the travel's game mode back over the
     // hub's own, so both players sat in the character screen unable to click while their spawned fighters died.
-    bool FighterLevel() const { return InFightLevel() && !progressionHub_ && !IsSoloLevel(currentLevel_); }
+    bool FighterLevel() const { return InFightLevel() && !progressionHub_ && !SoloHere(); }
     bool InAbyss() const { return FighterLevel() && currentLevel_.find("Abyss") != std::string::npos; }
 
     // Sync audit 36, 37, every machine in a session on the Abyss: the level's own enemy spawner held shut (the host spawns
@@ -2841,7 +3280,7 @@ private:
     }
 
     // The class picked in the menu; the plain fighter when nothing is picked.
-    bool UnrestrictedHere() const { return lobby_.InLobby() ? lobby_.InUnrestrictedLobby() : cfg_.modRule == ModPresetKey(ModPreset::Unrestricted); }
+    bool UnrestrictedHere() const { return lobby_.InLobby() ? lobby_.InUnrestrictedLobby() : ChoiceFromKeys(cfg_.modRule, cfg_.modClasses).classes == ClassesMode::Unrestricted; }
     // The class budget: the lobby's Class power (#2125, hsm_cpow), the usual +15 outside one.
     double PowerLimitHere() const { return lobby_.InLobby() ? ClassPowerPoints(lobby_.config().classPower) : kRuleMaxPoints; }
     ClassSheet MyClass() const { return ClassesOff() ? ClassSheet{} : ResolveClass(cfg_.className, cfg_.classCustom).value_or(ClassSheet{}); }
@@ -2901,7 +3340,7 @@ private:
         if (!ClawsDropWeapons(clawsOn_, clawMirrorActive_, clawMirror_.BladesOut())) return;
         if (adapter_.DropHeldWeapons(adapter_.PlayerWillie(0)) > 0) {
             HSM_LOG("rules: claws: dropped a held weapon");
-            ui::ShowLine("HSMMod", style::kWarn, "Sheathe your claws to hold a weapon.");
+            ui::Notify(notices::Id::SheatheClaws);
         }
     }
 
@@ -2922,11 +3361,11 @@ private:
         const uint32_t now = NowMs();
         // The host can allow HS Enhancer in its own lobby, and everyone in it should know.
         if (!lobby_.InClassesLobby() || lobby_.BlockHse()) warnedHse_ = false;
-        else if (!warnedHse_) { warnedHse_ = true; ui::ShowLine("HSMMod", style::kWarn, "This lobby's host allows HS Enhancer, which can change anything."); }
+        else if (!warnedHse_) { warnedHse_ = true; ui::Notify(notices::Id::HostAllowsHse); }
         if (!lobby_.InUnrestrictedLobby()) warnedUnrestricted_ = false;
         else if (!warnedUnrestricted_) {   // a guest never saw the checkbox's warning
             warnedUnrestricted_ = true;
-            ui::ShowLine("HSMMod", style::kWarn, "This lobby is Unrestricted Classes: no class balance, and fighters past what the game was built for. Expect glitches, and possibly crashes.");
+            ui::Notify(notices::Id::UnrestrictedWarn);
         }
         if (!lobby_.InClassesLobby()) { selfFailedAt_ = 0; powerLogged_ = -1; return; }
         if (const int power = lobby_.InUnrestrictedLobby() ? 0 : ClassPowerShown(PowerLimitHere()); power != powerLogged_) {
@@ -2942,18 +3381,18 @@ private:
             if (steam::MemberData(lobby_.id(), steam::MySteamId(), kMemberLiveKey) != live) steam::SetMemberData(lobby_.id(), kMemberLiveKey, live);
         }
         lobby_.RepublishMyCard();   // the host and everyone else see an edit within seconds, not at the next minute
-        const std::string why = OnlineBlockReason(lobby_.InUnrestrictedLobby() ? ModPreset::Unrestricted : ModPreset::Classes, lobby_.BlockHse(), PowerLimitHere());
+        const std::string why = OnlineBlockReason(lobby_.ClassesModeHere(), lobby_.BlockHse(), PowerLimitHere());
         if (why.empty()) {
-            if (selfFailedAt_) { HSM_LOG("rules: my class fits the rules again"); ui::ShowLine("HSMMod", style::kBone, "Your class fits the lobby's rules again."); }
+            if (selfFailedAt_) { HSM_LOG("rules: my class fits the rules again"); ui::Notify(notices::Id::ClassSelfOk); }
             selfFailedAt_ = 0;
             return;
         }
         if (!selfFailedAt_) {
             selfFailedAt_ = now | 1;
-            ui::ShowLine("HSMMod", style::kWarn, why + " Put it back within a minute or you leave the lobby.");
+            ui::Notify(notices::ClassSelfBreaks(why));
         } else if (uint32_t(now - selfFailedAt_) >= kClassRemoveMs) {
             HSM_LOG("rules: leaving the lobby: %s", why.c_str());
-            ui::ShowLine("HSMMod", style::kWarn, "You left the lobby: " + why);
+            ui::Notify(notices::ClassSelfLeft(why));
             selfFailedAt_ = 0;
             lobby_.Leave();
         }
@@ -2972,15 +3411,15 @@ private:
             if (m.id != lobby_.owner()) continue;
             std::vector<std::string> problems = CheckClassValue(MemberSheet(m.id), DecodeCard(m.name, m.card).mods, lobby_.InUnrestrictedLobby(), lobby_.BlockHse(), PowerLimitHere());
             if (problems.empty()) {
-                if (hostFailedAt_) ui::ShowLine("HSMMod", style::kBone, "The host's class fits the rules again.");
+                if (hostFailedAt_) ui::Notify(notices::Id::ClassHostOk);
                 hostFailedAt_ = 0;
             } else if (!hostFailedAt_) {
                 hostFailedAt_ = now | 1;
                 HSM_LOG("rules: the host breaks the class rules: %s", problems[0].c_str());
-                ui::ShowLine("HSMMod", style::kWarn, "The host breaks the class rules: " + problems[0] + ". You leave in a minute unless it's fixed.");
+                ui::Notify(notices::ClassHostBreaks(problems[0]));
             } else if (uint32_t(now - hostFailedAt_) >= kClassRemoveMs) {
                 HSM_LOG("rules: leaving the lobby: the host breaks the class rules: %s", problems[0].c_str());
-                ui::ShowLine("HSMMod", style::kWarn, "You left the lobby: the host breaks the class rules: " + problems[0]);
+                ui::Notify(notices::ClassHostLeft(problems[0]));
                 hostFailedAt_ = 0;
                 lobby_.Leave();
             }
@@ -3014,11 +3453,11 @@ private:
             if (!w.failedAt) {
                 w.failedAt = now | 1;
                 HSM_LOG("rules: %s breaks the class rules: %s", m.name.c_str(), problems[0].c_str());
-                ui::ShowLine("HSMMod", style::kWarn, m.name + " breaks the class rules: " + problems[0]);
+                ui::Notify(notices::ClassPlayerBreaks(m.name, problems[0]));
                 if (peer) Reply(*peer, "Your class breaks this lobby's rules: " + problems[0] + ". Fix it within a minute.");
             } else if (peer && uint32_t(now - w.failedAt) >= kClassRemoveMs) {
                 HSM_LOG("rules: removed %s: %s", m.name.c_str(), problems[0].c_str());
-                ui::ShowLine("HSMMod", style::kWarn, m.name + " was removed: " + problems[0]);
+                ui::Notify(notices::ClassPlayerRemoved(m.name, problems[0]));
                 DropMember(*peer, RejectReason::ModsNotAllowed, "Your class breaks this lobby's rules: " + problems[0]);
                 classWatch_.erase(m.id);
             }
@@ -3031,9 +3470,9 @@ private:
     // and nothing outside the game folder is looked at: the host's mod rule judges the mods this machine reports.
     mutable std::string lastBlockLog_;
     void LogBlockOnce(const std::string& line) const { if (line != lastBlockLog_) { lastBlockLog_ = line; HSM_LOG("%s", line.c_str()); } }
-    std::string OnlineBlockReason(ModPreset preset, bool blockHse, double powerLimit = kRuleMaxPoints) const {
+    std::string OnlineBlockReason(ClassesMode mode, bool blockHse, double powerLimit = kRuleMaxPoints) const {
         if (GloballyBanned(steam::MySteamId())) { LogBlockOnce("rules: this account is banned from HalfSwordMP"); return "This Steam account is banned from HalfSwordMP online play. You can still play alone."; }
-        const bool classes = IsClassesPreset(preset);
+        const bool classes = ClassesOn(mode);
         const RuleMods listed = ReadRuleMods(ue4ss::ReportMods());
         const bool hse = (enhancer::Detected() || listed.hse) && !game::modrules::HseLocked(), wolverine = listed.wolverine;
         // Blocked here and on: its keys are held from the join (modrules::HoldTick), unless they can't be this game.
@@ -3041,7 +3480,7 @@ private:
         if (!classes) return {};                     // the class rules are for lobbies that use classes
         if (hse && !blockHse) return {};             // allowed here, so classes are off for this player: there's nothing to check
         const ClassSheet mine = MyClass();
-        std::vector<std::string> broken = ClassProblems(mine, preset == ModPreset::Unrestricted, powerLimit);
+        std::vector<std::string> broken = ClassProblems(mine, mode == ClassesMode::Unrestricted, powerLimit);
         if (ClassNeedsWolverine(mine) && !wolverine) broken.push_back("it needs Half Wolverine");
         if (wolverine && !WolverineFileMatches(ReadWolverineIni(), mine)) broken.push_back(ClassNeedsWolverine(mine) ? "Half Wolverine hasn't picked up this class yet, so restart the game" : "this class doesn't use Half Wolverine, so turn it off and restart, or give the class some of its options");
         if (!broken.empty()) {
@@ -3059,7 +3498,7 @@ private:
         lobby_.RepublishMyCard();
         for (const game::LobbyMember& m : lobby_.members())
             if (m.card.empty() && m.id != steam::MySteamId() && cardlessWarned_.insert(m.id).second)
-                ui::ShowLine("HSMMod", style::kWarn, (m.name.empty() ? std::string("A player") : m.name) + " isn't sending a class card.");
+                ui::Notify(notices::NoClassCard(m.name));
     }
     uint32_t nextCardCheck_ = 0;
     std::set<steam::SteamId> cardlessWarned_;
@@ -3187,9 +3626,12 @@ private:
     // An owner-sync client waits for its level gate instead (the gate's exit spawns the announced fighter) and is
     // only the short fallback after it (LocalFighterGrace).
     void EnsureLocalFighter() {
-        if (!localFighter_ || !(net_ || automated_) || !FighterLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
+        const bool layout = game::cryptslayout::Active();   // a shared Crypts map: nothing of the game's spawns a player there
+        if (!localFighter_ || !(net_ || automated_ || layout) || !FighterLevel() || adapter_.PlayerWillie(0)) { noPawnSince_ = 0; return; }
         double graceMs = 0;
-        if (!LocalFighterGrace(net_ && !IsHost(), levelGate_.Open(), graceMs)) { noPawnSince_ = 0; return; }
+        if (!LocalFighterGrace(net_ && !IsHost(), levelGate_.Open(), layout, LayoutHolds(LayoutProbe(), double(NowMs() - levelLoadedAt_)), graceMs)) {
+            noPawnSince_ = 0; return;
+        }
         uint32_t now = NowMs();
         if (!noPawnSince_) { noPawnSince_ = now; return; }
         if (double(now - noPawnSince_) < graceMs) return;
@@ -3298,13 +3740,14 @@ private:
         const bool cryptsLeft = gatherSelf_ != GatherSelf::None && IsSoloLevel(currentLevel_) && (hostPeer_ == 0 || lobby_.InLobby());
         if (!migration_.Active()) { migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); }
         if (net_) { HSM_LOG("session: network reset (%s)", why); net_->Stop(); }
-        steamNet_ = nullptr; net_.reset();
+        steamNet_ = nullptr; net_.reset(); menuAfterResults_ = false; hostEndedRun_ = false;
         ++sessionGen_; reportOffer_ = ReportOffer{}; autoAttachDue_ = false;   // R2: no offer or late report outlives its session
         game::shareddice::Clear();                   // the game's own randomness again
         claims_.Stop();                              // the hooks go before any fighter does
         fx_.Stop();                                  // with its paint boxes on the stand-ins
         equip_.Stop();
         ClearScriptHooks(kStockFlowOwner);
+        game::cryptscoop::RemoveScripts();
         grabs_.Stop();                               // unmarks the fighters it held, so before they go too
         props_.Stop();
         severs_.Stop();
@@ -3314,9 +3757,9 @@ private:
         roster_.Clear(); director_ = HostDirector{}; hostBlobs_.Clear(); peers_.clear(); helloWatch_.Clear(); helloWaiting_.clear(); blobVersion_.fill(0); dealtBlob_.fill(0); hostExport_.clear();
         for (auto& b : ownLoadout_) b.clear();
         ownBlobId_.fill(0);
-        picksValid_ = false; hostPending_ = false; travelSeq_ = 0;
+        picksValid_ = false; hostPending_ = false; travelSeq_ = 0; bench_.Clear(); benchedFrom_.clear();
         for (auto& [e, ref] : bots_) if (adapter_.StillValid(ref.obj, ref.index)) adapter_.DestroyActor(ref.obj);
-        bots_.clear(); botWatch_.Clear(); botKillAt_.clear(); match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
+        bots_.clear(); botWatch_.Clear(); botKillAt_.clear(); botLoseLogged_ = 0; match_ = Match{}; kills_ = KillLog{}; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset(); tints_.clear();
         keptMatch_.reset(); reloadPending_ = false;
         ownDeadPending_ = false; ownRespawn_.Reset(); dropClearPending_ = false; mapGate_.Reset();
         mirrorBlob_.clear(); roleOf_.clear(); rolesDirty_ = false; ownBlob_ = 0;
@@ -3361,7 +3804,7 @@ private:
         if (cryptsLeft) { gatherMenuAt_ = NowMs() + 1000; HSM_LOG("crypts: the session is over; leaving the Crypts run"); }
         gather_.Stop(); gatherClock_ = GatherClock{}; gatherSelf_ = GatherSelf::None; battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
         gatherKit_.clear(); gatherKitSent_.clear(); gatherClockSentAt_ = kitSnapAt_ = 0; kitReadFails_ = 0; gatherRunSeq_ = 0;
-        kitSnapNever_ = true; gatherOpening_ = false; gatherMinuteWarned_ = false;
+        kitSnapNever_ = true; gatherOpening_ = false; gatherMinuteWarned_ = false; togetherAlive_ = false;
     }
 
     // ------------------------------------------------------------------ travel / levels
@@ -3398,18 +3841,28 @@ private:
         HSM_LOG("maps: cannot join, %s", line.c_str());
         pendingTravel_.reset(); modMapApproved_.clear(); modMapHost_.reset();
         const bool fight = InFightLevel();
+        EndMigrationOnLeave("modded map missing");
         welcomed_ = false;                             // the lobby's onLeft must not open the menu a second time
         if (steamMode()) lobby_.Leave();
         ResetNetwork("modded map missing");
-        ui::ShowLine("HSMMod", style::kBone, line);
+        ui::Notify(notices::Plain(NoticeKind::Error, "LOBBY", line, "rejected"));
         notice_ = line;
         if (fight) game::OpenLevel(lastGameMode_, kMenuLevel, true, "");
     }
 
     void FollowTravel(const Travel& tr) {
-        if (tr.seq == travelSeq_ && !currentLevel_.empty() && tr.level.find(currentLevel_) != std::string::npos) {
-            // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
-            if (hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
+        benchedFrom_.clear();                         // the host has moved on: a lobby wait is over (session/hsm_bench.h MigrationReopenLevel)
+        // Back in the lobby already (a BACK TO LOBBY of this guest, then the host's): the menu is not opened again, only confirmed.
+        if (IsMenuLevel(tr.level) && IsMenuLevel(currentLevel_) && net_ && welcomed_) {
+            travelSeq_ = tr.seq; pendingLevel_ = tr.level;
+            HSM_LOG("client: following host to %s (travel #%u): already in the menu; staying", tr.level.c_str(), tr.seq);
+            if (!readyHeld_) SendReady();
+            return;
+        }
+        // Already here (the host re-sends its travel after our Hello): confirm instead of reloading.
+        const std::string& here = currentLevel_;
+        if (tr.seq == travelSeq_ && !here.empty() && tr.level.find(here) != std::string::npos) {
+            if (!readyHeld_) SendReady();             // a held Ready goes once the rooms are in (ReadyHoldTick)
             return;
         }
         RememberFoes();
@@ -3421,6 +3874,11 @@ private:
         travelSeq_ = tr.seq; pendingLevel_ = tr.level;
         HSM_LOG("client: following host to %s (%zu settings applied)", tr.level.c_str(), applied);
         game::OpenLevel(lastGameMode_, tr.level, tr.absolute, tr.options);
+        // The host's shared Crypts: this level builds the rooms the host's director places (crypts_layout.cpp, coop mode). The rooms of
+        // an earlier run are forgotten here: the host sends the new run's after this Travel, never before.
+        const bool shared = net_ && !IsHost() && GatherOn() && gatherClock_.together() && IsSoloLevel(tr.level);
+        game::cryptslayout::ArmCoop(shared);
+        if (shared) { cryptRooms_.Clear(); cryptBuilt_.Clear(); cryptAckSent_ = 0; game::cryptsloot::Reset(); }
     }
 
     bool OnOpenLevel(const std::string& level, bool absolute, const std::string& options) {
@@ -3432,7 +3890,7 @@ private:
         // no match setup (BP_LevelManager.cpp:758). Refused for the host (no travel is sent) and a client alike.
         // A Crypts gather (#3199) opens it on purpose, each machine its own run: the game may open it again during that run
         // (a fall out of the world, BP_Procedural_Block_Master.cpp:393), and the run goes on.
-        if (joined && IsSoloLevel(level)) {
+        if (joined && IsSoloLevel(level) && !SharedHostOpen(level)) {   // the host's shared run travels everyone: below
             const bool run = gatherOpening_ || (InCryptsRun() && gatherSelf_ == GatherSelf::Gathering);
             if (!SoloLevelAllowed(level, run)) {
                 if (GatherOn()) HSM_LOG("crypts: %s not opened: during a gather only this machine's own Crypts run opens", level.c_str());
@@ -3446,7 +3904,12 @@ private:
             }
             return true;                               // this machine only: no Travel for the lobby
         }
-        if (joined && GatherOn()) return GatherLevelOpen(level);
+        if (joined && GatherOn()) {
+            // Together: the host's levels are everyone's, the shared Crypts and whatever follows it (a Travel); the host
+            // leaving the shared Crypts ends the run early (TogetherHostLeaves). A client's own level is its own, as Apart.
+            if (!IsHost() || !gatherClock_.together()) return GatherLevelOpen(level);
+            if (!IsSoloLevel(level)) TogetherHostLeaves(level);   // the shared Crypts is the dungeon level; any other level is a leave
+        }
         if (joined && IsHost() && !IsMenuLevel(level) && adapter_.EndErrandMode())
             HSM_LOG("session: %s opened as an errand (Game Mode 2); a session plays it as a normal fight", level.c_str());
         // The host's multiplayer career in or out, before its settings are captured for the travel: a load keeps the
@@ -3458,9 +3921,15 @@ private:
             lastTravel_ = t;
         }
         fightSettings_.clear();
-        if (!joined) return true;
+        if (!joined) {
+            return true;
+        }
         if (IsHost()) {
             Travel& t = *lastTravel_; t.seq = ++travelSeq_;
+            for (uint8_t e : bench_.Lifted(travelSeq_)) {   // a travel ends every guest's wait in the lobby (session/hsm_bench.h): it comes along
+                match_.Return(e); infoDirty_ = true;
+                HSM_LOG("host: entity %u is back from the lobby with travel #%u", unsigned(e), t.seq);
+            }
             fightSettings_ = t.settings;
             const uint64_t seed = NewLevelSeed();   // shared dice: a fresh seed for every level the host opens
             game::shareddice::SetSeed(seed);
@@ -3473,8 +3942,10 @@ private:
                 net_->Broadcast(kChanReliable, Encode(t), true);
             }
             const MatchConfig shown = lobby_.config();
-            lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing", level.substr(level.find_last_of('/') + 1),
-                                  lobby_.Progression() ? "" : ModeName(shown.format, shown.gear, shown.teams));
+            const MapInfo* shownMap = FindMap(level);   // the Crypts map by its name, not the level's file name
+            lobby_.SetPublicState(IsMenuLevel(level) ? "menu" : "playing",
+                                  shownMap && shownMap->crypts ? std::string(shownMap->display) : level.substr(level.find_last_of('/') + 1),
+                                  lobby_.Progression() ? "" : ModeNameFor(shown, lobby_.PlayerCount(), lobby_.MaxPlayers()));
             HSM_LOG("host: travel #%u to %s (%zu settings) sent to lobby", t.seq, level.c_str(), t.settings.size());
             return true;
         }
@@ -3484,8 +3955,13 @@ private:
     }
 
     void OnLevelLoaded() {
+        game::GameCheckSweep();   // the classes this level brought in
         abyss_.Clear(adapter_);   // its tiles went with the old level
+        const bool fromFight = InFightLevel();
         currentLevel_ = ObjectName(OuterOf(OuterOf(lastGameMode_)));   // GameMode -> PersistentLevel -> World
+        game::cryptslayout::OnLevel(lastGameMode_, adapter_, NowMs());   // a table of rooms the loader was armed with is built here (nothing arms one yet)
+        readyHeld_ = false;
+        if (InFightLevel()) benchedFrom_.clear();
         progressionHub_ = InFightLevel() && currentLevel_.find("Hub") != std::string::npos && !adapter_.FreeModeActive();
         if (progressionHub_) {
             HSM_LOG("session: %s is the Progression hub; no fighters, the game keeps its own input", currentLevel_.c_str());
@@ -3494,17 +3970,24 @@ private:
             if (cfg_.progressionSave && (steamMode() ? lobby_.InLobby() : net_ != nullptr)) saveGuard_.CareerHubLoaded(adapter_);
         }
         HSM_LOG("session: level loaded (%s)", currentLevel_.c_str());
+        if (fromFight && IsMenuLevel(currentLevel_) && steamMode() && lobby_.InLobby()) {   // BACK TO LOBBY, or the host's own return: the lobby page opens
+            lobbyPageUntil_ = std::max(NowMs(), 1u) + 30000;
+            HSM_LOG("session: back in the menu with the lobby kept; the lobby page opens");
+        }
         gatherOpening_ = false; gatherMenuAt_ = 0;      // Crypts: the run's level (or the menu) is in
         if (net_ && GatherOn() && IsMenuLevel(currentLevel_) && gatherSelf_ != GatherSelf::None && gatherSelf_ != GatherSelf::Gathering) {
             // Waiting here: the note closes the host's load window opened by the Loading note sent on the way.
             if (gatherSelf_ == GatherSelf::Opening) { gatherSelf_ = GatherSelf::Waiting; HSM_LOG("crypts: the Crypts did not open; waiting in the menu"); }
             SendGatherNote(GatherNote::Waiting);
         }
-        if (IsSoloLevel(currentLevel_) && GatherOn())
+        if (SharedCryptsHere())
+            HSM_LOG("crypts: %s loaded: the shared Crypts (%u s left)", currentLevel_.c_str(), gatherClock_.LeftMs(NowMs()) / 1000);
+        else if (IsSoloLevel(currentLevel_) && GatherOn())
             HSM_LOG("crypts: %s loaded: this machine's own Crypts run (%u s left); no fighters synced", currentLevel_.c_str(), gatherClock_.LeftMs(NowMs()) / 1000);
         else if (IsSoloLevel(currentLevel_))
             HSM_LOG("session: %s is single-player content (the procedural dungeon): not a match level, no fighters synced, the game keeps its own flow", currentLevel_.c_str());
         game::CryptsProbeLevel(cfg_.cryptsProbe, IsSoloLevel(currentLevel_), lastGameMode_, NowMs());
+        CryptsCoopLevel();
         levelLoadedAt_ = NowMs();
         SetMyWillie(nullptr);                        // the old world's fighter is gone; the next tick names the new one
         peerSilence_.LevelLoaded(NowMs());   // the clients load too, and send nothing meanwhile
@@ -3539,10 +4022,13 @@ private:
         }
         adapter_.SetBare(steamMode() && lobby_.InLobby() && MatchLevel() && !lobby_.Progression() &&
                          (IsBare(lobby_.config()) || ScenarioBare(lobby_.config())));   // Brawl and Tag, the Brawling scenario: no gear on any body
+        adapter_.SetBlossfechten(MatchLevel() && ScenarioBlossfechten(lobby_.config()));   // the Blossfechten scenario: no armour on any body, right hand only
         if (!InFightLevel()) { RestoreFoes(); adapter_.RestoreScenario(); }
         progState_ = ProgVoteMsg{};                     // a vote from the old level is over
         if (FighterLevel()) scenarioLogAt_ = NowMs() + 4000;   // the combat events' spike log, once the level has begun play
         inputFixAt_ = net_ && FighterLevel() ? NowMs() + 1500 : 0;
+        inputFixRepeat_ = false;   // a load before the 4.5 s repeat left it set: the next level got one restore, not two
+        respawnInput_.Clear();
         menuInputAt_ = InFightLevel() ? 0 : NowMs() + 500; menuInputRepeat_ = false;
         if (net_ && MatchLevel() && !bugHintShown_ && !bugHintAt_) bugHintAt_ = NowMs() + 8000;   // once the fight is under way
         probeSince_ = FighterLevel() ? std::max(NowMs(), 1u) : 0;
@@ -3562,7 +4048,7 @@ private:
             HSM_LOG("reset: %s loaded instead of %s; the match is not kept", currentLevel_.c_str(), reloadLevel_.c_str());
         }
         reloadPending_ = false;
-        bots_.clear(); botWatch_.Clear(); botKillAt_.clear(); match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
+        bots_.clear(); botWatch_.Clear(); botKillAt_.clear(); botLoseLogged_ = 0; match_ = Match{}; kills_ = KillLog{}; sidesValid_ = false; wave_ = 0; info_ = MatchInfo{}; groundSeen_ = false; groundClearSeen_ = false; clearCount_ = 0; nextGroundClear_ = 0; feed_.clear(); banner_.Reset();
         tints_.clear();
         if (currentLevel_.find("Ambush") != std::string::npos)
             HSM_LOG("maps: the Forest arena (%s) loaded", currentLevel_.c_str());
@@ -3583,10 +4069,41 @@ private:
         props_.Clear();                              // every prop actor died with the level
         lives_.clear(); gaveUp_.clear(); ownDeathReported_ = false; respawnQueue_.clear();
         if (!net_) return;
-        if (IsSoloLevel(currentLevel_)) return;      // a Crypts run: nothing to share, no Ready (its InCrypts note says it is in)
+        if (SoloHere()) return;                      // a Crypts run: nothing to share, no Ready (its InCrypts note says it is in)
         if (IsHost()) { ShareHostLoadout(); return; }
         if (welcomed_) UploadLoadout();             // before Ready, so the host never spawns us in a stale loadout
-        if (travelSeq_ && hostPeer_) { Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_; net_->Send(hostPeer_, kChanReliable, Encode(r), true); }
+        if (game::cryptslayout::Pending() > 0 && !game::cryptslayout::CoopLive()) {    // a shared Crypts map: Ready once its rooms are in (ReadyHoldTick); the co-op rooms are not known yet, the host holds the fighter instead
+            readyHeld_ = travelSeq_ != 0;
+            if (readyHeld_) HSM_LOG("client: Ready held until the shared Crypts rooms are in (%d loading)", game::cryptslayout::Pending());
+            return;
+        }
+        if (travelSeq_) SendReady();
+    }
+
+    void SendReady() {
+        if (!net_ || !hostPeer_) return;
+        Ready r; r.travelSeq = travelSeq_; r.level = pendingLevel_;
+        net_->Send(hostPeer_, kChanReliable, Encode(r), true);
+    }
+
+    // What the level gate and the fighter grace read of a shared Crypts map: whether this level is one, and its rooms
+    // still loading.
+    static LevelProbe LayoutProbe() {
+        LevelProbe p;
+        p.layout = game::cryptslayout::Active();
+        p.layoutPending = game::cryptslayout::Pending();
+        return p;
+    }
+
+    // Client, a shared Crypts map: the Ready held at the level load goes once no room is loading, or at kLayoutMaxWaitMs.
+    void ReadyHoldTick() {
+        if (!readyHeld_) return;
+        if (!net_ || IsHost()) { readyHeld_ = false; return; }
+        const uint32_t since = NowMs() - levelLoadedAt_;
+        if (LayoutHolds(LayoutProbe(), double(since))) return;
+        readyHeld_ = false;
+        HSM_LOG("client: shared Crypts rooms %s after %.1f s; Ready sent", game::cryptslayout::Pending() > 0 ? "still loading (timed out)" : "in", since / 1000.0);
+        SendReady();
     }
 
     // ------------------------------------------------------------------ host
@@ -3633,7 +4150,7 @@ private:
             if (hostRuleSet_ && own.complete) ServerSay("Mod rules now: " + RuleSummary(rule) + ".");
             HSM_LOG("host: mod rules %s: %s", hostRuleSet_ ? "changed" : "in force", RuleSummary(rule).c_str());
             hostRule_ = rule; hostRuleSet_ = true;
-            lobby_.hostPreset = rule.preset;
+            lobby_.hostClasses = rule.classes;
         }
         std::vector<std::pair<uint32_t, PlayerModVerdict>> removes;
         for (auto& [id, p] : peers_) {
@@ -3779,6 +4296,9 @@ private:
             }
             return;
         }
+        // An unknown exe whose script VM moved reads it from reflection once script functions are loaded: until then,
+        // ask again on the next tick (or the next session start) instead of giving the hook up.
+        if (ScriptVmPending()) return;
         vmHookDone_ = true;
         if (vmHookWaitLogged_)
             HSM_LOG("session: script VM hook goes in after %u ms: %s", w.waitedMs,
@@ -3799,9 +4319,10 @@ private:
         if (VmHookReady()) return false;
         HSM_LOG("session: the script VM hook is unavailable; multiplayer needs it (host sync was removed in 0.8.0), leaving the session");
         const char* msg = "Multiplayer cannot start: this game build is not supported by HSMMod (script VM hook unavailable). Update HSMMod.";
-        ui::ShowLine("HSMMod", style::kBone, msg);
+        ui::Notify(notices::Id::ScriptHookMissing);
         notice_ = msg;
         const bool fight = InFightLevel();
+        EndMigrationOnLeave("no script VM hook");
         welcomed_ = false;
         if (steamMode()) lobby_.Leave();
         ResetNetwork("no script VM hook");
@@ -3817,11 +4338,14 @@ private:
         frameFloor_ = sync::FrameFloor(cfg_.minFps);
         standIns_.SetRttOf([this](uint8_t e) { return RttToOwner(e); });
         claims_.SetClaimCheck(cfg_.claimCheck);
+        claims_.SetBlowSpeedCap(cfg_.blowSpeedCap);
         inputBatch_.Clear();
         for (sync::InputTimeline& t : timelines_) t.Clear();
         streams_.SetEpochOf([this](uint8_t e) { return leases_.Epoch(e); });   // rev 32: hand-off leases
         GuardStockFlow();
         GuardFence();
+        game::cryptscoop::SetModFighterTest([this](const UObject* o) { return IsModFighter(o); });
+        game::cryptscoop::InstallScripts();   // the shared Crypts keeps its rooms and its remote players (inert elsewhere)
         game::Claims::Env env;
         env.ownedEntity = [this](const UObject* w) { return OwnedEntityOf(w); };
         env.ownedActor = [this](uint8_t e) { return OwnedActorOf(e); };
@@ -3856,6 +4380,8 @@ private:
         fenv.ownedActor = [this](uint8_t e) { return OwnedActorOf(e); };
         fenv.gearChanged = [this](uint8_t e) { RetintEntity(e); };
         fenv.stripOff = [this] { return steamMode() && StripOffHere(lobby_.InLobby(), lobby_.Progression(), lobby_.config().stripOff); };   // #1931
+        fenv.biteOff = [this] { return steamMode() && BiteOffHere(lobby_.InLobby(), lobby_.Progression(), lobby_.config().biteOff); };
+        fenv.playerFighter = [this](const UObject* w) { const uint8_t e = OwnedEntityOf(w); return e != 0 && !bots_.count(e); };   // the Biting row: players only
         fenv.noteSpawn = [this] { props_.NoteSpawn(); };   // armour came off: the loose piece is looked for now, not at the next census
         fenv.send = [this](const combat::PaintFxMsg& m) {
             if (!net_) return;
@@ -3966,6 +4492,9 @@ private:
         penv.structureBridgesFollow = cfg_.structureBridgesFollow;
         penv.structureGameBreak = cfg_.structureGameBreak;
         penv.fightLevel = [this] { return FighterLevel() && (IsHost() || levelGate_.Open()); };
+        penv.roomsToBuild = [this] {
+            return !IsHost() && game::cryptslayout::CoopLive() && (cryptRooms_.Known() == 0 || cryptBuilt_.Prefix() < cryptRooms_.Known());
+        };
         const bool hostNow = penv.host;
         props_.Start(adapter_, standIns_, std::move(penv));
         // The new host after a migration: the objects the old host announced (every machine heard them) keep their ids.
@@ -3995,7 +4524,7 @@ private:
                 if (!stockFlowGuard_) return false;
                 if (std::strcmp(what, "Event Lose Match") == 0) {
                     bool player = false;
-                    if (!GetBool(c.self(), "Player", player) || !player) return false;
+                    if (!GetBool(c.self(), "Player", player) || !player) { NoteBotLoseMatch(c.self()); return false; }
                     RingOut(c.self(), winByWillie_ == c.self() ? "a lose volume or the Win by rule" : "a lose volume");   // the Pit, Yard and Slums volumes, the fence bags; WinByTick's first blood / knockdown
                 }
                 if (++stockFlowBlocked_ % 50 == 1) HSM_LOG("session: blocked stock \"%s\" during an owner-sync match (%u so far)", what, stockFlowBlocked_);
@@ -4121,6 +4650,7 @@ private:
         if (want.clearPlayerDed && GetBool(lastGameMode_, "Player DED", now) && now) {
             SetBool(lastGameMode_, "Player DED", false);
             HSM_LOG("session: the game mode still had Player DED set with my fighter alive; cleared (%u)", ++dedCleared_);
+            respawnInput_.Extra(NowMs());   // #3490: the game's death flow ran on it after the respawn's restore; restore once more
         }
     }
     // Under host physics the fighters of the guests are real here, and here's the only place their classes can run.
@@ -4166,7 +4696,7 @@ private:
         chaosStatsShown_ = line;
         if (line.empty()) return;
         HSM_LOG("chaos: my stats this round: %s", line.c_str());
-        ui::ShowLine("HSMMod", style::kBone, "Chaos: " + line);
+        ui::Notify(notices::ChaosStats(line));
     }
     void GuestClassTick() {
         if (!IsHost() || !HostPhysics()) return;
@@ -4257,7 +4787,7 @@ private:
                 warnedClassReplica_ = true;
                 HSM_LOG("classes: my fighter is simulated elsewhere (host physics or held): the host applies my class's stats, and they aren't checked here");
                 const std::optional<ClassSheet> mine = ResolveClass(cfg_.className, cfg_.classCustom);
-                if (lobby_.InClassesLobby() && HostPhysics() && mine && ClassLosesPartsOnGuest(*mine)) ui::ShowLine("HSMMod", style::kWarn, "This lobby is on Host Physics: the host runs your class's stats, but Half Wolverine's parts don't work here. Use Owner Sync for them.");
+                if (lobby_.InClassesLobby() && HostPhysics() && mine && ClassLosesPartsOnGuest(*mine)) ui::Notify(notices::Id::HostPhysicsParts);
             }
             return;
         }
@@ -4292,8 +4822,9 @@ private:
             HSM_LOG("rules: leaving the lobby: fighter base stats changed (strength %.3f, run %.3f)", classTracks_.strength.base, classTracks_.run.base);
             const std::string line2 = "Your fighter's base stats aren't the game's, so you left the lobby. Something other than your class changed them.";
             const bool fight = InFightLevel();
+            EndMigrationOnLeave("base stats changed");
             welcomed_ = false;
-            ui::ShowLine("HSMMod", style::kWarn, line2);
+            ui::Notify(notices::Id::LeftBaseStats);
             lobby_.Leave();
             ResetNetwork("base stats changed");
             notice_ = line2;
@@ -5078,7 +5609,7 @@ private:
         InfectedTick();
         RouletteBodyTick();
         HideSeekBodyTick();
-        SetMyWillie(inFight_ && localFighter_ && !IsSoloLevel(currentLevel_) ? adapter_.PlayerWillie(0) : nullptr);   // owner-authority checks read this, not the engine; not a Crypts run's player
+        SetMyWillie(inFight_ && localFighter_ && !SoloHere() ? adapter_.PlayerWillie(0) : nullptr);   // owner-authority checks read this, not the engine; not a Crypts run's player
         Timed(kPumpNet, [&] {
             NetEvent ev;
             while (net_->Poll(ev)) {
@@ -5189,6 +5720,13 @@ private:
     // was announced (at most every RecreateLimiter::kRetryMs); the servo then snaps it onto the client's stream.
     void RecoverLostStandIns(double now) {
         if (!FighterLevel()) return;
+        // #3906: a stand-in whose bodies left the world (NaN) is destroyed and recorded as lost just below, then made again.
+        for (const uint8_t e : standIns_.TakeDiverged()) {
+            const uint8_t slot = uint8_t(e - 1);   // Roster::EntityForSlot is slot + 1
+            if (slot < 1 || slot >= kMaxFighters || !fighters_[slot].actor.obj || HostDrives(e)) continue;
+            HSM_LOG("host: entity %u's stand-in left the world; destroying it to re-create it", e);
+            adapter_.DestroyFighter(fighters_[slot].actor.obj, fighters_[slot].actor.index);
+        }
         for (uint8_t slot = 1; slot < kMaxFighters; ++slot) if (fighters_[slot].actor.obj) FighterActor(slot);   // records losses
         for (auto it = lostSlots_.begin(); it != lostSlots_.end();) {
             const uint8_t slot = *it, e = Roster::EntityForSlot(slot);
@@ -5582,7 +6120,49 @@ private:
     // stand-in's head and put the new one 157 cm up), so the next trace walks again.
     void SpawnedThisTick() { if (spawnIgnoreState_ == SpawnIgnoreState::Cached) spawnIgnoreState_ = SpawnIgnoreState::InTick; }
     UObject* SpawnFighterNow(const game::Adapter::SpawnOptions& o) { UObject* w = adapter_.SpawnFighter(o); SpawnedThisTick(); return w; }
-    UObject* RespawnLocalNow(const game::Adapter::SpawnOptions& o) { UObject* w = adapter_.RespawnLocalPlayer(o); SpawnedThisTick(); return w; }
+    UObject* RespawnLocalNow(const game::Adapter::SpawnOptions& o) {
+        UObject* w = adapter_.RespawnLocalPlayer(o);
+        SpawnedThisTick();
+        if (w) { lastRespawnAt_ = NowMs(); respawnInput_.Arm(lastRespawnAt_); }   // #3490: the restore is repeated (match/hsm_input_mode.h)
+        return w;
+    }
+    // #3490, at a respawn restore: what the controller had before it. Logged when something was off (the move or look
+    // input ignored, the cursor shown with no chat) and, for the first respawns, at the 1 s one either way. Ignored move
+    // or look input is reset (the mod never sets it; RespawnLocalPlayer resets it once).
+    void RespawnInputCheck(int shot) {
+        const game::Adapter::InputState s = adapter_.ReadInputState();
+        if (!s.read) return;
+        const bool off = s.moveIgnored || s.lookIgnored || (s.cursor && !s.captured);
+        if (off || (shot == 1 && ++respawnStateLogs_ <= 10))
+            HSM_LOG("session: input %u ms after the respawn: move %s, look %s, cursor %s%s", unsigned(NowMs() - lastRespawnAt_),
+                    s.moveIgnored ? "IGNORED" : "ok", s.lookIgnored ? "IGNORED" : "ok", s.cursor ? "shown" : "hidden",
+                    s.captured ? ", chat has the keyboard" : "");
+        if (s.moveIgnored || s.lookIgnored) adapter_.ResetIgnoreInput();
+    }
+    // The game window is in front and neither the chat, the pause menu nor Fetch's keys have the keyboard: the mouse
+    // and the keys read from the OS are the fighter's (or the spectate camera's).
+    bool GameWindowInput() {
+        if (ui::Typing() || adapter_.PauseMenuOpen() || game::fetchlink::KeysHeld()) return false;
+        DWORD pid = 0;
+        if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
+        return pid == GetCurrentProcessId();
+    }
+    // #3490: for kRespawnWatchMs after a respawn, my living fighter's controller that reads no mouse movement gets game
+    // input again, at most once a second (as SpectateCameraInput does for a spectator). A still mouse costs one
+    // game-only call; none of the mod's screens that need a cursor or the keyboard is up.
+    void RespawnInputWatch() {
+        const uint32_t now = NowMs();
+        if (!respawnInput_.Watching(now) || now - respawnWatchAt_ < 1000) return;
+        UObject* own = adapter_.PlayerWillie(0);
+        if (!own || adapter_.IsDead(own) || spectating_ || ownDeadPending_ || photoOn_.load()) return;
+        if (ui::MenuTyping() || ui::PanelOpen() || modPanel_ || settingsVisit_ || loadoutVisit_ || !GameWindowInput()) return;
+        game::MouseDelta m;
+        if (!game::ReadMouse(adapter_, m) || m.dx != 0 || m.dy != 0) return;
+        respawnWatchAt_ = now;
+        adapter_.RestoreGameInput();
+        if (++respawnWatchFixes_ <= 10)
+            HSM_LOG("session: %u ms after the respawn the controller read no mouse movement; game input re-asserted", unsigned(now - lastRespawnAt_));
+    }
 
     // The floor a spawn traces under p (FloorZ); nullopt for no floor, or a trap (the Pit's spikes).
     std::optional<double> SpawnFloor(const Point3& p, const std::vector<UObject*>& ignore) {
@@ -5614,12 +6194,18 @@ private:
     }
 
     // The level's spawners a fighter can stand at (one with no floor under it is dropped), logged once per level.
-    std::vector<Point3> SpawnerPoints(const std::vector<UObject*>& ignore) {
+    // rows: each kept point's shared Crypts row (-1: none), in the same order.
+    std::vector<Point3> SpawnerPoints(const std::vector<UObject*>& ignore, std::vector<int>* rows = nullptr) {
         std::vector<Point3> out;
+        std::vector<int> candRows;
+        if (rows) rows->clear();
         size_t noFloor = 0;
-        for (const FVector& v : adapter_.SpawnCandidates()) {
-            const Point3 p{v.x, v.y, v.z};
-            if (SpawnFloor(p, ignore)) out.push_back(p); else ++noFloor;
+        const std::vector<FVector> cands = adapter_.SpawnCandidates(rows ? &candRows : nullptr);
+        for (size_t i = 0; i < cands.size(); ++i) {
+            const Point3 p{cands[i].x, cands[i].y, cands[i].z};
+            if (!SpawnFloor(p, ignore)) { ++noFloor; continue; }
+            out.push_back(p);
+            if (rows) rows->push_back(i < candRows.size() ? candRows[i] : -1);
         }
         if (spawnersLogged_ != currentLevel_) {
             spawnersLogged_ = currentLevel_;
@@ -5702,14 +6288,79 @@ private:
         return Grounded(at, ignore);
     }
 
+    // Host, the shared Crypts run (#3846): a client's fighter spawn waits until its CryptRoomsBuilt covers the entrance rooms. A client
+    // that spawned before its rooms existed fell through the floor and crashed on the next streaming change. After kReadyTimeoutMs
+    // with no report it spawns anyway (logged), so one broken client never holds the run.
+    bool CryptsHeld(uint8_t slot) {
+        if (!cryptReady_.Armed()) return false;
+        const bool was = cryptReady_.IsReady(slot);
+        const uint32_t now = NowMs();
+        switch (cryptReady_.Decide(slot, cryptRooms_.EntranceCover(), now)) {
+            case crypt::Hold::Wait: {
+                uint32_t& at = cryptWaitLogAt_[slot];
+                if (!at || now - at >= 5000) {
+                    at = now ? now : 1;
+                    HSM_LOG("crypt room: %s waits for its rooms: built %u of the %u the entrance needs (%zu room(s) known)", NameOfSlot(slot).c_str(),
+                            unsigned(cryptReady_.Reported(slot)), unsigned(cryptRooms_.EntranceCover()), cryptRooms_.Size());
+                }
+                return true;
+            }
+            case crypt::Hold::TimedOut:
+                HSM_LOG("crypt room: %s never reported its rooms in %u s (built %u of %u); spawning it anyway", NameOfSlot(slot).c_str(),
+                        crypt::kReadyTimeoutMs / 1000, unsigned(cryptReady_.Reported(slot)), unsigned(cryptRooms_.EntranceCover()));
+                return false;
+            case crypt::Hold::Spawn:
+                if (!was) HSM_LOG("crypt room: %s ready (built %u of the %u the entrance needs)", NameOfSlot(slot).c_str(),
+                                  unsigned(cryptReady_.Reported(slot)), unsigned(cryptRooms_.EntranceCover()));
+                return false;
+        }
+        return false;
+    }
+
+    // Host, the shared Crypts (#3847): where a remote player stands. The director spawns only player 0; the others are spread over the
+    // entrance room's standable spots nearest player 0, each clear of the bodies already there. Every spot Stands() turns down is
+    // logged with its reason (the old spawn logged only "N slot(s) passed over", and every slot failed).
+    FVector CryptsEntrancePoint(uint8_t slot, double& yawDeg) {
+        const std::vector<UObject*>& ignore = SpawnIgnore();
+        UObject* host = adapter_.PlayerWillie(0);
+        const FVector hp = host ? adapter_.ActorLocation(host) : FVector{};
+        const Point3 anchor{hp.x, hp.y, hp.z};
+        std::vector<Point3> cands = SpawnerPoints(ignore);
+        for (const Point3& r : RingCandidates(kNoSpawnerRingCm, ignore)) cands.push_back(r);
+        const size_t all = cands.size();
+        std::erase_if(cands, [&](const Point3& q) { return !game::cryptscoop::InEntranceRoom(q.x, q.y, q.z); });
+        const std::optional<double> cf = SpawnFloor(anchor, ignore);
+        int refused = 0;
+        const std::vector<Point3> got = crypt::PickEntranceSpots(
+            cands, anchor, 1, BodiesExcept(Roster::EntityForSlot(slot)), kMinFighterGapCm,
+            [&](const Point3& q) {
+                return crypt::StandCheck(cf, anchor, q, [&](const Point3& f) { return SpawnFloor(f, ignore); },
+                                         [&](const Point3& a, const Point3& b) { return adapter_.LineClear({a.x, a.y, a.z}, {b.x, b.y, b.z}, ignore); });
+            },
+            [&](const Point3& q, crypt::StandRefusal why) {
+                if (++refused <= 16)
+                    HSM_LOG("crypt room: %s: spot (%.0f, %.0f, %.0f) refused: %s", NameOfSlot(slot).c_str(), q.x, q.y, q.z, crypt::StandRefusalName(why));
+            });
+        FVector at{got[0].x, got[0].y, got[0].z};
+        HSM_LOG("crypt room: %s spawns at (%.0f, %.0f, %.0f) in the entrance room, %.0f cm from player 0 (%zu of %zu candidate(s) in the room, %d refused)",
+                NameOfSlot(slot).c_str(), at.x, at.y, at.z, std::sqrt((at.x - anchor.x) * (at.x - anchor.x) + (at.y - anchor.y) * (at.y - anchor.y)),
+                cands.size(), all, refused);
+        const double dx = anchor.x - at.x, dy = anchor.y - at.y;
+        yawDeg = (dx == 0 && dy == 0) ? 0 : std::atan2(dy, dx) * 57.29577951308232;   // face player 0
+        return Grounded(at, ignore);
+    }
+
     void SpawnDue() {
         std::vector<uint8_t> due = director_.Due(NowMs());
         if (due.empty()) return;
+        if (LayoutHolds(LayoutProbe(), double(NowMs() - levelLoadedAt_))) return;   // a shared Crypts map: no floor yet
         UObject* host = adapter_.PlayerWillie(0);
         if (localFighter_ && !host) return;             // the stock spawner has not placed the host yet
         if (!localFighter_) { FVector ap; AnchorKind ak; if (!HostAnchor(ap, ak)) return; }   // role=server: wait for the anchor
         for (uint8_t slot : due) {
             if (slot != 0 && ModHeld(slot)) continue;   // mod rules: its ModList has not passed yet
+            if (slot != 0 && CryptsHeld(slot)) continue;   // the shared Crypts: its rooms are not built yet (#3846)
+            if (!BodyAllowed(bench_, Roster::EntityForSlot(slot), travelSeq_)) continue;   // back in the lobby: no body until the next travel
             // K1/K2: a rejoiner the match counts down gets its body from the match's respawn (RespawnEntity), not at once:
             // it was invulnerable (hits on a fighter the match counts dead are ignored) for the rest of the round.
             // A third player joining a fought Duel is added to the match here, down: Match::AddFighter benches it, so it gets no body
@@ -5733,7 +6384,8 @@ private:
                 sp.blobId = hostBlobs_.LatestFor(0);
                 QueueTint(host, sp.team);
             } else {
-                at = sp.team != kNoTeam ? SidePoint(sp.team, sp.entity, yaw) : SpawnPoint(slot, yaw);
+                at = cryptReady_.Armed() ? CryptsEntrancePoint(slot, yaw)   // the shared Crypts: round player 0 in the entrance room (#3847)
+                   : sp.team != kNoTeam ? SidePoint(sp.team, sp.entity, yaw) : SpawnPoint(slot, yaw);
                 MatchGearFor(slot);                  // joins a running match, or came back to it with its own upload
                 uint32_t id = director_.BlobFor(slot);
                 const std::vector<uint8_t>* blob = hostBlobs_.Get(id);
@@ -5822,7 +6474,7 @@ private:
     }
 
     // The host's own change (the Esc menu): its passport is read again and, if it differs, takes the same road.
-    std::string HostChangeLoadout() {
+    std::string HostChangeLoadout(NoticeKind& kind) {
         const uint32_t now = NowMs();
         if (!localFighter_ || !MatchLevel()) return "Not in a match";
         LoadoutVerdict v = hostChangeLimit_.Allow(now) ? HostLoadoutVerdict(HostEntity(), now) : LoadoutVerdict::TooSoon;
@@ -5840,6 +6492,7 @@ private:
         const std::vector<uint8_t> own = bytes;
         KeepOwnLoadout(0, own, StoreAndRelay(0, std::move(bytes), 0));
         if (v == LoadoutVerdict::RespawnNow) RespawnEntity(HostEntity());
+        kind = NoticeKind::Done;
         return LoadoutVerdictText(v);
     }
 
@@ -6054,6 +6707,11 @@ private:
             pingTables_[peer.slot] = std::move(m);   // logged in the health window (LogPingHealth)
         } else if (t == MsgType::Ready) {
             Ready r; Decode(d, n, r);
+            if (!BodyAllowed(bench_, Roster::EntityForSlot(peer.slot), travelSeq_)) {   // benched: its menu load, not a level to spawn into
+                peerSilence_.Loaded(ev.peer, NowMs());
+                HSM_LOG("host: slot %u ready in %s (travel #%u); benched, no fighter, no census", peer.slot, r.level.c_str(), r.travelSeq);
+                return;
+            }
             director_.OnReady(peer.slot, r.travelSeq, NowMs(), travelSeq_);
             if (r.travelSeq == travelSeq_) peerSilence_.Loaded(ev.peer, NowMs());   // its 15 s count from here
             for (const Spawn& sp : director_.LiveSpawns()) net_->Send(ev.peer, kChanReliable, Encode(sp), true);
@@ -6100,6 +6758,16 @@ private:
             LoadoutChangeMsg m; if (Decode(d, n, m)) OnLoadoutChange(ev.peer, peer, m.chunk);
         } else if (t == MsgType::Gather) {
             GatherNoteMsg m; if (Decode(d, n, m)) OnGatherNote(ev.peer, peer.slot, m);
+        } else if (t == MsgType::BackToLobby) {
+            BackToLobbyMsg m; if (Decode(d, n, m)) OnBackToLobby(peer.slot, m);
+        } else if (t == MsgType::CryptRun) {   // rev 50: a guest's item count for its kit (the results go the other way)
+            crypt::CryptRunMsg m; if (Decode(d, n, m) && m.kind == crypt::kRunKit) OnCryptRunKit(peer.slot, m);
+        } else if (t == MsgType::CryptRoomsBuilt) {   // rev 50: a guest's rooms 1..count are built (the host holds its fighter until they cover the entrance)
+            crypt::CryptRoomsBuiltMsg m; if (Decode(d, n, m)) OnCryptRoomsBuilt(peer.slot, m);
+        } else if (t == MsgType::CryptLoot) {   // rev 50: a guest took a placed item (the host checks it and sends it on)
+            crypt::CryptLootMsg m; if (Decode(d, n, m) && game::cryptscoop::Armed()) game::cryptsloot::OnLoot(m, true);
+        } else if (t == MsgType::CryptDoor) {   // rev 50: a guest unlocked a gate
+            crypt::CryptDoorMsg m; if (Decode(d, n, m) && game::cryptscoop::Armed()) game::cryptsloot::OnDoor(m, true);
         } else if (t == MsgType::ProgressionVote) {
             ProgVoteMsg m; if (Decode(d, n, m) && m.kind == ProgVoteKind::Pick) HostFightPick(peer.slot, m);
         }
@@ -6177,7 +6845,7 @@ private:
         if (!lobby_.Password().empty()) net_->Send(ev.peer, kChanReliable, Encode(LobbySecretMsg{lobby_.Password()}), true);   // so a new host keeps the lobby locked
         net_->Send(ev.peer, kChanReliable, Encode(leases_.Snapshot()), true);   // rev 32: every hand-off lease (its own stream's epoch too)
         SendAllBlobs(ev.peer);
-        if (InFightLevel() && !IsSoloLevel(currentLevel_)) {   // late joiner: follow the host into the running level (never its Crypts run)
+        if (InFightLevel() && !SoloHere()) {   // late joiner: follow the host into the running level (never its Crypts run)
             Travel t;
             if (lastTravel_ && lastTravel_->level.find(currentLevel_) != std::string::npos) t = *lastTravel_;
             else { t.level = currentLevel_; t.settings = game::CaptureGameSettings(); }   // short map name resolves too
@@ -6187,12 +6855,153 @@ private:
             net_->Send(ev.peer, kChanReliable, Encode(dice::LevelSeedMsg{t.seq, game::shareddice::Seed()}), true);   // the running level's seed
             net_->Send(ev.peer, kChanReliable, Encode(t), true);
         }
+        SendCryptRoomsTo(ev.peer);                     // rev 50: a shared Crypts run's rooms so far (none: nothing sent)
         if (gather_.Active()) {                        // Crypts: a gather is on; the joiner opens a run for the time left, or waits
             const bool gathers = gather_.Join(*slot, NowMs());
-            net_->Send(ev.peer, kChanReliable, Encode(GatherMsg{gather_.phase(), gather_.LeftMs(NowMs()), gather_.seq()}), true);
-            HSM_LOG("crypts: %s joined during the gather: %s", h.name.c_str(), gathers ? "opens a run for the time left" : "too late; waits and fights as a fresh character");
+            net_->Send(ev.peer, kChanReliable, Encode(GatherMsg{gather_.phase(), gather_.LeftMs(NowMs()), gather_.seq(), gather_.together()}), true);
+            HSM_LOG("crypts: %s joined during the gather: %s", h.name.c_str(),
+                    gathers ? (gather_.together() ? "joins the shared Crypts for the time left" : "opens a run for the time left") : "too late; waits and fights as a fresh character");
+            if (gather_.together()) {                  // PR E: a joiner mid-run gets the rooms, loot and doors above; its run is booked for the results
+                runBook_.Add(*slot, h.name);
+                HSM_LOG("crypt coop: %s joined mid-run: %zu room(s) with their loot and doors sent%s", h.name.c_str(), cryptRooms_.Size(),
+                        gathers ? "" : "; too late to get in, it waits for the end");
+                if (crypt::ResultsShowing(NowMs(), cryptResultsAt_)) net_->Send(ev.peer, kChanReliable, Encode(cryptResults_), true);
+            }
         }
         HSM_LOG("host: '%s' joined as slot %u (%zu/%d fighters)", h.name.c_str(), *slot, roster_.size(), kMaxPlayers);
+    }
+
+    // ------------------------------------------------------------------ the shared Crypts run's rooms (rev 50, session/hsm_crypt_rooms.h)
+    // Host: every room so far, to one joiner (reliable, in seq order). Nothing when no shared run has rooms.
+    void SendCryptRoomsTo(uint32_t peer) {
+        if (!net_ || cryptRooms_.Size() == 0) return;
+        for (const crypt::CryptRoomMsg& m : cryptRooms_.All()) net_->Send(peer, kChanReliable, Encode(m), true);
+        HSM_LOG("crypt room: %zu room(s) sent to a joiner", cryptRooms_.Size());
+        game::cryptsloot::ForEachRecord([&](const std::vector<uint8_t>& b) { net_->Send(peer, kChanReliable, b, true); });   // PR D: the loot and doors so far
+    }
+    // Host: a client's rooms 1..count are built.
+    void OnCryptRoomsBuilt(uint8_t slot, const crypt::CryptRoomsBuiltMsg& m) {
+        if (!cryptReady_.Armed()) return;                                    // no shared run: nothing waits on it
+        const uint16_t was = cryptReady_.Reported(slot);
+        cryptReady_.Report(slot, m.count);
+        if (cryptReady_.Reported(slot) != was)
+            HSM_LOG("crypt room: %s built %u of %zu room(s)", NameOfSlot(slot).c_str(), unsigned(m.count), cryptRooms_.Size());
+    }
+    // Client: tell the host how many of the rooms (a prefix) are built; only when the count grew.
+    void SendCryptRoomsBuilt(uint16_t count) {
+        if (!net_ || !hostPeer_ || count <= cryptAckSent_) return;
+        cryptAckSent_ = count;
+        crypt::CryptRoomsBuiltMsg m; m.count = count;
+        net_->Send(hostPeer_, kChanReliable, Encode(m), true);
+    }
+    // Client: a room from the host. Stored; the loader builds the contiguous prefix (CryptsRoomsTick).
+    void OnCryptRoom(const crypt::CryptRoomMsg& m) {
+        if (IsHost()) return;
+        if (cryptRooms_.Receive(m))
+            HSM_LOG("crypt room: #%u %s at (%.0f, %.0f, %.0f) yaw %.0f, generation %u, parent #%u", unsigned(m.seq), crypts::kRooms[m.catalog].name,
+                    m.x, m.y, m.z, m.yaw, unsigned(m.generation), unsigned(m.parentSeq));
+    }
+
+    // The shared Crypts run's loot and doors (PR D, gameplay/crypts_loot.cpp): the host sends what its loot points placed and the state of its
+    // doors; a client spawns them (its rooms are built first) and reports a take or an unlocked gate.
+    void CryptsLootTick() {
+        if (!net_) return;
+        const bool host = IsHost();
+        if (host ? !game::cryptscoop::Armed() : !game::cryptslayout::CoopLive()) return;
+        game::cryptsloot::Env env;
+        env.host = host;
+        env.adapter = &adapter_;
+        if (host) {
+            for (const RosterMember& r : roster_.members())
+                if (r.slot != kHostSlot) env.remotes.push_back(EntityActor(Roster::EntityForSlot(r.slot)));
+            env.roomAt = [](double x, double y, double z) { return game::cryptscoop::RoomSeqAt(x, y, z); };
+            env.sendLoot = [this](const crypt::CryptLootMsg& m) { net_->Broadcast(kChanReliable, Encode(m), true); };
+            env.sendDoor = [this](const crypt::CryptDoorMsg& m) { net_->Broadcast(kChanReliable, Encode(m), true); };
+        } else {
+            env.roomBuilt = [this](uint16_t seq) { return cryptBuilt_.Has(seq); };
+            env.allBuilt = [this]() { return cryptRooms_.Known() > 0 && cryptBuilt_.Prefix() >= cryptRooms_.Known(); };
+            env.sendLoot = [this](const crypt::CryptLootMsg& m) { if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true); };
+            env.sendDoor = [this](const crypt::CryptDoorMsg& m) { if (hostPeer_) net_->Send(hostPeer_, kChanReliable, Encode(m), true); };
+        }
+        game::cryptsloot::Tick(NowMs(), env);
+    }
+
+    // Host: the shared Crypts loaded: arm the room reader (it numbers the rooms the host's director places and sends them) and the
+    // hold on the clients' fighters. Any other level, or a client: the rule stays inert and the old rooms are forgotten.
+    void CryptsCoopLevel() {
+        const bool shared = SharedCryptsHere() && IsHost();
+        game::cryptscoop::OnLevel(shared, NowMs());
+        if (!IsHost()) {
+            // A client: the loader (armed by FollowTravel) has started the Ambient level; each room is built as the host's CryptRoom arrives.
+            cryptBuilt_.Clear(); cryptAckSent_ = 0;
+            if (game::cryptslayout::CoopLive()) HSM_LOG("crypt room: building the host's rooms (%zu known so far)", cryptRooms_.Size());
+            else cryptRooms_.Clear();                    // not the shared Crypts: no rooms to keep
+            return;
+        }
+        cryptRooms_.Clear();
+        game::cryptsloot::Reset();
+        if (shared) cryptReady_.Arm(NowMs()); else cryptReady_.Disarm();
+    }
+    // Client: builds the rooms the host sent (the loader streams their levels), and tells the host how many of them, a prefix, stand.
+    void CryptsCoopClientTick() {
+        if (!net_ || IsHost() || !game::cryptslayout::CoopLive()) return;
+        game::cryptslayout::CoopTick(adapter_, NowMs(), cryptRooms_, [this](uint16_t seq) { cryptBuilt_.Mark(seq); });
+        const uint16_t prefix = cryptBuilt_.Prefix();
+        if (prefix > cryptAckSent_) {
+            HSM_LOG("crypt room: built %u/%u", unsigned(prefix), unsigned(cryptRooms_.Known()));
+            SendCryptRoomsBuilt(prefix);
+        }
+    }
+    // The stand-ins, the clients' bodies and the bots: the fighters the fall box and the area clear must spare in the shared Crypts.
+    bool IsModFighter(const UObject* o) const {
+        if (!o) return false;
+        if (standIns_.IsStandIn(o)) return true;
+        for (const Fighter& f : fighters_) if (f.actor.obj == o) return true;
+        for (const auto& b : bots_) if (b.second.obj == o) return true;
+        return false;
+    }
+    void CryptsCoopTick() {
+        if (!net_ || !IsHost() || !game::cryptscoop::Armed()) return;
+        game::cryptscoop::Env env;
+        env.gameInstance = adapter_.GameInstance();
+        env.hostPawn = adapter_.PlayerWillie(0);
+        env.isDead = [this](UObject* w) { return adapter_.IsDead(w); };
+        for (const RosterMember& r : roster_.members()) {
+            if (r.slot == kHostSlot) continue;
+            if (UObject* a = EntityActor(Roster::EntityForSlot(r.slot))) env.remotes.push_back({r.slot, NameOfSlot(r.slot), a});
+        }
+        env.onRoom = [this](const crypt::CryptRoomMsg& m) -> uint16_t {
+            const crypt::CryptRoomMsg* sent = cryptRooms_.Add(m);
+            if (!sent) { HSM_LOG("crypt room: the room list is full (%zu); this room is not sent", cryptRooms_.Size()); return 0; }
+            net_->Broadcast(kChanReliable, Encode(*sent), true);
+            HSM_LOG("crypt room: #%u %s at (%.0f, %.0f, %.0f) yaw %.0f, generation %u, parent #%u, entrance %u, flags %u: sent", unsigned(sent->seq),
+                    crypts::kRooms[sent->catalog].name, sent->x, sent->y, sent->z, sent->yaw, unsigned(sent->generation), unsigned(sent->parentSeq),
+                    unsigned(sent->startEntrance), unsigned(sent->flags));
+            return sent->seq;
+        };
+        game::cryptscoop::Tick(NowMs(), env);
+    }
+
+    // Host: a guest left the match for the lobby (BackToLobby 72, session/hsm_bench.h). Its slot is benched until the host's next
+    // Travel: the fighter falls as a leaver's does (the round is resolved without it), its body goes from every machine, its
+    // hand-off leases are freed and its input is let go, and it gets no body again (SpawnDue, RespawnEntity). The connection stays:
+    // the guest waits in the lobby, and a leave from there frees the slot once (OnClientLeft).
+    void OnBackToLobby(uint8_t slot, const BackToLobbyMsg& m) {
+        const uint8_t e = Roster::EntityForSlot(slot);
+        const BenchVerdict v = BenchVerdictOf(IsHost(), MatchLevel(), slot, GatherOn(), progression_ || oneFight_ || lobby_.Progression(), m.seq, travelSeq_,
+                                              bench_.Benched(e, travelSeq_));
+        if (v != BenchVerdict::Bench || !roster_.BySlot(slot)) {
+            HSM_LOG("host: slot %u BACK TO LOBBY ignored: %s (its travel #%u, now #%u)", unsigned(slot), BenchVerdictText(v), m.seq, travelSeq_);
+            return;
+        }
+        bench_.Bench(e, travelSeq_);
+        LeaverFalls(slot);
+        FreeSlotLeases(slot); ReleaseInputs(slot); props_.SlotLeft(slot);
+        BenchEntity(e, "back to the lobby");
+        director_.Forget(e);
+        infoDirty_ = true;
+        ui::Notify(notices::WentBackToLobby(NameOfSlot(slot)));
+        HSM_LOG("host: slot %u (entity %u) went back to the lobby; benched until the next travel (#%u)", unsigned(slot), unsigned(e), travelSeq_);
     }
 
     // A Steam member who drops mid-match keeps slot, fighter and score for ReservationTable's window.
@@ -6205,13 +7014,18 @@ private:
         uint64_t key = it->second.key;
         vote_.Left(key);
         if (gather_.Active()) gather_.Leave(slot);     // Crypts: not waited for; a rejoin gathers afresh
+        if (gather_.Active() && gather_.together()) runBook_.OnLeft(slot);   // the shared run's results list it as having left
         peers_.erase(it);
         MeshRosterChanged(slot);
         props_.SlotLeft(slot);
         FreeSlotLeases(slot);                           // a hand-off it held or was in ends
         ReleaseInputs(slot);                            // host physics: its held body lets go of everything
         bool steamKey = !(key >> 63);
-        if (match_.phase() != MatchPhase::Idle && steamKey && reservations_.Reserve(key, slot, NowMs())) {
+        // Benched (it went back to the lobby, then left it): its fall, body and leases were done at the bench, and a rejoin has no
+        // match to come back to, so no reservation: the slot is freed now, once (session/hsm_bench.h SlotBench::Leave).
+        const bool benched = bench_.Leave(Roster::EntityForSlot(slot), travelSeq_);
+        if (benched) HSM_LOG("host: slot %u left the lobby while benched; freeing it", unsigned(slot));
+        if (!benched && match_.phase() != MatchPhase::Idle && steamKey && reservations_.Reserve(key, slot, NowMs())) {
             LeaverFalls(slot);   // K1: the held body can't be hit (claims to a gone owner are dropped), so the fall is recorded now
             HSM_LOG("host: slot %u dropped mid-match; holding it for a rejoin", slot);
             return;
@@ -6222,13 +7036,14 @@ private:
     // K1/K2: a leaver in a fought phase falls (no kill credited; a Duel round goes to whoever is left) and stays down.
     void LeaverFalls(uint8_t slot) {
         const uint8_t e = Roster::EntityForSlot(slot);
-        if (!match_.Has(e) || !CombatPhase(match_.phase())) return;
+        if (!match_.Has(e) || !CombatPhase(match_.phase()) || match_.Gone(e)) return;   // gone already (a bench, a reservation): it fell then
         std::erase(respawnQueue_, e);
         if (match_.Alive(e)) HandleDeath(e, 0, NowMs());
         match_.Leave(e, NowMs());
     }
 
     void RemoveMember(uint8_t slot, uint64_t key) {
+        bench_.Leave(Roster::EntityForSlot(slot), travelSeq_);   // kicked, or a reservation ran out: the bench is over with the slot
         LeaverFalls(slot);
         slotTeam_.erase(slot);   // K6: the slot's next player picks a team afresh
         roleOf_.erase(Roster::EntityForSlot(slot));
@@ -6321,9 +7136,10 @@ private:
 
     // One stand-in per health report: a census walks every component it has.
     void ProbeCensus() {
+        if (UObject* me = adapter_.PlayerWillie(0)) hitProbe_.ArmorAudit(0, me, adapter_.Mesh(me));   // the baseline: the game's own body
         for (size_t i = 0; i < kMaxWillies; ++i) {
             probeCursor_ = uint8_t(probeCursor_ % kMaxWillies + 1);
-            if (UObject* w = standIns_.ActorOf(probeCursor_)) { hitProbe_.Census(probeCursor_, w, adapter_.Mesh(w)); return; }
+            if (UObject* w = standIns_.ActorOf(probeCursor_)) { hitProbe_.Census(probeCursor_, w, adapter_.Mesh(w)); hitProbe_.ArmorAudit(probeCursor_, w, adapter_.Mesh(w)); return; }
         }
     }
 
@@ -6419,7 +7235,7 @@ private:
     }
 
     int8_t KnownTeam(uint8_t e) {
-        if (IsHost()) return bots_.count(e) ? HitTeamOf(BotSide(e)) : match_.TeamOf(e);   // a Carnage bot is on no team
+        if (IsHost()) return bots_.count(e) ? HitTeamOf(BotSide(e)) : match_.TeamOf(e);   // a free-for-all stock bot is on no team
         for (const FighterEntry& f : info_.fighters) if (f.entity == e) return f.team;
         return kNoTeam;
     }
@@ -6523,27 +7339,42 @@ private:
     void FlushRoles() { if (rolesDirty_) BroadcastInfo(NowMs()); }
 
     // Item 8: a match starts only while every joined player runs this mod build (their Hello), unless allow_build_mismatch=1.
-    // Logs each new warning once.
-    bool BuildsAllowStart() {
+    // The rule is match/hsm_start_gate.h, the page's too. Every peer here sent its Hello, so a missing build is an older
+    // HSMMod. `whole` also asks who hosts, the game mode and the mode's player count (what a click on START asks); else only
+    // the builds (the server's rotation, the match tick). Logs each new warning once.
+    StartVerdict HostStartVerdict(bool whole, bool progression) {
         std::vector<PeerBuild> others;
-        for (const auto& [peer, p] : peers_) others.push_back({p.name, p.modBuild.empty() ? std::string("an older build") : p.modBuild});
+        for (const auto& [peer, p] : peers_) others.push_back({p.name, p.modBuild, true});
         const std::string mine = game::ModBuild();
         const std::string warn = BuildWarning(mine, others);
-        if (warn != buildWarnLogged_) {
+        if (net_ && warn != buildWarnLogged_) {
             buildWarnLogged_ = warn;
             if (!warn.empty())
                 HSM_LOG("host: %s (ours '%s')%s", warn.c_str(), mine.c_str(),
                         cfg_.allowBuildMismatch ? "; allow_build_mismatch=1, starting anyway" : "; no match starts until every build matches");
         }
-        if (lobby_.InLobby()) {
+        if (net_ && lobby_.InLobby()) {
             const size_t missing = (lobby_.members().size() - 1 > peers_.size()) ? lobby_.members().size() - 1 - peers_.size() : 0;
             if (missing && missing != notJoinedLogged_) {
                 notJoinedLogged_ = missing;
                 HSM_LOG("host: %zu lobby member(s) not joined yet; starting", missing);
             }
         }
-        return MayStartMatch(mine, others, cfg_.allowBuildMismatch);
+        StartInputs in;
+        in.host = true; in.progression = true;            // the builds alone
+        in.allowMismatch = cfg_.allowBuildMismatch; in.mine = mine; in.peers = std::move(others);
+        if (whole) {
+            in.host = !net_ || IsHost();
+            in.hasMode = lastGameMode_ != nullptr;
+            in.progression = progression;
+            if (!progression && !IsServer() && lobby_.IsHost()) {   // Duel is for exactly 2 players, Last Man Standing needs 2 or more
+                const ModeAvail av = ModeAvailable(lobby_.config(), lobby_.PlayerCount());   // Grave Robbers and the Crypts run's Together: refused without [mod] crypts_coop=1
+                in.modeOk = av.ok; in.modeHint = av.hint;
+            }
+        }
+        return EvaluateStart(in);
     }
+    bool BuildsAllowStart() { return HostStartVerdict(false, true).ok; }
 
     // role=server: the server_* keys. teams = two teams, survival = players vs bots.
     Format ServerFormat() const {
@@ -6599,8 +7430,11 @@ private:
 
     // The match StartMatch would start now: the lobby's settings, or Progression co-op outside Free Mode.
     MatchConfig StartConfig() {
-        MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? AdjustForPlayers(lobby_.config(), int(roster_.size())) : MatchConfig{};   // a Duel with a third player is Last Man Standing
+        MatchConfig cfg = IsServer() ? ServerMatchConfig() : steamMode() ? lobby_.config() : MatchConfig{};
+        if (steamMode() && !IsServer()) cfg.format = FormatForPlayers(cfg.format, int(roster_.size()));   // the Duel card: Duel with exactly two players, else Last Man Standing (hsm_mode_merge.h)
         if (!adapter_.FreeModeActive()) cfg = ProgressionConfig(cfg);   // co-op against the event's opponents, no clock, everyone in their own career kit
+        if (TogetherRun() && IsCrypts(cfg)) cfg = TogetherRunConfig(cfg);   // Together: the gather is fought on the shared Crypts as Players vs Bots
+        if (ScenarioBlossfechten(cfg)) cfg = BlossfechtenKit(cfg);   // swords only, no armour: the game hands out no sword in Free Mode, so the host deals them
         if (IsRoundFormat(cfg.format) && !HasTeams(cfg.format)) cfg.friendlyFire = true;   // no teams: every hit counts
         return cfg;
     }
@@ -6642,12 +7476,14 @@ private:
         if (!migrateBoard_.empty())
             HSM_LOG("host: scores restored for %zu players%s", migrateBoard_.players.size(), migrateBoard_.format == cfg.format ? "" : " (not applied: other format)");
         migrateBoard_ = ScoreCarry{};
-        kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression; looted_.clear();
+        kills_ = KillLog{}; wave_ = 0; adoptStock_ = IsBotFormat(cfg.format); wavesEnabled_ = adoptStock_ && !progression && !SharedCryptsHere(); looted_.clear();   // the shared Crypts: the host's director spawns the enemies, not the mod's waves
         respawnQueue_.clear();
         xbowChecked_ = false; xbowHolders_.clear(); xbowJobs_.clear();
         Regear startGear = RegearFor(match_.config(), RespawnCause::Rematch);   // everybody starts together; None for Own and Brawl
         adapter_.SetBare(IsBare(match_.config()) || ScenarioBare(match_.config()));   // every body from the match start on (RespawnAll below) comes up bare
-        carnageNextAt_ = 0; carnageAlive_ = 0; carnageLogged_ = false;
+        adapter_.SetBlossfechten(ScenarioBlossfechten(match_.config()));                // ... or with no armour, right hand only (Blossfechten)
+        if (ScenarioBlossfechten(match_.config()))
+            HSM_LOG("host: Blossfechten: swords only, no armour (gear %d, weapons %s)", int(match_.config().gear), WeaponMaskName(match_.config().weapons).c_str());
         if (BodiesOwn(match_.config())) HSM_LOG("host: Bodies row Own: every player keeps their own character's build");
         adapter_.SetBuild(ForcedWeight(match_.config()), ForcesBuild(cfg_.forceStrength, match_.config()) && !progression, int(match_.config().tier));   // and in the tier's build
         progression_ = progression; oneFight_ = progression;
@@ -6851,16 +7687,16 @@ private:
     void HostMatchTick() {
         hostWillie_ = localFighter_ && MatchLevel() ? adapter_.PlayerWillie(0) : nullptr;
         if (!MatchLevel()) return;
-        if (GatherOn()) return;                          // Crypts: a new gather is on its way; no match on this map until the battle
+        if (GatherOn() && !TogetherRun()) return;        // Crypts: a new gather is on its way; no match on this map until the battle (Together: the run is this map's match)
         if (serverTravelling_) return;                   // role=server: the next map is on its way; no new match on this one
         uint32_t now = NowMs();
-        bool wanted = HostMatchWanted(roster_.size(), steamMode() && IsBotFormat(lobby_.config().format), steamMode() && !adapter_.FreeModeActive());
+        bool wanted = HostMatchWanted(roster_.size(), steamMode() && (IsBotFormat(lobby_.config().format) || TogetherRun()), steamMode() && !adapter_.FreeModeActive());
         if (IsServer()) wanted = roster_.size() >= (IsBotFormat(ServerFormat()) ? size_t(1) : size_t(cfg_.serverMinPlayers));
         if (match_.phase() == MatchPhase::Idle) {
             // Start once every member's fighter is in (the director's ready/loadout timeouts bound the wait).
             bool allIn = true;
             std::string notLive;
-            for (const RosterMember& m : roster_.members()) if (!director_.Live(m.entity)) { allIn = false; notLive += " e" + std::to_string(m.entity); }
+            for (const RosterMember& m : roster_.members()) if (!director_.Live(m.entity) && BodyAllowed(bench_, m.entity, travelSeq_)) { allIn = false; notLive += " e" + std::to_string(m.entity); }
             if (!adapter_.FreeModeActive() && DueAt(now, nextIdleLog_)) {   // #37: a Progression match that never starts (nothing else says why)
                 nextIdleLog_ = now + 5000;
                 HSM_LOG("host: Progression match idle: roster %zu, wanted %d, host fighter %s, fighters not live:%s, builds %s", roster_.size(),
@@ -6877,6 +7713,8 @@ private:
         GiveUpFallbackTick(now);
         match_.SetPlayers(int(roster_.members().size()));   // the host's own fighter is in it as slot 0
         Match::Events ev = match_.Tick(now);
+        if (graveRun_ && TogetherRun()) ev.respawn.clear();   // Grave Robbers: a fallen player's run is over; nobody is revived
+        if (bench_.Any()) for (uint8_t e : BenchedToLeave(bench_, travelSeq_, match_)) match_.Leave(e, now);   // benched guests count as gone (a rematch forgets it)
         if (ev.live || ev.ended || ev.rematch || ev.waveStarted || ev.waveCleared || ev.roundReset) infoDirty_ = true;
         if (ev.waveStarted) HSM_LOG("host: wave %d starts (%d bots)", match_.wave() + 1, match_.botsLeft());
         if (ev.waveCleared) HSM_LOG("host: wave cleared");
@@ -6893,9 +7731,15 @@ private:
                 HostMapReset(ev.rematch || !IsRoundFormat(match_.config().format));
         }
         GroundClearTick(now);
+        if (ev.rematch) HSM_LOG("host: rematch: the results are over, format %u starts again (%zu fighter(s))", unsigned(match_.config().format), roster_.members().size());   // #3549: the decision to rematch
         if (ev.ended) {
             HSM_LOG("host: match over, winner key %d", match_.winner());
             coopOutcome_.Ended(match_.winner());         // a Progression fight's end reads it at the rematch (session/hsm_career.h)
+        }
+        if (ev.ended && TogetherRun() && gather_.CollectNow(now)) {   // Together: every player is down; the run is over before its time
+            HSM_LOG("crypts: every player is down in the shared Crypts; collecting the last kits (%d of %d in)", gather_.Kits(), gather_.Players());
+            SendGatherClock(now);
+            OwnFinalKit();
         }
         MakeGearAhead(now);
         if (ev.rematch && IsServer()) {                  // role=server: the results are over, the flow picks the next map
@@ -6907,8 +7751,17 @@ private:
             ProgressionAdvance("the results are over");  // the suppressed end screens' work, on every player's career (#620)
             return;
         }
+        if (ev.rematch && TogetherRun()) {               // Together: no new run; the battle follows once the last kits are in
+            HSM_LOG("crypts: the shared run's results are over; waiting for the last kits");
+            return;
+        }
         if (ev.rematch && IsCrypts(match_.config()) && CryptsStart()) {   // Crypts: the rematch is a new gather, everyone a new character
-            StartGather(!battleMap_.empty() ? battleMap_ : lastTravel_ ? lastTravel_->level : currentLevel_);
+            // Its battle goes to the Fight map the host's page shows now (one picked during this battle counts).
+            const MatchConfig lc = lobby_.config();
+            const std::string last = !battleMap_.empty() ? battleMap_ : lastTravel_ ? lastTravel_->level : currentLevel_;
+            const std::string map = RematchBattleMap(lc.format, lobby_.FightPick(), last);
+            if (map != last) HSM_LOG("crypts: rematch: the battle goes to %s, the Fight map picked now (was %s)", map.c_str(), last.c_str());
+            StartGather(map);
             return;
         }
         if ((ev.rematch && HasRoles(match_.config().format)) || (ev.roundReset && (IsChaos(match_.config().format) || IsHideSeek(match_.config().format)))) {   // the Knight / Juggernauts move on; Chaos deals every round anew
@@ -6920,12 +7773,14 @@ private:
         TagTick(ev, now);
         RouletteTick(ev, now);
         HideSeekTick(ev, now);
-        if (ev.regear != Regear::None) {                 // the blobs go out on the reliable channel before the Spawns
+        Regear regear = ev.regear;
+        if (regear == Regear::None && !ev.rematch && !ev.respawn.empty() && TogetherRun()) regear = Regear::Each;   // Together: a revived player comes back in the kit gathered so far
+        if (regear != Regear::None) {                    // the blobs go out on the reliable channel before the Spawns
             std::vector<uint8_t> slots;
             if (ev.rematch) slots = AllSlots();
             else for (uint8_t e : ev.respawn) if (e >= 1 && e <= kMaxFighters && roster_.BySlot(uint8_t(e - 1))) slots.push_back(uint8_t(e - 1));
             if (ev.rematch) keptKits_.Clear();
-            RegearSlots(match_.config(), slots, ev.regear, ev.rematch ? "rematch" : "respawn");
+            RegearSlots(match_.config(), slots, regear, ev.rematch ? "rematch" : "respawn");
             infoDirty_ = true;
         }
         if (ev.roundReset && !ev.rematch) DrawCrossbows("round");
@@ -6959,8 +7814,7 @@ private:
             }
         }
         if (wavesEnabled_ && ev.spawnBots) SpawnWaveBots(ev.spawnBots, ev.botRank);
-        CarnageTick(now);
-        if (wavesEnabled_ && DueAt(now, nextCorpseSweep_)) {
+        if ((wavesEnabled_ || CryptEnemiesHere()) && DueAt(now, nextCorpseSweep_)) {
             nextCorpseSweep_ = now + kScanIntervalMs;
             for (uint8_t e : match_.StaleBotCorpses(now, Match::kCorpseMs)) RemoveBot(e);
             // Sync audit 37: a bot whose body something else destroyed stayed alive in the match, holding its entity and
@@ -6968,6 +7822,7 @@ private:
             std::vector<uint8_t> vanished;
             for (auto& [e, ref] : bots_) if (!adapter_.StillValid(ref.obj, ref.index)) vanished.push_back(e);
             for (uint8_t e : vanished) { HSM_LOG("host: bot %u's body is gone (not destroyed by the mod); removed", e); RemoveBot(e); }
+            if (CryptEnemiesHere() && !vanished.empty()) HSM_LOG("crypt coop: %zu enemy body/bodies the game destroyed were removed from the match", vanished.size());
         }
         if (wavesEnabled_) BotWatchdogTick(now);
         if (wavesEnabled_ && match_.config().format == Format::PlayersVsBots)   // zombies disintegrate (the stock death)
@@ -7228,7 +8083,7 @@ private:
         const uint8_t target = self ? me : RouletteFaced(me);
         if (!target) {
             HSM_LOG("roulette: C: nobody in front of my fighter");
-            ui::ShowLine("HSMMod", style::kBone, "Nobody in front of you: face a fighter and press C again");
+            ui::Notify(notices::Id::NobodyInFront);
             return;
         }
         HSM_LOG("roulette: %s: I pull on entity %u", self ? "X" : "C", unsigned(target));
@@ -7473,21 +8328,21 @@ private:
         HSM_LOG("reset: reload done, match kept (round %d)", int(match_.round()));
     }
 
-    // The "Clear ground" lobby setting (free-for-all, teams, Brawl): every clearGroundMin minutes of a fought phase the host
+    // The "Clear ground" lobby setting (free-for-all, teams, Brawl): every clearGroundS seconds of a fought phase the host
     // clears its own drops and counts it in MatchInfo.clearCount; each client clears when that count changes (MatchInfo).
     // Held and worn gear stays: ClearDroppedWeapons skips what is held and armour that is attached.
     void GroundClearTick(uint32_t now) {
         const MatchConfig& c = match_.config();
-        if (!c.clearGroundMin || !CombatPhase(match_.phase())) { nextGroundClear_ = 0; return; }
-        if (!nextGroundClear_) { nextGroundClear_ = now + uint32_t(c.clearGroundMin) * 60000u; return; }
+        if (!c.clearGroundS || !CombatPhase(match_.phase())) { nextGroundClear_ = 0; return; }
+        if (!nextGroundClear_) { nextGroundClear_ = now + uint32_t(c.clearGroundS) * 1000u; return; }
         if (!DueAt(now, nextGroundClear_)) return;
-        nextGroundClear_ = now + uint32_t(c.clearGroundMin) * 60000u;
+        nextGroundClear_ = now + uint32_t(c.clearGroundS) * 1000u;
         ++clearCount_; infoDirty_ = true;
         GroundCleared();
     }
     void GroundCleared() {
         ClearDroppedWeapons(kClearWeapons | kClearArmor, "timer");
-        ui::ShowLine("MATCH", style::kBone, "Ground cleared");
+        ui::Notify(notices::Id::GroundCleared);
     }
 
     // Map reset (session/hsm_map_reset.h): the host's setting map_reset sends one MapReset when the drops are cleared (a Duel
@@ -7635,8 +8490,12 @@ private:
     void EnsureSides(const std::vector<UObject*>& ignore) {
         if (sidesValid_) return;
         pitEnds_ = false;
+        depthSides_ = false;
+        botSpread_ = 0;
         sidePoints_.clear();
-        sidePoints_ = SpawnerPoints(ignore);
+        std::vector<int> rows;
+        sidePoints_ = SpawnerPoints(ignore, &rows);
+        const bool spawners = sidePoints_.size() >= 2 && rows.size() == sidePoints_.size();
         if (sidePoints_.size() < 2) sidePoints_ = RingCandidates(kSideRingCm, ignore);   // no spawners: a ring around the host
         if (sidePoints_.size() < 2) sidePoints_ = RingCandidates(kNoSpawnerRingCm, ignore);   // a tighter one (a small yard)
         if (sidePoints_.size() < 2) {                  // nothing standable in view: around the host itself (StandableNear
@@ -7646,8 +8505,36 @@ private:
         }
         sides_ = PartitionSides(sidePoints_, std::max(TeamCount(match_.config().format, match_.config().teams), 1));
         if (match_.config().format == Format::PitBridgeDuel) PitBridgeSides();
+        if (spawners && match_.config().format == Format::PlayersVsBots && game::cryptslayout::Active()) CryptsStartSides(rows);
         sidesArea_ = AreaOf(sidePoints_);
-        sidesValid_ = true;
+        sidesValid_ = !game::cryptslayout::Loading();   // a shared Crypts map's rooms still loading: again next time
+    }
+    // A shared Crypts map in Players vs Bots (match/hsm_crypts_start.h): the players' side is the entrance and the rooms
+    // joined to it, the bots' every deeper room; a one-room map keeps the split by angle.
+    void CryptsStartSides(const std::vector<int>& rows) {
+        const crypts::Layout* l = game::cryptslayout::Current();
+        if (!l) return;
+        const std::vector<int> rowDepth = crypts::RowDepths(*l);
+        std::vector<int> depth(rows.size(), -1);
+        for (size_t i = 0; i < rows.size(); ++i)
+            if (rows[i] >= 0 && size_t(rows[i]) < rowDepth.size()) depth[i] = rowDepth[size_t(rows[i])];
+        std::vector<int8_t> s = crypts::DepthSides(depth);
+        if (s.empty()) {
+            if (cryptsStartLogged_ != currentLevel_) {
+                cryptsStartLogged_ = currentLevel_;
+                HSM_LOG("crypts layout: Players vs Bots on %s: no entrance-and-deeper split of %zu spawn point(s); sides by angle", l->name, rows.size());
+            }
+            return;
+        }
+        size_t players = 0, bots = 0, none = 0;
+        for (int8_t t : s) { players += t == kHumanTeam; bots += t == kBotTeam; none += t == kNoTeam; }
+        sides_ = std::move(s);
+        depthSides_ = true;
+        if (cryptsStartLogged_ != currentLevel_) {
+            cryptsStartLogged_ = currentLevel_;
+            HSM_LOG("crypts layout: Players vs Bots on %s: the players start at the entrance (%zu spawn point(s), depth %d or less), the bots spread through the rooms beyond (%zu point(s)); %zu in no room",
+                    l->name, players, crypts::kStartDepth, bots, none);
+        }
     }
     // A Progression co-op start (session/hsm_spawn.h CoopStartTaken): the host where the stock spawner put the player, the
     // others round it, clear of every fighter in the level and of every other spawner (an opponent's or the mercenary's).
@@ -7678,6 +8565,7 @@ private:
         if (nearMates && pitSide < 0 && team != kNoTeam)
             for (const RosterMember& m : roster_.members()) AddMate(mates, m.entity, team, entity);
         const Point3& p = sidePoints_[pitSide >= 0 ? PickRespawn(sidePoints_, sides_, int8_t(pitSide), enemies)
+                                      : depthSides_ && team == kBotTeam ? crypts::SpreadPick(sidePoints_, sides_, kBotTeam, botSpread_++, enemies)   // spread through the rooms
                                                    : PickRespawnNearTeam(sidePoints_, sides_, team, enemies, mates)];
         const Point3 spot = pitEnds_ ? p : StandableNear(p, entity, entity, sidesArea_, ignore);   // a bridge end is stood on as it is: a spread slot lands in the Pit
         FVector at = Grounded({spot.x, spot.y, spot.z}, ignore);
@@ -7801,7 +8689,13 @@ private:
         if (e < 1 || e > kMaxFighters) return;            // bots come back as waves, not respawns
         uint8_t slot = uint8_t(e - 1);
         if (!roster_.BySlot(slot)) { match_.MarkRespawned(e); return; }
+        if (slot != 0 && cryptReady_.Armed() && !cryptReady_.IsReady(slot)) {
+            // #3846: no "(now)" destroy and respawn of a client whose rooms are not in; SpawnDue gives it its body once they are.
+            match_.MarkRespawned(e);
+            return;
+        }
         if (IsQueueFormat(match_.config().format) && match_.Benched(e)) return;   // on the bench: no body (BenchEntity)
+        if (!BodyAllowed(bench_, e, travelSeq_)) return;                          // back in the lobby: no body until the next travel (OnBackToLobby)
         int8_t team = match_.TeamOf(e);
         double yaw = 0;
         const int pitSide = match_.config().format == Format::PitBridgeDuel ? PitSideOf(e == match_.PairA() ? 0 : 1) : -1;   // a side of the bridge, not a team
@@ -7837,6 +8731,7 @@ private:
         net_->Broadcast(kChanReliable, Encode(dp), true);
         net_->Broadcast(kChanReliable, Encode(sp), true);
         match_.MarkRespawned(e); kills_.Forget(e);
+        props_.NoteGift(e, sp.flags);   // #3910: every stand-in of this fighter builds the gift's copy when its pose shows it
         if (w && (sp.flags & kSpawnCrossbow) && (slot == 0 || HostPhysics())) QueueCrossbow(w, e);   // a body this machine plays or drives; an owner's stand-in gets its owner's
         if (w) QueueTint(w, team); else HSM_LOG("host: respawn of entity %u failed", e);
     }
@@ -7949,50 +8844,39 @@ private:
     }
     StockSide BotSide(uint8_t e) const { auto it = botSide_.find(e); return it == botSide_.end() ? StockSide::Foe : it->second; }
 
-    // The Carnage scenario (match/hsm_scenarios.h, #1407): in a free-for-all the host keeps 3 to 5 computer fighters in the
-    // arena, on no team (Team Int 0: the stock AI takes everyone for a foe; HitTeamOf lets their blows land on everyone). They
-    // score nothing (Match::OnDeath). One comes in a second while the round is fought; a dead one is replaced after the lobby's
-    // respawn delay, its body removed then.
-    void CarnageTick(uint32_t now) {
-        if (!steamMode() || !lobby_.InLobby() || lobby_.Progression() || IsBotFormat(match_.config().format)) return;
-        if (match_.phase() != MatchPhase::Live && match_.phase() != MatchPhase::SuddenDeath) return;
-        const ScenarioEffects fx = ScenarioEffectsFor(match_.config(), currentLevel_, lobby_.PlayerCount());
-        if (fx.carnageBots <= 0 || now < carnageNextAt_) return;
-        int alive = 0;
-        uint8_t dead = 0;
-        for (auto& [b, ref] : bots_) {
-            UObject* w = adapter_.StillValid(ref.obj, ref.index) ? ref.obj : nullptr;
-            if (w && !adapter_.IsDead(w) && match_.Alive(b)) ++alive;
-            else if (!dead) dead = b;
-        }
-        if (alive < carnageAlive_) {   // one fell: its replacement after the respawn delay
-            carnageAlive_ = alive;
-            carnageNextAt_ = now + uint32_t(match_.config().respawnDelayS) * 1000u + 1000u;
+    // The shared Crypts (PR C): the host's director spawns the enemies; each living one nobody owns is adopted as a host bot, a foe
+    // of every player. Nothing is purged here: a corpse the level placed, or an enemy that waits for a free bot entity, stays.
+    bool CryptEnemiesHere() const { return adoptStock_ && IsHost() && SharedCryptsHere(); }
+    void ScanCryptEnemy(UObject* w, int& adopted) {
+        const bool dead = adapter_.IsDead(w);
+        const uint8_t slot = FreeBotEntity();
+        const crypt::EnemyVerdict v = crypt::EnemyVerdictOf(dead, slot != 0);
+        const FVector at = adapter_.ActorLocation(w);
+        const int32_t* teamInt = Field<int32_t>(w, "Team Int");
+        if (v == crypt::EnemyVerdict::Adopt) {
+            AnnounceBot(slot, w, StockSide::Foe); ++adopted;
+            HSM_LOG("crypt coop: enemy %s adopted as bot e%u at (%.0f, %.0f, %.0f): %s, Team Int %d (players are on 1), director list %d, %zu bot(s) now",
+                    ObjectName(w).c_str(), unsigned(slot), at.x, at.y, at.z, ObjectName(reinterpret_cast<UObject*>(ClassOf(w))).c_str(),
+                    teamInt ? *teamInt : -1, game::cryptscoop::SpawnedWillies(), bots_.size());
             return;
         }
-        carnageNextAt_ = now + 1000;
-        if (alive >= fx.carnageBots) { carnageAlive_ = alive; return; }
-        if (dead) RemoveBot(dead);
-        const uint8_t e = FreeBotEntity();
-        if (!e) return;
-        double yaw = 0;
-        const FVector at = SidePoint(kBotTeam, e, yaw);
-        UObject* bot = adapter_.SpawnBot(int(match_.config().tier), at, yaw, 0);
-        if (!bot) { HSM_LOG("host: carnage: computer fighter %u failed to spawn", e); carnageNextAt_ = now + 5000; return; }
-        AnnounceBot(e, bot, StockSide::FreeForAll);
-        carnageAlive_ = alive + 1;
-        if (!carnageLogged_ || carnageAlive_ == fx.carnageBots) {
-            carnageLogged_ = true;
-            HSM_LOG("host: carnage: computer fighter %u in at (%.0f, %.0f, %.0f); %d of %d in the arena", e, at.x, at.y, at.z, carnageAlive_, fx.carnageBots);
+        if (stockLogLevel_ != currentLevel_) { stockLogLevel_ = currentLevel_; stockLogs_ = 0; }
+        if (v == crypt::EnemyVerdict::Wait || stockLogs_ < 8) {
+            if (v == crypt::EnemyVerdict::Wait && cryptEnemyWaitLogs_++ % 20) return;   // a waiting enemy is asked again every second
+            ++stockLogs_;
+            HSM_LOG("crypt coop: fighter %s at (%.0f, %.0f, %.0f) not adopted: %s (Team Int %d, %zu bot(s))", ObjectName(w).c_str(), at.x, at.y, at.z,
+                    crypt::EnemyVerdictText(v), teamInt ? *teamInt : -1, bots_.size());
         }
     }
 
     // Stock NPCs: adopted as synced bots in players-vs-bots / Progression, removed otherwise.
     void ScanStockWillies() {
         int purged = 0, seen = 0, adopted = 0;
+        const bool cryptEnemies = CryptEnemiesHere();
         for (UObject* w : adapter_.AllWillies()) {
             if (EntityOf(w)) continue;
             ++seen;
+            if (cryptEnemies) { ScanCryptEnemy(w, adopted); continue; }
             // The Abyss's own spawner is held shut in a session (AbyssTick), so what it spawned before that goes too: the
             // zombies are the host's waves alone (adopting them kept the level's tier-sized pack on the host, over the cap).
             uint8_t e = adoptStock_ && !adapter_.IsDead(w) ? FreeBotEntity() : 0;
@@ -8021,6 +8905,7 @@ private:
                 adapter_.DestroyActor(w); ++purged;
             }
         }
+        if (cryptEnemies) { if (adopted) HSM_LOG("crypt coop: %d enemy/enemies adopted this scan (%zu bot(s))", adopted, bots_.size()); return; }
         if (seen && (adopted || purged)) HSM_LOG("host: stock scan: %d stock fighter(s) seen, %d adopted, %d purged (adopt %s)", seen, adopted, purged, adoptStock_ ? "on" : "off");
         if (purged) HSM_LOG("host: removed %d unsynced stock fighter(s)", purged);
     }
@@ -8061,11 +8946,17 @@ private:
                 const double d = std::sqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y) + (q.z - p.z) * (q.z - p.z));
                 if (nearest < 0 || d < nearest) nearest = d;
             }
-            const BotVerdict v = botWatch_.Observe(e, p.x, p.y, p.z, nearest, now);
+            BotVerdict v = botWatch_.Observe(e, p.x, p.y, p.z, nearest, now);
+            if (v == BotVerdict::Ok) {
+                bool gaveUp = false;
+                GetBool(ref.obj, "Give Up", gaveUp);
+                if (botWatch_.OutBelow(e, p.z, gaveUp, now)) v = BotVerdict::GaveUpBelow;
+            }
             if (v != BotVerdict::Ok) doomed.push_back({e, v});
         }
         for (const auto& [e, v] : doomed)
-            KillWatchedBot(e, v == BotVerdict::BelowFloor ? "fell below the floor" : "stood still too long", now);
+            KillWatchedBot(e, v == BotVerdict::BelowFloor ? "fell below the floor"
+                              : v == BotVerdict::GaveUpBelow ? "fell out (gave up below the floor)" : "stood still too long", now);
         const uint32_t sig = uint32_t(match_.botsLeft()) * 64u + uint32_t(alive);   // a spawn or a death changes it
         if (alive == 0 || sig != waveSig_) { waveSig_ = sig; waveProgressAt_ = now; return; }
         if (!WaveStalled(waveProgressAt_, now, alive)) return;
@@ -8074,6 +8965,25 @@ private:
         std::vector<uint8_t> rest;
         for (auto& [e, ref] : bots_) if (match_.Alive(e) && !botKillAt_.count(e)) rest.push_back(e);
         for (uint8_t e : rest) KillWatchedBot(e, "was left over from a stalled wave", now);
+    }
+    // Host: the stock Event Lose Match ran on a wave bot (the Pit's pit and the other lose volumes; #3370). The stock
+    // event only sets Give Up (a zombie gets no flag the mod reads), so BotWatchdogTick's OutBelow rule takes it from
+    // here. The height logged says how deep the volume is, for the rule's 3 m.
+    void NoteBotLoseMatch(UObject* w) {
+        if (!IsHost()) return;
+        uint8_t e = 0;
+        for (auto& [b, ref] : bots_) if (ref.obj == w) { e = b; break; }
+        if (!e) return;
+        botWatch_.NoteLoseMatch(e);
+        if (botLoseLogged_ >= 20) return;
+        ++botLoseLogged_;
+        FVector p;
+        if (!adapter_.BoneLocation(w, "pelvis", p)) p = adapter_.ActorLocation(w);
+        double spawnZ = 0;
+        bool downed = false;
+        GetBool(w, "Downed", downed);
+        if (botWatch_.SpawnZ(e, spawnZ)) HSM_LOG("host: bot %u ran Event Lose Match at %.0f cm from its spawn height (downed %d)", unsigned(e), p.z - spawnZ, int(downed));
+        else HSM_LOG("host: bot %u ran Event Lose Match at z %.0f (downed %d)", unsigned(e), p.z, int(downed));
     }
     void KillWatchedBot(uint8_t e, const char* why, uint32_t now) {
         auto it = bots_.find(e);
@@ -8106,6 +9016,10 @@ private:
     void RemoveBot(uint8_t e) {
         auto it = bots_.find(e);
         if (it == bots_.end()) return;
+        if (CryptEnemiesHere()) {   // out of the director's list first, or its cap of living enemies would stay full
+            const int out = game::cryptscoop::ForgetEnemy(it->second.obj);
+            HSM_LOG("crypt coop: enemy %s (bot e%u) removed (%d director list entr%s dropped)", ObjectName(it->second.obj).c_str(), unsigned(e), out, out == 1 ? "y" : "ies");
+        }
         adapter_.DestroyFighter(it->second.obj, it->second.index);   // its armour and weapons too (DestroyActor left them)
         looted_.erase(e);
         Despawn dp; dp.entity = e; net_->Broadcast(kChanReliable, Encode(dp), true);
@@ -8157,6 +9071,7 @@ private:
         }
         const double t0 = game::SteadyNowMs();
         const bool byRole = HasRoles(cfg.format);        // Riot, Juggernaut: every slot rolls at its role's tier and weapons; a Mirror role shares one roll
+        const bool swords = ScenarioBlossfechten(cfg);   // Blossfechten: every roll holds a sword, a role's and a Chaos draw's too
         int ahead = 0;
         auto next = [&](const MatchConfig& c) {          // one made ahead in the gap if there is one (for this tier and weapons only), else made now
             if (c.gear == Gear::HostKit) return ownLoadout_[0];   // #777: the host's own upload, for everyone (empty: the host has none)
@@ -8174,6 +9089,7 @@ private:
                 sc.weapons = ChaosWeapons(roleSeed_, roleRematch_, Roster::EntityForSlot(slot));
                 HSM_LOG("host: chaos: entity %u gets %s gear with %s", unsigned(Roster::EntityForSlot(slot)), TierName(sc.tier), WeaponMaskName(sc.weapons).c_str());
             }
+            if (swords) sc.weapons = SwordsOnly(sc.weapons);
             const bool share = byRole ? sc.gear == Gear::Mirror : mode == Regear::Shared;
             std::vector<uint8_t> blob;
             if (share) {
@@ -8278,7 +9194,7 @@ private:
         m.friendlyFire = c.friendlyFire; m.phase = uint8_t(match_.phase()); m.timeLeftMs = match_.TimeLeftMs(now);
         m.winner = int16_t(match_.winner());
         m.gear = uint8_t(c.gear); m.tier = c.tier;
-        m.freeCam = c.freeCam ? 1 : 0;                   // rev 36: the dead may fly a free camera
+        m.freeCam = 1;                                   // rev 36: the dead may fly a free camera; always on since 0.9.0, the byte is written as on
         m.crossbows = c.crossbows;                       // rev 36: the Crossbows row
         m.forceStrength = ForcesBuild(cfg_.forceStrength, match_.phase() != MatchPhase::Idle ? match_.config() : StartConfig()) ? 1 : 0;    // rev 34: every machine builds its players the way the host does
         m.round = uint16_t(match_.round()); m.roundGapLeftMs = match_.RoundGapLeftMs(now); m.roundWinner = match_.roundWinner();
@@ -8297,7 +9213,7 @@ private:
             m.physics[kPinnedDeadWeight] = w[kPinnedDeadWeight];
             m.physics[kPinnedWeaponWeight] = w[kPinnedWeaponWeight];
         }
-        m.waveBreakS = c.waveBreakS; m.clearGroundMin = c.clearGroundMin; m.clearCount = clearCount_;
+        m.waveBreakS = c.waveBreakS; m.clearGroundMin = ClearGroundWireMin(c.clearGroundS); m.clearCount = clearCount_;
         m.syncMode = uint8_t(nextSync_);   // rev 29: the mode the next map runs
         if (IsBotFormat(c.format)) {                     // the break between waves in the Duel gap's fields (InWaveBreak)
             m.roundGapLeftMs = match_.BreakLeftMs(now);
@@ -8309,9 +9225,11 @@ private:
             if (match_.bracket().Current(g)) { m.fightWinsA = uint8_t(std::min(match_.PairingWins(g.a), 3)); m.fightWinsB = uint8_t(std::min(match_.PairingWins(g.b), 3)); }
         } else if (c.format == Format::PitBridgeDuel) { m.queueOrder = match_.queue().order(); m.streak = match_.queue().streak(); }   // rev 37: the queue
         for (const auto& [key, score] : match_.scores()) if (m.scores.size() < kMaxWillies) m.scores.push_back({int16_t(key), int16_t(score)});
-        for (const RosterMember& r : roster_.members())
+        for (const RosterMember& r : roster_.members()) {
+            const bool back = !BodyAllowed(bench_, r.entity, travelSeq_);   // rev 49: back in the lobby, shown so and not as dead
             m.fighters.push_back({r.entity, match_.TeamOf(r.entity), int16_t(match_.Kills(r.entity)), int16_t(match_.Deaths(r.entity)), r.name,
-                                  PingOfSlot(r.slot), match_.Alive(r.entity), DownInRound(r.entity), ScoreId(r.entity), RoleIdOf(r.entity)});
+                                  PingOfSlot(r.slot), match_.Alive(r.entity) && !back, DownInRound(r.entity), ScoreId(r.entity), RoleIdOf(r.entity), back});
+        }
         for (auto& [e, ref] : bots_)
             if (m.fighters.size() < kMaxWillies)
                 m.fighters.push_back({e, match_.TeamOf(e), int16_t(match_.Kills(e)), int16_t(match_.Deaths(e)), BotSide(e) == StockSide::Ally ? "Ally" : "Bot", 0,
@@ -8328,7 +9246,7 @@ private:
         while (feed_.size() > kFeedRows) feed_.pop_front();
     }
     // This machine's fighter comes back in generated gear.
-    void NewGearNotice(uint8_t tier) { banner_.Fire("NEW GEAR", "TIER " + std::to_string(tier), style::kWarn, NowMs()); }
+    void NewGearNotice(uint8_t tier) { banner_.NewGear(tier, NowMs()); }
 
     // The team kit (match/hsm_team_kit.h). A fighter with a team is put in its colours on this machine's own copy: right
     // after a spawn (the armour attaches over the first moments: a short burst of tries), whenever its gear changes (the
@@ -8743,14 +9661,9 @@ private:
     // front, as the arrows are. True when the mode changed this frame.
     bool SpectateCameraInput(UObject* followed, float dt) {
         const bool wasFree = camState_.free();
-        camState_.SetAllowed(IsHost() ? match_.config().freeCam : info_.freeCam != 0);   // the host turning it off ends a flight at once
-        bool ours = false;
-        if (!ui::Typing() && !adapter_.PauseMenuOpen() && !game::fetchlink::KeysHeld()) {
-            DWORD pid = 0;
-            if (HWND w = GetForegroundWindow()) GetWindowThreadProcessId(w, &pid);
-            ours = pid == GetCurrentProcessId();
-        }
-        auto down = [&](int vk) { return ours && (GetAsyncKeyState(vk) & 0x8000) != 0; };
+        camState_.SetAllowed(true);                      // always on since 0.9.0: no row turns it off, and an older host's 0 in MatchInfo.freeCam is ignored
+        const bool ours = GameWindowInput();
+        auto down =[&](int vk) { return ours && (GetAsyncKeyState(vk) & 0x8000) != 0; };
         bool changed = false;
         const bool f = down('F');
         if (f && !spectateFDown_ && spectating_) changed = ToggleFreeCam(followed);
@@ -8799,7 +9712,7 @@ private:
         w.matchLevel = MatchLevel();
         w.fighting = info_.phase != uint8_t(MatchPhase::Idle) && info_.phase != uint8_t(MatchPhase::Results);
         w.alive = own && !adapter_.IsDead(own) && !spectating_ && !ownDeadPending_;
-        w.allowed = IsHost() ? match_.config().freeCam : info_.freeCam != 0;
+        w.allowed = true;                                // the free camera is always on (0.9.0); an older host's MatchInfo.freeCam 0 is ignored
         w.busy = ui::Typing() || ui::MenuTyping() || ui::PanelOpen() || modPanel_ || settingsVisit_ || adapter_.PauseMenuOpen();
         w.ready = adapter_.SetPhotoUnpaused(own, stockFlowGuard_);
         const game::Adapter::PhotoState s = adapter_.PhotoMode(own);
@@ -8812,9 +9725,9 @@ private:
             static const char* const kWhy[] = {"it may open", "it is open", "no match runs", "my fighter is down", "the host's Free cam row is off",
                                                "a mod screen has the keyboard, or photo mode only just closed", "its pause switches could not be turned off"};
             const size_t k = size_t(asked - 1);
-            const char* line = freecam::PhotoKeyLine(freecam::PhotoKey(asked - 1));
+            const notices::Id say = freecam::PhotoKeyNotice(freecam::PhotoKey(asked - 1));
             HSM_LOG("photo: the key did nothing (%s)", k < std::size(kWhy) ? kWhy[k] : "?");
-            if (*line) ui::ShowLine("HSMMod", style::kBone, line);
+            if (say != notices::Id::Count) ui::Notify(say);
         }
         if (w.open && !was) {                            // it opened: what my fighter holds is let go, then its input is held
             int released = 0;
@@ -9034,6 +9947,11 @@ private:
     // step this machine may be the lobby owner while its transport is still a client's) and waits for MigrationTick.
     bool OnLobbyOwnerChanged(steam::SteamId old, steam::SteamId now) {
         if (!cfg_.hostMigration || SteamServer()) return false;
+        if (!MigrateWhenHostGone(cfg_.hostMigration, TogetherRun(), hostEndedRun_)) {
+            HSM_LOG("session: the host left the shared Crypts run%s: no host migration; back to the menu", hostEndedRun_ ? " and ended it" : "");
+            if (hostEndedRun_ && crypt::ResultsShowing(NowMs(), cryptResultsAt_)) menuAfterResults_ = true;   // ClientTick goes there after them
+            return false;
+        }
         HSM_LOG("session: host migration: the lobby owner changed (%s)", now == steam::MySteamId() ? "now this machine" : "another member");
         BeginMigration(old);
         return true;
@@ -9044,8 +9962,12 @@ private:
     bool MigrateAfterHostLoss() {
         if (!cfg_.hostMigration || !steamMode() || SteamServer() || !lobby_.InLobby()) return false;
         if (migration_.Active()) return true;
+        if (!MigrateWhenHostGone(cfg_.hostMigration, TogetherRun(), hostEndedRun_)) {
+            HSM_LOG("client: host lost in the shared Crypts run%s: no host migration", hostEndedRun_ ? " (it ended the run)" : "");
+            return false;
+        }
         HSM_LOG("client: host lost; host migration: waiting up to %u s for Steam to name a new host", kMigrationOwnerWaitMs / 1000);
-        ui::ShowLine("HSMMod", style::kBone, "The host is gone. Waiting for a new host...");
+        ui::Notify(notices::Id::HostGone);
         BeginMigration(hostSteam_);
         return true;
     }
@@ -9054,7 +9976,7 @@ private:
         if (!migration_.Active()) {
             migration_.Start(oldHost, NowMs());
             // The map to open again (the new host) or to wait in (the others): the fight level the old host had open.
-            migrateLevel_ = InFightLevel() && !IsSoloLevel(currentLevel_) ? currentLevel_ : std::string();   // never a Crypts run
+            migrateLevel_ = MigrationReopenLevel(InFightLevel(), IsSoloLevel(currentLevel_), currentLevel_, benchedFrom_);   // never a Crypts run; a guest back in the lobby reopens the level it left
             migrateBoard_ = ScoreCarryFrom(info_);   // the last MatchInfo heard: the new host restores these scores
             migrateObjects_ = props_.ExportKnown();  // the spawned objects this machine knows by id: the new host adopts them
             migrateReplica_ = (HostPhysics() || ownLeased_) && !IsHost() && InFightLevel();   // my fighter here is a replica: it cannot play on
@@ -9070,14 +9992,14 @@ private:
             case MigrationStep::BecomeHost:
                 HSM_LOG("session: host migration: this machine is the new host%s%s", migrateLevel_.empty() ? "" : "; reopening ",
                         migrateLevel_.c_str());
-                ui::ShowLine("HSMMod", style::kBone, "The host left. You are the new host.");
+                ui::Notify(notices::Id::NewHostSelf);
                 ResetNetwork("host migration");
                 OnLobbyEntered();                 // as the owner: a host transport, every member allowed, BecomeHost next tick
                 lobby_.SetPassword(lobby_.Password());   // the password the old host handed us: the lobby stays locked (open when we never got one)
                 break;
             case MigrationStep::FollowHost:
                 HSM_LOG("session: host migration: following the new host");
-                ui::ShowLine("HSMMod", style::kBone, "The host left. " + NewHostName(owner) + " is the new host.");
+                ui::Notify(notices::NewHost(NewHostName(owner)));
                 ResetNetwork("host migration");
                 OnLobbyEntered();                 // a client of the new owner: Hello, Welcome (migration_.Welcomed)
                 break;
@@ -9085,6 +10007,7 @@ private:
                 HSM_LOG("session: host migration gave up (%s); returning to the main menu",
                         !cfg_.hostMigration ? "off" : !lobby_.InLobby() ? "left the lobby" : "no new host in time");
                 migrateLevel_.clear(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); migrateReplica_ = false;
+                ui::NoticeClear("migration");     // "waiting for a new host" is over
                 if (lobby_.InLobby() || net_ || InFightLevel()) ReturnToMenuAfterHostLoss();
                 return;
             default: break;
@@ -9103,6 +10026,17 @@ private:
             else if (map) StartOnMap(map->path);
             else if (!level.empty()) HSM_LOG("session: host migration: %s is not a catalog map; staying here", level.c_str());
         }
+    }
+
+    // This machine leaves the lobby on its own and opens the menu itself: a host migration under way has nothing left to
+    // follow. Left running, MigrationTick gave up on the menu's first tick ("left the lobby") and opened the menu a second
+    // time with the fight level's freed game mode (public #855).
+    void EndMigrationOnLeave(const char* why) {
+        if (!migration_.Active()) return;
+        HSM_LOG("session: host migration ended: this machine left the lobby (%s)", why);
+        migration_.Clear();
+        migrateLevel_.clear(); migrateBoard_ = ScoreCarry{}; migrateObjects_.clear(); migrateReplica_ = false;
+        ui::NoticeClear("migration");     // "waiting for a new host" is over
     }
 
     void ReturnToMenuAfterHostLoss() {
@@ -9143,6 +10077,15 @@ private:
         if (rejected_) { const RejectReason why = *rejected_; rejected_.reset(); std::string detail; detail.swap(rejectedDetail_); OnRejected(why, detail); return; }
         if (modMapHost_ && !modMapChecked_) { ModMapTick(); if (!net_) return; }   // modded maps: the scan or a hash finished
         if (refuseNoHook_) { refuseNoHook_ = false; if (!ScriptHookMissing()) { HSM_LOG("client: refusing a host whose sync mode this build removed"); LeaveSession(); } return; }
+        // The host left the shared run and sent its results: they stay on screen for their time, then the main menu.
+        if (hostGone && hostEndedRun_ && !menuAfterResults_ && crypt::ResultsShowing(NowMs(), cryptResultsAt_)) {
+            menuAfterResults_ = true;
+            HSM_LOG("client: the host left the shared Crypts run: its results stay on screen for %u s, then the main menu", crypt::kRunResultsMs / 1000);
+        }
+        if (menuAfterResults_) {
+            if (crypt::ResultsShowing(NowMs(), cryptResultsAt_)) return;
+            menuAfterResults_ = false; hostGone = true;
+        }
         if (hostGone) { if (!MigrateAfterHostLoss()) ReturnToMenuAfterHostLoss(); return; }
         if (!welcomed_ && hostPeer_ && NowMs() >= nextHello_) SendHello();   // the first message of a Steam session can be lost
         // Again when the report changes, or when the update check answers after the join (official-only lobbies need it).
@@ -9194,6 +10137,7 @@ private:
         p.manager = !managers.empty();
         if (p.manager) GetBool(managers.front(), "Player Spawned", p.playerSpawned);
         p.pawn = adapter_.PlayerWillie(0) != nullptr;
+        { const LevelProbe lp = LayoutProbe(); p.layout = lp.layout; p.layoutPending = lp.layoutPending; }   // a shared Crypts map
         const double now = game::SteadyNowMs();
         if (p.manager && !managerProbed_) {
             // Once per level: the delay the manager waits before it spawns the player (a Blueprint default the RE
@@ -9214,7 +10158,8 @@ private:
         }
         if (!levelGate_.Update(now, p)) return false;
         const char* why = levelGate_.why() == LevelSpawnGate::Why::LevelSpawned ? "the level spawned its player"
-                        : levelGate_.why() == LevelSpawnGate::Why::NoManager ? "no level manager" : "timed out waiting for the level";
+                        : levelGate_.why() == LevelSpawnGate::Why::NoManager ? "no level manager"
+                        : levelGate_.why() == LevelSpawnGate::Why::LayoutShown ? "the shared Crypts rooms are in" : "timed out waiting for the level";
         const LevelProbe& last = levelGate_.lastProbe();
         if (levelGate_.why() == LevelSpawnGate::Why::TimedOut)
             HSM_LOG("client: level start-up over (%s, still waiting for %s; last probe: manager %d, Player Spawned %d, pawn %d); spawning fighters",
@@ -9229,6 +10174,12 @@ private:
     // (at most every RecreateLimiter::kRetryMs per entity); the servo then snaps it onto its owner's stream.
     void RecoverLostPuppets() {
         const double now = game::SteadyNowMs();
+        // #3906: a stand-in whose bodies left the world (NaN) is destroyed here and counts as lost, so it is made again below.
+        for (const uint8_t e : standIns_.TakeDiverged()) {
+            if (e == world_.myEntity() || !puppets_.count(e) || !recreate_.Allow(e, now)) continue;
+            DestroyPuppet(e);
+            if (world_.MarkLost(e)) HSM_LOG("client: entity %u's stand-in left the world; re-creating it", e);
+        }
         for (auto it = puppets_.begin(); it != puppets_.end();) {
             const uint8_t e = it->first;
             if (adapter_.StillValid(it->second.obj, it->second.index) || !recreate_.Allow(e, now)) { ++it; continue; }
@@ -9357,7 +10308,7 @@ private:
 
     // CHANGE LOADOUT, client side: the same rule on what this client knows, then the passport as LoadoutChange chunks. It is
     // kept (changeBytes_) and becomes the loadout this client's own body respawns in only when the host's verdict accepts it.
-    std::string ClientChangeLoadout() {
+    std::string ClientChangeLoadout(NoticeKind& kind) {
         const uint32_t now = NowMs();
         const LoadoutVerdict v = ClientLoadoutVerdict();
         if (!MatchLevel() || !welcomed_) return "Not in a match";
@@ -9372,6 +10323,7 @@ private:
         changeLimit_.Used(now);
         changeBytes_ = std::move(bytes);
         HSM_LOG("loadout: change sent (%zu bytes, %zu chunks)", changeBytes_.size(), chunks);
+        kind = NoticeKind::Info;   // on its way: the host's answer replaces this line (OnLoadoutResult)
         return "Sending your loadout to the host...";
     }
 
@@ -9385,7 +10337,7 @@ private:
     void OnLoadoutResult(LoadoutVerdict v) {
         if (LoadoutAllowed(v) && !changeBytes_.empty()) lastUpload_ = std::move(changeBytes_);   // the next own respawn wears it
         changeBytes_.clear();
-        loadoutNote_ = LoadoutVerdictText(v); loadoutNoteUntil_ = NowMs() + 8000;
+        ui::Notify(notices::LoadoutAnswer(LoadoutAllowed(v) ? NoticeKind::Done : NoticeKind::Warn, LoadoutVerdictText(v)));
         HSM_LOG("loadout: the host answered: %s", LoadoutVerdictLog(v));
     }
 
@@ -9398,13 +10350,14 @@ private:
         const LoadoutVerdict verdict = IsHost() ? HostLoadoutVerdict(HostEntity(), NowMs()) : ClientLoadoutVerdict();
         v.available = LoadoutAllowed(verdict);
         v.hint = v.available ? "" : LoadoutVerdictText(verdict);
-        if (!loadoutNote_.empty() && !DueAt(NowMs(), loadoutNoteUntil_)) v.note = loadoutNote_;
         return v;
     }
-    static constexpr const char* kGatherNoChange = "The Crypts gather is on: you fight in what you gather";
+    static constexpr const char* kGatherNoChange = "A Crypts run is on: you fight in what you gather";
+    // The answer is a notice (key "loadout"): a refusal warns, "sending" informs, a change that took is done.
     std::string ChangeLoadout() override {
-        std::string line = GatherOn() ? std::string(kGatherNoChange) : IsHost() ? HostChangeLoadout() : ClientChangeLoadout();
-        loadoutNote_ = line; loadoutNoteUntil_ = NowMs() + 8000;
+        NoticeKind kind = NoticeKind::Warn;
+        const std::string line = GatherOn() ? std::string(kGatherNoChange) : IsHost() ? HostChangeLoadout(kind) : ClientChangeLoadout(kind);
+        ui::Notify(notices::LoadoutAnswer(kind, line));
         return line;
     }
 
@@ -9749,7 +10702,7 @@ private:
         switch (t) {
             case MsgType::Welcome: {
                 Welcome w; Decode(d, n, w);
-                welcomed_ = true; mySlot_ = w.slot; world_.SetMyEntity(w.entity);
+                welcomed_ = true; hostEndedRun_ = false; mySlot_ = w.slot; world_.SetMyEntity(w.entity);
                 clientNextSync_ = SyncMode(w.syncMode); SetSyncMode(clientNextSync_);   // the host's level runs it; a later one may differ (MatchInfo)
                 if (!VmHookReady()) { refuseNoHook_ = true; break; }   // handled after the pump (ScriptHookMissing / OnRejected)
                 hostHasFighter_ = !(w.flags & kWelcomeNoHostFighter);
@@ -9797,6 +10750,10 @@ private:
             case MsgType::ProgressionResult: { ProgResultMsg m; if (Decode(d, n, m)) OnProgResult(m); break; }   // rev 40: the fight just over, on this career
             case MsgType::LobbySecret: { LobbySecretMsg m; if (Decode(d, n, m)) lobby_.RememberPassword(m.password); break; }   // the host's latest password
             case MsgType::LevelSeed: { dice::LevelSeedMsg m; if (Decode(d, n, m)) game::shareddice::SetSeed(m.seed); break; }   // the host's dice for the level it sent us to
+            case MsgType::CryptRoom: { crypt::CryptRoomMsg m; if (Decode(d, n, m)) OnCryptRoom(m); break; }   // rev 50: a room of the host's dungeon
+            case MsgType::CryptDoor: { crypt::CryptDoorMsg m; if (Decode(d, n, m) && !IsHost()) game::cryptsloot::OnDoor(m, false); break; }   // rev 50: a door, gate or barricade and its state
+            case MsgType::CryptLoot: { crypt::CryptLootMsg m; if (Decode(d, n, m) && !IsHost()) game::cryptsloot::OnLoot(m, false); break; }
+            case MsgType::CryptRun: { crypt::CryptRunMsg m; if (Decode(d, n, m) && !IsHost() && m.kind == crypt::kRunResults) { if (m.reason == crypt::RunEnd::HostLeft) hostEndedRun_ = true; ShowCryptResults(m); } break; }   // rev 50: the shared run is over   // rev 50: a placed item of the host's rooms
             case MsgType::ModMap: {
                 ModMapMsg m; if (!Decode(d, n, m)) break;
                 modMapHost_ = m; modMapChecked_ = false; modMapApproved_.clear(); pendingTravel_.reset();
@@ -9834,6 +10791,7 @@ private:
                 if (sp.entity >= kFirstBotEntity)   // #37: a bot of the host's
                     HSM_LOG("client: bot entity %u spawn received (team %d)", sp.entity, int(sp.team));
                 if (world_.OnSpawn(sp)) DestroyPuppet(sp.entity);
+                props_.NoteGift(sp.entity, sp.flags);   // #3910
                 if (sp.entity == world_.myEntity()) OnOwnSpawn(sp);
                 break;
             }
@@ -9858,6 +10816,7 @@ private:
                 if (MatchLevel()) {
                     adapter_.SetBuild(ForcedWeight(Format(info_.format), Gear(info_.gear), info_.tier), info_.forceStrength != 0 && !lobby_.Progression(), int(info_.tier));
                     adapter_.SetBare(IsBare(Gear(info_.gear)) || ScenarioBare(lobby_.config()));   // the scenario: the lobby's hsm_scen
+                    adapter_.SetBlossfechten(ScenarioBlossfechten(lobby_.config()));
                 }
                 banner_.Observe(ShownInfo(), world_.myEntity(), infoAt_);
                 if (dropWatch_.Observe(Format(info_.format), info_.phase, info_.round)) {   // F5: after the own body's armour is on
@@ -9953,6 +10912,7 @@ private:
     // host
     bool hostPending_ = false, refuseNoHook_ = false;
     HostMigration migration_;      // survives ResetNetwork: it spans the old session and the new one
+    bool joinSoundDue_ = false;    // a member joined in the lobby part of this tick: the sound plays once the level resolved
     std::string migrateLevel_;     // the fight level open when the old host left
     ScoreCarry migrateBoard_;      // its scores by SteamID, until the new host's match starts (ResetNetwork drops it outside a migration)
     std::vector<ObjectAnnounceMsg> migrateObjects_;   // the spawned objects this machine knew when the host left (the new host adopts them)
@@ -10026,6 +10986,7 @@ private:
     struct CoopStart { FVector at; double yaw = 0; };
     std::optional<CoopStart> coopStart_;              // host: a Progression fight's start, where the stock spawner put the player
     UObject* hostWillie_ = nullptr;
+    int cryptEnemyWaitLogs_ = 0;                             // PR C: the log of an enemy waiting for a free bot entity, every 20th scan
     bool adoptStock_ = false, wavesEnabled_ = false, sidesValid_ = false, infoDirty_ = false, progression_ = false;
     bool oneFight_ = false;                          // this level holds a Progression fight: the HUD shows one fight, no waves
     bool progressionPaidThisFight_ = false;          // host: this Progression fight's purse has been decided (#620)
@@ -10035,6 +10996,7 @@ private:
     uint32_t nextCorpseSweep_ = 0;
     BotWatch botWatch_;                              // host: the wave bots' watchdog (BotWatchdogTick)
     std::map<uint8_t, uint32_t> botKillAt_;          // bots the watchdog killed, and when
+    unsigned botLoseLogged_ = 0;                     // NoteBotLoseMatch lines logged this level (at most 20)
     uint32_t nextBotWatch_ = 0, waveProgressAt_ = 0, waveSig_ = 0;
     uint32_t nextScan_ = 0, nextInfo_ = 0, nextDraw_ = 0, nextIdleLog_ = 0;
     uint32_t gateOpenAt_ = 0, lastForeignPurgeAt_ = 0;   // client: the level's start-up ended; the last purge of local-only fighters
@@ -10042,6 +11004,9 @@ private:
     std::vector<Point3> sidePoints_;
     SpawnArea sidesArea_;                     // AreaOf(sidePoints_)
     std::vector<int8_t> sides_;
+    bool depthSides_ = false;                 // sides_ is a shared Crypts map's entrance/deeper split (CryptsStartSides)
+    size_t botSpread_ = 0;                    // its bots' next step of the spread walk (crypts::SpreadPick)
+    std::string cryptsStartLogged_;           // the level CryptsStartSides last logged for
     // match (both)
     MatchInfo info_;
     uint32_t infoAt_ = 0;     // when info_ was made (host) or arrived (client), for Extrapolate
@@ -10252,7 +11217,7 @@ private:
     PendingShare pendingShare_;                   // a crash report filed before any session: shared with the next one
     static constexpr size_t kCrashTailBytes = 256u << 10;   // how much of HSMMod.prev.log is read for a crash line
     bool crashChecked_ = false, autoAttachDue_ = false;
-    std::deque<std::string> reportHeld_;          // outcome lines waiting for the chat or the multiplayer page (ReportOutcomeToPlayer)
+    std::deque<std::pair<std::string, notices::Msg>> reportHeld_;   // outcomes waiting for the chat or the multiplayer page: the full line, and its notice (ReportOutcomeToPlayer)
     std::string reportStatus_; uint32_t reportStatusSeq_ = 0;   // the last outcome told, for the menu's note
     uint32_t lastReportAt_ = 0; bool reportedOnce_ = false;
     uint32_t sessionGen_ = 0;                     // counts sessions (bumped when one starts and when it ends)
@@ -10271,15 +11236,16 @@ private:
     uint32_t xbowDraws_ = 0;
     std::vector<uint8_t> changeBytes_;       // client: the passport of a change the host has not answered yet
     LoadoutChangeLimiter changeLimit_, hostChangeLimit_;   // one CHANGE LOADOUT per kLoadoutChangeGapMs on this machine
-    std::string loadoutNote_;                // the last CHANGE LOADOUT outcome, shown a few seconds in the Esc menu
-    uint32_t loadoutNoteUntil_ = 0;
+    uint32_t lobbyPageUntil_ = 0;            // back in the menu with the lobby kept: until when the main menu is to open the lobby page (TakeLobbyPage)
+    SlotBench bench_;                        // host: the guests who went back to the lobby, by the travel they left (session/hsm_bench.h)
+    std::string benchedFrom_;                // guest: the fight level this machine left for the lobby, until the host's next travel
     std::map<uint8_t, ActorRef> puppets_;
     LevelSpawnGate levelGate_;                   // owner sync: the level's start-up cleanup is over (hsm_level_gate.h)
     uint32_t nextGateProbe_ = 0;
     bool managerProbed_ = false;   // this level's manager seen by ClientGateOpen (its Level Load Delay logged)
     bool pauseLiftArmed_ = false;                    // LiftPauseFromWidgetTick: set per tick, cleared on travel
     uint32_t lastPauseButton_ = 0;                   // PauseReportTick's throttle (ms)
-    bool modPauseMatch_ = false;                     // mod_pause=1 and a session match: Esc is the mod's (ModPauseTick)
+    bool modPauseMatch_ = false;                     // a session match: Esc is the mod's (ModPauseTick)
     bool modPanel_ = false;                          // the mod's pause panel is open
     bool settingsVisit_ = false;                     // SETTINGS opened the game's screen; the panel waits out of sight
     bool loadoutVisit_ = false;                      // loadout_trial: LOADOUT opened the game's inventory screen; the panel waits out of sight
@@ -10288,7 +11254,7 @@ private:
     uint32_t loadoutVisitAt_ = 0;
     uint32_t settingsVisitAt_ = 0, quitDesktopAt_ = 0;   // quitDesktopAt_: QUIT TO DESKTOP left the session, the game closes once the save is back
     bool escPauseEvent_ = false;                     // BlockPauseInput saw the game's pause event (Esc, P, Start)
-    bool escBusyWas_[5] = {};                        // last tick's chat, text box, Fetch, lobby page and settings screen (an Esc that closes one is not ours)
+    bool escBusyWas_[6] = {};                        // last tick's chat, text box, Fetch, lobby page, settings screen and open dropdown (an Esc that closes one is not ours)
     EscPress escPress_;
     uint32_t timeInputBlocked_ = 0, timeReset_ = 0;
     double nextListenerMs_ = 0;
@@ -10325,7 +11291,30 @@ private:
     uint32_t gatherClockSentAt_ = 0, kitSnapAt_ = 0, gatherMenuAt_ = 0, kitReadFails_ = 0;
     uint16_t gatherRunSeq_ = 0;                      // client: the gather this machine opened (or waits for)
     bool kitSnapNever_ = true, gatherOpening_ = false, gatherMinuteWarned_ = false;
+    crypt::RoomList cryptRooms_;                  // the shared Crypts run's rooms: the host's director's (read by crypts_coop), or the client's received
+    crypt::BuiltSet cryptBuilt_;                  // client: which of them are built (CryptRoomsBuilt reports the prefix)
+    std::map<uint8_t, uint32_t> cryptWaitLogAt_;  // host: when each waiting client's "waits" line was last logged
+    crypt::ReadyTracker cryptReady_;              // host: what each client has built, and who may have a fighter yet (#3846)
+    uint16_t cryptAckSent_ = 0;                   // client: the last prefix count sent
+    crypt::RunBook runBook_;                      // host: how each player's shared run went (exit, down, items)
+    crypt::CryptRunMsg cryptResults_;             // the results of the last shared run (every machine)
+    uint32_t cryptResultsAt_ = 0;                 // when this machine started showing them (0: none showing)
+    uint8_t kitItems_ = 0;                        // this machine's last kit's carried things, read while alive
+    bool graveRun_ = false;                       // the gather is Grave Robbers: exit and death end a player's run, results and the lobby after
+    bool runHostLeft_ = false, runTimeUp_ = false;   // host: why the shared run ended
+    uint32_t leaveDueAt_ = 0;                        // host: LeaveSession waits until then for the run's results to go (kHostLeaveGraceMs)
+    bool hostEndedRun_ = false;                      // client: the host's results said it left the shared run (MigrateWhenHostGone)
+    bool menuAfterResults_ = false;                  // client: the host is gone; the main menu once its results had their time
+    bool togetherAlive_ = false;                  // Together: this machine's player was up at the last TogetherTick (kits are read from the living)
     bool tierHeldLogged_ = false;                 // CryptsTierTick: "held at" logged for this run
+    uint8_t runTierCap_ = kCryptsTierCap;         // this run's cap: the lobby's Dungeon tier row (CryptsRunCap), read at OpenOwnCrypts
+    struct KeyDoor { UObject* obj = nullptr; int32_t index = -1; DoorSpot spot; };
+    std::vector<KeyDoor> keyDoors_;               // KeyMarkerTick: the gate doors seen this run while a key was held
+    std::string keyHeld_, keyLine_;               // HeldCryptsKey's last answer ("": none); the key marker's chip text
+    bool keyLineTold_ = false;                    // this run has had the notice that says what "Locked room not found yet" means
+    std::vector<std::string> keyHandSeen_;        // classes seen in a hand this run (logged once each)
+    uint32_t keyScanAt_ = 0, keyLockAt_ = 0, keyLineAt_ = 0, keyLogAt_ = 0;
+    int keyLoggedDoors_ = -1, keyLoggedLocked_ = -1;
     uint32_t tierLowered_ = 0, tierRoomsAt_ = 0;   // how often a tier above the cap was brought down; when the rooms were last held
     HelloWatch helloWatch_;
     std::set<uint32_t> helloWaiting_;   // peers whose Hello is late but who are still lobby members (logged once)
@@ -10336,10 +11325,13 @@ private:
     int savedFoes_ = -1;
     uint32_t probeSince_ = 0;   // InputProbeTick: when the fight level loaded, 0 once logged
     uint32_t levelLoadedAt_ = 0;
+    bool readyHeld_ = false;                         // client: Ready waits for a shared Crypts map's rooms (ReadyHoldTick)
     uint32_t pauseCursorAt_ = 0, pauseCursorFixes_ = 0;
     uint32_t inputFixAt_ = 0, nextHealth_ = 0, nextHello_ = 0, hellosSent_ = 0;
     uint32_t menuInputAt_ = 0;
     bool inputFixRepeat_ = false, pauseMenuWas_ = false, menuInputRepeat_ = false;
+    RespawnInputFix respawnInput_;   // #3490: the repeated game-input restores after a respawn of my fighter
+    uint32_t lastRespawnAt_ = 0, respawnWatchAt_ = 0, respawnWatchFixes_ = 0, respawnRestores_ = 0, respawnStateLogs_ = 0;
     SpectateCycler spectate_;
     uint8_t spectating_ = 0;
     std::atomic<UObject*> spectateBody_{nullptr};   // the dead body of the player while spectating_ (the input hook's swallow, freecam::SwallowLook)
@@ -10415,9 +11407,6 @@ private:
     uint32_t longFrameAt_ = 0;
     int longFrameLogs_ = 0;
     std::string longFrameLevel_;
-    uint32_t carnageNextAt_ = 0;                            // CarnageTick: the next look, and the bots alive at the last
-    int carnageAlive_ = 0;
-    bool carnageLogged_ = false;
     std::array<uint64_t, kPumpParts> pumpLookups_{};
     std::array<double, kPumpParts> pumpMs_{}, pumpMaxMs_{};   // Timed: per part, this window
     bool sampling_ = false;
@@ -10433,7 +11422,7 @@ UClass* g_gameModeClass = nullptr;
 }  // namespace
 
 bool StartMod(const Config& cfg) {
-    if (!Init()) return false;
+    if (!Init(cfg.forceUnknownBuild)) return false;
     game::SetStandInGripLock(cfg.standInGripLock);
     game::SetStandInTwoHandPose(cfg.standInTwoHandPose);
     game::SetStandInTwoHandLock(cfg.standInTwoHandLock);
@@ -10505,10 +11494,14 @@ bool StartMod(const Config& cfg) {
         return slowMo ? g_session->BlockTimeInput("slow motion") : g_session->PhotoModeKey(obj);
     });
     HookFunctionsMatching([](const std::string& n) { return n.rfind("InpActEvt_Pause_", 0) == 0; },
-                          [](UObject*, UFunction*, void*) { return g_session->BlockPauseInput(); });   // mod_pause: Esc is the mod's panel
+                          [](UObject*, UFunction*, void*) { return g_session->BlockPauseInput(); });   // Esc is the mod's panel
     HookFunctionsMatching([](const std::string& n) {   // Arena_Cutting_Map.cpp:54: the drop off the edge
         return n.rfind("BndEvt__Arena_Cutting_Map_TriggerVolume_0_", 0) == 0;
     }, [](UObject*, UFunction* fn, void* params) { return g_session->CuttingRingOut(fn, params); });
+    game::cryptscoop::InstallRule();     // the host's shared Crypts: rooms kept, remote players spared (inert until armed)
+    game::cryptslayout::InstallRule();   // shared Crypts maps: the dungeon off while a layout is armed
+    game::cryptsloot::InstallRule();     // the shared Crypts' loot: the host reads its loot points' products, a client rolls none
+    game::cryptslayout::SetNameForm(cfg.cryptsLayoutNames);
     if (!InstallProcessEventHook()) return false;
     HSM_LOG("session: started (%s)", RoleName(cfg.role));
     return true;

@@ -3,6 +3,7 @@
 // plain structs below; these functions decide every label, value, hint and which buttons show, so the UMG code only
 // maps them to widgets. Pure, no engine types.
 #pragma once
+#include "match/hsm_dropdown.h"
 #include "voice/hsm_voice_ui.h"
 #include <cmath>
 #include <cstdint>
@@ -44,10 +45,10 @@ struct MpPlayer {
 };
 
 // The Esc menu's CHANGE LOADOUT button (session/hsm_loadout_change.h): shown in a match, available when the rule allows it now;
-// hint says why not; note is the last outcome, for a few seconds.
+// hint says why not. The outcome of a click is a notice.
 struct MpLoadout {
     bool shown = false, available = false;
-    std::string hint, note;
+    std::string hint;   // why not, while it is dimmed; the answer to a click is a notice (notices::LoadoutAnswer)
 };
 
 struct MpVote {
@@ -62,10 +63,14 @@ struct MpVote {
 // ---------------------------------------------------------------- the voice block
 
 enum class VoiceRow : uint8_t { Reach, Cut, Mic, Device, Level, Key, Volume, Monitor, Count };
+// The rows that pick from a list (a dropdown): voice chat, microphone and device. The rest are toggles, numbers and the key.
+inline constexpr bool VoiceRowIsChoice(VoiceRow r) { return r == VoiceRow::Reach || r == VoiceRow::Mic || r == VoiceRow::Device; }
 struct VoiceRowView {
     VoiceRow id = VoiceRow::Reach;
     std::string label, value, hint;
     bool enabled = true;                  // the < > (or the toggle) may be used
+    std::vector<DropOption> choices;      // Voice chat, Microphone and Device: the dropdown's options (empty on the other rows)
+    size_t choice = 0;                    // the option picked now
 };
 struct VoiceScene {
     std::vector<VoiceRowView> rows;       // in VoiceRow order, those that apply
@@ -98,27 +103,42 @@ inline std::string MicLabel(voice::Mic m) {
     }
     return "Push to talk";
 }
+// The dropdowns of the three voice rows with named values. Option i of Voice chat is Reach(i), of Microphone Mic(i) (the order
+// the arrows stepped); Device lists the Windows default and then each device, at most kDropdownPool options.
+inline std::vector<DropOption> ReachChoices() {
+    std::vector<DropOption> v;
+    for (uint8_t i = 0; i < 3; ++i) v.push_back({ReachLabel(voice::Reach(i)), true, ""});
+    return v;
+}
+inline std::vector<DropOption> MicChoices() {
+    std::vector<DropOption> v;
+    for (uint8_t i = 0; i < 3; ++i) v.push_back({MicLabel(voice::Mic(i)), true, ""});
+    return v;
+}
+inline std::vector<DropOption> DeviceChoices(const std::vector<std::string>& devices) {
+    std::vector<DropOption> v{{voice::DeviceLabel(devices, -1), true, ""}};
+    for (size_t i = 0; i < devices.size() && v.size() < kDropdownPool; ++i) v.push_back({devices[i], true, ""});
+    return v;
+}
 
 // binding: the menu waits for the next key press for push to talk.
 inline VoiceScene BuildVoiceScene(const MpVoice& v, bool binding) {
     VoiceScene s;
     {
         VoiceRowView r; r.id = VoiceRow::Reach; r.label = "Voice chat"; r.value = ReachLabel(v.reach); r.enabled = !(v.server && v.host);
+        r.choices = ReachChoices(); r.choice = size_t(v.reach) < r.choices.size() ? size_t(v.reach) : 0;
         if (v.server && v.host) r.hint = "A server relays voice; it does not talk.";
-        else if (v.reach == voice::Reach::Off) r.hint = "You neither talk nor hear anyone.";
-        else if (v.reach == voice::Reach::Proximity) r.hint = "Voices fade with distance; the dead hear the dead.";
-        else r.hint = "You hear, and are heard by, every living player who also chose Everyone; others hear you by distance.";
+        else if (v.reach == voice::Reach::Proximity) r.hint = "The dead hear only the dead.";
+        else if (v.reach == voice::Reach::Everyone) r.hint = "Heard by everyone who also picks Everyone.";
         s.rows.push_back(r);
     }
     if (v.reach != voice::Reach::Off) {
         VoiceRowView r; r.id = VoiceRow::Cut; r.label = "Knocked out"; r.value = v.cut ? "Go quiet" : "Keep talking";
-        r.hint = v.cut ? "Your voice cuts out when you are knocked out or nearly." : "Your voice stays on while you are knocked out (the dead still talk only to the dead).";
         s.rows.push_back(r);
     }
     {
         VoiceRowView r; r.id = VoiceRow::Mic; r.label = "Microphone"; r.value = MicLabel(v.mic);
-        r.hint = v.mic == voice::Mic::Open ? "Sends whenever you speak above the threshold."
-               : v.mic == voice::Mic::PushToTalk ? "Sends while you hold the key." : "Nothing is sent; you still hear the others.";
+        r.choices = MicChoices(); r.choice = size_t(v.mic) < r.choices.size() ? size_t(v.mic) : 0;
         s.rows.push_back(r);
     }
     {
@@ -126,17 +146,16 @@ inline VoiceScene BuildVoiceScene(const MpVoice& v, bool binding) {
         const int idx = voice::DeviceIndex(v.devices, v.device);
         r.value = !v.device.empty() && idx < 0 ? v.device + " (not found)" : voice::DeviceLabel(v.devices, idx);
         r.enabled = !v.devices.empty();
-        r.hint = v.source.empty() ? std::string() : "Recording through " + v.source + ".";
+        r.choices = DeviceChoices(v.devices); r.choice = size_t(idx + 1) < r.choices.size() ? size_t(idx + 1) : 0;
         s.rows.push_back(r);
     }
     if (v.mic == voice::Mic::Open) {
         VoiceRowView r; r.id = VoiceRow::Level; r.label = "Threshold"; r.value = std::to_string(v.levelDb) + " dB";
-        r.hint = "Lower picks up quieter speech (and more noise).";
         s.rows.push_back(r);
     }
     if (v.mic == voice::Mic::PushToTalk) {
         VoiceRowView r; r.id = VoiceRow::Key; r.label = "Push-to-talk key"; r.value = binding ? "Press a key..." : voice::VoiceKeyLabel(v.key);
-        r.hint = binding ? "A letter, a digit, F1-F12 or a side mouse button. Esc cancels." : "Click to change.";
+        if (binding) r.hint = "Press a key. Esc cancels.";
         s.rows.push_back(r);
     }
     {
@@ -146,7 +165,7 @@ inline VoiceScene BuildVoiceScene(const MpVoice& v, bool binding) {
     {
         VoiceRowView r; r.id = VoiceRow::Monitor; r.label = "Hear myself"; r.value = v.monitor ? "On" : "Off";
         r.enabled = v.mic != voice::Mic::Off;
-        r.hint = "Plays back what would be sent, to check your microphone.";
+        if (!r.enabled) r.hint = "Turn the microphone on to hear yourself.";
         s.rows.push_back(r);
     }
     s.meter = voice::MeterFraction(v.micDb);
@@ -176,6 +195,21 @@ inline MpVoice StepVoice(MpVoice v, VoiceRow row, int dir) {
         case VoiceRow::Monitor: v.monitor = !v.monitor; break;
         case VoiceRow::Cut: v.cut = !v.cut; break;
         case VoiceRow::Key: case VoiceRow::Count: break;
+    }
+    return v;
+}
+
+// The settings after option `i` of a voice row's dropdown is picked (Reach and Monitor are applied by the caller through their
+// own calls, as for StepVoice). A row without a dropdown, or an option past the list, changes nothing.
+inline MpVoice WithVoiceChoice(MpVoice v, VoiceRow row, size_t i) {
+    switch (row) {
+        case VoiceRow::Reach: if (i < 3) v.reach = voice::Reach(i); break;
+        case VoiceRow::Mic: if (i < 3) v.mic = voice::Mic(i); break;
+        case VoiceRow::Device:
+            if (i == 0) v.device.clear();
+            else if (i - 1 < v.devices.size() && i < kDropdownPool) v.device = v.devices[i - 1];
+            break;
+        default: break;
     }
     return v;
 }

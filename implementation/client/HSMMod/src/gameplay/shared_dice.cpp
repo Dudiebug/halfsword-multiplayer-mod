@@ -1,5 +1,6 @@
 #include "gameplay/shared_dice.h"
 #include "log.h"
+#include "match/hsm_crypts_layout.h"
 #include "session/hsm_dice.h"
 #include "ue/engine.h"
 #include "ue/hook.h"
@@ -63,7 +64,9 @@ bool IsFighter(const UObject* o) {
     return false;
 }
 
-// A placed actor of a level, not a fighter. Its name is part of the map package, so it is the same on every machine.
+// A placed actor of a level, not a fighter. Its name is part of the map package, so it is the same on every machine. A room
+// the shared Crypts loader streamed keys by its instance's package name (crypts::DiceLevelName): two copies of one room
+// (Descent's Corridor_3 and Corridor_3_Exit) share the world's name and every actor name, and must not share their rolls.
 Actor* ActorOf(const UObject* obj) {
     static Actor none;
     const FName name = ObjectFName(obj);
@@ -75,7 +78,10 @@ Actor* ActorOf(const UObject* obj) {
     const UClass* lc = ClassOf(level);
     if (!IsDefaultObject(obj) && !IsGarbage(obj) && WasLoaded(obj) && lc && ObjectName(reinterpret_cast<const UObject*>(lc)) == "Level" && !IsFighter(obj)) {
         a.shared = true;
-        a.key = dice::IdentityKey(ObjectName(OuterOf(level)) + "/" + ObjectName(level) + "/" + ObjectName(obj));
+        const UObject* world = OuterOf(level);
+        const std::string worldName = ObjectName(world), packageName = ObjectName(OuterOf(world));   // named: the view points into them
+        const std::string_view keyLevel = crypts::DiceLevelName(worldName, packageName);
+        a.key = dice::IdentityKey(std::string(keyLevel) + "/" + ObjectName(level) + "/" + ObjectName(obj));
     }
     return &(g_actors[obj] = a);
 }

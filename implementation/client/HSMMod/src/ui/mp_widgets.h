@@ -4,14 +4,18 @@
 #pragma once
 #include "ui/umg.h"
 #include "match/hsm_mp_scene.h"
+#include "match/hsm_hud_style.h"
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace hsm {
 class Session;
-namespace ui::mp {
+namespace ui {
+class DropdownLayer;
+namespace mp {
 
 // Everything clickable: an invisible Button around a frame around a face (the multiplayer page's look).
 struct Card {
@@ -39,13 +43,22 @@ public:
     // A stepper's < or > (next: >): the game's ornate arrow on a bare button, or the text on a card when the art is not
     // loaded. Its label stays in the tree (empty beside the arrow) so callers treat it as any Flat.
     Flat MakeArrow(bool next, float size);
+    // A dropdown's closed control (docs/UI_STYLE.md): a card across its cell, the value centred. PaintPlate writes it.
+    Flat MakePlate(float size);
 private:
     Kit* kit_ = nullptr;
 };
 
 void Paint(Card& c);                          // per frame: the frame and face for the card's state and the mouse
+// The ink for text on a card: the picked ink once the card is chosen (it reads on the picked colour in every look), else base.
+inline Rgba InkOn(const Card& c, Rgba base) { return c.selected ? style::kMenuOnPicked : base; }
 bool Clicked(Card& c);
 void Live(Flat& f, bool on);                  // clickable, or dimmed
+// Dimmed, not disabled: a dimmed card still sees the click, so it can say why it does nothing.
+void Dimmed(Card& c, bool on);
+// A plate's text, picked look and ink: the value and a chevron (v closed, ^ open), the picked card while its list is open.
+// usable false (a row only the host changes, seen by a member): the plain value, dimmed, no chevron. Call Paint(f.card) after the poll.
+void PaintPlate(Flat& f, const std::string& value, bool open, bool usable);
 Slot AddV(Box& column, const Widget& child, float padTop);
 Slot AddH(Box& row, const Widget& child, float fill, float padRight);   // fill 0: the child's own width
 
@@ -53,13 +66,14 @@ Slot AddH(Box& row, const Widget& child, float fill, float padRight);   // fill 
 // HEAR MYSELF, and a level meter. Changes go straight to the session (and HSMMod.ini).
 class VoiceBlock {
 public:
-    bool Build(Maker& m, Box& column, float padTop);
+    // drops: the layer the voice chat, microphone and device lists open in (ui/dropdown.h); without one the rows keep their arrows.
+    bool Build(Maker& m, Box& column, float padTop, DropdownLayer* drops = nullptr);
     void Tick(Session& session);              // each frame while shown
     void Show(bool on);
     bool Binding() const { return binding_; }
     void StopBinding() { binding_ = false; }
 private:
-    struct RowView { Box box; Text label, value, hint; Flat prev, next, bind; };
+    struct RowView { Box box; Text label, value, hint; Flat prev, next, bind, plate; };
     void PollBinding(Session& session, const MpVoice& v);
     Box root_;
     std::array<RowView, size_t(VoiceRow::Count)> rows_;
@@ -70,11 +84,12 @@ private:
     Text meterText_, note_;
     bool binding_ = false;
     std::vector<int> heldAtBind_;             // keys already down when binding began (they must be let go first)
+    DropdownLayer* drops_ = nullptr;
 };
 
 // The Esc menu in a multiplayer match: a full-screen panel on the stock pause menu, which GAME MENU shows again
-// (Layout::Overlay), or the MULTIPLAYER MENU page of the mod's own pause panel (Layout::Pause, ui/pause_panel.h): the same
-// players, voice and network tabs, with BACK and CHANGE LOADOUT in the footer and the pause panel's buttons left out.
+// (Layout::Overlay), or the PLAYERS page of the mod's own pause panel (Layout::Pause, ui/pause_panel.h): the players and
+// network tabs (the voice settings are in MOD SETTINGS), with BACK TO MENU alone in the footer.
 class EscPanel {
 public:
     enum class Action : uint8_t { None, Resume, GameMenu, ReportBug, Leave, Back };
@@ -104,14 +119,16 @@ private:
     MpVote vote_;
     Text alone_;
     VoiceBlock voice_;
+    std::shared_ptr<DropdownLayer> drops_;    // the Esc menu's own layer (Layout::Overlay: its VOICE tab opens lists)
     std::array<Text, 10> netLines_;
-    Flat resume_, loadout_, gameMenu_, report_, help_, leave_, back_;   // loadout_: CHANGE LOADOUT (session/hsm_loadout_change.h)
+    Flat resume_, loadout_, gameMenu_, report_, help_, leave_, back_;   // loadout_: CHANGE LOADOUT (session/hsm_loadout_change.h; the overlay's)
     Layout layout_ = Layout::Overlay;
-    Text loadoutNote_;   // help_: HELP IMPROVE THE MOD (0.8.0-pre7)
+    Text loadoutNote_;   // the overlay's reason under the buttons while CHANGE LOADOUT is dimmed
     uint32_t nextData_ = 0, leaveArmedAt_ = 0, confirmAt_ = 0;
     int confirmRow_ = -1;
     bool confirmBan_ = false;
 };
 
-}  // namespace ui::mp
+}  // namespace mp
+}  // namespace ui
 }  // namespace hsm

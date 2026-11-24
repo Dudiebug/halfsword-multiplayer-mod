@@ -182,6 +182,8 @@ void ObjectSync::Clear() {
     simCache_.Clear();
     attach_.Clear();
     ghosts_.Clear();
+    ghostsHeld_ = false;
+    ghostExpiredByClass_.clear();
     announced_.clear();
     refused_.clear();
     touched_.clear();
@@ -195,6 +197,7 @@ void ObjectSync::Clear() {
     baselineMs_ = -1;
     levelWeapons_.clear();
     resetQueue_.clear();
+    wornKept_.clear();
 }
 
 // ---------------------------------------------------------------- per frame
@@ -759,7 +762,8 @@ bool ObjectSync::InCensus(uint64_t propId) const {
     return IsCanonicalLevelPropId(propId) && censusIndex_.count(LevelPropIndex(propId)) != 0;
 }
 
-// The physics objects of the level here: actors that are no fighter and no weapon, attached to nothing and not being
+// The physics objects of the level here: actors that are no fighter and no weapon, attached to nothing (a bolt quiver a fighter
+// wears is held by a constraint, not attached: QuiverWorn, #3909) and not being
 // destroyed, with at least one movable primitive component that simulates physics (an actor none of whose movable
 // primitives simulate is counted in notSimulating). One walk over every object (the WeaponActors pattern): each movable
 // primitive component is credited to its owning actor, so a chain whose links are children of a scene root is found by
@@ -795,7 +799,9 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
             const UClass* ac = ClassOf(actor);
             auto ak = actorKind_.find(ac);
             if (ak == actorKind_.end()) ak = actorKind_.emplace(ac, uint8_t(!IsChildOf(ac, actorClass) ? 0 : ClassSkipped(ac) ? 2 : 1)).first;
-            if (ak->second == 1 && !adapter_->IsWillie(actor) && !adapter_->IsWeapon(actor) && !Adapter::BeingDestroyed(actor) && !ParentActorOf(actor)) {
+            bool wornQuiver = false;
+            if (ak->second == 1 && !adapter_->IsWillie(actor) && !adapter_->IsWeapon(actor) && !Adapter::BeingDestroyed(actor) && !ParentActorOf(actor) &&
+                (wornQuiver = adapter_->QuiverWorn(actor)) == false) {
                 slot = acc.size();
                 LevelActor la;
                 la.actor = actor;
@@ -806,6 +812,8 @@ std::vector<ObjectSync::LevelActor> ObjectSync::WalkLevel(size_t& notSimulating)
                     if (auto tp = props_.find(tracked->second); tp != props_.end()) la.asleep = !tp->second.moving && !tp->second.provisional;
                 acc.push_back(la);
             }
+            if (wornQuiver && wornKept_.insert(uint64_t(reinterpret_cast<uintptr_t>(actor))).second)
+                HSM_LOG("props: %s is worn by a fighter; it is not a prop (not proposed, not cleared)", ObjectName(actor).c_str());
             st = seen.emplace(actor, slot).first;
         }
         if (st->second == kRejected) continue;
@@ -1051,10 +1059,15 @@ bool ObjectSync::TaggedRandomDelete(UObject* actor) {
     return c.invoke() && c.get<bool>("ReturnValue");
 }
 
+void ObjectSync::NoteGift(uint8_t entity, uint8_t spawnFlags) {
+    if (ValidEntity(entity)) gift_.Note(entity, spawnFlags, SteadyNowMs());
+}
+
 void ObjectSync::ForgetEntity(uint8_t entity) {
     if (!active_ || !ValidEntity(entity)) return;
     hands_[entity] = Hands{};
     standInHands_[entity] = StandInHands{};
+    gift_.Forget(entity);
     for (Loose& l : loose_)
         if (l.entity == entity) l.entity = 0;   // still falls; no drop of that fighter's can be heard of any more
     for (auto it = pending_.begin(); it != pending_.end();)

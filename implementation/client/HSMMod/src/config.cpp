@@ -66,8 +66,6 @@ constexpr char kDefaultIni[] =
     "build_cards=1\n"
     "; 1: a short sound from the game's menus when a player joins your lobby or session; 0: off\n"
     "join_sound=1\n"
-    "; 1: in a multiplayer match Esc opens the mod's own pause menu, with every menu button of the game in one place, and the game's pause menu is not used; 0: the game's pause menu with the mod's buttons over it\n"
-    "mod_pause=1\n"
     "; 1: a trial: LOADOUT in the mod's pause menu opens the game's own inventory screen over the match. The screen was made for the Tavern and may not work in an arena; Esc closes it. 0: off\n"
     "loadout_trial=0\n"
     "; 1: leave custom maps named as a test (Test_Arena, MapTest, test01) out of the map picker; 0: list them too\n"
@@ -112,6 +110,8 @@ constexpr char kDefaultIni[] =
     ";input_delay=auto\n"
     "; check each blow against where your fighter really was: off, log (count only) or on (drop a blow that missed)\n"
     "claim_check=log\n"
+    "; a blow faster than this many cm/s is sent at this speed (the game's damage grows with it; 0 = off)\n"
+    ";blow_speed_cap=3500\n"
     "; 1: a blade clash on your screen knocks the other player's real weapon too\n"
     ";deflect=1\n"
     "; in-game bug reports: type /bug <what went wrong> in the chat to file a GitHub issue with your HSMMod log\n"
@@ -171,7 +171,7 @@ constexpr char kDefaultIni[] =
     "votekick=1\n"
     "\n"
     "[mod]\n"
-    "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it), and replaces any other build with its own, asking first about one it does not know; 0: neither. ue4ss_keep: the hash of the build you said to keep.\n"
+    "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it), and always replaces any other build there with its own (4.0.0); 0: neither.\n"
     "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
     "; ue4ss_console=0 (default): HSMMod turns UE4SS's console and cheat manager mods off in mods.txt at every start (a Vanilla lobby refuses them); 1: leaves them as you set them.\n"
     "ue4ss=1\n"
@@ -183,21 +183,24 @@ constexpr char kDefaultIni[] =
     "; Empty: the only valid pack installed. off: none. See docs/MODPACK.md. Set mod_rule=bundle with it: vanilla refuses every pak.\n"
     "pack=\n"
     "; Mod rules for the lobbies you host: mod_rule=vanilla (no mods; UE4SS alone is fine; the default), maps (map\n"
-    "; paks only), bundle (exactly the pack= above), custom (mod_allow=, or what you run), anything, classes (balanced HSE and Half Wolverine classes).\n"
-    "; block_hse=1 refuses players running HS Enhancer (0: allow). mod_official=1 takes official HSMMod releases only.\n"
+    "; paks only), bundle (exactly the pack= above), custom (mod_allow=, or what you run), anything.\n"
+    "; mod_classes=off (default) | on (balanced HSE and Half Wolverine classes) | unrestricted (no class budget; expect glitches): works with any mod_rule.\n"
+    "; block_hse=1 refuses players running HS Enhancer (0: allow). mod_official=1 (default) takes official HSMMod releases only; 0: any build.\n"
     "; mod_allow=A, B*1a2b3c4d, +Needed: the custom list (*: the first 8 hex of its SHA-256, +: required).\n"
     "; mod_rules=0 turns all of it off (and the HSMMod build check); mod_challenge=0 stops the host's code checks.\n"
-    "; mod_rule=unrestricted: Unrestricted Classes, with no class budget (the MODS tab's UNRESTRICTED checkbox sets this).\n"
+    "; mod_rule=classes and mod_rule=unrestricted (older builds) still mean mod_rule=anything with that mod_classes.\n"
     "mod_rules=1\n"
     "mod_challenge=1\n"
     #ifdef HSM_TESTBENCH
     "mod_rule=classes\n"
+    "mod_classes=on\n"
 #else
     "mod_rule=vanilla\n"
+    "mod_classes=off\n"
 #endif
 
     "block_hse=1\n"
-    "mod_official=0\n"
+    "mod_official=1\n"
     "mod_allow=\n"
     "; hse_share_keys=1: HS Enhancer and HSMMod take the keyboard in turns. While an HSMMod text box (the chat) is open, HS Enhancer gets no\n"
     "; input; while HS Enhancer's menu is open (0.6 on), HSMMod's chat and hotkeys wait. 0: both read every key, as before.\n"
@@ -215,13 +218,17 @@ std::string ReadString(const std::wstring& ini, const wchar_t* key, const char* 
 // A name typed on the multiplayer page (nickname, lobby name). SaveIniValues writes its UTF-8 bytes; GetPrivateProfileString
 // would read them back in the system code page, so these are read as the file's bytes (util::GetIniValue). A UTF-16 file
 // (a Notepad "Unicode" save) goes through GetPrivateProfileString instead.
-std::string ReadUtf8String(const std::wstring& ini, const char* key) {
+std::string ReadIniFile(const std::wstring& ini) {
     std::string text;
     if (FILE* f = _wfopen(ini.c_str(), L"rb")) {
         char buf[4096];
         for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
         std::fclose(f);
     }
+    return text;
+}
+std::string ReadUtf8String(const std::wstring& ini, const char* key) {
+    const std::string text = ReadIniFile(ini);
     if (text.size() >= 2 && (text.compare(0, 2, "\xFF\xFE") == 0 || text.compare(0, 2, "\xFE\xFF") == 0)) {
         const std::string k(key);
         return ReadString(ini, std::wstring(k.begin(), k.end()).c_str(), "");
@@ -300,7 +307,8 @@ void ReadModRuleKeys(Config& c) {
     if (hse.empty()) hse = ReadString(ini, L"block_hse", "");
     if (hse.empty()) hse = ReadModString(ini, L"mod_cheats", "") == "allow" ? "0" : "1";
     c.blockHse = hse != "0";
-    c.modOfficialOnly = ReadModString(ini, L"mod_official", "0") == "1";
+    c.modOfficialOnly = ReadModString(ini, L"mod_official", "1") == "1";   // official builds only unless the file says 0
+    c.modClasses = ReadModString(ini, L"mod_classes", "off");
     c.modAllow = ReadModLong(ini, L"mod_allow");
 }
 
@@ -313,6 +321,7 @@ Config LoadConfig() {
     std::string role = ReadString(ini, L"role", "steam");
     c.role = ParseRole(role, "role");
     if (!ReadString(ini, L"server_transport", "").empty()) HSM_LOG("config: server_transport is ignored: direct IP was removed in 0.8.0, servers use a public Steam lobby");
+    for (const std::string& note : util::RetiredKeyNotes(ReadIniFile(ini))) HSM_LOG("%s", note.c_str());   // a key an older HSMMod wrote: util/hsm_ini.h
     c.playerName = ReadString(ini, L"name", "Player").substr(0, 32);
     c.nickname = UsableNickname(ReadUtf8String(ini, "nickname"));
     c.lobbyName = UsableLobbyName(ReadUtf8String(ini, "lobby_name"));
@@ -380,6 +389,11 @@ Config LoadConfig() {
         if (!c.inputDelay.valid) { HSM_LOG("config: input_delay=%s is not 0, auto or 1-4; off", d.c_str()); c.inputDelay = MatchDelaySetting{}; }
         const std::string cc = ReadString(ini, L"claim_check", "log");
         if (!combat::ParseClaimCheckMode(cc, c.claimCheck)) HSM_LOG("config: claim_check=%s is not off, log or on; log", cc.c_str());
+        const std::string bs = ReadString(ini, L"blow_speed_cap", "3500");
+        char* end = nullptr;
+        const double speed = std::strtod(bs.c_str(), &end);
+        if (end != bs.c_str() && *end == 0 && std::isfinite(speed) && speed >= 0.0) c.blowSpeedCap = speed;
+        else HSM_LOG("config: blow_speed_cap=%s is not a speed in cm/s; %.0f", bs.c_str(), combat::kMaxBlowSpeed);
     }
     c.deflect = ReadString(ini, L"deflect", cp ? "1" : "0") == "1";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
@@ -417,13 +431,14 @@ Config LoadConfig() {
     c.standInTwoHandPose = ReadString(ini, L"standin_two_hand_pose", "1") != "0";
     c.standInTwoHandLock = ReadString(ini, L"standin_two_hand_lock", "1") != "0";
     c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
+    c.gameCheckTest = ReadString(ini, L"game_check_test", "0") == "1";
+    c.forceUnknownBuild = Clamp(std::atoi(ReadString(ini, L"force_unknown_build", "0").c_str()), 0, 2);
     c.nameTags = ReadString(ini, L"name_tags", "1") != "0";
     c.classTags = ReadString(ini, L"class_tags", "1") != "0";
     c.classLook = ReadString(ini, L"class_look", "1") != "0";
     c.taggerSpeed = ReadString(ini, L"tagger_speed", "1") != "0";
     c.buildCards = ReadString(ini, L"build_cards", "1") != "0";
     c.joinSound = ReadString(ini, L"join_sound", "1") != "0";
-    c.modPause = ReadString(ini, L"mod_pause", "1") != "0";
     c.loadoutTrial = ReadString(ini, L"loadout_trial", "0") == "1";
     c.hideTestMaps = ReadString(ini, L"hide_test_maps", "1") != "0";
     c.clawMirror = ReadString(ini, L"claw_mirror", "1") != "0";
@@ -478,7 +493,6 @@ Config LoadConfig() {
     c.serverAdmins = ReadString(ini, L"server_admins", "");
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
-    c.ue4ssKeep = ReadModString(ini, L"ue4ss_keep", "");
     c.ue4ssConsole = ReadModString(ini, L"ue4ss_console", "0") == "1";
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
     c.modPack = ReadModString(ini, L"pack", "");
@@ -488,10 +502,19 @@ Config LoadConfig() {
     ReadModRuleKeys(c);
     c.record = ReadModString(ini, L"record", "0") != "0";
     if (c.record) HSM_LOG("config: record=1: fight levels are recorded to HSMRec-*.hsmrec next to this log");
-    c.cryptsMaxTier = CryptsTierCapFrom(std::atoi(ReadModString(ini, L"crypts_max_tier", "1").c_str()));
-    if (c.cryptsMaxTier != kCryptsTierCap) HSM_LOG("config: crypts_max_tier=%d: a Crypts gather runs %s", c.cryptsMaxTier, c.cryptsMaxTier >= kCryptsTierTop ? "at the game's own tiers" : "up to that tier");
+    const std::string ctier = ReadModString(ini, L"crypts_max_tier", "");   // none: the lobby's Dungeon tier row
+    c.cryptsMaxTier = ctier.empty() ? -1 : int(CryptsTierCapFrom(std::atoi(ctier.c_str())));
+    if (c.cryptsMaxTier >= 0)
+        HSM_LOG("config: crypts_max_tier=%d: this machine's Crypts gather runs %s, whatever the lobby's Dungeon tier row says", c.cryptsMaxTier,
+                c.cryptsMaxTier >= kCryptsTierTop ? "at the game's own tiers" : "up to that tier");
     c.cryptsProbe = ReadModString(ini, L"crypts_probe", "0") != "0";
     if (c.cryptsProbe) HSM_LOG("config: crypts_probe=1: the Crypts' rooms are logged (cryptsprobe: lines)");
+    c.cryptsCoop = ReadModString(ini, L"crypts_coop", "1") != "0";
+    g_cryptsCoopOffered = c.cryptsCoop;
+    HSM_LOG("config: crypts_coop=%d: Grave Robbers and the Crypts run's Together are %s", c.cryptsCoop ? 1 : 0,
+            c.cryptsCoop ? "offered in the lobby and START opens them (the host's rooms, enemies, loot and doors on every machine, and the run's end)"
+                         : "hidden in the lobby and START refuses them");
+    c.cryptsLayoutNames = ReadModString(ini, L"crypts_layout_names", "auto");   // checked and logged by cryptslayout::SetNameForm
     // Command-line overrides (several instances may share one ini).
     std::string cl = CommandLineUtf8();
     if (CommandLineIgnoresHsmFlags(cl)) {   // M6: a Steam join launch (+connect_lobby) cannot steer the mod through -hsm* flags
@@ -520,10 +543,10 @@ Config LoadConfig() {
             c.hostLockOn ? 1 : 0, c.scabbardFix ? 1 : 0, c.forceStrength ? 1 : 0, c.stuckArmorGate ? 1 : 0, c.standInPartsOff ? 1 : 0, c.standInBoxFix ? 1 : 0);
     HSM_LOG("config: netcode competitive=%d late_send=%d combat_copies=%d min_fps=%d", c.competitive ? 1 : 0, c.lateSend ? 1 : 0,
             c.combatCopies ? 1 : 0, c.minFps);
-    HSM_LOG("config: netcode direct_p2p=%d playout_quantile=%.2f playout_margin_ms=%.0f standin_lead_ms=%.0f input_delay=%s claim_check=%s deflect=%d",
+    HSM_LOG("config: netcode direct_p2p=%d playout_quantile=%.2f playout_margin_ms=%.0f standin_lead_ms=%.0f input_delay=%s claim_check=%s blow_speed_cap=%.0f deflect=%d",
             c.directP2P ? 1 : 0, c.playoutQuantile, c.playoutMarginMs, c.standinLeadMs,
             c.inputDelay.mode == MatchDelayMode::Auto ? "auto" : std::to_string(c.inputDelay.frames).c_str(),
-            combat::ClaimCheckModeName(c.claimCheck), c.deflect ? 1 : 0);
+            combat::ClaimCheckModeName(c.claimCheck), c.blowSpeedCap, c.deflect ? 1 : 0);
     HSM_LOG("config: voice=%d reach=%s cut=%d mode=%s device=%s level_db=%.0f key=0x%02x near_m=%.0f far_m=%.0f cutoff=%.0f%% volume=%.0f%% votekick=%d", c.voice ? 1 : 0,
             voice::ReachIni(c.voiceReach), c.voiceCut ? 1 : 0, voice::MicIni(c.voiceMic), c.voiceDevice.empty() ? "default" : "named", c.voiceLevelDb, c.voiceKey, c.voiceNearM, c.voiceFarM, c.voiceCutoff * 100.f, c.voiceVolume * 100.f, c.serverVoteKick ? 1 : 0);
     if (c.role == Role::Server)

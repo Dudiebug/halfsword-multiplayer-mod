@@ -42,6 +42,9 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::ProgressionVote: return BudgetClass::Control;   // rev 36: the Tavern's next-fight vote: a state change or a second, a pick per click
         case MsgType::ProgressionResult: return BudgetClass::Control;   // rev 41: host -> client only, one per Progression fight
         case MsgType::Gather: return BudgetClass::Control;   // rev 47: the gather's clock every 10 s, a few notes per run
+        case MsgType::BackToLobby: return BudgetClass::Control;   // rev 49: client -> host only, one per click on BACK TO LOBBY
+        case MsgType::CryptRoom: case MsgType::CryptDoor: case MsgType::CryptRoomsBuilt: case MsgType::CryptLoot: case MsgType::CryptRun:   // rev 50: a room, door or placed item per host discovery (a few dozen a run), one ack per built room
+            return BudgetClass::Control;
         case MsgType::LevelSeed: return BudgetClass::Control;   // rev 28: host -> client only, one per travel (and one to each joiner)
         case MsgType::ModList: case MsgType::ModAnswer:          // rev 40: one per mod change / per code challenge (60..180 s)
         case MsgType::SessionMods: case MsgType::ModChallenge:

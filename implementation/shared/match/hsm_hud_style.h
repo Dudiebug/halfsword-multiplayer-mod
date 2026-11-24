@@ -2,21 +2,60 @@
 // FLinearColor values. Text is judged by WCAG contrast against the smoke panel laid over a mid-grey scene.
 // Game-independent.
 #pragma once
+#include "match/hsm_dropdown.h"
 #include "match/hsm_match.h"
 #include <algorithm>
+#include <cmath>
 #include <string>
+#include <vector>
 
 namespace hsm::style {
 
 inline constexpr Rgba kSmoke{0.02f, 0.017f, 0.014f, 0.82f};      // panel fill
+inline constexpr Rgba kSmokeDense{0.02f, 0.017f, 0.014f, 0.92f};  // the same smoke, denser: the chat's input line
+// Text with no panel behind it (the banner sub, the chat hint, the name tags) has the dark outline and, under it, this drop
+// shadow, kShadowPx to the right and down: it stays readable on a bright map. One outline for every text that has one.
+inline constexpr Rgba kOutlineInk{0, 0, 0, 0.9f};
+inline constexpr Rgba kShadowInk{0, 0, 0, 0.75f};
+inline constexpr float kShadowPx = 1.5f;
 inline constexpr Rgba kBone{0.93f, 0.89f, 0.80f, 1};             // body text
 inline constexpr Rgba kBlood{0.70f, 0.05f, 0.04f, 1};            // accent: frames, bars, swatches (not text)
-inline constexpr Rgba kBloodInk{0.95f, 0.32f, 0.26f, 1};         // the accent as text
-inline constexpr Rgba kIron{0.45f, 0.47f, 0.50f, 1};             // secondary text, frames
+inline constexpr Rgba kBloodInk{0.9647f, 0.3763f, 0.3095f, 1};  // the accent as text (sRGB #fba597; was 0.95 0.32 0.26: 4.1:1 over white)
+inline constexpr Rgba kIron{0.4851f, 0.5029f, 0.5395f, 1};       // secondary text, frames (sRGB #b9bcc2; was 0.45 0.47 0.50: 4.3:1 over white)
 inline constexpr Rgba kOk{0.35f, 0.65f, 0.25f, 1};
 inline constexpr Rgba kWarn{0.85f, 0.62f, 0.05f, 1};
 inline constexpr Rgba kInfectedInk{0.45f, 0.78f, 0.28f, 1};      // Infection: the infected, as text
 inline constexpr Rgba kSceneGrey{0.18f, 0.18f, 0.18f, 1};        // the reference scene behind a panel
+inline constexpr Rgba kSceneWhite{1, 1, 1, 1};                    // the worst case: a bright map (snow, sky) behind a panel
+
+// The game's pressed-button amber: a picked card or plate in the game look (the plain fill that stands for its art), and in
+// the dark look the same, shaded. The shading is what the skin multiplies the art's colour by (kDarkKeep*).
+inline constexpr Rgba kAmber{0.85f, 0.45f, 0.03f, 1};
+inline constexpr float kDarkKeepPicked = 0.55f, kDarkKeepPlate = 0.50f;
+constexpr Rgba Keep(Rgba c, float k) { return {c.r * k, c.g * k, c.b * k, c.a}; }
+// Your own kill-feed line in the classic look: the smoke, reddened.
+inline constexpr Rgba kPlateMineClassic{0.22f, 0.025f, 0.02f, 0.80f};
+// What the skin multiplies the art by: a card at rest and under the mouse, and START at rest.
+inline constexpr Rgba kCardTint{0.86f, 0.84f, 0.80f, 1}, kCardTintHover{1, 0.97f, 0.88f, 1}, kStartTint{0.85f, 0.85f, 0.85f, 1};
+
+// Disabled controls: the whole control drawn at this opacity, everywhere (buttons, steppers, rows). 0.55 is the lowest of
+// the values the page used (0.3, 0.4, 0.45, 0.55) at which the label still reads 3:1 in all three looks.
+inline constexpr float kDisabledAlpha = 0.55f;
+// WCAG: body text 4.5:1, disabled text 3:1.
+inline constexpr double kMinTextContrast = 4.5, kMinDisabledContrast = 3.0;
+
+// The type scale (UMG points), by role. Every size the menus and the HUD draw is one of these (or a HUD display size
+// below): hint 14 (notes under a control, legends), body 15 (notes, card text), row 17 (a row's name, a stepper),
+// emphasis 20 (buttons, kill feed, chat), section 23 (a rubric), card 28 (START, a board title), modal 36 (a pop-up's
+// title), page 44 (the page's title). The match HUD's display sizes stay off the scale: its banners, score and "you died".
+namespace type {
+inline constexpr float kHint = 14, kBody = 15, kRow = 17, kEmphasis = 20, kSection = 23, kCard = 28, kModal = 36, kPage = 44;
+inline constexpr float kBannerSub = 26, kScore = 34, kDeadTitle = 38, kBanner = 80;
+inline constexpr float kScale[] = {kHint, kBody, kRow, kEmphasis, kSection, kCard, kModal, kPage};
+// The typeface follows the role, not a number sitting in a call: the game's blackletter from a section up, its plain face
+// below. (A tab's label is the one exception: emphasis size, blackletter, set where it is made.)
+constexpr bool IsHeading(float size) { return size >= kSection; }
+}  // namespace type
 
 // The menus (multiplayer page, Esc panel) and the HUD's panels. Three looks, chosen once at start (ui_style in
 // HSMMod.ini, UseMenuLook): the classic one (the default, the look before 0.8.0-pre43, "Iron & Blood": opaque dark
@@ -26,6 +65,11 @@ inline constexpr Rgba kSceneGrey{0.18f, 0.18f, 0.18f, 1};        // the referenc
 // after that.
 struct MenuPalette {
     Rgba bg, backdrop, panel, card, cardHover, frame, frameHover, text, dim, accent, accentInk, ok, warn, light;
+    // A picked card (a chosen option, an open tab): its face, its frame and the ink on it. Classic keeps the card face
+    // inside a red frame, with light text; the game look is the game's amber button with dark ink; dark is that amber
+    // shaded, where light text reads 2.5:1, so it takes dark ink too. platePicked: the same for a plate (your own
+    // kill-feed line). field: a text box's fill.
+    Rgba picked, pickedFrame, onPicked, platePicked, field;
 };
 inline constexpr MenuPalette kGameMenus{
     {0.020f, 0.012f, 0.007f, 0.97f},   // bg: behind everything, dark wood
@@ -42,6 +86,11 @@ inline constexpr MenuPalette kGameMenus{
     {0.018f, 0.11f, 0.012f, 1},        // ok
     {0.19f, 0.055f, 0.002f, 1},        // warn
     {0.80f, 0.72f, 0.58f, 1},          // light: text on the dark backdrop and on START's red
+    kAmber,                            // picked: the game's pressed button
+    kAmber,                            // pickedFrame
+    {0.010f, 0.007f, 0.005f, 1},       // onPicked: ink
+    kAmber,                            // platePicked
+    {0.86f, 0.80f, 0.66f, 1},          // field: a text box, parchment
 };
 inline constexpr MenuPalette kDarkMenus{
     {0.010f, 0.009f, 0.008f, 1},          // bg: behind a page, opaque (the game's own menu never shows through)
@@ -58,6 +107,11 @@ inline constexpr MenuPalette kDarkMenus{
     {0.35f, 0.80f, 0.35f, 1},             // ok
     {0.85f, 0.55f, 0.08f, 1},             // warn
     {0.8148f, 0.7529f, 0.6514f, 1},       // light: START's label, as the rest of the text
+    Keep(kAmber, kDarkKeepPicked),        // picked: the amber button, shaded as the skin shades it
+    Keep(kAmber, kDarkKeepPicked),        // pickedFrame
+    {0.010f, 0.007f, 0.005f, 1},          // onPicked: dark ink (bone on the shaded amber read 2.5:1)
+    Keep(kAmber, kDarkKeepPlate),         // platePicked
+    {0.016f, 0.014f, 0.012f, 0.85f},      // field: a text box, dark with the scene showing a little
 };
 inline constexpr MenuPalette kClassicMenus{
     {0.0040f, 0.0037f, 0.0033f, 0.97f},   // bg: the page behind everything
@@ -74,6 +128,11 @@ inline constexpr MenuPalette kClassicMenus{
     {0.1590f, 0.5210f, 0.1714f, 1},       // ok
     {0.7454f, 0.4342f, 0.0648f, 1},       // warn
     {0.8148f, 0.7529f, 0.6514f, 1},       // light: START's label, as the rest of the text
+    {0.0137f, 0.0116f, 0.0097f, 1},       // picked: the card face (the frame says picked)
+    {0.3419f, 0.0110f, 0.0110f, 1},       // pickedFrame: the accent
+    {0.8148f, 0.7529f, 0.6514f, 1},       // onPicked: the text
+    kPlateMineClassic,                    // platePicked
+    {0.016f, 0.014f, 0.012f, 1},          // field: a text box
 };
 
 enum class MenuLook : uint8_t { Dark, Game, Classic };
@@ -82,7 +141,9 @@ inline Rgba kMenuBg = kClassicMenus.bg, kMenuBackdrop = kClassicMenus.backdrop, 
             kMenuCard = kClassicMenus.card, kMenuCardHover = kClassicMenus.cardHover, kMenuFrame = kClassicMenus.frame,
             kMenuFrameHover = kClassicMenus.frameHover, kMenuText = kClassicMenus.text, kMenuDim = kClassicMenus.dim,
             kMenuAccent = kClassicMenus.accent, kMenuAccentInk = kClassicMenus.accentInk, kMenuOk = kClassicMenus.ok,
-            kMenuWarn = kClassicMenus.warn, kMenuLight = kClassicMenus.light;
+            kMenuWarn = kClassicMenus.warn, kMenuLight = kClassicMenus.light, kMenuPicked = kClassicMenus.picked,
+            kMenuPickedFrame = kClassicMenus.pickedFrame, kMenuOnPicked = kClassicMenus.onPicked,
+            kMenuPlatePicked = kClassicMenus.platePicked, kMenuField = kClassicMenus.field;
 
 inline const MenuPalette& PaletteOf(MenuLook look) {
     return look == MenuLook::Classic ? kClassicMenus : look == MenuLook::Game ? kGameMenus : kDarkMenus;
@@ -92,7 +153,8 @@ inline void UseMenuLook(MenuLook look) {
     gMenuLook = look;
     kMenuBg = m.bg; kMenuBackdrop = m.backdrop; kMenuPanel = m.panel; kMenuCard = m.card; kMenuCardHover = m.cardHover;
     kMenuFrame = m.frame; kMenuFrameHover = m.frameHover; kMenuText = m.text; kMenuDim = m.dim; kMenuAccent = m.accent;
-    kMenuAccentInk = m.accentInk; kMenuOk = m.ok; kMenuWarn = m.warn; kMenuLight = m.light;
+    kMenuAccentInk = m.accentInk; kMenuOk = m.ok; kMenuWarn = m.warn; kMenuLight = m.light; kMenuPicked = m.picked;
+    kMenuPickedFrame = m.pickedFrame; kMenuOnPicked = m.onPicked; kMenuPlatePicked = m.platePicked; kMenuField = m.field;
 }
 inline MenuLook CurrentMenuLook() { return gMenuLook; }
 inline bool ClassicMenus() { return gMenuLook == MenuLook::Classic; }
@@ -117,6 +179,20 @@ inline StartLook ReadStartLook(const std::string& value, bool moved) {
 inline MenuLook NextMenuLook(MenuLook look) {
     return look == MenuLook::Classic ? MenuLook::Game : look == MenuLook::Game ? MenuLook::Dark : MenuLook::Classic;
 }
+
+// MENU LOOK as a list: the looks in the order the button stepped them, Classic first. Option i is kMenuLookOrder[i].
+inline constexpr MenuLook kMenuLookOrder[3] = {MenuLook::Classic, MenuLook::Game, MenuLook::Dark};
+inline const char* MenuLookName(MenuLook look) { return look == MenuLook::Classic ? "Classic" : look == MenuLook::Game ? "Game art" : "Dark"; }
+inline std::vector<DropOption> MenuLookChoices() {
+    std::vector<DropOption> v;
+    for (MenuLook l : kMenuLookOrder) v.push_back({MenuLookName(l), true, ""});
+    return v;
+}
+inline size_t MenuLookChoiceAt(MenuLook look) {
+    for (size_t i = 0; i < 3; ++i) if (kMenuLookOrder[i] == look) return i;
+    return 0;
+}
+inline MenuLook MenuLookPicked(size_t i) { return kMenuLookOrder[i < 3 ? i : 0]; }
 
 // hud_opacity in HSMMod.ini: the render opacity of the match HUD, the chat and the fighter card, for a less harsh and
 // less distracting overlay (HSMBot 2801). kHudOpacityMin..1; below it is kHudOpacityMin, above 1 or not a number is 1.
@@ -165,12 +241,35 @@ inline Rgba Over(Rgba top, Rgba under) {
     return {mix(top.r, under.r), mix(top.g, under.g), mix(top.b, under.b), a};
 }
 
+// The same, mixing the display (sRGB) values, as the mock's CSS does: the numbers behind the contrast tests below. (Over mixes
+// linear values, which makes a pale scene behind the smoke read much brighter than it is drawn.) That the engine blends
+// in display space too is taken from the mock; it has not been checked in the game.
+inline double ToDisplay(double c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * std::pow(c, 1 / 2.4) - 0.055; }
+inline double FromDisplay(double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); }
+inline Rgba DisplayOf(Rgba c) { return {float(ToDisplay(c.r)), float(ToDisplay(c.g)), float(ToDisplay(c.b)), c.a}; }
+inline Rgba LinearOf(Rgba c) { return {float(FromDisplay(c.r)), float(FromDisplay(c.g)), float(FromDisplay(c.b)), c.a}; }
+inline Rgba OverDisplay(Rgba top, Rgba under) { return LinearOf(Over(DisplayOf(top), DisplayOf(under))); }
+
 inline Rgba PanelOverScene() { return Over(kSmoke, kSceneGrey); }
+inline Rgba PanelOverWhite() { return OverDisplay(kSmoke, kSceneWhite); }
 
 // Contrast of text in colour `c` (its alpha included) on the panel over the reference scene.
 inline double TextContrast(Rgba c) { Rgba p = PanelOverScene(); return Contrast(Over(c, p), p); }
 
+// The same on the panel over a white scene, the worst case for light text.
+inline double TextContrastOverWhite(Rgba c) { Rgba p = PanelOverWhite(); return Contrast(OverDisplay(c, p), p); }
+
 inline Rgba Faded(Rgba c, float opacity) { return {c.r, c.g, c.b, c.a * opacity}; }
+
+inline bool ReadableText(double contrast) { return contrast >= kMinTextContrast; }
+inline bool ReadableDisabled(double contrast) { return contrast >= kMinDisabledContrast; }
+
+// A disabled control's label: the face drawn at `alpha` over what is behind it, and the ink at `alpha` over that face (a
+// widget's render opacity multiplies everything it draws, so a faded button fades its face and its label alike).
+inline double DisabledContrast(Rgba ink, Rgba face, Rgba behind, float alpha = kDisabledAlpha) {
+    const Rgba f = OverDisplay(Faded(face, alpha), behind);
+    return Contrast(OverDisplay(Faded(ink, alpha), f), f);
+}
 
 // A light ink (made for the dark HUD panels) as ink on parchment: the same hue, darkened until it reads on the menu
 // faces. Dark colours stay as they are, and so does everything in the dark and classic looks (their faces are dark).

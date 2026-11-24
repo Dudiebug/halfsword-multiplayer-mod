@@ -44,16 +44,14 @@ inline const char* PickName(Pick p) {
 // An xinput1_3.dll beside the exe is UE4SS's when it sits next to UE4SS files (a real one lives in System32).
 inline bool LooksLikeUe4ss2x(bool xinput13Present, bool settingsIni, bool modsDir) { return xinput13Present && (settingsIni || modsDir); }
 
-// HSMMod carries one UE4SS build inside its DLL, and that's the one that runs. Install: ue4ss/ has no UE4SS.dll. Replace: it has
-// an older accepted build. Ask: it has a build nobody here knows, which may be the player's own and can't be got back, so they
-// choose. Keep: they already said no to this very file. Install and Replace write the DLL and every other file already there
-// stays. Then an old-layout UE4SS.dll and a 2.x proxy beside the exe get .off on their names, so nothing else starts a second UE4SS.
-enum class BundleStep { None, Install, Replace, Ask, Keep };
-inline BundleStep ChooseBundleStep(bool subThere, bool subIsBundled, bool subIsAccepted, bool subIsKept) {
-    if (!subThere) return BundleStep::Install;
-    if (subIsBundled) return BundleStep::None;
-    if (subIsAccepted) return BundleStep::Replace;
-    return subIsKept ? BundleStep::Keep : BundleStep::Ask;
+// HSMMod carries one UE4SS build inside its DLL, and that one always runs. Install: ue4ss/ has no UE4SS.dll. Replace: it has
+// any other build, older, newer or the player's own, and no one is asked. Install and Replace write the DLL; every other file
+// already there stays (mods.txt, the settings, Mods/). Then an old-layout UE4SS.dll and a 2.x proxy beside the exe get .off on
+// their names, so nothing else starts a second UE4SS.
+enum class BundleStep { None, Install, Replace };
+inline BundleStep ChooseBundleStep(bool there, bool bundled) {
+    if (!there) return BundleStep::Install;
+    return bundled ? BundleStep::None : BundleStep::Replace;
 }
 // Where a file of the bundled zip goes, relative to the exe dir with backslashes; "" for what stays in the zip. Only ue4ss/ is
 // unpacked: the zip's dwmapi.dll is UE4SS's proxy, and that slot is HSMMod's.

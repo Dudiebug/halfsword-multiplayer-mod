@@ -61,23 +61,44 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
         std::unique_ptr<Owned>& slot = owned_[e];
         if (!slot) slot = std::make_unique<Owned>();
         Owned& o = *slot;
-        if (o.willie != w) { o.willie = w; o.havePelvis = false; o.failLogged = false; }
+        if (o.willie != w) { o.willie = w; o.havePelvis = false; o.failLogged = false; o.diverge.Reset(); }
         if (nowMs >= o.nextPoseMs) {
             o.nextPoseMs = std::max(o.nextPoseMs + (e > kMaxFighters ? kBotPoseEveryMs : kPoseEveryMs), nowMs);
             sync::PoseFrame f;
             if (o.rig.Bind(w) && o.rig.Read(ts, stepUs, &f, nullptr)) {
-                const FVector at = adapter.ActorLocation(w);
-                PoseMsg m;
-                m.entity = e;
-                m.epoch = epochOf_ ? epochOf_(e) : 0;
-                m.rootX = float(at.x); m.rootY = float(at.y); m.rootZ = float(at.z);
-                m.yawDeg = float(adapter.ActorYaw(w));
-                m.pose = sync::EncodePose(f);
-                send(Encode(m));
-                ++posesSent_;
-                o.pelvis = f.bones[sync::kBonePelvis].pos;
-                o.havePelvis = true;
-                o.history.Push(f);
+                // #3906/#3907 (opf2ZCDQyj, SNv5QDo7Eu): this fighter's own bodies left the world (NaN, or past sync::kDivergedUu). The codec
+                // turned such a pelvis into 0,0,0, so everyone saw the player jump to the map origin and back, and the body took no hits at
+                // all: an "immortal" zombie. Nothing is streamed from it; after sync::kDivergedHoldMs the game's own Death runs on it and the
+                // normal death and respawn flow takes over.
+                bool bad = false;
+                for (const sync::BoneSample& b : f.bones) bad = bad || sync::BodyDiverged(b.pos);
+                if (o.diverge.Update(nowMs, bad)) {
+                    const sync::V3 p = f.bones[sync::kBonePelvis].pos;
+                    const bool dead = adapter.IsDead(w);
+                    HSM_LOG("owner: entity %u's own body left the world (pelvis read %.0f %.0f %.0f, root %.0f %.0f %.0f)%s", e, p.x, p.y, p.z,
+                            adapter.ActorLocation(w).x, adapter.ActorLocation(w).y, adapter.ActorLocation(w).z,
+                            dead ? "; already dead" : "; killing it so it respawns");
+                    if (!dead) {
+                        if (double* hp = Field<double>(w, "Health")) *hp = 0.0;
+                        adapter.TriggerDeath(w);
+                    }
+                }
+                if (bad) {
+                    o.havePelvis = false;
+                } else {
+                    const FVector at = adapter.ActorLocation(w);
+                    PoseMsg m;
+                    m.entity = e;
+                    m.epoch = epochOf_ ? epochOf_(e) : 0;
+                    m.rootX = float(at.x); m.rootY = float(at.y); m.rootZ = float(at.z);
+                    m.yawDeg = float(adapter.ActorYaw(w));
+                    m.pose = sync::EncodePose(f);
+                    send(Encode(m));
+                    ++posesSent_;
+                    o.pelvis = f.bones[sync::kBonePelvis].pos;
+                    o.havePelvis = true;
+                    o.history.Push(f);
+                }
             } else {
                 ++readFailed_;
                 o.havePelvis = false;
@@ -322,6 +343,7 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
             return;
         }
         a.driver.Reset();
+        a.diverge.Reset();
         a.haveTarget = false;
     }
     if (!a.rig.StillValid()) { a.rig.Unbind(); return; }
@@ -384,6 +406,17 @@ void StandIns::TickOne(Adapter& adapter, uint8_t entity, Slot& s, double nowMs, 
     sync::PoseFrame target;
     const sync::DriverStep st = a.driver.Step(s.feed->player, nowMs, now, dt, snapBlocked, target);
     if (st.have) a.lastPelvisErrUu = st.pelvisErrUu;
+    if (a.diverge.Update(nowMs, st.divergedBones != 0)) {
+        // #3906: bodies the physics threw out of the world cannot be placed back (a NaN shift wrote NaN into the mesh again);
+        // the session destroys this actor and spawns a new one.
+        const sync::BodyNow& pel = now.bones[sync::kBonePelvis];
+        const sync::V3 want = st.have ? target.bones[sync::kBonePelvis].pos : sync::V3{};
+        HSM_LOG("standins: entity %u's stand-in left the world (bones 0x%x of %d; pelvis read %.0f %.0f %.0f, target pelvis %.0f %.0f %.0f): "
+                "building a new body", entity, unsigned(st.divergedBones), sync::kPoseBones, pel.pos.x, pel.pos.y, pel.pos.z,
+                want.x, want.y, want.z);
+        diverged_.push_back(entity);
+    }
+    if (st.divergedBones) return;   // nothing below may write from a body that is not in the world (placement, grips, seats)
     if (st.have) {   // rev 42: how far in the past the stand-in is shown, and how far off its target it is
         const double rtt = rttOf_ ? rttOf_(entity) : 0.0;
         s.feed->stats.staleness.Add(nowMs, sync::StalenessMs(st.info.delayMs, rtt, a.driver.LeadMs()));

@@ -46,6 +46,8 @@ public:
         std::function<void(uint8_t)> gearChanged;                   // an entity's worn armour changed (put on here or on a stand-in): the team kit is put back. Optional.
         std::function<void()> noteSpawn;                            // armour came off a fighter: a new loose object (ObjectSync::NoteSpawn). Optional.
         std::function<bool()> stripOff;                             // the lobby's Stripping row is Off (match/hsm_strip.h StripOffHere). Optional.
+        std::function<bool()> biteOff;                              // the lobby's Biting row is Off (match/hsm_bite.h BiteOffHere). Optional.
+        std::function<bool(const ue::UObject*)> playerFighter;      // a player's fighter simulated here (not a bot): its bites follow the Biting row. Optional.
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
     bool Start(Adapter& adapter, StandIns& standIns, Env env);
@@ -65,7 +67,7 @@ private:
     struct Box { ue::UObject* actor = nullptr; int32_t actorIndex = -1; ue::UObject* box = nullptr; int32_t boxIndex = -1; };
     struct Counters { uint64_t blood = 0, wounds = 0, pains = 0, hits = 0, armor = 0, limited = 0, noBone = 0, noName = 0, passedOn = 0, applied = 0,
                       skipped = 0, failed = 0, rxLimited = 0, badName = 0, badBone = 0, scanLimited = 0, stripTries = 0, stripHeld = 0,
-                      crossbow = 0, crossbowReplayed = 0, bloodGated = 0, paintGated = 0, stripWeapon = 0, stripBlocked = 0, stripOff = 0, woundDeferred = 0,
+                      crossbow = 0, crossbowReplayed = 0, bloodGated = 0, paintGated = 0, stripWeapon = 0, stripBlocked = 0, stripOff = 0, biteOff = 0, woundDeferred = 0,
                       woundGaveUp = 0; };
     void OnGetDamage(ue::ScriptCall& c);
     void OnSpawnBlood(ue::ScriptCall& c);
@@ -76,10 +78,14 @@ private:
     void OnStripBegin(ue::ScriptCall& c);   // a stand-in its owner reports down counts as Fallen for the stock strip
     void OnStripEnd();
     bool StripKeepsArmor(ue::ScriptCall& c);   // pre-hook on Remove Armor: true blocks it
+    bool StopBite(ue::ScriptCall& c);          // pre-hook on BP_Constraint_Bite_C ReceiveBeginPlay: true blocks it (the Biting row Off)
     void SendHitSound(uint8_t entity, ue::UObject* willie, ue::ScriptCall& c, double damageRawScaled);
     void ApplyVoice(const combat::PaintFxMsg& m, ue::UObject* standIn);
     void CrossbowTick();                                             // the owner's side: poll, report changes
     void ApplyCrossbow(const combat::PaintFxMsg& m, ue::UObject* standIn);
+    void CrossbowOwedTick();                                         // #4118: brings a stand-in that holds its crossbow again to the kept state
+    ue::UObject* StandInCrossbow(ue::UObject* standIn, int hand);    // the hand named, else the other one
+    bool RunCrossbowSteps(ue::UObject* crossbow, ue::UObject* standIn, const std::vector<combat::CrossbowStep>& steps);
     ue::UObject* CrossbowIn(ue::UObject* willie, int hand);          // the crossbow in that hand (0 right, 1 left), null if none
     bool ReadCrossbow(ue::UObject* crossbow, combat::CrossbowState& out);
     bool LoadBolt(ue::UObject* crossbow, ue::UObject* standIn);      // seats a bolt of the stand-in's own
@@ -140,10 +146,22 @@ private:
     uint32_t paintWaitsLogged_ = 0, paintBusyOwnLogged_ = 0;
     Counters n_, reported_;
     // The owner's crossbows, per entity and hand: the object last seen there and its flags then.
-    struct CrossbowWatch { ue::UObject* crossbow = nullptr; int32_t index = -1; combat::CrossbowState state; };
+    struct CrossbowWatch {
+        ue::UObject* crossbow = nullptr; int32_t index = -1; combat::CrossbowState state;
+        ue::UObject* bolt = nullptr; int32_t boltIndex = -1; double seatedMs = 0;   // the bolt seen seated (#3440 log)
+    };
+    void LogBolt(bool seated, uint8_t e, int hand, CrossbowWatch& w);   // #3440: a bolt seated or lost
+    static constexpr int kBoltLogsPerLevel = 24;
+    int boltLogs_ = 0;
+    ue::UClass* primitiveClass_ = nullptr;
     std::array<std::array<CrossbowWatch, 2>, kMaxWillies + 1> crossbows_{};
     std::unordered_map<const ue::UClass*, bool> crossbowClass_;      // a weapon class with String Loaded and Bolt Loaded
     bool crossbowFailLogged_ = false;
+    // #4118: a crossbow report that reached a stand-in holding no crossbow, kept as the owner's state after it (the last
+    // one wins) until the stand-in holds one again or kCrossbowOwedMs passes.
+    struct CrossbowOwed { bool owed = false; int hand = 0; uint16_t seq = 0; double since = 0; combat::CrossbowTarget target; };
+    std::array<CrossbowOwed, kMaxWillies + 1> crossbowOwed_{};
+    uint64_t crossbowKept_ = 0, crossbowCaughtUp_ = 0, crossbowOwedLapsed_ = 0;
 };
 
 }  // namespace hsm::game

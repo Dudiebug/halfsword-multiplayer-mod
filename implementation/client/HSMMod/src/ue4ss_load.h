@@ -27,4 +27,6 @@ std::string Notice();
 // The enabled mod folders under modsDir (".../Mods" with a trailing backslash): mods.txt and enabled.txt, as UE4SS reads
 // them (session/hsm_ue4ss.h). The mod report (gameplay/mod_rules.cpp) lists them. Any thread.
 std::vector<std::string> EnabledModNames(const std::wstring& modsDir);
+// The fixed file version of a DLL, "a.b.c.d" (session/hsm_ue4ss.h FormatFileVersion), read without running it. Empty: none.
+std::string FileVersion(const std::wstring& path);
 }  // namespace hsm::ue4ss

@@ -9,6 +9,7 @@
 #include "hsm_protocol.h"
 #include "util/hsm_sha256.h"
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,13 +34,26 @@ inline std::string ModBuildString(const std::string& version, const std::string&
 struct PeerBuild {
     std::string name;
     std::string build;   // empty: not known yet (the peer's Hello or member data has not come)
+    bool joined = false; // the host has the peer's Hello: an empty build is then a mod too old to send one, not one still on its way
 };
 
-// The other players whose known build differs from mine, as "NAME on BUILD".
+// What the host knows of one player's build against mine. Unknown: neither its Hello nor its member data has come, which
+// never blocks a start. Older: its Hello came with no build, an HSMMod too old to send one.
+enum class BuildState : uint8_t { Unknown, Same, Older, Other };
+inline BuildState BuildStateOf(const std::string& mine, const PeerBuild& p) {
+    if (p.build.empty()) return p.joined ? BuildState::Older : BuildState::Unknown;
+    return p.build == mine ? BuildState::Same : BuildState::Other;
+}
+
+// The other players whose build differs from mine, as "NAME on BUILD" ("NAME on an older build" for a joined player with
+// no build). A member whose Hello has not come yet is no mismatch.
 inline std::vector<std::string> BuildMismatches(const std::string& mine, const std::vector<PeerBuild>& others) {
     std::vector<std::string> out;
-    for (const PeerBuild& p : others)
-        if (!p.build.empty() && p.build != mine) out.push_back((p.name.empty() ? std::string("another player") : p.name) + " on " + p.build);
+    for (const PeerBuild& p : others) {
+        const BuildState st = BuildStateOf(mine, p);
+        if (st != BuildState::Older && st != BuildState::Other) continue;
+        out.push_back((p.name.empty() ? std::string("another player") : p.name) + " on " + (st == BuildState::Older ? std::string("an older build") : p.build));
+    }
     return out;
 }
 

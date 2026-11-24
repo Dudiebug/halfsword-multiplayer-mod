@@ -8,6 +8,7 @@
 #include "sync/hsm_standin.h"
 #include "sync/hsm_track.h"
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <memory>
 
@@ -705,6 +706,81 @@ static void TestDriverPelvisUnread() {
     CHECK(d.Step(feed.player, 1016, now, 1.0 / 60.0, false, tg).place);
 }
 
+// 17b. #3906 (opf2ZCDQyj): a stand-in whose pelvis the physics threw out of the world (NaN, or 5e9 uu off) was "snapped"
+// by a NaN shift every 150 ms, which wrote NaN into the mesh again. A diverged body is not read: no error, no placement,
+// no command, and the step reports which bones.
+static void TestDriverDiverged() {
+    const PoseFrame tg0 = StaticTarget(V3{ 0, 0, 95 });
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double bad[] = { nan, 5.0e9, -2.0e6 };
+    for (const double v : bad) {
+        Feeder feed;
+        StandInDriver d;
+        PoseFrame tg;
+        feed.To(1000, tg0);
+        FighterNow now = NowAtOffset(tg0, V3{ 0, 0, 0 });
+        CHECK(d.Step(feed.player, 1000, now, 1.0 / 60.0, false, tg).place);   // placed once, as ever
+        now.bones[kBonePelvis].pos = V3{ v, 0, 95 };
+        // Long past the 150 ms snap clock: a NaN error used to snap here, by a NaN shift.
+        for (int i = 1; i <= 20; ++i) {
+            feed.To(1000 + 16 * i, tg0);
+            const DriverStep s = d.Step(feed.player, 1000 + 16 * i, now, 1.0 / 60.0, false, tg);
+            CHECK(s.have && !s.place && !s.snap && s.pelvisErrUu == -1.0 && MaxCmd(s.cmd) == 0.0);
+            CHECK(s.divergedBones == (1u << kBonePelvis));
+            CHECK(std::isfinite(s.shift.x) && std::isfinite(s.shift.y) && std::isfinite(s.shift.z));
+        }
+        // The body back in the world is read and driven again.
+        now.bones[kBonePelvis].pos = V3{ 5, 0, 95 };
+        feed.To(1400, tg0);
+        const DriverStep ok = d.Step(feed.player, 1400, now, 1.0 / 60.0, false, tg);
+        CHECK(ok.divergedBones == 0 && ok.pelvisErrUu >= 0.0 && MaxCmd(ok.cmd) > 0.0);
+    }
+    // A diverged hand is dropped from the servo while the pelvis keeps being driven; a flung weapon is dropped without
+    // counting as a lost body.
+    Feeder feed;
+    StandInDriver d;
+    PoseFrame tg;
+    feed.To(1000, tg0);
+    FighterNow now = NowAtOffset(tg0, V3{ 0, 0, 0 });
+    d.Step(feed.player, 1000, now, 1.0 / 60.0, false, tg);
+    now.bones[kBoneHandR].pos = V3{ 0, nan, 0 };
+    feed.To(1016, tg0);
+    DriverStep s = d.Step(feed.player, 1016, now, 1.0 / 60.0, false, tg);
+    CHECK(s.divergedBones == (1u << kBoneHandR) && s.pelvisErrUu >= 0.0 && !s.cmd.drive[kBoneHandR]);
+    now.bones[kBoneHandR] = NowAtOffset(tg0, V3{}).bones[kBoneHandR];
+    now.weaponValid[0] = true;
+    now.weapons[0].pos = V3{ 1.0e12, 0, 0 };
+    feed.To(1032, tg0);
+    s = d.Step(feed.player, 1032, now, 1.0 / 60.0, false, tg);
+    CHECK(s.divergedBones == 0 && !s.cmd.weaponDrive[0]);
+    // A bad rotation counts as diverged too.
+    FighterNow rot = NowAtOffset(tg0, V3{});
+    rot.bones[kBonePelvis].rot.w = nan;
+    CHECK(DropDiverged(rot) == (1u << kBonePelvis) && !rot.valid[kBonePelvis]);
+    // Edge: exactly the limit is in the world, anything past it is not.
+    CHECK(!BodyDiverged(V3{ kDivergedUu, -kDivergedUu, 0 }) && BodyDiverged(V3{ kDivergedUu + 1, 0, 0 }));
+}
+
+// 17c. DivergeWatch asks for a new body once per episode: only after kDivergedHoldMs of unbroken divergence, never for a
+// glitch frame, and again only after a clean frame.
+static void TestDivergeWatch() {
+    DivergeWatch w;
+    CHECK(!w.Update(0, false));
+    CHECK(!w.Update(100, true));                        // starts the clock
+    CHECK(!w.Update(100 + kDivergedHoldMs - 1, true));
+    CHECK(!w.Update(100 + kDivergedHoldMs - 1, false)); // a clean frame restarts it
+    CHECK(!w.Update(400, true));
+    CHECK(!w.Update(400 + kDivergedHoldMs - 1, true));
+    CHECK(w.Update(400 + kDivergedHoldMs, true));       // inclusive
+    CHECK(!w.Update(400 + 5 * kDivergedHoldMs, true));  // once per episode
+    CHECK(!w.Update(2000, false));
+    CHECK(!w.Update(2001, true));
+    CHECK(w.Update(2001 + kDivergedHoldMs, true));      // the next episode fires again
+    w.Reset();                                          // a new stand-in was bound
+    CHECK(!w.Update(3000, true));
+    CHECK(w.Update(3000 + kDivergedHoldMs, true));
+}
+
 // 18. Snap rules: only a pelvis error above 150 uu held for 150 ms snaps (inclusive); an error back under the line
 // restarts the clock; a vetoed snap waits for the veto to lift; each snap restarts the clock and the ramp.
 static void TestDriverSnapRules() {
@@ -936,6 +1012,8 @@ int main() {
     TestDriverNoSample();
     TestDriverFirstPlacement();
     TestDriverPelvisUnread();
+    TestDriverDiverged();
+    TestDivergeWatch();
     TestDriverSnapRules();
     TestDriverCut();
     TestDriverImpactAndReset();

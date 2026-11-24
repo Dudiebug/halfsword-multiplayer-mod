@@ -36,7 +36,8 @@ inline constexpr uint64_t kModCompleteWaitMs = 120000;   // a held player whose 
 
 // Lobby data keys (host) and member data keys (each player).
 inline constexpr const char* kMemberLiveKey = "hsm_live";          // what a fighter reports running, as an encoded class (match/hsm_online_rules.h LiveSheet)
-inline constexpr const char* kLobbyModRuleKey = "hsm_mrule";        // preset digit, ModPreset
+inline constexpr const char* kLobbyModRuleKey = "hsm_mrule";        // preset digit, ModPreset (5 and 6: an older build's Classes and Unrestricted Classes)
+inline constexpr const char* kLobbyClassesKey = "hsm_mcls";         // the Classes row, ClassesMode digit
 inline constexpr const char* kLobbyBlockHseKey = "hsm_mcheat";      // "1" HS Enhancer blocked (effective: off when the host runs it)
 inline constexpr const char* kLobbyModOfficialKey = "hsm_mofficial";// "1" official builds only (effective)
 inline constexpr const char* kLobbyModListKey = "hsm_mlist";        // Custom / Bundle list, or "#<16 hex>" when too long
@@ -223,11 +224,11 @@ inline ModKind ClassifyPak(const std::vector<std::string>& maps, const std::vect
 //   Maps only                      stock + proxy DLLs + map paks
 //   Bundle / Custom                stock + proxy DLLs + the list (Bundle: the pack's paks, or with no pack what the host
 //                                  runs, each required; Custom: mod_allow, or what the host runs, none required: "same as host")
-//   Anything / Classes             everything (Classes checks HS Enhancer's and Half Wolverine's settings instead, match/hsm_online_rules.h)
-enum class ModPreset : uint8_t { Vanilla = 0, MapsOnly = 1, Bundle = 2, Custom = 3, Anything = 4, Classes = 5, Unrestricted = 6 };
-inline constexpr uint8_t kMaxModPreset = 6;
-// Both take classes and judge mods the same way. Unrestricted only lifts the class power budget (match/hsm_class.h).
-inline constexpr bool IsClassesPreset(ModPreset p) { return p == ModPreset::Classes || p == ModPreset::Unrestricted; }
+//   Anything                       everything
+// The Classes row (ClassesMode, below) is separate and works with any of them: it says whether classes count and whether the
+// class power budget holds. Classes check HS Enhancer's and Half Wolverine's settings (match/hsm_online_rules.h), not mods.
+enum class ModPreset : uint8_t { Vanilla = 0, MapsOnly = 1, Bundle = 2, Custom = 3, Anything = 4 };
+inline constexpr uint8_t kMaxModPreset = 4;
 inline const char* ModPresetName(ModPreset p) {
     switch (p) {
         case ModPreset::Vanilla: return "Vanilla";
@@ -235,8 +236,6 @@ inline const char* ModPresetName(ModPreset p) {
         case ModPreset::Bundle: return "Bundle";
         case ModPreset::Custom: return "Custom";
         case ModPreset::Anything: return "Anything";
-        case ModPreset::Classes: return "Classes";
-        case ModPreset::Unrestricted: return "Unrestricted Classes";
     }
     return "?";
 }
@@ -248,8 +247,6 @@ inline const char* ModPresetKey(ModPreset p) {
         case ModPreset::Bundle: return "bundle";
         case ModPreset::Custom: return "custom";
         case ModPreset::Anything: return "anything";
-        case ModPreset::Classes: return "classes";
-        case ModPreset::Unrestricted: return "unrestricted";
     }
     return "maps";
 }
@@ -258,6 +255,44 @@ inline bool ParseModPreset(std::string_view s, ModPreset& out) {
         if (modrules_detail::EqNoCase(s, ModPresetKey(ModPreset(i)))) { out = ModPreset(i); return true; }
     return false;
 }
+
+// The Classes row (MODS tab): Off (no classes: everyone fights as the game's plain fighter), On (each player's class, held to
+// the class power budget) or Unrestricted (no budget; match/hsm_class.h). It works with any Mods allowed value. A build before
+// the row had these as two values of Mods allowed itself, "Classes" and "Unrestricted Classes": its lobby data said hsm_mrule 5
+// and 6 and its INI mod_rule=classes and =unrestricted (both judged mods as Anything does). They still read that way.
+enum class ClassesMode : uint8_t { Off = 0, On = 1, Unrestricted = 2 };
+inline constexpr uint8_t kMaxClassesMode = 2;
+inline constexpr bool ClassesOn(ClassesMode m) { return m != ClassesMode::Off; }
+inline const char* ClassesModeName(ClassesMode m) {
+    switch (m) {
+        case ClassesMode::Off: return "Off";
+        case ClassesMode::On: return "On";
+        case ClassesMode::Unrestricted: return "Unrestricted";
+    }
+    return "?";
+}
+// The INI / log spelling: off, on, unrestricted.
+inline const char* ClassesModeKey(ClassesMode m) {
+    switch (m) {
+        case ClassesMode::Off: return "off";
+        case ClassesMode::On: return "on";
+        case ClassesMode::Unrestricted: return "unrestricted";
+    }
+    return "off";
+}
+inline bool ParseClassesMode(std::string_view s, ClassesMode& out) {
+    for (uint8_t i = 0; i <= kMaxClassesMode; ++i)
+        if (modrules_detail::EqNoCase(s, ClassesModeKey(ClassesMode(i)))) { out = ClassesMode(i); return true; }
+    return false;
+}
+// The old INI spellings: mod_rule=classes (On) and mod_rule=unrestricted. False for every other word.
+inline bool LegacyClassesMode(std::string_view s, ClassesMode& out) {
+    if (modrules_detail::EqNoCase(s, "classes")) { out = ClassesMode::On; return true; }
+    if (modrules_detail::EqNoCase(s, "unrestricted")) { out = ClassesMode::Unrestricted; return true; }
+    return false;
+}
+// The old lobby data: hsm_mrule 5 (Classes) and 6 (Unrestricted Classes) were Mods allowed values.
+inline constexpr char kLegacyClassesRule = '5', kLegacyUnrestrictedRule = '6';
 
 struct ModAllow {
     std::string name;        // matched any case against every kind
@@ -268,25 +303,51 @@ struct ModAllow {
 
 struct ModRule {
     ModPreset preset = ModPreset::Vanilla;
+    ClassesMode classes = ClassesMode::Off;   // the Classes row, whatever the preset
     bool blockHse = true;         // HS Enhancer is refused, whatever the preset
     bool officialOnly = true;
     std::vector<ModAllow> list;   // Custom and Bundle
     bool listHashOnly = false;    // read from lobby data whose list was too long: only the host can check it
-    bool operator==(const ModRule& o) const { return preset == o.preset && blockHse == o.blockHse && officialOnly == o.officialOnly && list == o.list && listHashOnly == o.listHashOnly; }
+    bool operator==(const ModRule& o) const { return preset == o.preset && classes == o.classes && blockHse == o.blockHse && officialOnly == o.officialOnly && list == o.list && listHashOnly == o.listHashOnly; }
 };
 
-// What a host chose in HSMMod.ini [mod] (mod_rule, block_hse, mod_official), before its pack, its own report and build
-// shape it (HostRule, EffectiveRule): the lobby's MODS tab steps it. The defaults are the INI's.
+// What a host chose in HSMMod.ini [mod] (mod_rule, mod_classes, block_hse, mod_official), before its pack, its own report and
+// build shape it (HostRule, EffectiveRule): the lobby's MODS tab steps it. The defaults are the INI's. Official builds only is
+// on by default (an INI that already says mod_official=0 keeps it).
 struct ModChoice {
     ModPreset preset = ModPreset::Vanilla;   // no mods unless the host picks a looser mode
+    ClassesMode classes = ClassesMode::Off;
     bool blockHse = true;
-    bool officialOnly = false;
-    bool operator==(const ModChoice& o) const { return preset == o.preset && blockHse == o.blockHse && officialOnly == o.officialOnly; }
+    bool officialOnly = true;
+    bool operator==(const ModChoice& o) const { return preset == o.preset && classes == o.classes && blockHse == o.blockHse && officialOnly == o.officialOnly; }
 };
-inline ModChoice ChoiceOf(const ModRule& r) { return ModChoice{r.preset, r.blockHse, r.officialOnly}; }
+inline ModChoice ChoiceOf(const ModRule& r) { return ModChoice{r.preset, r.classes, r.blockHse, r.officialOnly}; }
+
+// The INI's two keys back to a choice. mod_rule=classes and mod_rule=unrestricted are what a build before the Classes row (and the
+// launcher's Unrestricted checkbox) write: they mean Anything with that Classes value, and they win over mod_classes. Any other
+// mod_rule is a Mods allowed value; one we don't know reads as Vanilla (`known` false: the caller logs it). mod_classes is the
+// Classes row: Off when it is missing or not off, on or unrestricted.
+struct ModChoiceKeys { ModPreset preset = ModPreset::Vanilla; ClassesMode classes = ClassesMode::Off; bool known = true; };
+inline ModChoiceKeys ChoiceFromKeys(std::string_view modRule, std::string_view modClasses) {
+    ModChoiceKeys k;
+    if (LegacyClassesMode(modRule, k.classes)) { k.preset = ModPreset::Anything; return k; }
+    k.known = ParseModPreset(modRule, k.preset);
+    if (!k.known) k.preset = ModChoice{}.preset;
+    if (!ParseClassesMode(modClasses, k.classes)) k.classes = ClassesMode::Off;
+    return k;
+}
+// The two keys a choice is saved as. Anything with classes on is saved the old way (mod_rule=classes or =unrestricted) so the
+// launcher, which reads mod_rule alone, still sees Unrestricted; mod_classes always says the row.
+struct ModChoiceStrings { std::string modRule, modClasses; };
+inline ModChoiceStrings KeysOfChoice(const ModChoice& c) {
+    ModChoiceStrings k;
+    k.modRule = c.preset == ModPreset::Anything && ClassesOn(c.classes) ? (c.classes == ClassesMode::On ? "classes" : "unrestricted") : ModPresetKey(c.preset);
+    k.modClasses = ClassesModeKey(c.classes);
+    return k;
+}
 
 // What a lobby whose host has no rule (mod_rules=0, or a build before rules) means to a client that has them.
-inline ModRule NoRule() { ModRule r; r.preset = ModPreset::Anything; r.blockHse = true; r.officialOnly = false; return r; }
+inline ModRule NoRule() { ModRule r; r.preset = ModPreset::Anything; r.classes = ClassesMode::Off; r.blockHse = true; r.officialOnly = false; return r; }
 
 // The rule a host publishes and enforces: what it chose, with HS Enhancer allowed when the host runs it itself (it
 // cannot block what it runs; the lobby says so) and official-only off when the host is not on an official build.
@@ -400,7 +461,7 @@ struct RuleResult {
 // an ASI loader's version.dll) is a mod only to Vanilla, since its name cannot tell an overlay from a mod.
 inline RuleFail ItemPresetFail(const ModRule& rule, const ModItem& it) {
     if (it.kind == ModKind::HseLocked) return RuleFail::None;   // loaded but locked: no menu, no hotkeys, nothing on
-    if (rule.preset == ModPreset::Anything || IsClassesPreset(rule.preset)) return RuleFail::None;
+    if (rule.preset == ModPreset::Anything) return RuleFail::None;
     if (it.kind == ModKind::Ue4ssStock) {
         if (rule.preset != ModPreset::Vanilla) return RuleFail::None;
         return ue4ss::IsConsoleMod(it.name) ? RuleFail::NoMods : RuleFail::None;
@@ -429,14 +490,14 @@ inline bool RuleRefusesHse(const ModRule& rule) {
 }
 
 // Is the report allowed by the rule? The first problem, in this order: HS Enhancer where it is blocked, then each item
-// the preset refuses (in report order), then a missing required mod. Anything and Classes take any list, a cut one too.
+// the preset refuses (in report order), then a missing required mod. Anything takes any list, a cut one too.
 inline RuleResult CheckMods(const ModRule& rule, const ModReport& rep) {
     RuleResult r;
     if (!rep.complete) { r.fail = RuleFail::Pending; return r; }
     if (rule.blockHse)
         for (const ModItem& it : rep.items)
             if (IsHseItem(it)) { r.fail = RuleFail::Hse; r.mod = it.name; return r; }
-    if (rule.preset == ModPreset::Anything || IsClassesPreset(rule.preset)) return r;
+    if (rule.preset == ModPreset::Anything) return r;
     if (rep.truncated) { r.fail = RuleFail::TooMany; return r; }
     if (rule.listHashOnly && (rule.preset == ModPreset::Custom || rule.preset == ModPreset::Bundle)) { r.fail = RuleFail::Unchecked; return r; }
     for (const ModItem& it : rep.items) {
@@ -488,21 +549,29 @@ inline std::string RuleFailShort(const RuleResult& r) {
     return {};
 }
 
-// "Maps only, HS Enhancer blocked, official builds only": the system chat line after a change and the browser tooltip.
+// The Classes row as a name that says what it does ("Classes", "Unrestricted Classes"), empty for Off.
+inline std::string ClassesModeLabel(ClassesMode m) {
+    return m == ClassesMode::On ? "Classes" : m == ClassesMode::Unrestricted ? "Unrestricted Classes" : std::string();
+}
+
+// "Maps only, Classes, HS Enhancer blocked, official builds only": the system chat line after a change and the browser tooltip.
 inline std::string RuleSummary(const ModRule& r) {
     std::string s = ModPresetName(r.preset);
+    if (ClassesOn(r.classes)) s += ", " + ClassesModeLabel(r.classes);
     s += r.blockHse ? ", HS Enhancer blocked" : ", HS Enhancer allowed";
     if (r.officialOnly) s += ", official builds only";
     return s;
 }
 
-// The browser row's tag for a lobby's rule: empty for the default (Vanilla, HS Enhancer blocked), else "mods: Maps only",
-// "mods: Anything, HS Enhancer ok", ", official only".
+// The browser row's tag for a lobby's rule: empty for the default (a ModChoice{}: Vanilla, no classes, HS Enhancer blocked,
+// official builds only), else what differs: "mods: Maps only", "mods: Anything, Classes, HS Enhancer ok, unofficial builds ok".
 inline std::string LobbyRuleTag(const ModRule& r) {
-    if (r.preset == ModChoice{}.preset && r.blockHse && !r.officialOnly) return {};
+    const ModChoice d;
+    if (r.preset == d.preset && r.classes == d.classes && r.blockHse == d.blockHse && r.officialOnly == d.officialOnly) return {};
     std::string s = std::string("mods: ") + ModPresetName(r.preset);
+    if (ClassesOn(r.classes)) s += ", " + ClassesModeLabel(r.classes);
     if (!r.blockHse) s += ", HS Enhancer ok";
-    if (r.officialOnly) s += ", official only";
+    if (!r.officialOnly) s += ", unofficial builds ok";
     return s;
 }
 
@@ -524,24 +593,48 @@ inline std::string EncodeLobbyModList(const std::vector<ModAllow>& list) {
     return "#" + Sha256Hex(d).substr(0, 16);
 }
 
-struct LobbyModData { std::string rule, hse, official, list; };   // kLobbyModRuleKey, kLobbyBlockHseKey, kLobbyModOfficialKey, kLobbyModListKey
+// kLobbyModRuleKey, kLobbyBlockHseKey, kLobbyModOfficialKey, kLobbyModListKey, kLobbyClassesKey
+struct LobbyModData { std::string rule, hse, official, list, classes; };
 
+// How the Classes row travels (Steam lobby data, not the wire protocol): hsm_mcls is the row, "0" Off, "1" On, "2" Unrestricted.
+// hsm_mrule stays the Mods allowed digit, 0..4, so a build before the row reads the preset. Its two old classes values are
+// written only where they were true to the old build, Anything with classes on: 5 (Classes) and 6 (Unrestricted Classes).
+// A host on any other preset with classes on is read as plain classes-off by an older build (lossy, and said so in the PR);
+// writing 5 or 6 for it would tell the old build to take every mod, which is worse.
 inline LobbyModData EncodeLobbyRule(const ModRule& r) {
     LobbyModData d;
     d.rule = std::to_string(unsigned(r.preset));
+    if (r.preset == ModPreset::Anything && r.classes == ClassesMode::On) d.rule[0] = kLegacyClassesRule;
+    if (r.preset == ModPreset::Anything && r.classes == ClassesMode::Unrestricted) d.rule[0] = kLegacyUnrestrictedRule;
+    d.classes = std::to_string(unsigned(r.classes));
     d.hse = r.blockHse ? "1" : "0";
     d.official = r.officialOnly ? "1" : "0";
     if (r.preset == ModPreset::Custom || r.preset == ModPreset::Bundle) d.list = EncodeLobbyModList(r.list);
     return d;
 }
 
+// The Classes row of a lobby from its raw keys (hsm_mrule, hsm_mcls): what Lobby::InClassesLobby asks. A lobby without hsm_mrule has
+// no rule in force, so no classes. Otherwise hsm_mcls, when it is one good digit, is the row; without it the lobby is an older
+// host's, whose hsm_mrule 5 and 6 mean Classes and Unrestricted Classes (on Anything), and every other digit means classes off.
+inline ClassesMode LobbyClassesMode(std::string_view rule, std::string_view classes) {
+    if (rule.empty()) return ClassesMode::Off;
+    ClassesMode m = ClassesMode::Off;
+    if (rule.size() == 1 && (rule[0] == kLegacyClassesRule || rule[0] == kLegacyUnrestrictedRule))
+        m = rule[0] == kLegacyClassesRule ? ClassesMode::On : ClassesMode::Unrestricted;
+    if (classes.size() == 1 && classes[0] >= '0' && classes[0] <= char('0' + kMaxClassesMode)) m = ClassesMode(classes[0] - '0');
+    return m;
+}
+
 // Peer-written lobby data back to a rule. A lobby without hsm_mrule has no rule (NoRule); a bad value is read as the
-// strictest reading of that field (HS Enhancer blocked), never as a looser one.
+// strictest reading of that field (HS Enhancer blocked), never as a looser one. The Classes row is LobbyClassesMode's.
 inline ModRule DecodeLobbyRule(const LobbyModData& d) {
     if (d.rule.empty()) return NoRule();
     ModRule r;
-    if (d.rule.size() != 1 || d.rule[0] < '0' || d.rule[0] > char('0' + kMaxModPreset)) r.preset = ModPreset::Vanilla;
-    else r.preset = ModPreset(d.rule[0] - '0');
+    const char digit = d.rule.size() == 1 ? d.rule[0] : char(0);
+    if (digit >= '0' && digit <= char('0' + kMaxModPreset)) r.preset = ModPreset(digit - '0');
+    else if (digit == kLegacyClassesRule || digit == kLegacyUnrestrictedRule) r.preset = ModPreset::Anything;
+    else r.preset = ModPreset::Vanilla;
+    r.classes = LobbyClassesMode(d.rule, d.classes);
     r.blockHse = d.hse != "0";
     r.officialOnly = d.official == "1";
     if (r.preset == ModPreset::Custom || r.preset == ModPreset::Bundle) {

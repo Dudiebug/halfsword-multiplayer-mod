@@ -1,7 +1,8 @@
-// The Crypts gather's wire (protocol rev 47, match/hsm_crypts.h). Gather 71, reliable, both ways:
+// The Crypts gather's wire (protocol rev 47; the flags byte rev 48; match/hsm_crypts.h). Gather 71, reliable, both ways:
 //   host -> client  GatherMsg: the gather's phase (GatherPhase: 0 over or called off, 1 gathering, 2 collecting the last
-//                   kits), its time left in ms (at most the Gather time's 30 minutes) and its seq (never 0). Sent at the
-//                   start, every kGatherClockEveryMs, to each joiner, at Collect and at the end.
+//                   kits), its time left in ms (at most the Gather time's 60 minutes), its seq (never 0) and its flags
+//                   (bit 0 kGatherTogether: the gather is run in one shared Catacombs the host travels everyone to; no
+//                   other bit is set). Sent at the start, every kGatherClockEveryMs, to each joiner, at Collect and at the end.
 //   client -> host  GatherNoteMsg: a note about the sender's own run (GatherNote) in the gather of that seq.
 // The kits themselves go as LoadoutChange 61 chunks (session/hsm_loadout_change.h): while a gather runs, the host takes a
 // client's whole passport as its gathered kit, after the same checks as any upload.
@@ -13,17 +14,19 @@
 
 namespace hsm {
 
-struct GatherMsg { GatherPhase phase = GatherPhase::Off; uint32_t leftMs = 0; uint16_t seq = 0; };
+inline constexpr uint8_t kGatherTogether = 1;   // GatherMsg flags bit 0
+struct GatherMsg { GatherPhase phase = GatherPhase::Off; uint32_t leftMs = 0; uint16_t seq = 0; bool together = false; };
 struct GatherNoteMsg { GatherNote note = GatherNote::Loading; uint16_t seq = 0; };
 
 // The two share the type and differ in length: the host's is 8 bytes after the header, a note 3.
 inline std::vector<uint8_t> Encode(const GatherMsg& m) {
-    Writer w; w.header(MsgType::Gather); w.u8(uint8_t(m.phase)); w.u32(m.leftMs); w.u16(m.seq); w.u8(0); return w.buf;
+    Writer w; w.header(MsgType::Gather); w.u8(uint8_t(m.phase)); w.u32(m.leftMs); w.u16(m.seq); w.u8(m.together ? kGatherTogether : 0); return w.buf;
 }
 inline bool Decode(const uint8_t* d, size_t n, GatherMsg& m) {
     Reader r(d, n); MsgType t; if (!r.header(t) || t != MsgType::Gather) return false;
-    const uint8_t p = r.u8(); m.leftMs = r.u32(); m.seq = r.u16(); const uint8_t spare = r.u8();
-    if (!r.done() || p >= kGatherPhaseCount || spare != 0 || m.seq == 0) return false;
+    const uint8_t p = r.u8(); m.leftMs = r.u32(); m.seq = r.u16(); const uint8_t flags = r.u8();
+    if (!r.done() || p >= kGatherPhaseCount || (flags & ~kGatherTogether) != 0 || m.seq == 0) return false;
+    m.together = (flags & kGatherTogether) != 0;
     if (m.leftMs > uint32_t(kGatherMaxS) * 1000u) return false;
     m.phase = GatherPhase(p);
     return true;

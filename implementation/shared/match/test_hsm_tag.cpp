@@ -15,6 +15,9 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 using namespace hsm;
 
+// A listed lobby that advertises `mode`, three players in of eight (the Duel card reads Last man standing from three), against a browser entry.
+static bool Matches(const char* mode, const char* entry) { LobbyFound f; f.mode = mode; f.players = 3; f.maxPlayers = 8; return ModeMatches(f, entry); }
+
 using V = std::vector<uint8_t>;
 static bool Has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
 
@@ -179,9 +182,9 @@ static void TestConfig() {
     CHECK(c.fuseS == kFuseDefaultS && kFuseDefaultS == 30);
     c.fuseS = 3; CHECK(Sanitize(c).fuseS == kFuseMinS);
     c.fuseS = 250; CHECK(Sanitize(c).fuseS == kFuseMaxS);
-    c.fuseS = 45; c.timeLimitS = 600; c.crossbows = 4; c.clearGroundMin = 3;
+    c.fuseS = 45; c.timeLimitS = 600; c.crossbows = 4; c.clearGroundS = 180;
     const MatchConfig s = Sanitize(c);
-    CHECK(s.fuseS == 45 && s.timeLimitS == 0 && s.crossbows == 0 && s.clearGroundMin == 0);
+    CHECK(s.fuseS == 45 && s.timeLimitS == 0 && s.crossbows == 0 && s.clearGroundS == 0);
     c.format = Format::FreeForAll; c.timeLimitS = 600; c.crossbows = 4;
     CHECK(Sanitize(c).timeLimitS == 600 && Sanitize(c).crossbows == 4);   // other modes keep theirs
 }
@@ -199,8 +202,8 @@ static void TestBare() {
     CHECK(t.format == Format::Tag && t.gear == Gear::Fists && t.tier == kBrawlTier && t.damagePct == kTagDamagePct);
     const DamageRange r;                                                  // the vanilla slider: 0..200 by 10, stock 100
     CHECK(StepSetting(t, LobbyRow::Damage, 1, r).damagePct == 20 && StepSetting(t, LobbyRow::Damage, -1, r).damagePct == 0);   // the host can change it
-    MatchConfig back = SelectMode(t, Format::Duel, false);
-    CHECK(back.format == Format::Duel && back.gear == Gear::Own && back.tier == MatchConfig{}.tier && back.damagePct == kDamageStock);
+    MatchConfig back = SelectMode(t, Format::Duel, false);                // the Duel card is the Last man standing one (hsm_mode_merge.h)
+    CHECK(back.format == Format::LastManStanding && back.gear == Gear::Own && back.tier == MatchConfig{}.tier && back.damagePct == kDamageStock);
     MatchConfig changed = t; changed.damagePct = 50;
     back = SelectMode(changed, Format::FreeForAll, false);
     CHECK(back.gear == Gear::Own && back.damagePct == 50);                // a damage the host chose stays
@@ -212,9 +215,10 @@ static void TestBare() {
     CHECK(SelectMode(tag, Format::Tag, false).damagePct == kTagDamagePct && SelectFormat(changed, Format::Tag).damagePct == 50);   // the same card changes nothing
     LobbyLocal l; l.phase = LobbyPhase::InLobby; l.host = true; l.config = Sanitize(tag); l.playerCount = 3;
     const LobbyScene ls = BuildLobbyScene(l);
-    CHECK(ls.summary.find("TAG") != std::string::npos && ls.summary.find("loadouts") == std::string::npos && ls.summary.find("tier") == std::string::npos);
+    CHECK(ls.summary.find("TAG") != std::string::npos && ls.summary.find("loadouts") == std::string::npos && ls.summary.find("tier") == std::string::npos
+          && ls.summary.find("kits") == std::string::npos);   // bare fists: the summary names no gear
     bool blurb = false;
-    for (const ModeCard& m : ls.modes) if (m.format == Format::Tag) blurb = Has(m.description, "Bare fists");
+    for (const ModeCard& m : ls.modes) if (m.format == Format::Tag) blurb = m.description == "Tag.";   // the owner's wording, 2026-11-15
     CHECK(blurb);
 }
 
@@ -280,14 +284,12 @@ static void TestHud() {
     BannerTracker c; c.Observe(TagInfo(1, 9000), 1, 100);
     CHECK(c.shot().text.empty());                               // joining a running match fires nothing
     // The feed lines.
-    CHECK(ModeEventLine(me, ModeEventMsg{ModeEventKind::TagPass, 1, 2}) == "Ann tagged Bo");
-    CHECK(ModeEventLine(me, ModeEventMsg{ModeEventKind::TagBurn, 2, 0}) == "Bo burned out");
     const FeedRow pass = MakeModeFeedRow(other, ModeEventMsg{ModeEventKind::TagPass, 1, 2}, 3);
     CHECK(pass.spans.size() == 3 && pass.spans[0].text == "Ann" && pass.spans[1].text == " tagged " && pass.spans[2].text == "Bo" && !pass.mine);
     CHECK(pass.spans[2].color.r == style::kBloodInk.r && pass.spans[0].color.r == style::kBone.r);   // the new "it" is red
     CHECK(MakeModeFeedRow(other, ModeEventMsg{ModeEventKind::TagPass, 1, 2}, 2).mine && MakeModeFeedRow(other, ModeEventMsg{ModeEventKind::TagBurn, 2, 0}, 2).mine);
     const FeedRow burn = MakeModeFeedRow(other, ModeEventMsg{ModeEventKind::TagBurn, 2, 0}, 1);
-    CHECK(burn.spans.size() == 2 && burn.spans[1].text == " burned out" && !burn.mine);
+    CHECK(burn.spans.size() == 2 && burn.spans[0].text == "Bo" && burn.spans[1].text == " burned out" && !burn.mine);   // "Bo burned out"
     // The name tag ink.
     CHECK(NameTagInk(Format::Tag, kNoTeam, true).r == style::kBloodInk.r && NameTagInk(Format::Tag, kNoTeam, false).r == style::kBone.r);
     CHECK(NameTagInk(Format::FreeForAll, kNoTeam, true).r == style::kBone.r);                   // "it" means nothing elsewhere
@@ -304,21 +306,23 @@ static LobbyLocal InLobby(Format f, int players = 4) {
 }
 static std::vector<LobbyRow> Ids(const LobbyScene& s) { std::vector<LobbyRow> v; for (const SettingRow& r : s.settings) v.push_back(r.id); return v; }
 
-// Criterion: the card, its blurb, the rows (Limit, Fuse time, Damage, FreeCam, Sync, Gear/Tier/Weapons), 2+ players, and arenas only.
+// Criterion: the card, its blurb, the rows (Limit, Fuse time, Damage, FreeCam, Sync; no gear rows), 2+ players, and arenas only.
 static void TestLobby() {
     LobbyScene s = BuildLobbyScene(InLobby(Format::Tag));
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) card = &m;
     CHECK(card && card->name == "TAG" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // bare fists: no gear rows
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Players, LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Bite,
+                                              LobbyRow::Strip, LobbyRow::TimeOfDay, LobbyRow::Props, LobbyRow::Sync}));   // bare fists: no Gear, Tier or Weapons rows
     for (const SettingRow& r : s.settings) {
-        if (r.id == LobbyRow::Fuse) CHECK(r.label == "Fuse time" && r.value == "30 s" && r.enabled && !r.hint.empty());
-        if (r.id == LobbyRow::Limit) CHECK(r.label == "Rounds to win");
-        if (r.id == LobbyRow::Respawn) CHECK(r.label == "Round break");
+        if (r.id == LobbyRow::Fuse) CHECK(r.label == "Fuse time" && r.value == "30 s" && r.enabled && r.hint.empty());
+        if (r.id == LobbyRow::Limit) CHECK(r.label == "Score limit");
+        if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay");
     }
     LobbyLocal rolled = InLobby(Format::Tag); rolled.config.gear = Gear::RandomTier;
     s = BuildLobbyScene(rolled);
-    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));   // a stale gear changes nothing
+    CHECK(Ids(s) == (std::vector<LobbyRow>{LobbyRow::Players, LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Bite,
+                                              LobbyRow::Strip, LobbyRow::TimeOfDay, LobbyRow::Props, LobbyRow::Sync}));   // a stale gear changes nothing
     CHECK(!ModeAvailable(Format::Tag, 1).ok && ModeAvailable(Format::Tag, 2).ok && ModeAvailable(Format::Tag, 8).ok);
     s = BuildLobbyScene(InLobby(Format::FreeForAll, 1));
     for (const ModeCard& m : s.modes) if (m.format == Format::Tag) CHECK(!m.enabled && !m.hint.empty());
@@ -333,7 +337,7 @@ static void TestLobby() {
     for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, Format::Tag) == MapAllowsFormat(m, Format::FreeForAll));
     bool browser = false; for (const std::string& n : BrowserModes()) browser = browser || n == "Tag";
     CHECK(browser);
-    CHECK(ModeMatches("Tag", "Tag") && !ModeMatches("Team duel (2)", "Tag"));
+    CHECK(Matches("Tag", "Tag") && !Matches("Team duel (2)", "Tag"));
 }
 
 // Criterion (#1408): whoever is "it" in a round in play runs and walks at the Tagger speed row's percent; nobody else does, and no

@@ -1,6 +1,7 @@
 #include "steam/steam_api.h"
 #include "steam/hsm_steam_abi.h"
 #include "steam/hsm_steam_route.h"
+#include "steam/hsm_steam_result.h"
 #include "log.h"
 #include "ue/hook.h"
 #include <windows.h>
@@ -156,7 +157,7 @@ bool g_selfPump = false;
 ULONGLONG g_readyAt = 0;
 
 // ---------------------------------------------------------------- call results (polled)
-struct PendingCall { ApiCall call; int id; Event::Kind kind; };
+struct PendingCall { ApiCall call; int id; Event::Kind kind; ULONGLONG startedMs; };
 std::vector<PendingCall> g_pending;
 bool g_ready = false;
 }  // namespace
@@ -297,12 +298,22 @@ void Tick() {
     for (size_t i = 0; i < g_pending.size();) {
         PendingCall pc = g_pending[i];
         bool failed = false;
-        if (!g.IsAPICallCompleted(g_utils, pc.call, &failed)) { ++i; continue; }
+        if (!g.IsAPICallCompleted(g_utils, pc.call, &failed)) {
+            if (!CallTimedOut(pc.startedMs, GetTickCount64())) { ++i; continue; }
+            g_pending.erase(g_pending.begin() + long(i));   // never answered: failed, so the page can try again
+            HSM_LOG("steam: call %d had no answer after %llu ms; dropped", pc.id, (unsigned long long)kCallTimeoutMs);
+            Event e{}; e.kind = pc.kind; e.ok = false; e.result = kResultNoAnswer;
+            Push(std::move(e));
+            continue;
+        }
         g_pending.erase(g_pending.begin() + long(i));
-        Event e{}; e.kind = pc.kind; e.ok = false;
+        Event e{}; e.kind = pc.kind; e.ok = false; e.result = kResultNoResult;
         if (pc.id == kCbLobbyCreated) {
             LobbyCreated r{};
-            if (g.GetAPICallResult(g_utils, pc.call, &r, sizeof r, pc.id, &failed) && !failed) { e.ok = r.result == 1; e.lobby = r.lobby; }
+            if (g.GetAPICallResult(g_utils, pc.call, &r, sizeof r, pc.id, &failed) && !failed) {
+                e.result = int(r.result); e.ok = r.result == kResultOK && r.lobby; e.lobby = r.lobby;
+            }
+            if (!e.ok) HSM_LOG("steam: CreateLobby failed: result %d (%s)", e.result, ResultText(e.result).c_str());
         } else if (pc.id == kCbLobbyMatchList) {
             LobbyMatchList r{};
             if (g.GetAPICallResult(g_utils, pc.call, &r, sizeof r, pc.id, &failed) && !failed) {
@@ -410,7 +421,7 @@ std::string LaunchConnectLobby() {
 void CreateLobby(LobbyType type, int maxMembers) {
     if (!g_ready) return;
     const ApiCall call = g.CreateLobby(g_mm, int(type), maxMembers);
-    if (call) { g_pending.push_back({call, kCbLobbyCreated, Event::LobbyCreated}); return; }
+    if (call) { g_pending.push_back({call, kCbLobbyCreated, Event::LobbyCreated, GetTickCount64()}); return; }
     HSM_LOG("steam: CreateLobby returned no call handle");
     Event e{}; e.kind = Event::LobbyCreated; e.ok = false; Push(std::move(e));
 }
@@ -443,7 +454,7 @@ void RequestLobbyList(const std::string& key, const std::string& value, int dist
     if (distance >= 0 && g.AddRequestLobbyListDistanceFilter) g.AddRequestLobbyListDistanceFilter(g_mm, distance);
     HSM_LOG("steam: RequestLobbyList distance=%d%s", distance, distance < 0 ? " (Steam's default)" : g.AddRequestLobbyListDistanceFilter ? "" : " (no export: default)");
     const ApiCall call = g.RequestLobbyList(g_mm);
-    if (call) { g_pending.push_back({call, kCbLobbyMatchList, Event::LobbyList}); return; }
+    if (call) { g_pending.push_back({call, kCbLobbyMatchList, Event::LobbyList, GetTickCount64()}); return; }
     HSM_LOG("steam: RequestLobbyList returned no call handle");
     Event e{}; e.kind = Event::LobbyList; e.ok = false; Push(std::move(e));
 }

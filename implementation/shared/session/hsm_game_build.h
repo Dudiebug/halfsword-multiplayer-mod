@@ -1,10 +1,13 @@
-// The Half Sword Steam build this HSMMod is made for, told by Steam's own build id (ISteamApps::GetAppBuildId).
-// The exe key (ue/engine.cpp kBuilds) cannot tell every update apart: builds 26615445, 26641406, 26737211 and 26820056 changed
-// only the content pak, and their HalfSwordUE5-Win64-Shipping.exe is byte for byte the one of 26568321 (sha256 726c10f7...). The
-// content differs in ways a session feels (26615445: Willie_BP's grab rule, the middle mouse fighter spawn, the zombies' hearing;
-// 26641406: a weapon lists its holders in "Parent Actors"; 26737211: Willie_BP's dislocation and blood events; 26820056: Get
-// Damage x1.125, the win and lose screens; docs/REVERSE_ENGINEERING.md sections 12, 13 and 15), so the Steam
-// build id is checked as well: a notice on the multiplayer page when this machine is on another
+// The Half Sword Steam build this HSMMod was last verified on, told by Steam's own build id (ISteamApps::GetAppBuildId).
+// It is not a limit: a newer build runs, and gameplay/game_check.cpp says in game what it changed that the mod uses
+// (the multiplayer page's "changed K things" line). tools/game_watch.py moves this number when a new build passes the
+// offline gates.
+// The exe key (ue/engine.cpp kBuilds) cannot tell every update apart: builds 26615445, 26641406, 26737211 and 26820056 changed only the
+// content pak, and their HalfSwordUE5-Win64-Shipping.exe is byte for byte the one of 26568321 (sha256 726c10f7...). The content
+// differs in ways a session feels (26615445: Willie_BP's grab rule, the middle mouse fighter spawn, the zombies' hearing;
+// 26641406: a weapon lists its holders in "Parent Actors"; 26737211: Willie_BP's dislocation and blood events; 26820056: Get Damage x1.125, the win and lose screens;
+// docs/REVERSE_ENGINEERING.md sections 12, 13 and 15), so the Steam
+// build id is checked as well: a notice on the multiplayer page when this machine is on an older
 // build, and a lobby whose host is on another build is not joinable. Steam may not say (0): then the exe key alone decides.
 // Pure; the DLL reads the id and shows the text.
 #pragma once
@@ -13,27 +16,22 @@
 
 namespace hsm {
 
-constexpr int kTargetSteamBuild = 26820056;
+constexpr int kVerifiedSteamBuild = 26820056;
 
-enum class SteamBuildCheck : unsigned char { Unknown, Target, Older, Newer };
+enum class SteamBuildCheck : unsigned char { Unknown, Verified, Older, Newer };
 
 inline SteamBuildCheck CheckSteamBuild(int id) {
     if (id <= 0) return SteamBuildCheck::Unknown;
-    if (id == kTargetSteamBuild) return SteamBuildCheck::Target;
-    return id < kTargetSteamBuild ? SteamBuildCheck::Older : SteamBuildCheck::Newer;
+    if (id == kVerifiedSteamBuild) return SteamBuildCheck::Verified;
+    return id < kVerifiedSteamBuild ? SteamBuildCheck::Older : SteamBuildCheck::Newer;
 }
 
-// The multiplayer page's line for this machine's build; empty on the target build or when Steam cannot say.
+// The multiplayer page's line for this machine's build: only an older build has one (update the game). A newer build
+// gets none here: the game check's line says whether it changed anything the mod uses.
 inline std::string SteamBuildNotice(int id) {
-    switch (CheckSteamBuild(id)) {
-        case SteamBuildCheck::Older:
-            return "Half Sword is not up to date (Steam build " + std::to_string(id) + "). Update it in Steam: this HSMMod is made "
-                   "for build " + std::to_string(kTargetSteamBuild) + ".";
-        case SteamBuildCheck::Newer:
-            return "Half Sword has an update (Steam build " + std::to_string(id) + ") newer than this HSMMod (made for build " +
-                   std::to_string(kTargetSteamBuild) + "). Look for an HSMMod update.";
-        default: return "";
-    }
+    if (CheckSteamBuild(id) != SteamBuildCheck::Older) return "";
+    return "Half Sword is not up to date (Steam build " + std::to_string(id) + "). Update it in Steam: this HSMMod was checked "
+           "on build " + std::to_string(kVerifiedSteamBuild) + ".";
 }
 
 // A Steam build id written by another machine (lobby data "hsm_sbuild"): 1 to 9 digits, else 0 (unknown).

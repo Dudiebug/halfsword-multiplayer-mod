@@ -1,4 +1,5 @@
 #include "gameplay/spectate.h"
+#include "gameplay/world_context.h"
 #include "log.h"
 #include <algorithm>
 #include <cctype>
@@ -27,7 +28,7 @@ UObject* LocalController(Adapter& a) {
     UObject* statics = GameplayStatics();
     if (!statics || !a.World()) return nullptr;
     Call c(statics, "GetPlayerController");
-    c.set<UObject*>("WorldContextObject", a.World()).set<int32_t>("PlayerIndex", kLocalPlayer);
+    c.set<UObject*>("WorldContextObject", worldctx::For(a.World())).set<int32_t>("PlayerIndex", kLocalPlayer);
     return c.invoke() ? c.get<UObject*>("ReturnValue") : nullptr;
 }
 
@@ -65,7 +66,7 @@ UObject* SpawnCamera(Adapter& a, const FVector& at, UObject*& camComp) {
     if (!statics || !cls || !a.World()) return nullptr;
     FTransform t; t.translation = at;
     Call begin(statics, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", a.World()).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(a.World())).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* cam = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!cam) return nullptr;
@@ -215,7 +216,7 @@ void ClearCameraFade(Adapter& a) {
     UObject* statics = GameplayStatics();
     if (!statics || !a.World()) return;
     Call m(statics, "GetPlayerCameraManager");
-    m.set<UObject*>("WorldContextObject", a.World()).set<int32_t>("PlayerIndex", kLocalPlayer);
+    m.set<UObject*>("WorldContextObject", worldctx::For(a.World())).set<int32_t>("PlayerIndex", kLocalPlayer);
     if (UObject* manager = m.invoke() ? m.get<UObject*>("ReturnValue") : nullptr) Call(manager, "StopCameraFade").invoke();
 }
 
@@ -313,7 +314,7 @@ bool ResetViewToPawn(Adapter& a) {
     UObject* statics = GameplayStatics();
     if (!statics || !a.World()) return false;
     Call p(statics, "GetPlayerPawn");
-    p.set<UObject*>("WorldContextObject", a.World()).set<int32_t>("PlayerIndex", kLocalPlayer);
+    p.set<UObject*>("WorldContextObject", worldctx::For(a.World())).set<int32_t>("PlayerIndex", kLocalPlayer);
     UObject* pawn = p.invoke() ? p.get<UObject*>("ReturnValue") : nullptr;
     UObject* controller = LocalController(a);
     if (!pawn || !controller) return false;

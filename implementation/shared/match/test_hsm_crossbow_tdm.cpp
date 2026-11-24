@@ -12,6 +12,9 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 using namespace hsm;
 
+// A listed lobby that advertises `mode`, three players in of eight (the Duel card reads Last man standing from three), against a browser entry.
+static bool Matches(const char* mode, const char* entry) { LobbyFound f; f.mode = mode; f.players = 3; f.maxPlayers = 8; return ModeMatches(f, entry); }
+
 using V = std::vector<uint8_t>;
 static bool Has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
 
@@ -43,7 +46,7 @@ static void TestRules() {
     CHECK(MapAllowsFormat(kMaps[0], f) == MapAllowsFormat(kMaps[0], Format::TwoTeams));
     for (const MapInfo& mi : kMaps) CHECK(MapAllowsFormat(mi, f) == MapAllowsFormat(mi, Format::FreeForAll));
     CHECK(ModeName(f, Gear::Own, 3) == "Crossbow TDM (3)" && ModeName(f, Gear::Own) == "Crossbow TDM" && Has(FormatBlurb(f), "crossbow"));
-    CHECK(ModeMatches("Crossbow TDM (4)", "Crossbow TDM") && !ModeMatches("Crossbow TDM", "Teams"));
+    CHECK(Matches("Crossbow TDM (4)", "Crossbow TDM") && !Matches("Crossbow TDM", "Teams"));
 }
 
 // Criterion: the Crossbows row is forced to All for this mode (whatever a stale lobby value says) and left alone elsewhere.

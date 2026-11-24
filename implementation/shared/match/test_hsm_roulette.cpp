@@ -313,22 +313,19 @@ static void TestScreens() {
     CHECK(Text(MakeModeFeedRow(mine, bangSelf, 1)) == "Bo pulled the trigger: BANG");
     CHECK(Text(MakeModeFeedRow(mine, bangOther, 1)) == "Bo has a live round for Ann");
     CHECK(MakeModeFeedRow(mine, ask, 1).spans.empty() && MakeModeFeedRow(mine, fired, 1).spans.empty());
-    CHECK(ModeEventLine(mine, clickSelf) == "Ann pulled the trigger: click  +1" && ModeEventLine(mine, clickOther) == "Ann pulled on Bo: click");
-    CHECK(ModeEventLine(mine, bangSelf) == "Bo pulled the trigger: BANG" && ModeEventLine(mine, bangOther) == "Bo has a live round for Ann");
-    CHECK(ModeEventLine(mine, ask).empty() && ModeEventLine(mine, fired).empty());
 }
 
 // The lobby: its card, its rows, two players; picking it makes the peasants, leaving it puts gear and tier back.
 static void TestLobby() {
     const Format f = Format::Roulette;
     CHECK(FormatName(f) == "Roulette" && Has(FormatBlurb(f), "six chambers"));
-    CHECK(SettingsFor(Cfg()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight,
+    CHECK(SettingsFor(Cfg()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight,
                                                       LobbyRow::WeaponWeight, LobbyRow::Sync}));
     CHECK(!ModeAvailable(f, 1).ok && ModeAvailable(f, 2).ok && ModeAvailable(f, 20).ok && std::string(ModeAvailable(f, 1).hint) == "Needs 2 or more players");
     bool card = false, browser = false;
-    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || kModeOrder[i] == f;
+    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || (kModeOrder[i].format == f && !kModeOrder[i].blossfechten);
     for (const std::string& n : BrowserModes()) browser = browser || n == "Roulette";
-    CHECK(card && browser && kModeOrderCount + 3 == kModeCardCount);
+    CHECK(card && browser && kModeOrderCount + 5 == kModeCardCount);
     Format parsed = Format::FreeForAll;
     CHECK(ParseServerFormat("roulette", &parsed) && parsed == f);
     for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, f) == MapAllowsFormat(m, Format::LastManStanding));
@@ -344,8 +341,8 @@ static void TestLobby() {
     LobbyLocal l; l.phase = LobbyPhase::InLobby; l.host = true; l.myName = "Ann"; l.version = "0.2.0"; l.config = in;
     for (const char* name : {"Ann", "Bob", "Cat"}) { LobbyPlayer p; p.name = name; p.me = l.players.empty(); p.host = l.players.empty(); l.players.push_back(p); }
     const SettingRow limit = lobby_detail::Row(l, LobbyRow::Limit);
-    CHECK(limit.label == "Points to win" && Has(limit.hint, "every blank you pull on yourself"));
-    { LobbyLocal o = l; o.config = SelectMode(in, Format::OneCrossbow, false); CHECK(lobby_detail::Row(o, LobbyRow::Limit).label == "Rounds to win" && !Has(lobby_detail::Row(o, LobbyRow::Limit).hint, "blank")); }
+    CHECK(limit.label == "Score limit" && Has(limit.value, "point") && limit.hint.empty());
+    { LobbyLocal o = l; o.config = SelectMode(in, Format::OneCrossbow, false); CHECK(lobby_detail::Row(o, LobbyRow::Limit).label == "Score limit" && Has(lobby_detail::Row(o, LobbyRow::Limit).value, "round") && lobby_detail::Row(o, LobbyRow::Limit).hint.empty()); }
     const LobbyScene s = BuildLobbyScene(l);
     bool selected = false;
     for (const ModeCard& m : s.modes) if (m.format == f && !m.brawl && !m.progression) selected = m.selected && m.name == "ROULETTE" && m.enabled;

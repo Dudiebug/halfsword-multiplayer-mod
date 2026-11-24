@@ -6,10 +6,18 @@
 #include "match/hsm_lobby_mods.h"
 #include "match/hsm_mp_scene.h"
 #include "session/hsm_region.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace hsm {
+
+// A player the host has the Hello of: the key is the Steam ID the lobby member list uses, the build is what the Hello said
+// (empty: an older HSMMod, which sent none). The START button needs it to tell "older build" from "Hello not arrived yet".
+struct JoinedBuild {
+    uint64_t key = 0;
+    std::string build;
+};
 
 class Session {
 public:
@@ -23,6 +31,7 @@ public:
     virtual uint32_t ReportStatusSeq() const = 0;                    // changes with every new outcome (0: none yet)
     virtual void LobbyChatLine(const std::string& line) = 0;         // typed in the lobby chat box: /bug, /sendlog and /nolog work as in the match chat, else it goes to every member
     virtual std::string TakeNotice() = 0;                            // why the host turned us away (kicked, banned, full...), once; empty: nothing new
+    virtual bool TakeLobbyPage() = 0;                                // back in the main menu from a match with the lobby kept (BACK TO LOBBY): the lobby page is to open, once
     virtual std::string CryptsStatus() = 0;                          // Crypts (#3199): this machine's gather line, as the pill reads it; empty: no gather
     virtual std::string ClassName() const = 0;                       // the class picked in the menu (match/hsm_class.h)
     virtual void SetClassName(const std::string& name) = 0;          // also written back to HSMMod.ini
@@ -70,6 +79,7 @@ public:
     // The lobby's MODS tab: the session's mod list (the host builds it from every admitted report, a member has the host's
     // SessionMods), names and slots, and on the host who it is still checking. The rule fields are the menu's to fill.
     virtual LobbyModsLocal ModsView() = 0;
+    virtual std::vector<JoinedBuild> JoinedBuilds() const = 0;       // host: every player whose Hello has come (a client has none to give)
     virtual void SetPlayerListen(uint8_t slot, bool muted, int volumePct) = 0;   // this player's own mute and volume for one speaker
     virtual void SetLobbyPassword(const std::string& password) = 0;  // host: lock the lobby with it, or open it again with ""; nobody is kicked
     virtual void KickPlayer(uint8_t slot, bool ban) = 0;             // host
@@ -77,7 +87,7 @@ public:
     virtual void VoteBanPlayer(uint8_t slot) = 0;                    // starts a voteban (role=server sessions: 7 days)
     virtual void CastVote(bool yes) = 0;
     virtual MpLoadout LoadoutView() = 0;                             // the Esc menu's CHANGE LOADOUT button: shown, available, why not
-    virtual std::string ChangeLoadout() = 0;                         // a click: re-reads this player's passport and asks for the new kit; the line to show
+    virtual std::string ChangeLoadout() = 0;                         // a click: re-reads this player's passport and asks for the new kit; the answer is a notice, its line is returned for the log
     virtual MpVote Vote() = 0;                                       // the vote running now, if any
     virtual std::vector<std::string> NetworkLines() = 0;             // read-only network facts for the menu
     virtual void LeaveSession() = 0;                                 // out of the session (and the lobby), back to the main menu

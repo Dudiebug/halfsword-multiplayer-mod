@@ -1,4 +1,5 @@
-// Tournament and Pit Bridge Duels on screen: the mode cards, availability, the rows and their keys, the maps, the HUD line under
+// Tournament and Pit Bridge Duels on screen (Pit bridge duels have no lobby card since 0.9.0; a lobby of an older host can still run
+// them): the mode cards, availability, the rows and their keys, the maps, the HUD line under
 // the strip, the pill, the bench panel and the scoreboard (eliminated players dimmed).
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_lobby_scene.h"
@@ -24,17 +25,17 @@ static const SettingRow* RowOf(const LobbyScene& s, LobbyRow id) { for (const Se
 static void TestCards() {
     LobbyScene s = BuildLobbyScene(InLobby(Format::Tournament));
     CHECK(s.modes.size() == kModeCardCount);
-    const ModeCard *t = nullptr, *p = nullptr;
-    for (const ModeCard& m : s.modes) { if (m.format == Format::Tournament && !m.brawl) t = &m; if (m.format == Format::PitBridgeDuel) p = &m; }
-    CHECK(t && p);
+    const ModeCard* t = nullptr;
+    int pitCards = 0;
+    for (const ModeCard& m : s.modes) { if (m.format == Format::Tournament && !m.brawl) t = &m; if (m.format == Format::PitBridgeDuel) ++pitCards; }
+    CHECK(t && pitCards == 0);                                                  // the Pit bridge card is gone
     CHECK(t->name == "TOURNAMENT" && t->selected && t->enabled && t->group == ModeGroup::Versus && !t->description.empty());
-    CHECK(p->name == "PIT BRIDGE DUELS" && !p->selected && p->enabled && p->group == ModeGroup::Versus && !p->description.empty());
-    CHECK(std::string(FormatBlurb(Format::Tournament)) != FormatBlurb(Format::FreeForAll) && std::string(FormatBlurb(Format::PitBridgeDuel)) != FormatBlurb(Format::FreeForAll));
-    // the cards sit in the versus part, before the co-op ones
+    CHECK(std::string(FormatBlurb(Format::Tournament)) != FormatBlurb(Format::FreeForAll) && std::string(FormatBlurb(Format::PitBridgeDuel)) == FormatBlurb(Format::FreeForAll));   // an older host's Pit reads as Carnage
+    // the card sits in the versus part, before the co-op ones
     size_t at = 0, bots = 0;
-    for (size_t i = 0; i < kModeOrderCount; ++i) { if (kModeOrder[i] == Format::Tournament) at = i; if (kModeOrder[i] == Format::PlayersVsBots) bots = i; }
+    for (size_t i = 0; i < kModeOrderCount; ++i) { if (kModeOrder[i].format == Format::Tournament) at = i; if (kModeOrder[i].format == Format::PlayersVsBots) bots = i; }
     CHECK(at > 0 && at < bots && ModeGroupAt(at) == ModeGroup::Versus);
-    for (Format f : {Format::Tournament, Format::PitBridgeDuel}) { bool in = false; for (Format k : kModeOrder) in = in || k == f; CHECK(in); }
+    { bool in = false, pit = false; for (const ModeSlot& k : kModeOrder) { in = in || k.format == Format::Tournament; pit = pit || k.format == Format::PitBridgeDuel; } CHECK(in && !pit); }
     CHECK(FormatName(Format::Tournament) == "Tournament" && FormatName(Format::PitBridgeDuel) == "Pit bridge duels");
     CHECK(ModeName(Format::Tournament, Gear::Own) == "Tournament" && ModeName(uint8_t(Format::PitBridgeDuel), 0) == "Pit bridge duels");
 }
@@ -42,41 +43,43 @@ static void TestCards() {
 static void TestAvailability() {
     CHECK(!ModeAvailable(Format::Tournament, 2).ok && std::string(ModeAvailable(Format::Tournament, 2).hint) == "Needs 3 or more players");
     CHECK(ModeAvailable(Format::Tournament, 3).ok && ModeAvailable(Format::Tournament, 8).ok);
-    CHECK(!ModeAvailable(Format::PitBridgeDuel, 1).ok && ModeAvailable(Format::PitBridgeDuel, 2).ok && ModeAvailable(Format::PitBridgeDuel, 8).ok);
+    CHECK(ModeAvailable(Format::PitBridgeDuel, 1).ok && ModeAvailable(Format::PitBridgeDuel, 2).ok && ModeAvailable(Format::PitBridgeDuel, 8).ok);   // no card to grey out
     LobbyScene two = BuildLobbyScene(InLobby(Format::Tournament, 2));
     for (const ModeCard& m : two.modes) if (m.format == Format::Tournament && !m.brawl) CHECK(!m.enabled && std::string(m.hint) == "Needs 3 or more players");
-    CHECK(!two.start && two.waiting == "Needs 3 or more players");
+    CHECK(!two.start && two.waiting == "Needs 3 or more players.");
     LobbyScene pit2 = BuildLobbyScene(InLobby(Format::PitBridgeDuel, 2));
     CHECK(pit2.start);
     LobbyScene pit1 = BuildLobbyScene(InLobby(Format::PitBridgeDuel, 1));
-    CHECK(!pit1.start);
+    CHECK(pit1.start && pit1.modes.size() == kModeCardCount);              // an older host's Pit config still builds a page
 }
 
 static void TestRows() {
     using R = LobbyRow;
     const LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     // no limit (one round a fight) and no time limit (a bracket has no clock); the rest as every round format
-    CHECK((Ids(t) == std::vector<LobbyRow>{R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Bodies, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
+    CHECK((Ids(t) == std::vector<LobbyRow>{R::Players, R::WinBy, R::Respawn, R::Damage, R::DeadWeight, R::WeaponWeight, R::Bite, R::Gear, R::Bodies, R::Crossbows,
+                                          R::Strip, R::TimeOfDay, R::Props, R::Sync}));
     CHECK(RowOf(t, R::Limit) == nullptr);
     bool oneRound = false;
-    for (const ModeCard& m : t.modes) if (m.format == Format::Tournament) oneRound = m.description.find("One round a fight") != std::string::npos;
+    for (const ModeCard& m : t.modes) if (m.format == Format::Tournament) oneRound = m.description == "A one-on-one bracket.";
     CHECK(oneRound);
     const LobbyScene p = BuildLobbyScene(InLobby(Format::PitBridgeDuel));
-    CHECK((Ids(p) == std::vector<LobbyRow>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Bodies, R::Damage, R::DeadWeight, R::WeaponWeight, R::Crossbows, R::Sync}));
+    CHECK((Ids(p) == std::vector<LobbyRow>{R::Players, R::Limit, R::Time, R::WinBy, R::Respawn, R::Damage, R::DeadWeight, R::WeaponWeight, R::Bite, R::Gear, R::Bodies, R::Crossbows,
+                                          R::Strip, R::TimeOfDay, R::Props, R::Sync}));
     const SettingRow* win = RowOf(p, R::Limit);
-    CHECK(win && win->label == "Wins to take the match" && win->value == "5");
+    CHECK(win && win->label == "Score limit" && win->value == "5 rounds");                            // no wins unit of its own any more
     // random gear adds the Weapons row, as everywhere
     LobbyLocal g = InLobby(Format::Tournament); g.config.gear = Gear::RandomTier;
     CHECK(RowOf(BuildLobbyScene(g), R::Weapons) != nullptr);
-    // the steppers: a Tournament limit only steps to 1 (one round a fight); wins 3, 5, 7, 10, 15
+    // the steppers: a Tournament limit only steps to 1 (one round a fight); an older host's Pit steps like the other round formats
     MatchConfig c; c.format = Format::Tournament; c.scoreLimit = 2;
     c = StepSetting(c, R::Limit, 1); CHECK(c.scoreLimit == 1 && LimitToKey(c.format, c.scoreLimit) == 1);
     c = StepSetting(c, R::Limit, -1); CHECK(c.scoreLimit == 1);
     CHECK(LimitToKey(Format::Tournament, 2) == 3 && LimitFromKey(Format::Tournament, 3) == 2);   // an old lobby key still reads
     MatchConfig w; w.format = Format::PitBridgeDuel; w.scoreLimit = 5;
     w = StepSetting(w, R::Limit, 1); CHECK(w.scoreLimit == 7);
-    w = StepSetting(w, R::Limit, 1); w = StepSetting(w, R::Limit, 1); CHECK(w.scoreLimit == 15);
-    w = StepSetting(w, R::Limit, 1); CHECK(w.scoreLimit == 3);
+    w = StepSetting(w, R::Limit, 1); CHECK(w.scoreLimit == 10);
+    w = StepSetting(w, R::Limit, -1); CHECK(w.scoreLimit == 7);
     // picking a card starts at its own default
     MatchConfig d; d.format = Format::FreeForAll; d.scoreLimit = 20;
     CHECK(SelectMode(d, Format::Tournament, false).scoreLimit == 1 && SelectMode(d, Format::PitBridgeDuel, false).scoreLimit == 5);
@@ -93,15 +96,19 @@ static void TestMaps() {
     CHECK(EffectiveMap(Format::PitBridgeDuel, "") == size_t(pit - kMaps));
     LobbyScene s = BuildLobbyScene(InLobby(Format::PitBridgeDuel));
     int allowed = 0;
-    for (const MapCard& m : s.maps) { allowed += m.allowed ? 1 : 0; CHECK(m.allowed == (m.name == "Pit")); if (!m.allowed) CHECK(m.reason == "Pit bridge duels need the Pit"); }
+    for (const MapCard& m : s.maps) { if (kMaps[m.index].crypts) { CHECK(m.allowed); continue; }   // the Crypts map is picked from any mode (it enters Crypts mode)
+        allowed += m.allowed ? 1 : 0; CHECK(m.allowed == (m.name == "Pit")); if (!m.allowed) CHECK(m.reason == "Not for this mode"); }
     CHECK(allowed == 1);
-    LobbyLocal mod = InLobby(Format::PitBridgeDuel);
+    LobbyLocal mod = InLobby(Format::Tournament);                          // a modded map is not an arena of the stock bracket either way
     LobbyModMap mm; mm.path = "/Game/Mods/X"; mm.display = "X"; mod.modMaps = {mm};
-    for (const MapCard& m : BuildLobbyScene(mod).maps) if (m.modded) CHECK(!m.allowed);
+    for (const MapCard& m : BuildLobbyScene(mod).maps) if (m.modded) CHECK(m.allowed);   // custom maps are every format's (Zombies and Blossfechten aside)
     LobbyScene t = BuildLobbyScene(InLobby(Format::Tournament));
     for (const MapCard& m : t.maps) if (!m.allowed) CHECK(m.reason == "Tournament needs an arena");
-    CHECK(BrowserModes().size() == 21 && BrowserModes()[18] == "Crypts" && BrowserModes()[11] == "Tournament" && BrowserModes()[12] == "Pit bridge duels" && BrowserModes()[13] == "Chaos" && BrowserModes()[14] == "One crossbow" && BrowserModes()[15] == "Roulette" && BrowserModes()[16] == "Hide and seek" && BrowserModes()[17] == "Brawl");
-    CHECK(ModeMatches("Tournament", BrowserModes()[11]) && ModeMatches("Pit bridge duels", BrowserModes()[12]));
+    CHECK(BrowserModes().size() == 21 && BrowserModes()[17] == "Crypt Royale" && BrowserModes()[18] == "Grave Robbers" && BrowserModes()[10] == "Tournament" && BrowserModes()[11] == "Blossfechten" && BrowserModes()[12] == "Chaos" && BrowserModes()[13] == "One crossbow" && BrowserModes()[14] == "Roulette" && BrowserModes()[15] == "Hide and seek" && BrowserModes()[16] == "Brawl");
+    LobbyFound tf; tf.mode = "Tournament"; tf.players = 4; tf.maxPlayers = 8;
+    LobbyFound pf; pf.mode = "Pit bridge duels"; pf.players = 4; pf.maxPlayers = 8;           // an older host: read as Carnage, no stop of its own
+    CHECK(ModeMatches(tf, BrowserModes()[10]) && !ModeMatches(tf, BrowserModes()[1]) && ModeMatches(pf, BrowserModes()[1]) && BrowserModeShown(pf) == "Carnage");
+    for (const std::string& n : BrowserModes()) CHECK(n != "Pit bridge duels");
 }
 
 // ---------------------------------------------------------------- the HUD

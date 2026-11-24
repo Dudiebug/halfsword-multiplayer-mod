@@ -3,7 +3,7 @@
 //   report     what this machine runs: mod paks (gameplay/mod_maps.cpp's scan, each a map pak or a content pak), the
 //              UE4SS mods UE4SS has enabled (stock ones apart; each hashed over Scripts/main.lua and dlls/main.dll), the
 //              other proxy DLLs next to the exe, and a detected Half Sword Enhancer. Names and hashes only.
-//   rule       the host's chosen rule from HSMMod.ini ([mod] mod_rule, block_hse, mod_official, mod_allow), made
+//   rule       the host's chosen rule from HSMMod.ini ([mod] mod_rule, mod_classes, block_hse, mod_official, mod_allow), made
 //              effective against the host's own report and build (EffectiveRule)
 //   challenge  this DLL's own code, relocation-normalised, for the host's ModChallenge (both sides of it)
 // Game thread only, except where a function says otherwise; the file work runs on a worker thread.
@@ -79,7 +79,7 @@ Official OwnOfficial();              // the update check's verdict on this DLL (
 ModRule HostRule(const Lobby& lobby);
 // The host's choice as the INI has it (preset and the two switches; no Bundle list, no loosening), for the lobby's MODS
 // tab. SetChoice is that tab's steppers: it takes effect at once (the next ModRulesTick announces it, LobbyTick
-// republishes it) and writes mod_rule, block_hse and mod_official under [mod] in HSMMod.ini. False: not written (the
+// republishes it) and writes mod_rule, mod_classes, block_hse and mod_official under [mod] in HSMMod.ini. False: not written (the
 // rule still changed for this run).
 ModChoice Chosen();
 bool SetChoice(const ModChoice& c);

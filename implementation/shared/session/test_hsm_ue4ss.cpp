@@ -108,15 +108,13 @@ static void TestProxy() {
 }
 
 static void TestBundle() {
-    // Nothing there: unpack it, whatever the flags say with no DLL to judge.
-    CHECK(ChooseBundleStep(false, false, false, false) == BundleStep::Install);
-    CHECK(ChooseBundleStep(false, true, true, true) == BundleStep::Install);
-    // The bundled build stays, and an older accepted one goes without a question.
-    CHECK(ChooseBundleStep(true, true, true, false) == BundleStep::None);
-    CHECK(ChooseBundleStep(true, false, true, false) == BundleStep::Replace);
-    // A build nobody knows is the player's to decide, once.
-    CHECK(ChooseBundleStep(true, false, false, false) == BundleStep::Ask);
-    CHECK(ChooseBundleStep(true, false, false, true) == BundleStep::Keep);
+    // Nothing there: unpack it. The bundled build stays.
+    CHECK(ChooseBundleStep(false, false) == BundleStep::Install);
+    CHECK(ChooseBundleStep(false, true) == BundleStep::Install);
+    CHECK(ChooseBundleStep(true, true) == BundleStep::None);
+    // Any other build is replaced without a question: an older one, the player's own, and a newer one too. The report: a
+    // player's own 4.0.0 under a mod carrying 3.0.1; the mod now carries 4.0.0, and its own build is the one that runs.
+    CHECK(ChooseBundleStep(true, false) == BundleStep::Replace);
 
     CHECK(BundleFilePath("ue4ss/UE4SS.dll") == "ue4ss\\UE4SS.dll");
     CHECK(BundleFilePath("ue4ss/Mods/Keybinds/Scripts/main.lua") == "ue4ss\\Mods\\Keybinds\\Scripts\\main.lua");

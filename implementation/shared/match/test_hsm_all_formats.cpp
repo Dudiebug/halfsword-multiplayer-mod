@@ -27,35 +27,40 @@ static LobbyLocal InLobby(Format f, int players) {
 }
 
 static bool HasCard(Format f) {
-    for (Format k : kModeOrder) if (k == f) return true;
+    for (const ModeSlot& k : kModeOrder) if (!k.blossfechten && k.format == f) return true;
     return false;
 }
 
 static void TestTables() {
     CHECK(kFormatCount == 20 && uint8_t(Format::Chaos) == 16 && uint8_t(Format::OneCrossbow) == 17 && uint8_t(Format::Roulette) == 18 && uint8_t(Format::HideSeek) == 19 && uint8_t(Format::CaptureTheFlag) == 10 && uint8_t(Format::Tag) == 11 && uint8_t(Format::Infection) == 12 &&
           uint8_t(Format::CrossbowTDM) == 13 && uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15);
-    // One card per format but ThreeTeams (the Teams card's 3 teams) and CaptureTheFlag (removed), none twice; then Brawl, Crypts and Progression.
-    CHECK(kModeOrderCount == kFormatCount - 2 && kModeCardCount == kModeOrderCount + 3);
+    // One card per format but ThreeTeams (the Teams card's 3 teams), CaptureTheFlag (removed), Duel (the Last man standing card with two
+    // players) and Pit bridge duels (gone from the lobby), none twice; plus the Blossfechten card; then Brawl, CRYPTS, Progression, Crypt Royale and Grave Robbers.
+    CHECK(kModeOrderCount == kFormatCount - 4 + 1 && kModeCardCount == kModeOrderCount + 5);
     std::set<uint8_t> carded;
-    for (Format k : kModeOrder) CHECK(carded.insert(uint8_t(k)).second);
+    for (const ModeSlot& k : kModeOrder) CHECK(k.blossfechten ? k.format == Format::LastManStanding : carded.insert(uint8_t(k.format)).second);
+    {   int bloss = 0; for (const ModeSlot& k : kModeOrder) bloss += k.blossfechten ? 1 : 0; CHECK(bloss == 1); }
     std::set<std::string> names, blurbs;
     for (uint8_t i = 0; i < kFormatCount; ++i) {
         const Format f = Format(i);
         const bool teams3 = f == Format::ThreeTeams;
+        const bool noCard = teams3 || f == Format::Duel || f == Format::PitBridgeDuel;   // a card of another format, or gone from the lobby
         if (f == Format::CaptureTheFlag) {             // removed: no card, no map; an old lobby's 10 plays Teams
             MatchConfig old; old.format = f;
             CHECKF(!HasCard(f) && Sanitize(old).format == Format::TwoTeams && Sanitize(old).teams == 2 && EffectiveMap(f, "") >= MapCount(), i);
             continue;
         }
-        CHECKF(HasCard(f) == !teams3, i);
-        // Name and blurb: each format has its own (ThreeTeams is spelled as Teams), neither empty, neither the free-for-all fallback.
+        CHECKF(HasCard(f) == !noCard, i);
+        // Name and blurb: each format has its own (ThreeTeams is spelled as Teams), neither empty, neither the Carnage fallback.
         const std::string name = FormatName(f), blurb = FormatBlurb(f);
         CHECKF(!name.empty() && !blurb.empty(), i);
-        if (f != Format::FreeForAll) { CHECKF(name != "Free-for-all", i); CHECKF(blurb != FormatBlurb(Format::FreeForAll), i); }
-        if (!teams3) { CHECKF(names.insert(name).second, i); CHECKF(blurbs.insert(blurb).second, i); }
-        // The browser's mode chip has an entry that matches the name a lobby of this format advertises.
+        if (f != Format::FreeForAll && f != Format::PitBridgeDuel) { CHECKF(name != "Carnage", i); CHECKF(blurb != FormatBlurb(Format::FreeForAll), i); }
+        if (!noCard) { CHECKF(names.insert(name).second, i); CHECKF(blurbs.insert(blurb).second, i); }
+        // The browser's mode chip has an entry that matches the name a lobby of this format advertises (Duel and Pit bridge duels: the
+        // card they read as, hsm_mode_merge.h BrowserModeFor).
         bool listed = false;
-        for (const std::string& m : BrowserModes()) listed = listed || ModeMatches(ModeName(f, Gear::Own, 2), m);
+        LobbyFound adv; adv.mode = ModeName(f, Gear::Own, 2); adv.players = 3; adv.maxPlayers = 8;
+        for (const std::string& m : BrowserModes()) listed = listed || ModeMatches(adv, m);
         CHECKF(listed, i);
         // A map to play on: the effective map for an empty pick allows the format, and some listed map allows it.
         const size_t em = EffectiveMap(f, "");
@@ -86,7 +91,13 @@ static void TestTables() {
         for (LobbyRow r : rows) { CHECKF(seen.insert(uint8_t(r)).second, i); CHECKF(!lobby_detail::Row(l, r).label.empty(), i); CHECKF(r <= LobbyRow::Sync, i); }
         // The scene lists the format's own card as selected, with the rows the list names.
         const LobbyScene s = BuildLobbyScene(InLobby(f, 4));
-        CHECKF(s.settings.size() == rows.size() || f == Format::FreeForAll, i);
+        {   // the scene lists the format's rows, plus the ones every lobby has (the player limit, Props, Strip), once each and in order
+            std::vector<LobbyRow> got;
+            for (const SettingRow& r : s.settings) got.push_back(r.id);
+            for (LobbyRow r : rows) CHECKF(std::count(got.begin(), got.end(), r) == 1, i);
+            for (LobbyRow r : {LobbyRow::Players, LobbyRow::Props, LobbyRow::Strip}) CHECKF(std::count(got.begin(), got.end(), r) == 1, i);
+            CHECKF(got.size() >= rows.size() && std::is_sorted(got.begin(), got.end()), i);
+        }
         // Sanitize keeps the format (ThreeTeams becomes Teams with 3) and is idempotent.
         const MatchConfig san = Sanitize(c);
         CHECKF(teams3 ? san.format == Format::TwoTeams : san.format == f, i);
@@ -102,7 +113,7 @@ static void TestTables() {
         CHECKF(!(ScoresPerFighter(f) && HasTeams(f)), i);
         CHECKF(DefaultScoreLimit(f) >= 1, i);
     }
-    CHECK(FormatName(Format(kFormatCount)) == "Free-for-all");
+    CHECK(FormatName(Format(kFormatCount)) == "Carnage");
 }
 
 // A MatchInfo of each format, as the host sends it with that format's own fields, goes through the wire; the fields a format does
@@ -171,8 +182,8 @@ static void TestServerFormat() {
     const W words[] = {{"ffa", Format::FreeForAll, 2}, {"duel", Format::Duel, 2}, {"lms", Format::LastManStanding, 2}, {"teams", Format::TwoTeams, 2},
                        {"teamduel", Format::TeamDuel, 2}, {"riot", Format::Riot, 2}, {"juggernaut", Format::Juggernaut, 2},
                        {"tag", Format::Tag, 2}, {"infection", Format::Infection, 2},
-                       {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2}, {"pitbridge", Format::PitBridgeDuel, 2},
-                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2}, {"PitBridge", Format::PitBridgeDuel, 2},
+                       {"crossbowtdm", Format::CrossbowTDM, 2}, {"tournament", Format::Tournament, 2},
+                       {"survival", Format::PlayersVsBots, 2}, {"zombies", Format::Zombies, 2},
                        {"chaos", Format::Chaos, 2}, {"onecrossbow", Format::OneCrossbow, 2}, {"roulette", Format::Roulette, 2}, {"hideseek", Format::HideSeek, 2}};
     for (const W& w : words) {
         Format f = Format::FreeForAll; int teams = 0;
@@ -180,10 +191,12 @@ static void TestServerFormat() {
     }
     Format f = Format::FreeForAll;
     CHECK(!ParseServerFormat("capture", &f) && !ParseServerFormat("ctf", &f) && !ParseServerFormat("", &f) && !ParseServerFormat("pit bridge", &f));
-    // Every format with a card has a word (not ThreeTeams, nor the removed CaptureTheFlag).
+    CHECK(!ParseServerFormat("pitbridge", &f) && !ParseServerFormat("PitBridge", &f));   // the lobby's card is gone (0.9.0): the word reads as unknown
+    // Every format with a card has a word (not ThreeTeams, nor the removed CaptureTheFlag, nor Pit bridge duels, gone from the lobby).
+    // Duel and Last man standing are one card with two words.
     std::set<uint8_t> reachable;
     for (const W& w : words) reachable.insert(uint8_t(w.f));
-    for (uint8_t i = 0; i < kFormatCount; ++i) CHECKF(reachable.count(i) != (Format(i) == Format::ThreeTeams || Format(i) == Format::CaptureTheFlag), i);
+    for (uint8_t i = 0; i < kFormatCount; ++i) CHECKF(reachable.count(i) != (Format(i) == Format::ThreeTeams || Format(i) == Format::CaptureTheFlag || Format(i) == Format::PitBridgeDuel), i);
     // A player count that cannot start the format falls back to Last Man Standing (Duel: not exactly two; the 3-player formats: two).
     CHECK(ServerFormatFor(Format::Duel, 3) == Format::LastManStanding && ServerFormatFor(Format::Duel, 2) == Format::Duel);
     for (Format r : {Format::Riot, Format::Juggernaut, Format::Tournament}) {

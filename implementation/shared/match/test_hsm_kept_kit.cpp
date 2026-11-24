@@ -21,6 +21,7 @@ static LobbyLocal Lobby(Format f, Gear g, bool host = true) {
     return l;
 }
 static bool Listed(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return true; return false; }
+static SettingRow Row(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return r; CHECK(false); return SettingRow{}; }   // a copy: the scene is often a temporary
 
 int main() {
     // In force only for a Tournament with a random loadout each, with the row on Keep.
@@ -66,33 +67,33 @@ int main() {
         CHECK(d.keepKit);
     }
 
-    // The row: a Tournament with random loadouts, in GEAR, apart from `settings`; a member reads it greyed.
+    // The row: a Tournament with random loadouts, in GEAR; a member reads it greyed.
     CHECK(SectionOf(LobbyRow::KeepKit) == LobbySection::Gear);
-    CHECK(size_t(LobbyRow::KeepKit) < size_t(LobbyRow::Scenario) && size_t(LobbyRow::Scenario) + 1 == size_t(LobbyRow::Sync));
+    CHECK(size_t(LobbyRow::KeepKit) < size_t(LobbyRow::Sync));
     {
         LobbyLocal l = Lobby(Format::Tournament, Gear::RandomTier);
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasKeepKit && s.keepKit.id == LobbyRow::KeepKit && s.keepKit.label == "Loadouts" && s.keepKit.value == "New each fight");
-        CHECK(s.keepKit.enabled && s.keepKit.hint.find("every fight") != std::string::npos && !Listed(s, LobbyRow::KeepKit));
+        CHECK(Listed(s, LobbyRow::KeepKit) && Row(s, LobbyRow::KeepKit).id == LobbyRow::KeepKit && Row(s, LobbyRow::KeepKit).label == "Keep kit" && Row(s, LobbyRow::KeepKit).value == "New each fight");
+        CHECK(Row(s, LobbyRow::KeepKit).enabled && Row(s, LobbyRow::KeepKit).hint.empty());
         const size_t rows = s.settings.size();
         l.config.keepKit = true;
         s = BuildLobbyScene(l);
-        CHECK(s.keepKit.value == "Keep for the bracket" && s.keepKit.hint.find("first fight") != std::string::npos);
+        CHECK(Row(s, LobbyRow::KeepKit).value == "Keep for the bracket" && Row(s, LobbyRow::KeepKit).hint.empty());
         CHECK(s.settings.size() == rows);
     }
     {
         LobbyLocal l = Lobby(Format::Tournament, Gear::RandomTier, false);
         l.config.keepKit = true;
         const LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasKeepKit && s.keepKit.value == "Keep for the bracket" && !s.keepKit.enabled);
+        CHECK(Listed(s, LobbyRow::KeepKit) && Row(s, LobbyRow::KeepKit).value == "Keep for the bracket" && !Row(s, LobbyRow::KeepKit).enabled);
     }
-    CHECK(!BuildLobbyScene(Lobby(Format::Tournament, Gear::Mirror)).hasKeepKit);
-    CHECK(!BuildLobbyScene(Lobby(Format::Tournament, Gear::Own)).hasKeepKit);
-    CHECK(!BuildLobbyScene(Lobby(Format::Duel, Gear::RandomTier)).hasKeepKit);
+    CHECK(!Listed(BuildLobbyScene(Lobby(Format::Tournament, Gear::Mirror)), LobbyRow::KeepKit));
+    CHECK(!Listed(BuildLobbyScene(Lobby(Format::Tournament, Gear::Own)), LobbyRow::KeepKit));
+    CHECK(!Listed(BuildLobbyScene(Lobby(Format::Duel, Gear::RandomTier)), LobbyRow::KeepKit));
     {
         LobbyLocal l = Lobby(Format::Tournament, Gear::RandomTier);
         l.progression = true;
-        CHECK(!BuildLobbyScene(l).hasKeepKit);
+        CHECK(!Listed(BuildLobbyScene(l), LobbyRow::KeepKit));
     }
 
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }

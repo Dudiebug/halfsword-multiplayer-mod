@@ -54,6 +54,7 @@ private:
         sync::V3 pelvis{};
         bool havePelvis = false, failLogged = false;
         combat::SelfPoseHistory history;   // rev 42: what the claim check rewinds
+        sync::DivergeWatch diverge;        // #3906/#3907: the body's own bones out of the world
     };
     std::array<std::unique_ptr<Owned>, kMaxWillies + 1> owned_{};
     double startMs_ = 0, prevDtS_ = 0;
@@ -135,6 +136,10 @@ public:
     bool StreamOffset(uint8_t entity, double& offsetMs) const;
     bool Replica() const { return replica_; }
     std::string HealthLine();                            // since the previous call; empty with no stand-in
+    // Entities whose stand-in's bodies the physics threw out of the world (NaN or past sync::kDivergedUu) and kept there
+    // (sync::DivergeWatch, #3906): they are not recoverable by placing them, so the session destroys the actor and spawns
+    // a new one. Each is listed once per episode; the list is emptied by the call.
+    std::vector<uint8_t> TakeDiverged() { return std::exchange(diverged_, {}); }
     int Count() const;
 
 private:
@@ -160,6 +165,7 @@ private:
         int32_t index = -1;
         FighterRig rig;
         sync::StandInDriver driver;
+        sync::DivergeWatch diverge;
         double bindDeadlineMs = 0, nextBindMs = 0;
         bool bindLogged = false, haveTarget = false, releaseBlockedLogged = false;
         bool deadShown = false;   // DED set on the stand-in from the owner's vitals
@@ -200,6 +206,7 @@ private:
     std::function<uint32_t(uint8_t)> stuckBones_;
     bool grabNoSnap_ = false;
     StepObserver stepObserver_;
+    std::vector<uint8_t> diverged_;
     double costSumMs_ = 0, costMaxMs_ = 0;
     uint64_t ticks_ = 0;
     bool audit_ = false;

@@ -34,6 +34,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
     if (IsCrossbowTdm(c.format)) c.crossbows = uint8_t(Crossbows::All);                      // the mode's rule, no row
     else if (IsOneCrossbow(c.format)) c.crossbows = uint8_t(Crossbows::One);                 // the same: exactly one, drawn each round
     else if (IsTag(c.format) || IsInfection(c.format)) c.crossbows = 0;                      // no Crossbows row there: a stale pick from another mode must not apply
+    if (IsBlossfechten(c)) { c = BlossfechtenKit(c); c.crossbows = 0; }                      // the Blossfechten card: swords, no armour; it has no Gear, Weapons or Crossbows row
     if (IsTag(c.format)) c.timeLimitS = 0;                                                   // the rounds and the fuse are the clock
     if (IsInfection(c.format)) {
         if (c.timeLimitS == 0) c.timeLimitS = kInfectionDefaultTimeS;                        // the survivors win by lasting: there is always a clock
@@ -49,9 +50,14 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.weaponWeightPct = std::min(c.weaponWeightPct, kWeightMaxPct);
     if (!ValidWaveBreakS(c.waveBreakS) || !IsBotFormat(c.format)) c.waveBreakS = 0;     // a bot-format setting
     c.gatherS = uint16_t(std::clamp(c.gatherS, kGatherMinS, kGatherMaxS) / 60 * 60);    // Crypts: 2 to 60 whole minutes
-    if (c.timeOfDay >= kTimeOfDayCount) c.timeOfDay = 0;   // a stale or peer-written value: the map's own
+    c.cryptsTier = std::min(c.cryptsTier, kCryptsTierTop);                               // Crypts: Beggar .. the game's own
+    if (!IsCrypts(c) || !g_cryptsCoopOffered) c.cryptsTogether = false;                  // the Crypts modes' row only, and held back (a stale hsm_ctog included)
+    if (!IsCrypts(c) || !g_cryptsCoopOffered) c.graveRobbers = false;                    // Grave Robbers: held back too (a missing key is Crypt Royale)
+    if (c.graveRobbers) c.cryptsTogether = false;                                        // Grave Robbers has no Apart/Together row: the crypt is shared
+    c.timeOfDay = TimeOfDayRead(c.timeOfDay);              // a stale or peer-written value, and an older host's Map's own: Midday
+    c.freeCam = true;                                                                     // always on (0.9.0): the row is gone; an older host's 0 is ignored, the byte is written as on
     if (c.winBy > 2) c.winBy = 0;                                                         // hsm::WinBy: Death, First blood, Knockdown
-    if (!ValidClearGroundMin(c.clearGroundMin) || IsBotFormat(c.format) || IsRoundFormat(c.format) || IsInfection(c.format)) c.clearGroundMin = 0;   // bots despawn idle drops; Duel clears per round
+    if (!ValidClearGroundS(c.clearGroundS) || !ClearGroundApplies(c.format)) c.clearGroundS = 0;   // bots despawn idle drops; Duel clears per round
     return c;
 }
 
@@ -593,8 +599,7 @@ inline Match::Events Match::Advance(uint32_t nowMs) {
         if (IsBotFormat(cfg_.format)) StartWave(nowMs, ev);
     } else if (phase_ == MatchPhase::Live && IsInfection(cfg_.format) && cfg_.timeLimitS && elapsed >= uint32_t(cfg_.timeLimitS) * 1000u) {
         End(Score(kSurvivorTeam) > 0 ? kSurvivorTeam : kInfectedTeam, nowMs);                 // survivors still standing at the clock: they win
-    } else if (IsHideSeek(cfg_.format)) {                 // its clock is a round's (HideSeekGame), never the match's
-    } else if (phase_ == MatchPhase::Live && cfg_.timeLimitS && elapsed >= uint32_t(cfg_.timeLimitS) * 1000u) {
+    } else if (phase_ == MatchPhase::Live && !IsHideSeek(cfg_.format) && cfg_.timeLimitS && elapsed >= uint32_t(cfg_.timeLimitS) * 1000u) {   // Hide and Seek: the clock is a round's (HideSeekGame), never the match's
         int leader = UniqueLeader();
         if (leader != kNoWinner) End(leader, nowMs);
         else { phase_ = MatchPhase::SuddenDeath; phaseStart_ = nowMs; }

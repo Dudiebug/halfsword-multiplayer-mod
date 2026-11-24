@@ -8,7 +8,7 @@ using namespace hsm;
 
 int main() {
     NameTagView v = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, kNoTeam, Format::FreeForAll);
-    CHECK(v.visible && v.x == 960 && v.y == 400 && v.fontSize == 22.f && v.alpha == 1.f);
+    CHECK(v.visible && v.x == 960 && v.y == 400 && v.fontSize == 20.f && v.alpha == 1.f);   // 20, was 22: the type scale (PR8)
     CHECK(v.ink.r == style::kBone.r && v.ink.g == style::kBone.g);
     v = NameTagLayout(true, 960, 400, 1920, 1080, 2.f, 500, true, kNoTeam, Format::Duel);        // DPI scale 2
     CHECK(v.visible && v.x == 480 && v.y == 200);
@@ -22,6 +22,9 @@ int main() {
     CHECK(!NameTagLayout(true, 960, 400, 1920, 1080, 0.f, 500, true, kNoTeam, Format::Duel).visible);    // no scale
     NameTagView far = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, kNameTagFarCm, true, kNoTeam, Format::Duel);
     CHECK(far.fontSize < v.fontSize && far.alpha < v.alpha && far.alpha > 0.3f);
+    CHECK(far.fontSize == 14.f);                                                                          // the far end is the hint size
+    NameTagView mid = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, (kNameTagNearCm + kNameTagFarCm) / 2, true, kNoTeam, Format::Duel);
+    CHECK(std::fabs(mid.fontSize - 17.f) < 0.01f);                                                        // halfway: 17
     NameTagView t1 = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, 1, Format::TwoTeams);
     CHECK(t1.ink.b == style::TeamInk(1).b && t1.ink.r == style::TeamInk(1).r);
     NameTagView ffa = NameTagLayout(true, 960, 400, 1920, 1080, 1.f, 500, true, 1, Format::FreeForAll);   // no teams: bone

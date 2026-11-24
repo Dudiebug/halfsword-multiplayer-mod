@@ -262,11 +262,26 @@ bool ObjectSync::Rekey(uint64_t provisional, uint64_t canonical, uint8_t hostBod
 // Match the pending announces to the actors in free (class and place; where the object was last heard of if it has been
 // streamed since). Bound actors leave free. An announce nothing matched keeps a ghost (GhostTable) until it expires.
 void ObjectSync::BindAnnounced(std::vector<LevelActor>& free, double nowMs) {
-    for (uint64_t id : ghosts_.Expire(nowMs))
-        if (announced_.erase(id)) {
-            ++n_.ghostsExpired;
-            HSM_LOG("props: no actor here for announced object %016llx after %.0f s; it is not synced here", static_cast<unsigned long long>(id), kGhostTtlMs / 1000.0);
-        }
+    const bool hold = env_.roomsToBuild && env_.roomsToBuild();
+    if (hold != ghostsHeld_) {
+        ghostsHeld_ = hold;
+        if (!announced_.empty() || hold)
+            HSM_LOG("props: %s (%zu announced object(s) waiting for an actor here)",
+                    hold ? "rooms of the host's still to build here: announced objects wait for them" : "every room is built: announced objects wait the usual 10 s",
+                    announced_.size());
+    }
+    for (uint64_t id : ghosts_.Expire(nowMs, hold)) {
+        const auto an = announced_.find(id);
+        if (an == announced_.end()) continue;
+        const uint32_t cls = an->second.msg.classHash;
+        announced_.erase(an);
+        ++n_.ghostsExpired;
+        // One class (a clutter spawner's pieces, rolled on each machine) can make most of these: a few per class, then counted.
+        const uint32_t seen = ++ghostExpiredByClass_[cls];
+        if (seen <= 3 || seen % 100 == 0)
+            HSM_LOG("props: no actor here for announced object %016llx (class %08x) after %.0f s; it is not synced here (%u of this class)",
+                    static_cast<unsigned long long>(id), cls, kGhostTtlMs / 1000.0, seen);
+    }
     if (announced_.empty() || free.empty()) {
         for (auto& [id, a] : announced_)
             if (!ghosts_.IsGhost(id)) ghosts_.Note(id, nowMs);

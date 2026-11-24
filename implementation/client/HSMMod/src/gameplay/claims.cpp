@@ -103,6 +103,7 @@ bool Claims::Start(Adapter& adapter, StandIns& standIns, OwnerStreams& streams, 
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Damage", [this](ScriptCall& c) { return OnGetDamage(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Get Up, Pal", [this](ScriptCall& c) { OnGetUpPal(c); return false; });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Heal and Restore", [this](ScriptCall& c) { OnHealAndRestore(c); });
+    n += ObserveScript(kHookOwner, "Willie_BP_C", "Get Nutrients (Food)", {}, [this](ScriptCall& c) { AfterNutrients(c); });
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Func Talk to Others", {}, [this](ScriptCall& c) { OnTalk(c); });
     // The rules stay registered: at the menu Willie_BP_C may not be loaded yet (n == 0); every level load resolves them.
     active_ = ScriptHookActive();
@@ -230,6 +231,7 @@ bool Claims::OnDealComplexDamage(ScriptCall& c) {
             if (audit) ++audit->limited;
             return true;
         }
+        if (!isProp) CapHitSpeed(c, comp, attacker, victim);
         MakeClaim(c, self, victim, attacker, striker, comp, isProp ? &prop : nullptr);
         if (audit) {
             if (pending_.standIn) pending_.audit = AuditKey(comp);
@@ -426,12 +428,14 @@ void Claims::OnGetUpPal(ScriptCall& c) {
 // heal amount or a saviour and are not this.
 void Claims::OnHealAndRestore(ScriptCall& c) {
     const uint8_t target = standIns_->EntityOf(c.self());
-    if (!target || !env_.sendRemote || !env_.ownedActor) return;
     double heal = 0;
     UObject* saviour = nullptr;
+    const bool args = c.get("Heal Amount", heal) && c.get("Saved By Willie", saviour);
+    if (args && heal != 0.0) LogHeal(c.self(), target, "Heal and Restore (a liquid splashed on the body, such as wine)", heal, -1);
+    if (!target || !env_.sendRemote || !env_.ownedActor) return;
     FName bone{};
     FVector at{};
-    if (!c.get("Heal Amount", heal) || heal != 0.0 || !c.get("Saved By Willie", saviour) || saviour) return;
+    if (!args || heal != 0.0 || saviour) return;
     if (!c.get("Bone Name", bone) || !c.get("Location", at)) return;
     uint8_t from = 0;                               // whose hand: a fighter simulated here that holds this stand-in's mesh
     for (uint8_t e = 1; e <= kMaxWillies && !from; ++e) {
@@ -456,6 +460,37 @@ void Claims::OnHealAndRestore(ScriptCall& c) {
         HSM_LOG("claims: e%u presses e%u's %s (Heal and Restore on its stand-in); sent to its owner", from, target, name.c_str());
 }
 
+// Food and drink: Get Nutrients (Food) (Willie_BP.cpp:5525) runs on the fighter who takes it, from a bottle's sip (Drink From
+// Bottle) or a liquid splashed at its mouth (Paint Splash). Its Medicine goes into Health at once and keeps healing a while
+// (the fighter's own Medicine). Only logged, for a report that wine did not heal: who drank, whose machine simulates them.
+void Claims::AfterNutrients(ScriptCall& c) {
+    double medicine = 0;
+    c.get("Medicine", medicine);
+    LogHeal(c.self(), standIns_->EntityOf(c.self()), "food or drink (Get Nutrients)", -1, medicine);
+}
+
+// One heal line per fighter at most every 2 s, kMaxHealLines in all. A stand-in's heal stays on this screen's copy: its
+// owner's fighter is not healed by it.
+void Claims::LogHeal(UObject* willie, uint8_t standIn, const char* what, double amount, double medicine) {
+    constexpr uint64_t kMaxHealLines = 60;
+    const uint8_t own = standIn || !env_.ownedEntity ? 0 : env_.ownedEntity(willie);
+    const uint8_t e = standIn ? standIn : own;
+    if (e > kMaxWillies || healLines_ >= kMaxHealLines) return;
+    const double now = SteadyNowMs();
+    if (healLogAt_[e] > 0 && now - healLogAt_[e] < 2000) return;
+    healLogAt_[e] = now;
+    ++healLines_;
+    const double* health = Field<double>(willie, "Health");
+    const double* inBody = Field<double>(willie, "Medicine");
+    char amounts[96] = "";
+    if (amount >= 0) std::snprintf(amounts, sizeof amounts, "heal amount %.1f", amount);
+    else std::snprintf(amounts, sizeof amounts, "medicine %.2f", medicine);
+    HSM_LOG("heal: e%u (%s) %s, %s; health %.1f, medicine in body %.2f%s", unsigned(e),
+            standIn ? "a stand-in here" : own ? "simulated here" : "not a fighter in the match", what, amounts,
+            health ? *health : -1.0, inBody ? *inBody : -1.0,
+            standIn ? ": only this screen's copy heals, its owner's fighter does not" : "");
+}
+
 // A spoken line. After a voice line the speaker's Func Talk to Others (Willie_BP.cpp:4807) looks for a fighter ahead and
 // tells that fighter's AI (Get Spoken To: its aggression and fear change, it may accept a gift or answer) and the
 // speaker's allies near by (AI Get Alerted). The AI lives on the host; here the fighter found is a stand-in without one,
@@ -472,6 +507,38 @@ void Claims::OnTalk(ScriptCall& c) {
     env_.sendRemote(m);
     if (++talksSent_ <= kLogFirst)
         HSM_LOG("claims: e%u spoke at e%u's stand-in (aggression %.2f, fear %.2f); sent to the host", from, target, aggression, fear);
+}
+
+// #3845: a hit velocity on a stand-in above blow_speed_cap is scaled down to it before the stand-in's own run of the blow
+// reads it, so its Damage Out (the coalescer's strength and the "damage out" log) and the claim both carry the capped speed.
+// A fired bolt (Extra High Velocity) and a flail (its head is whipped past any hand's speed) are left alone.
+void Claims::CapHitSpeed(ScriptCall& c, UObject* comp, uint8_t attacker, uint8_t victim) {
+    if (!(blowSpeedCap_ > 0.0)) return;
+    bool bolt = false;
+    c.getBool("Extra High Velocity", bolt);
+    FVector fv{};
+    if (bolt || !c.get("Hit Velocity", fv)) return;
+    sync::V3 v = ToV(fv);
+    if (!std::isfinite(v.x + v.y + v.z) || std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) <= blowSpeedCap_) return;
+    if (comp) {
+        const std::string actor = ObjectName(OuterOf(comp));
+        if (actor.find("Flail") != std::string::npos) return;
+        if (Call tag(comp, "ComponentHasTag"); tag.valid() && tag.setName("Tag", MakeName("Flail")).invoke() && tag.get<bool>("ReturnValue")) return;
+    }
+    const double before = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    combat::CapBlowSpeed(v, blowSpeedCap_);
+    if (!c.set("Hit Velocity", ToF(v))) return;
+    if (++speedCapped_ > 20 && speedCapped_ % 100 != 0) return;
+    FName bone{};
+    FVector impulse{};
+    double rigidity = 0;
+    c.get("Hit Bone", bone);
+    c.get("Hit Impulse", impulse);
+    c.get("Rigidity", rigidity);
+    HSM_LOG("hit claim: capped e%u -> e%u by %s '%s' bone %s: speed %.0f -> %.0f cm/s (impulse %.0f, rigidity %.2f, %llu so far)", attacker,
+            victim, comp ? ObjectName(OuterOf(comp)).c_str() : "none", comp ? ObjectName(comp).c_str() : "none", NameToString(bone).c_str(), before,
+            blowSpeedCap_, std::sqrt(impulse.x * impulse.x + impulse.y * impulse.y + impulse.z * impulse.z), rigidity,
+            static_cast<unsigned long long>(speedCapped_));
 }
 
 void Claims::MakeClaim(ScriptCall& c, UObject* standIn, uint8_t victim, uint8_t attacker, UObject* attackerWillie, UObject* comp,

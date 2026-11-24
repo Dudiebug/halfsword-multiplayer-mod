@@ -61,6 +61,14 @@ int main() {
     CHECK(m.Tick(oldH, me, true, true, 0x100) == S::WaitOwner);       // 512 ms later
     CHECK(m.Tick(me, me, true, true, 0x200) == S::BecomeHost);
 
+    // who migrates: only outside the shared Crypts run, with migration on, and when the host did not end the run
+    for (int i = 0; i < 8; ++i) {
+        const bool on = i & 1, crypts = i & 2, ended = i & 4;
+        CHECK(MigrateWhenHostGone(on, crypts, ended) == (i == 1));
+    }
+    CHECK(!MigrateWhenHostGone(true, true, false));   // the pre56 test: the host left the run for the menu
+    CHECK(kHostLeaveGraceMs > 0 && kHostLeaveGraceMs < 2000);
+
     if (g_fail) { std::printf("test_hsm_migration: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_migration: all passed\n");
     return 0;

@@ -7,7 +7,11 @@
 #include "combat/hsm_sever.h"
 #include "hsm_owner.h"
 #include "hsm_protocol.h"
+#include "session/hsm_bench.h"
 #include "session/hsm_career.h"
+#include "session/hsm_crypt_loot.h"
+#include "session/hsm_crypt_rooms.h"
+#include "session/hsm_crypt_run.h"
 #include "session/hsm_dice.h"
 #include "session/hsm_gather.h"
 #include "session/hsm_lease.h"
@@ -74,7 +78,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
     Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
-    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n); Try<GatherMsg>(d, n); Try<GatherNoteMsg>(d, n);
+    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n); Try<GatherMsg>(d, n); Try<GatherNoteMsg>(d, n); Try<BackToLobbyMsg>(d, n); Try<crypt::CryptRoomMsg>(d, n); Try<crypt::CryptRunMsg>(d, n); Try<crypt::CryptDoorMsg>(d, n); Try<crypt::CryptRoomsBuiltMsg>(d, n); Try<crypt::CryptLootMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -82,6 +86,32 @@ void TryAll(const uint8_t* d, size_t n) {
     // Known-bad decoder: trusts a length byte from the packet and reads past the end of the buffer.
     if (n >= 5) { volatile uint8_t sink = 0; size_t len = d[4]; for (size_t i = 0; i < len + 8; ++i) sink ^= d[5 + i]; (void)sink; }
 #endif
+}
+
+// A passport-shaped save file holding one weapon passport array property (hsm_gvas.h's shape), so the CryptLoot seed with an item reaches
+// the decoder's item checks; the mutator then bends it.
+std::vector<uint8_t> ItemSaveSeed() {
+    std::vector<uint8_t> b;
+    auto u8 = [&](uint8_t v) { b.push_back(v); };
+    auto i32 = [&](int32_t v) { for (int i = 0; i < 4; ++i) u8(uint8_t(uint32_t(v) >> (8 * i))); };
+    auto str = [&](const std::string& t) { i32(int32_t(t.size() + 1)); for (char c : t) u8(uint8_t(c)); u8(0); };
+    for (char c : std::string("GVAS")) u8(uint8_t(c));
+    i32(3); i32(522); i32(1012);
+    u8(5); u8(0); u8(4); u8(0); u8(4); u8(0); i32(int32_t(2147486353u));
+    str("++Halfsword+Main");
+    i32(3); i32(0);
+    str(kPassportSaveClass);
+    u8(0);
+    str("Available Weapons 1H");
+    str("ArrayProperty"); i32(1);
+    str("StructProperty"); i32(2);
+    str("Str_Passport_Weapon1"); i32(1);
+    str("/Game/Blueprints/Structure/Passports/Str_Passport_Weapon1"); i32(0);
+    str("4ffe2bb5-464d-c6a5-8138-3cadd2c7eb0d"); i32(0);
+    i32(16); u8(0);
+    for (int i = 0; i < 16; ++i) u8(uint8_t(i));
+    str("None"); i32(0);
+    return b;
 }
 
 std::vector<std::vector<uint8_t>> Seeds() {
@@ -117,6 +147,8 @@ std::vector<std::vector<uint8_t>> Seeds() {
     }
     InputFrame f; f.seq = 7; f.axes[0] = 1; f.buttons = 5; s.push_back(Encode(f));
     { GatherMsg g; g.phase = GatherPhase::Gathering; g.leftMs = 600000; g.seq = 3; s.push_back(Encode(g)); GatherNoteMsg gn; gn.note = GatherNote::Died; gn.seq = 3; s.push_back(Encode(gn)); }   // rev 47: a Crypts gather
+    { BackToLobbyMsg bl; bl.seq = 5; s.push_back(Encode(bl)); }   // rev 49: a guest back in the lobby
+    { crypt::CryptRoomMsg cr; cr.seq = 2; cr.catalog = 3; cr.x = 100; cr.parentSeq = 1; cr.startEntrance = 0; cr.generation = 1; s.push_back(Encode(cr)); crypt::CryptRoomMsg root; root.seq = 1; s.push_back(Encode(root)); crypt::CryptDoorMsg cd; cd.seq = 1; cd.kind = 1; cd.state = crypt::kDoorGone; s.push_back(Encode(cd)); crypt::CryptLootMsg cl; cl.room = 2; cl.index = 3; cl.cls = "/Game/Assets/Food/Blueprints/BP_Food_Bread.BP_Food_Bread_C"; cl.x = 10; s.push_back(Encode(cl)); crypt::CryptLootMsg ci; ci.room = 2; ci.index = 4; ci.cls = "/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C"; ci.itemKind = crypt::kItemWeapon; ci.item = ItemSaveSeed(); s.push_back(Encode(ci)); crypt::CryptRoomsBuiltMsg cb; cb.count = 4; s.push_back(Encode(cb)); crypt::CryptRunMsg rk; rk.seq = 3; rk.items = 5; s.push_back(Encode(rk)); crypt::CryptRunMsg rr; rr.kind = crypt::kRunResults; rr.seq = 3; rr.rows.push_back({1, crypt::Outcome::Out, 4, "Ann"}); rr.rows.push_back({2, crypt::Outcome::Down, 0, "Bo"}); s.push_back(Encode(rr)); }   // rev 50: the shared Crypts run
     { InputBatch b; b.entity = 2; b.delayMs = 33; b.frames.push_back({1000, f}); InputFrame g = f; g.seq = 8; b.frames.push_back({1017, g}); s.push_back(Encode(b)); }
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
     Event e; e.kind = EventKind::Died; e.a = 2; s.push_back(Encode(e));

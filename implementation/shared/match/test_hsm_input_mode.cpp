@@ -63,12 +63,10 @@ static void TestEscNotOurs() {
     CHECK(EscOwnerOf(Ctx()) == EscOwner::OpenPanel);
     EscContext off = Ctx(); off.sessionMatch = false;            // the menus, a fight alone: the game's own Esc
     CHECK(EscOwnerOf(off) == EscOwner::Game);
-    EscContext ini = Ctx(); ini.modPause = false;                // mod_pause=0
-    CHECK(EscOwnerOf(ini) == EscOwner::Game);
     EscContext busy = off; busy.chatOpen = true; busy.panelOpen = true;   // outside a match no other flag matters
     CHECK(EscOwnerOf(busy) == EscOwner::Game);
-    EscContext iniBusy = ini; iniBusy.settingsScreen = true;
-    CHECK(EscOwnerOf(iniBusy) == EscOwner::Game);
+    EscContext offSettings = off; offSettings.settingsScreen = true;   // nor does a settings screen outside a match
+    CHECK(EscOwnerOf(offSettings) == EscOwner::Game);
 }
 
 static void TestEscBusyScreens() {
@@ -105,15 +103,23 @@ static void TestEscPrecedence() {
     CHECK(EscOwnerOf(c) == EscOwner::Fetch);
     c = Ctx(); c.lobbyPage = true; c.settingsScreen = true;
     CHECK(EscOwnerOf(c) == EscOwner::Lobby);
+    // An open dropdown list is above all of them: Esc closes the list, never the page, the panel or the chat under it.
+    c = Ctx(); c.dropdownOpen = true; c.panelOpen = true; c.lobbyPage = true; c.settingsScreen = true; c.fetchMenu = true; c.textFocused = true; c.chatOpen = true;
+    CHECK(EscOwnerOf(c) == EscOwner::Dropdown);
+    c = Ctx(); c.dropdownOpen = true;
+    CHECK(EscOwnerOf(c) == EscOwner::Dropdown);                  // not OpenPanel: the press that closes a list must not open the panel
+    c = Ctx(); c.dropdownOpen = true; c.sessionMatch = false;
+    CHECK(EscOwnerOf(c) == EscOwner::Game);                      // outside a match the game's own Esc applies; the list closes itself
 }
 
 static void TestEscText() {
-    const EscOwner all[] = {EscOwner::Chat, EscOwner::TextBox, EscOwner::Fetch, EscOwner::Lobby, EscOwner::Settings,
+    const EscOwner all[] = {EscOwner::Dropdown, EscOwner::Chat, EscOwner::TextBox, EscOwner::Fetch, EscOwner::Lobby, EscOwner::Settings,
                             EscOwner::ClosePanel, EscOwner::OpenPanel};
-    for (size_t i = 0; i < 7; ++i) {
+    for (size_t i = 0; i < 8; ++i) {
         CHECK(EscOwnerText(all[i])[0] != 0);
-        for (size_t j = i + 1; j < 7; ++j) CHECK(std::string_view(EscOwnerText(all[i])) != EscOwnerText(all[j]));
+        for (size_t j = i + 1; j < 8; ++j) CHECK(std::string_view(EscOwnerText(all[i])) != EscOwnerText(all[j]));
     }
+    CHECK(std::string_view(EscOwnerText(EscOwner::Dropdown)) == "dropdown (it closes)");   // the log line "pause: Esc -> dropdown (it closes)"
     CHECK(std::string_view(EscOwnerText(EscOwner::OpenPanel)) == "mod panel");   // the log line "pause: Esc -> mod panel"
     CHECK(std::string_view(EscOwnerText(EscOwner::Game)).empty());
 }
@@ -168,7 +174,69 @@ static void TestEscPressStartsFromZero() {
     CHECK(q.Step(false, true, 100));             // nor 100 ms into the run
 }
 
+static void TestRespawnShots() {
+    RespawnInputFix f;
+    CHECK(!f.Due(0) && f.Take(0) == -1 && !f.Watching(0));   // never armed
+    f.Arm(1000);
+    CHECK(!f.Due(1000) && !f.Due(1299));
+    CHECK(f.Due(1300) && f.Take(1300) == 0 && !f.Due(1300));
+    CHECK(!f.Due(1999));
+    CHECK(f.Due(2000) && f.Take(2000) == 1);
+    CHECK(!f.Due(3999));
+    CHECK(f.Due(4000) && f.Take(4000) == 2);
+    CHECK(!f.Due(4001) && !f.Due(100000));                   // three shots, then nothing
+    CHECK(kRespawnInputShotsMs[0] == 300 && kRespawnInputShotsMs[1] == 1000 && kRespawnInputShotsMs[2] == 3000);
+}
+
+static void TestRespawnShotsMerged() {
+    RespawnInputFix f;
+    f.Arm(0);
+    CHECK(f.Take(1500) == 1);                                // a long frame: the 0.3 s and 1 s shots are one restore
+    CHECK(!f.Due(1500) && f.Take(2999) == -1);
+    CHECK(f.Take(3000) == 2);
+    RespawnInputFix g;
+    g.Arm(0);
+    CHECK(g.Take(5000) == 2 && !g.Due(5000));                // all three at once
+}
+
+static void TestRespawnRearm() {
+    RespawnInputFix f;
+    f.Arm(0);
+    CHECK(f.Take(300) == 0);
+    f.Arm(500);                                              // another respawn: the schedule starts over
+    CHECK(!f.Due(799) && f.Take(800) == 0 && f.Take(1500) == 1);
+    f.Clear();
+    CHECK(!f.Due(100000) && !f.Watching(600));
+}
+
+static void TestRespawnExtra() {
+    RespawnInputFix f;
+    f.Extra(0);
+    CHECK(!f.Due(0));                                        // no respawn: the Player DED clear restores nothing
+    f.Arm(1000);
+    f.Extra(1010);
+    CHECK(f.Due(1010) && f.Take(1010) == -1 && !f.Due(1010));   // the extra restore, once
+    CHECK(f.Take(1300) == 0);                                // the schedule is untouched
+    f.Extra(1400);
+    CHECK(f.Due(1400) && f.Take(1400) == -1 && f.Due(2000) && f.Take(2000) == 1);
+    CHECK(f.Take(4000) == 2);
+    f.Extra(1000 + kRespawnWatchMs - 1);                     // the last moment of the watch: still one more
+    CHECK(f.Due(1000 + kRespawnWatchMs - 1) && f.Take(1000 + kRespawnWatchMs - 1) == -1 && !f.Due(1000 + kRespawnWatchMs - 1));
+    f.Extra(1000 + kRespawnWatchMs);                         // after the watch: nothing
+    CHECK(!f.Due(1000 + kRespawnWatchMs));
+}
+
+static void TestRespawnWatch() {
+    RespawnInputFix f;
+    f.Arm(0xFFFFF000u);                                      // across the GetTickCount wrap
+    CHECK(f.Watching(0xFFFFF000u) && f.Watching(0x00001000u));
+    CHECK(f.Watching(0xFFFFF000u + kRespawnWatchMs - 1) && !f.Watching(0xFFFFF000u + kRespawnWatchMs));
+    CHECK(f.Take(0xFFFFF000u + 300) == 0);
+    CHECK(kRespawnWatchMs == 10000);
+}
+
 int main() {
+    TestRespawnShots(); TestRespawnShotsMerged(); TestRespawnRearm(); TestRespawnExtra(); TestRespawnWatch();
     TestEscNotOurs(); TestEscBusyScreens(); TestEscPrecedence(); TestEscText();
     TestEscPress(); TestEscPressEvent(); TestEscPressGap(); TestEscPressWraps(); TestEscPressStartsFromZero();
     TestPauseScreens();

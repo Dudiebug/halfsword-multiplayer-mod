@@ -296,11 +296,16 @@ static void TestPhotoMode() {
     // the key reached my fighter while it was open: the screen has kPhotoCloseAfterMs to close it itself
     CHECK(!PhotoKeyCloses(true, 0) && !PhotoKeyCloses(true, kPhotoCloseAfterMs - 1) && PhotoKeyCloses(true, kPhotoCloseAfterMs) && PhotoKeyCloses(true, 5000));
     CHECK(!PhotoKeyCloses(false, 0) && !PhotoKeyCloses(false, 5000));
-    // what the player is told: only where the key did nothing and no other screen answered
-    for (PhotoKey a : {PhotoKey::NoMatch, PhotoKey::NotAllowed, PhotoKey::NotReady}) CHECK(*PhotoKeyLine(a));
-    for (PhotoKey a : {PhotoKey::Open, PhotoKey::Close, PhotoKey::Dead, PhotoKey::Busy}) CHECK(!*PhotoKeyLine(a));
-    CHECK(std::string(PhotoKeyLine(PhotoKey::NotAllowed)).find("host") != std::string::npos && std::string(PhotoKeyLine(PhotoKey::NoMatch)).find("match") != std::string::npos);
-    CHECK(std::string(PhotoKeyLine(PhotoKey::NotReady)) == "Photo mode could not start here");
+    // what the player is told: only where the key did nothing and no other screen answered (a dead player is told too)
+    using hsm::notices::Id;
+    for (PhotoKey a : {PhotoKey::NoMatch, PhotoKey::NotAllowed, PhotoKey::NotReady, PhotoKey::Dead}) CHECK(PhotoKeyNotice(a) != Id::Count);
+    for (PhotoKey a : {PhotoKey::Open, PhotoKey::Close, PhotoKey::Busy}) CHECK(PhotoKeyNotice(a) == Id::Count);
+    CHECK(PhotoKeyNotice(PhotoKey::NoMatch) == Id::PhotoNoMatch && PhotoKeyNotice(PhotoKey::NotAllowed) == Id::PhotoNotAllowed);
+    CHECK(PhotoKeyNotice(PhotoKey::NotReady) == Id::PhotoNotReady && PhotoKeyNotice(PhotoKey::Dead) == Id::PhotoDead);
+    CHECK(std::string(hsm::notices::Of(Id::PhotoNotAllowed).text).find("host") != std::string::npos && std::string(hsm::notices::Of(Id::PhotoNoMatch).text).find("match") != std::string::npos);
+    CHECK(std::string(hsm::notices::Of(Id::PhotoNotReady).text) == "Photo mode could not start here.");
+    CHECK(std::string(hsm::notices::Of(Id::PhotoDead).text) == "Photo mode needs a living fighter.");
+    for (Id id : {Id::PhotoNoMatch, Id::PhotoNotAllowed, Id::PhotoNotReady, Id::PhotoDead}) CHECK(std::string(hsm::notices::Of(id).key) == "photo-key");   // one at a time
     for (PhotoEnd e : {PhotoEnd::MatchOver, PhotoEnd::Down, PhotoEnd::HostOff}) CHECK(*PhotoEndText(e));
     CHECK(!*PhotoEndText(PhotoEnd::Keep) && std::string(PhotoEndText(PhotoEnd::Down)) == "my fighter is down");
     CHECK(std::string(PhotoEndText(PhotoEnd::HostOff)).find("host") != std::string::npos && std::string(PhotoEndText(PhotoEnd::MatchOver)).find("match") != std::string::npos);

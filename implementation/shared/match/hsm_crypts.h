@@ -7,9 +7,14 @@
 // kGatherCollectMs for them, then travels everyone to the battle map, where the format is fought in the gathered kits
 // (RegearFor: dealt per slot when everybody starts, kept for every life). A rematch is a new gather.
 //
-// The dungeons are not shared: the game draws them from unseeded random numbers on each machine, so every player walks a
-// different one. CryptsGather is the host's record of the gather, GatherClock every machine's view of its clock, and
-// GatherSelf what this machine's own player is doing; the DLL keeps the kits' bytes and opens the levels.
+// Apart (the Crypts run row's default), the dungeons are not shared: the game draws them from unseeded random numbers on
+// each machine, so every player walks a different one. Together, the host travels everyone to one shared Catacombs
+// (match/hsm_crypts_layout.h, drawn from the level seed) and the gather is fought there as Players vs Bots: everyone starts
+// at the entrance, the bots wait in the rooms beyond (match/hsm_crypts_start.h). Nobody's run ends early there: a player
+// who falls keeps the last kit read alive and comes back in it when a wave is cleared; when every player is down the
+// last kits are collected at once (CollectNow). CryptsGather is the host's record of the gather, GatherClock every
+// machine's view of its clock, and GatherSelf what this machine's own player is doing; the DLL keeps the kits' bytes and
+// opens the levels.
 #pragma once
 #include "match/hsm_match.h"
 #include <algorithm>
@@ -58,10 +63,27 @@ inline std::optional<uint16_t> ParseGatherInput(const std::string& text) {
 // game raises the tier room by room (each room is its parent's tier plus its door's modifier, and the dungeon's director
 // takes the tier of each room entered) and when it proceeds to the next rank. The higher tiers' enemies outrun what their
 // loot gives a kit, so until the loot tables and the enemies' ranks can be changed a gather is held at Peasant: the
-// director's tier and each room's are capped (`[mod] crypts_max_tier`, 0 to 8; 8 = the game's own tiers).
-constexpr uint8_t kCryptsTierCap = 1;             // Peasant
-constexpr uint8_t kCryptsTierTop = 8;             // Lord: no cap
+// director's tier and each room's are capped (kCryptsTierCap, match/hsm_match.h): the host's Dungeon tier row (#3350, 0 to 8;
+// 8 = the game's own tiers), or a machine's own `[mod] crypts_max_tier` when it sets one (a test).
 inline uint8_t CryptsTierCapFrom(int ini) { return uint8_t(std::clamp(ini, 0, int(kCryptsTierTop))); }
+// The cap of this machine's run: its own crypts_max_tier when set (iniTier >= 0), else the lobby's row.
+inline uint8_t CryptsRunCap(int iniTier, uint8_t lobbyTier) { return CryptsTierCapFrom(iniTier >= 0 ? iniTier : int(lobbyTier)); }
+// The Dungeon tier row: Beggar .. Knight, then the game's own (Lord, the top rank, caps nothing). Wraps like the Gather time.
+inline uint8_t StepCryptsTier(uint8_t cur, int dir) {
+    constexpr int n = int(kCryptsTierTop) + 1;
+    const int at = std::min(int(cur), int(kCryptsTierTop));
+    return uint8_t((at + (dir < 0 ? n - 1 : 1)) % n);
+}
+// Together: the gather's match on the shared Catacombs. Players vs Bots in Crypts gear: everyone starts at the entrance in a
+// fresh kit (the DLL's CryptsFreshKit) and a revived player comes back in the kit gathered so far; no clock but the
+// gather's, no friendly fire, no team shuffle. The lobby's own format is the battle's after the gather; its tier, weapons
+// and the rest go on (Sanitize drops what Players vs Bots does not take).
+inline MatchConfig TogetherRunConfig(MatchConfig c) {
+    c.format = Format::PlayersVsBots; c.gear = Gear::Crypts;
+    c.scoreLimit = DefaultScoreLimit(Format::PlayersVsBots); c.timeLimitS = 0;
+    c.shuffle = TeamShuffle::Off; c.friendlyFire = false;
+    return c;
+}
 // The tier to write back: `tier` held at `cap` (the game's own value when it is not above the cap).
 inline uint8_t CappedCryptsTier(uint8_t tier, uint8_t cap) { return tier > cap ? cap : tier; }
 constexpr uint32_t kGatherCollectMs = 10000;      // after the clock: the last kits come in for at most this long
@@ -99,8 +121,9 @@ class CryptsGather {
 public:
     struct Slot { bool kit = false, done = false, finalKit = false, inRun = false; };   // inRun: InCrypts seen
 
-    void Start(uint32_t now, uint16_t gatherS, const std::vector<uint8_t>& slots) {
+    void Start(uint32_t now, uint16_t gatherS, const std::vector<uint8_t>& slots, bool together = false) {
         phase_ = GatherPhase::Gathering;
+        together_ = together;
         startMs_ = now; collectMs_ = 0;
         gatherMs_ = uint32_t(std::clamp(gatherS, kGatherMinS, kGatherMaxS)) * 1000u;
         if (++seq_ == 0) seq_ = 1;
@@ -111,6 +134,7 @@ public:
     GatherPhase phase() const { return phase_; }
     bool Active() const { return phase_ != GatherPhase::Off; }
     uint16_t seq() const { return seq_; }
+    bool together() const { return together_; }   // the run is the shared Catacombs (the Crypts run row's Together)
 
     // Gathering: the clock's time left; Collecting: the time left for the last kits; 0 otherwise.
     uint32_t LeftMs(uint32_t now) const {
@@ -180,20 +204,30 @@ public:
         return GatherStep::None;
     }
 
+    // The gather is over before its time (Together: every player is down, the shared run's match ended): the last kits are
+    // collected now, as if the clock had run out. False when it is not gathering (collecting already, or off).
+    bool CollectNow(uint32_t now) {
+        if (phase_ != GatherPhase::Gathering) return false;
+        phase_ = GatherPhase::Collecting; collectMs_ = now;
+        return true;
+    }
+
 private:
     GatherPhase phase_ = GatherPhase::Off;
     uint32_t startMs_ = 0, gatherMs_ = 0, collectMs_ = 0;
     uint16_t seq_ = 0;
+    bool together_ = false;
     std::map<uint8_t, Slot> slots_;
 };
 
 // Every machine's view of the host's clock, from its Gather messages; it runs on between them.
 class GatherClock {
 public:
-    void Set(uint32_t now, GatherPhase p, uint32_t leftMs, uint16_t seq) { phase_ = p; leftMs_ = leftMs; atMs_ = now; seq_ = seq; }
-    void Clear() { phase_ = GatherPhase::Off; leftMs_ = 0; }
+    void Set(uint32_t now, GatherPhase p, uint32_t leftMs, uint16_t seq, bool together = false) { phase_ = p; leftMs_ = leftMs; atMs_ = now; seq_ = seq; together_ = together; }
+    void Clear() { phase_ = GatherPhase::Off; leftMs_ = 0; together_ = false; }
     GatherPhase phase() const { return phase_; }
     bool Active() const { return phase_ != GatherPhase::Off; }
+    bool together() const { return together_; }   // the host's gather is run in one shared Catacombs
     uint16_t seq() const { return seq_; }
     uint32_t LeftMs(uint32_t now) const {
         if (phase_ == GatherPhase::Off) return 0;
@@ -205,6 +239,7 @@ private:
     GatherPhase phase_ = GatherPhase::Off;
     uint32_t leftMs_ = 0, atMs_ = 0;
     uint16_t seq_ = 0;
+    bool together_ = false;
 };
 
 // What this machine's own player is doing in the gather.

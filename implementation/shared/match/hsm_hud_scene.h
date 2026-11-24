@@ -164,6 +164,8 @@ public:
         seen_ = true; format_ = m.format; phase_ = m.phase; round_ = m.round; gap_ = gap; cleared_ = cleared;
     }
     void Fire(std::string text, std::string sub, Rgba color, uint32_t nowMs) { shot_ = {std::move(text), std::move(sub), color, nowMs}; }
+    // This machine's fighter came back in generated gear: NEW GEAR, and the tier by its name (KNIGHT), never "TIER 3".
+    void NewGear(int tier, uint32_t nowMs) { Fire("NEW GEAR", Upper(TierName(tier)), style::kWarn, nowMs); }
     const BannerShot& shot() const { return shot_; }
     void Reset() { *this = BannerTracker{}; }
 
@@ -183,7 +185,7 @@ struct FeedRow { std::vector<Span> spans; bool mine = false; };   // mine: names
 
 struct FeedItem { uint32_t atMs = 0; FeedRow row; };
 
-// The words of KillLine, the names in their inks and the rest in iron. Made when the kill arrives, so a fighter
+// A kill as a feed row: the names in their inks and the rest in iron. Made when the kill arrives, so a fighter
 // who leaves later keeps their name in the feed.
 inline FeedRow MakeFeedRow(const MatchInfo& m, const Kill& k, uint8_t me) {
     FeedRow r;
@@ -266,17 +268,30 @@ struct BoardRow {
 constexpr size_t kBoardRowBudget = 26;
 // results: the match is over and this is the results board (not the Tab scoreboard): the HUD puts it in a corner and shrinks the
 // banner (#3056), so the winner and the last blows stay in view.
+// heads: the column heads (the words, so the widths can fit them); legend: the line under the board that says what DOWN and DEAD mean.
+struct BoardHeads { std::string player, kills, deaths, score, ping; };
 struct Board { bool visible = false, results = false; std::string title, footer; std::vector<BoardRow> rows;
-               std::vector<BoardRow> bracket; };   // the Tab board's Tournament bracket, under the fighters (BracketRows)
+               std::vector<BoardRow> bracket;      // the Tab board's Tournament bracket, under the fighters (BracketRows)
+               BoardHeads heads; std::string legendDown, legendDead; };
 // The G hold, in the middle of the screen (the top pill was covered by the game's own text in the pre1 test).
 struct HoldView { bool visible = false; std::string text; Rgba color = style::kBloodInk; bool bar = false; float frac = 0; };
+// A small tag of its own beside the info line (the Crypts key marker): a label and a short text, on its own smoke panel.
+struct ChipView { bool visible = false; std::string label, text; Rgba labelColor = style::kWarn, color = style::kBone; };
+// The Crypts key marker as a chip: while this machine gathers and holds a key, the nearest locked door ("Locked door 42 m,
+// ahead-left") or "Locked room not found yet". It is not added onto the info line any more.
+inline constexpr const char* kKeyChipLabel = "KEY";
+inline ChipView KeyChip(bool gathering, bool keyHeld, const std::string& line) {
+    if (!gathering || !keyHeld || line.empty()) return {};
+    return {true, kKeyChipLabel, line, style::kWarn, style::kBone};
+}
 
 struct HudScene {
     bool visible = false;
     std::vector<ScoreBlock> strip;
     bool timeBar = false; float timeFrac = 0; std::string clock;
     SceneText pill, banner, bannerSub;
-    SceneText info;                  // under the pill: Tournament's pairing and what is next, Pit Bridge Duels' streak and queue
+    SceneText info;                  // under the pill: Tournament's pairing and what is next, Pit Bridge Duels' streak and queue (FitInfo: 80 characters)
+    ChipView chip;                   // beside the info line: the Crypts key marker
     HoldView hold;
     DeadPanel dead;
     std::vector<FeedView> feed;
@@ -374,11 +389,9 @@ inline DeadPanel Dead(const MatchInfo& m, const LocalHud& l, uint32_t nowMs) {
     }
     for (const FighterEntry& e : m.fighters)
         if (e.entity != l.me && e.alive) { d.hint = "LEFT / RIGHT   watch another fighter"; break; }
-    // F: only when the host allows the free camera (MatchInfo.freeCam); nothing about it otherwise.
-    if (m.freeCam) {
-        if (l.flying) d.hint = l.watching ? "F: follow " + NameOf(m, l.watching) : std::string("F: follow");
-        else if (l.watching) d.hint += std::string(d.hint.empty() ? "" : "   ") + "F: free camera";
-    }
+    // F: the free camera is always on (0.9.0). MatchInfo.freeCam stays on the wire; a 0 from an older host is ignored.
+    if (l.flying) d.hint = l.watching ? "F: follow " + NameOf(m, l.watching) : std::string("F: follow");
+    else if (l.watching) d.hint += std::string(d.hint.empty() ? "" : "   ") + "F: free camera";
     return d;
 }
 
@@ -451,6 +464,8 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
     if (m.phase == uint8_t(MatchPhase::Idle) || (!l.tab && m.phase != uint8_t(MatchPhase::Results))) return b;
     b.visible = true;
     b.results = m.phase == uint8_t(MatchPhase::Results);
+    b.heads = {kBoardHeadPlayer, kBoardHeadKills, kBoardHeadDeaths, kBoardHeadScore, kBoardHeadPing};
+    b.legendDown = kBoardLegendDown; b.legendDead = kBoardLegendDead;
     Format f = Format(m.format);
     std::string limit = f == Format::Tournament ? std::string("ONE ROUND A FIGHT")
                       : f == Format::Duel ? "BEST OF " + std::to_string(2 * m.scoreLimit - 1)
@@ -487,6 +502,7 @@ inline Board MakeBoard(const MatchInfo& m, const LocalHud& l) {
             r.dead = out; r.ink = out ? style::kIron : style::kBone;
             r.tag = out ? "OUT" : q == QueueRole::Waiting ? "WAIT" : "";
         }
+        if (e.lobby) { r.dead = false; r.down = false; r.ink = style::kIron; r.tag = "LOBBY"; }   // rev 49: back in the lobby (session/hsm_bench.h): not dead, not fighting
         rows.push_back({e.team, std::move(r)});
     }
     std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& c) {
@@ -528,9 +544,9 @@ inline HudScene BuildHudScene(const MatchInfo& info, const LocalHud& l, uint32_t
         s.clock = Clock(m.timeLeftMs);
     }
     s.pill = hud_detail::Pill(m, l.me, l.oneFight);
-    if (const std::string line = QueueLine(m); !line.empty()) s.info = {true, line, style::kIron, 1, 1};
-    else if (const std::string chaos = ChaosLine(m); !chaos.empty()) s.info = {true, chaos, style::kIron, 1, 1};
-    else if (const std::string turn = RouletteLine(m, l.me, l.rouletteOneIn, l.rouletteLoaded); !turn.empty()) s.info = {true, turn, m.tagIt == l.me ? style::kWarn : style::kIron, 1, 1};
+    if (const std::string line = QueueLine(m); !line.empty()) s.info = {true, FitInfo(line), style::kIron, 1, 1};
+    else if (const std::string chaos = ChaosLine(m); !chaos.empty()) s.info = {true, FitInfo(chaos), style::kIron, 1, 1};
+    else if (const std::string turn = RouletteLine(m, l.me, l.rouletteOneIn, l.rouletteLoaded); !turn.empty()) s.info = {true, FitInfo(turn), m.tagIt == l.me ? style::kWarn : style::kIron, 1, 1};
     const bool fought = m.phase == uint8_t(MatchPhase::Live) || m.phase == uint8_t(MatchPhase::SuddenDeath);
     // Item 9c: down by the draw check (fallen, knocked out, or the pelvis low over the feet), not just the game's flags.
     // A Progression co-op fight has no stock give-up screen in a session: G gives the fight up (Match::GiveUpFight).

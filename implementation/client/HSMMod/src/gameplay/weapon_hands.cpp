@@ -470,6 +470,43 @@ bool ObjectSync::TakeIntoHand(UObject* standIn, int h, UObject* weapon) {
 // The owner picked a weapon up: the loose weapon of that class nearest the owner's (sync::PickAttach) goes into the
 // stand-in's hand. Loose: an empty "Parent Actors" (held and sheathed weapons list their fighter), not a body weapon, not being destroyed.
 bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::PoseHandView& pose, double nowMs) {
+    // #3910, the crossbow. Its Spawn gave it (sync::GiftBook): the stand-in builds the copy now, whatever lies loose here (a
+    // last life's copy, a copy another machine streamed). Waiting for "no copy of the class anywhere" left the first
+    // crossbow replay with no crossbow to act on, and a stale copy taken from 600 uu away was let go again by its lease.
+    if (gift_.Due(e, pose.classHash, nowMs) && WeaponClassByHash(pose.classHash, nowMs)) {
+        const double sinceSpawnMs = gift_.AgeMs(e, nowMs);
+        if (SpawnIntoHand(e, standIn, h, pose.classHash)) {
+            gift_.Done(e);
+            if (++n_.giftCopies <= kLogFirst * 4)
+                HSM_LOG("props: stand-in of e%u hand %d: the crossbow its Spawn gave got its own copy %.0f ms after the Spawn (pose %.0f ms old); no loose crossbow was looked for",
+                        e, h, sinceSpawnMs, nowMs - pose.sinceMs);
+            return true;
+        }
+    }
+    // #3910: the owner moved the class from the other hand (the string is pulled with the left): that hand's copy goes
+    // over, a second one is not built (the first was let go as a dropped weapon, streamed, and picked up by the others).
+    if (ValidEntity(e)) {
+        const int o = 1 - h;
+        StandInHand& oh = standInHands_[e].hand[size_t(o)];
+        StandIns::PoseHandView other;
+        if (oh.held && standIns_->PoseHandInfo(e, o, other) &&
+            sync::MoveHeldCopy(pose.classHash, true, oh.heldClass, byActor_.count(oh.held) != 0, other.classHash)) {
+            UObject* w = oh.held;
+            const std::string name = ObjectName(w);
+            if (HandTornOff(standIn, h)) return false;
+            bool moved = false;
+            if (DropFromHands(standIn, o, w, name) == DropResult::Dropped) {
+                moved = TakeIntoHand(standIn, h, w);
+                if (!moved) LetLoose(e, o, w, nowMs);
+            }
+            ForgetHeld(e, standIn);
+            if (moved && ++n_.copiesMoved <= kLogFirst * 4)
+                HSM_LOG("props: stand-in of e%u moved %s from hand %d to hand %d: the owner's pose moved the class over; no second copy built", e,
+                        name.c_str(), o, h);
+            if (!moved) HSM_LOG("props: stand-in of e%u could not move %s from hand %d to hand %d", e, name.c_str(), o, h);
+            return moved;
+        }
+    }
     if (nowMs - weaponsMs_ >= kWeaponsRefreshMs) {
         weaponsMs_ = nowMs;
         weapons_.clear();

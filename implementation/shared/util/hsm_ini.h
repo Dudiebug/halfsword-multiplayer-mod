@@ -1,8 +1,9 @@
-// Setting one key of an ini file's text without touching the rest (comments, other sections, other keys, line endings).
-// Game-independent: the caller reads and writes the file.
+// Setting one key of an ini file's text without touching the rest (comments, other sections, other keys, line endings), and
+// the note an old key that is no longer read gets. Game-independent: the caller reads and writes the file.
 #pragma once
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hsm::util {
 
@@ -101,6 +102,23 @@ inline bool GetIniValue(const std::string& text, std::string_view section, std::
         pos = next;
     }
     return false;
+}
+
+// Keys an older HSMMod read under [net] and this one does not. An INI that still has one is not an error: the key is ignored
+// and the log says so once. Add a key here when its setting is removed.
+struct RetiredKey { std::string_view key, note; };
+inline constexpr RetiredKey kRetiredKeys[] = {
+    {"mod_pause", "the mod's pause menu is always used"},
+};
+
+// One log line, "config: <key> is gone; <note>", for each retired key the INI text still has under [net], whatever its value
+// (0 and 1 alike) and however many times it is written. Nothing for a file that has none.
+inline std::vector<std::string> RetiredKeyNotes(const std::string& text) {
+    std::vector<std::string> notes;
+    std::string value;
+    for (const RetiredKey& r : kRetiredKeys)
+        if (GetIniValue(text, "net", r.key, value)) notes.push_back("config: " + std::string(r.key) + " is gone; " + std::string(r.note));
+    return notes;
 }
 
 }  // namespace hsm::util

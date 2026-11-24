@@ -22,6 +22,7 @@ static LobbyLocal Lobby(bool budget, bool host = true) {
     return l;
 }
 static bool Listed(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return true; return false; }
+static SettingRow Row(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return r; CHECK(false); return SettingRow{}; }   // a copy: the scene is often a temporary
 static ClassSheet Strong(double strength) { ClassSheet c; c.strength = strength; return c; }   // 0.6 power per 100% of strength
 
 int main() {
@@ -70,29 +71,29 @@ int main() {
         c.classPower = 81; CHECK(Sanitize(c).classPower == 15);
     }
 
-    // The row: lobbies with a class budget only, in MATCH, apart from `settings`; a member reads it greyed.
+    // The row: lobbies with a class budget only, in MATCH; a member reads it greyed.
     CHECK(SectionOf(LobbyRow::ClassPower) == LobbySection::Match);
-    CHECK(size_t(LobbyRow::ClassPower) < size_t(LobbyRow::Scenario) && size_t(LobbyRow::Scenario) + 1 == size_t(LobbyRow::Sync));
+    CHECK(size_t(LobbyRow::ClassPower) < size_t(LobbyRow::Sync));
     {
         LobbyLocal l = Lobby(true);
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasClassPower && s.classPower.id == LobbyRow::ClassPower && s.classPower.label == "Class power" && s.classPower.value == "+15");
-        CHECK(s.classPower.enabled && s.classPower.hint.find("usual limit") != std::string::npos && !Listed(s, LobbyRow::ClassPower));
+        CHECK(Listed(s, LobbyRow::ClassPower) && Row(s, LobbyRow::ClassPower).id == LobbyRow::ClassPower && Row(s, LobbyRow::ClassPower).label == "Class power" && Row(s, LobbyRow::ClassPower).value == "+15");
+        CHECK(Row(s, LobbyRow::ClassPower).enabled && Row(s, LobbyRow::ClassPower).hint.empty());   // the label and the value say it
         const size_t rows = s.settings.size();
         l.config.classPower = 120;
         s = BuildLobbyScene(l);
-        CHECK(s.classPower.value == "+120" && s.classPower.hint.find("+120") != std::string::npos && s.classPower.hint.find("removed") != std::string::npos);
+        CHECK(Row(s, LobbyRow::ClassPower).value == "+120" && Row(s, LobbyRow::ClassPower).hint.empty());
         CHECK(s.settings.size() == rows);
         l.config.classPower = 99;                                                          // a stale value reads as +15
-        CHECK(BuildLobbyScene(l).classPower.value == "+15");
+        CHECK(Row(BuildLobbyScene(l), LobbyRow::ClassPower).value == "+15");
     }
     {
         LobbyLocal l = Lobby(true, false);
         l.config.classPower = 50;
         const LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasClassPower && s.classPower.value == "+50" && !s.classPower.enabled);
+        CHECK(Listed(s, LobbyRow::ClassPower) && Row(s, LobbyRow::ClassPower).value == "+50" && !Row(s, LobbyRow::ClassPower).enabled);
     }
-    CHECK(!BuildLobbyScene(Lobby(false)).hasClassPower);                                      // no classes, or Unrestricted
+    CHECK(!Listed(BuildLobbyScene(Lobby(false)), LobbyRow::ClassPower));                                      // no classes, or Unrestricted
 
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::printf("hsm_class_power: ok\n");

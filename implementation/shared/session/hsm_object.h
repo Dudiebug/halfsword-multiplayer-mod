@@ -35,6 +35,9 @@ constexpr uint8_t kMaxAnnounceBodies = kMaxObjectBodies;     // sane cap on bodi
 constexpr size_t kMaxKnownObjects = 4096;                    // the host's table; far above any arena's loose objects
 constexpr size_t kMaxGhosts = 256;
 constexpr double kGhostTtlMs = 10000.0;
+// Longest a ghost is held past kGhostTtlMs while this machine still builds rooms the host has (the shared Crypts run: a client
+// builds them 24-91 s after the host in the pre56 test, and their props are announced as the host builds them).
+constexpr double kGhostHoldMaxMs = 180000.0;
 
 // ---------------------------------------------------------------- minting
 // One per spawning slot, on that slot's machine. Ids are slot << 56 | seq, seq starting at 1 (so no spawned id is just
@@ -303,25 +306,34 @@ public:
     // False when the table is full (a new id is refused); an id already present is refreshed.
     bool Note(uint64_t objId, double nowMs) {
         auto it = ghosts_.find(objId);
-        if (it == ghosts_.end() && ghosts_.size() >= kMaxGhosts) return false;
-        ghosts_[objId] = nowMs;
+        if (it == ghosts_.end()) {
+            if (ghosts_.size() >= kMaxGhosts) return false;
+            ghosts_[objId] = {nowMs, nowMs};
+        } else {
+            it->second.last = nowMs;
+        }
         return true;
     }
     bool IsGhost(uint64_t objId) const { return ghosts_.count(objId) != 0; }
     // The machine found or made its own actor: the ghost ends. True if there was one.
     bool Resolve(uint64_t objId) { return ghosts_.erase(objId) != 0; }
-    // Drop ghosts not refreshed for kGhostTtlMs; returns their ids.
-    std::vector<uint64_t> Expire(double nowMs) {
+    // Drop ghosts not refreshed for kGhostTtlMs; returns their ids. While `hold` (rooms still to build here, where the actor may
+    // yet appear) a ghost is kept, its kGhostTtlMs counting from the last held pass, up to kGhostHoldMaxMs from its first note.
+    std::vector<uint64_t> Expire(double nowMs, bool hold = false) {
         std::vector<uint64_t> gone;
         for (auto it = ghosts_.begin(); it != ghosts_.end();) {
-            if (nowMs - it->second >= kGhostTtlMs) { gone.push_back(it->first); it = ghosts_.erase(it); } else ++it;
+            Entry& e = it->second;
+            const bool held = hold && nowMs - e.first < kGhostHoldMaxMs;
+            if (held) e.last = nowMs;
+            if (!held && nowMs - e.last >= kGhostTtlMs) { gone.push_back(it->first); it = ghosts_.erase(it); } else ++it;
         }
         return gone;
     }
     size_t Size() const { return ghosts_.size(); }
     void Clear() { ghosts_.clear(); }
 private:
-    std::map<uint64_t, double> ghosts_;
+    struct Entry { double first = 0, last = 0; };
+    std::map<uint64_t, Entry> ghosts_;
 };
 
 }  // namespace hsm

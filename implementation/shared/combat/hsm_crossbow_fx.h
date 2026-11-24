@@ -39,6 +39,12 @@ inline std::optional<CrossbowAction> CrossbowEdge(const CrossbowState& prev, con
     return std::nullopt;
 }
 
+// A bolt lost without a shot: Bolt Loaded dropped while the string stayed drawn. Not reported (no event to replay), but
+// logged with the bolt's and the rails' state, to find what lets a seated bolt fall through the crossbow (#3440).
+inline bool CrossbowBoltLost(const CrossbowState& prev, const CrossbowState& now) {
+    return prev.string && now.string && prev.bolt && !now.bolt;
+}
+
 enum class CrossbowStep : uint8_t { LoadString, LoadBolt, Shoot };
 
 // The events to run on the stand-in's crossbow (its state as read now) so it shows the owner's action. Missing steps are
@@ -64,6 +70,39 @@ inline std::vector<CrossbowStep> PlanCrossbowReplay(const CrossbowState& standIn
             s.push_back(CrossbowStep::Shoot);
             break;
     }
+    return s;
+}
+
+// #4118: what the owner's crossbow is after an action, as far as the action tells. A shot leaves it slack and empty, a
+// bolt drawn and loaded, a draw drawn (its bolt unknown). A report that reaches a stand-in holding no crossbow (the owner
+// dropped and took it back within a moment) is kept as this, and the stand-in is brought to it once it holds one again.
+struct CrossbowTarget {
+    bool string = false;
+    bool boltKnown = false;
+    bool bolt = false;
+};
+
+inline CrossbowTarget CrossbowAfter(CrossbowAction a) {
+    switch (a) {
+        case CrossbowAction::String: return {true, false, false};
+        case CrossbowAction::Bolt: return {true, true, true};
+        case CrossbowAction::Shoot:
+        case CrossbowAction::ShootEmpty: return {false, true, false};
+    }
+    return {false, false, false};
+}
+
+// The events that bring a stand-in's crossbow to the owner's state. Unlike a replay this can un-draw: a drawn stand-in
+// whose owner is slack runs Event Shoot (the only event that slackens the string; a seated bolt leaves with it, a
+// cosmetic one of the stand-in's own).
+inline std::vector<CrossbowStep> PlanCrossbowReconcile(const CrossbowState& standIn, const CrossbowTarget& t) {
+    std::vector<CrossbowStep> s;
+    if (!t.string) {
+        if (standIn.string) s.push_back(CrossbowStep::Shoot);
+        return s;
+    }
+    if (!standIn.string) s.push_back(CrossbowStep::LoadString);
+    if (t.boltKnown && t.bolt && !standIn.bolt) s.push_back(CrossbowStep::LoadBolt);
     return s;
 }
 

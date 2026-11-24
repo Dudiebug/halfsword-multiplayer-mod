@@ -196,6 +196,9 @@ size_t ObjectSync::ClearMovedProps(double nowMs, bool propsOff) {
         c.haveStart = !p.start.empty();
         c.bornInMatch = p.bornMs > baselineMs_ + kBaselineGraceMs;
         c.held = p.attachedSent || ObjectField(p.actor, 0) != nullptr;
+        c.worn = !c.held && adapter_->WornGear(p.actor);   // the bolt quiver on a fighter's hip is no weapon and not attached (#3909)
+        if (c.worn && propsOff && c.spawned && c.bornInMatch && !c.level && wornKept_.insert(id).second)   // a quiver tracked before it was worn
+            HSM_LOG("clear: props off: kept %s e%llu, a fighter wears it", ObjectName(p.actor).c_str(), (unsigned long long)id);
         c.denied = p.denied; c.sub = p.sub;
         c.structure = IsStructure(id, p.sub, p.bodies.size(), p.constraints.size(), p.found);   // by shape, whatever sync_structures says
         c.fence = propsOff && ObjectName(p.actor).find("Fence_Bags") != std::string::npos;     // the ring of Fenced ring stays

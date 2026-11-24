@@ -173,6 +173,49 @@ static void TestTyping() {
     CHECK(!i.input && i.draft.empty() && !i.caret);
 }
 
+// "(N left)" shows once the draft is within 20 bytes of the 120-byte cap, red from 5 bytes. Bytes, not letters: the wire
+// limit counts bytes.
+static void TestCounter() {
+    CHECK(kChatLeftShownBytes == 20 && kChatLeftRedBytes == 5 && kMaxChatBytes == 120);
+    ChatLocal c = Shown();
+    c.typing = true; c.typingAtMs = kNow;
+    auto at = [&](size_t bytes) { c.draft = std::string(bytes, 'a'); return BuildChatScene(c, kNow).counter; };
+    CHECK(at(0).text.empty() && at(50).text.empty() && at(99).text.empty());      // 21 left: nothing yet
+    CHECK(at(100).text == "(20 left)" && Same(at(100).color, kWarn));              // the first line of it
+    CHECK(at(101).text == "(19 left)" && Same(at(101).color, kWarn));
+    CHECK(at(114).text == "(6 left)" && Same(at(114).color, kWarn));
+    CHECK(at(115).text == "(5 left)" && Same(at(115).color, kBloodInk));           // red from 5
+    CHECK(at(119).text == "(1 left)" && Same(at(119).color, kBloodInk));
+    CHECK(at(120).text == "(0 left)" && Same(at(120).color, kBloodInk));
+    CHECK(at(125).text == "(0 left)");                                              // never a negative count
+    c.draft.clear();
+    for (int i = 0; i < 50; ++i) c.draft += "\xC3\xA9";                             // 50 letters, 100 bytes
+    CHECK(BuildChatScene(c, kNow).counter.text == "(20 left)");
+    // It sits beside the hint, which it does not replace; "slow down" and the counter show together.
+    c.draft = std::string(110, 'a'); c.refused = true; c.refusedAtMs = kNow;
+    ChatScene s = BuildChatScene(c, kNow);
+    CHECK(s.counter.text == "(10 left)" && s.hint.text == "slow down");
+    // Not typing: no counter, whatever the draft field holds.
+    ChatLocal idle = Shown();
+    idle.draft = std::string(119, 'a');
+    CHECK(BuildChatScene(idle, kNow).counter.text.empty());
+}
+
+// The draft a pause kept comes back on the next open and shows in the input row (the session keeps it, the scene shows it).
+static void TestKeptDraftShows() {
+    ChatSession session;
+    session.On(ChatEvent::Enter, 0);
+    session.On(ChatEvent::Char, 1, std::string(105, 'k'));
+    session.On(ChatEvent::Paused, 2);
+    ChatLocal c = Shown();
+    c.typing = session.typing(); c.draft = session.draft();
+    CHECK(!BuildChatScene(c, kNow).input && BuildChatScene(c, kNow).draft.empty() && BuildChatScene(c, kNow).counter.text.empty());
+    session.On(ChatEvent::Enter, 3);
+    c.typing = session.typing(); c.typingAtMs = kNow; c.draft = session.draft();
+    ChatScene s = BuildChatScene(c, kNow);
+    CHECK(s.input && s.draft == std::string(105, 'k') && s.counter.text == "(15 left)");
+}
+
 static void TestSlowDown() {
     ChatLocal c = Shown();
     c.typing = true; c.typingAtMs = kNow - 5000; c.draft = "spam";
@@ -230,6 +273,8 @@ int main() {
     TestLog();
     TestNewestEight();
     TestTyping();
+    TestCounter();
+    TestKeptDraftShows();
     TestSlowDown();
     TestIdleHint();
     if (g_fail) { std::printf("%d chat scene checks failed\n", g_fail); return 1; }

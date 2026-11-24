@@ -198,6 +198,56 @@ inline double BoneError(const FighterNow& now, const PoseFrame& target, int bone
     return sidetail::Len(sidetail::Sub(now.bones[bone].pos, target.bones[bone].pos));
 }
 
+// A body the physics threw out of the world: a NaN, or farther than kDivergedUu (10 km; the arenas are a few hundred
+// metres across) from the origin on any axis. Report opf2ZCDQyj (0.8.0-pre53, Infection, #3906): one client's stand-ins
+// read a pelvis 5e9 uu off, then NaN. A NaN pelvis error is neither <= the snap line nor < 0, so every 150 ms the driver
+// "snapped" the stand-in by a NaN shift, which wrote NaN into the mesh again; the body stayed lost for the rest of the
+// round and the player saw everyone teleporting. Such a body is not read at all, and DivergeWatch asks for a new stand-in.
+inline constexpr double kDivergedUu = 1.0e6;
+inline constexpr double kDivergedHoldMs = 200.0;   // diverged this long without a break: the physics state is gone, build a new body
+
+inline bool BodyDiverged(const V3& p) {
+    return !(std::fabs(p.x) <= kDivergedUu && std::fabs(p.y) <= kDivergedUu && std::fabs(p.z) <= kDivergedUu);   // NaN fails the compare
+}
+inline bool BodyDiverged(const BodyNow& b) {
+    return BodyDiverged(b.pos) || !(std::isfinite(b.rot.x) && std::isfinite(b.rot.y) && std::isfinite(b.rot.z) && std::isfinite(b.rot.w));
+}
+
+// Marks every diverged body of `n` unread, so no error, placement or command is built from it. Returns a bit per bone
+// (bit i = bone i) that was read and diverged; weapons and flail heads are dropped too but do not set a bit (a flung
+// weapon is not a lost body).
+inline uint32_t DropDiverged(FighterNow& n) {
+    uint32_t bad = 0;
+    for (int i = 0; i < kPoseBones; ++i) {
+        if (n.valid[i] && BodyDiverged(n.bones[i])) { n.valid[i] = false; bad |= 1u << i; }
+        if (n.velValid[i] && BodyDiverged(n.vel[i])) n.velValid[i] = false;
+    }
+    for (int w = 0; w < kPoseWeapons; ++w) {
+        if (n.weaponValid[w] && BodyDiverged(n.weapons[w])) n.weaponValid[w] = false;
+        if (n.headValid[w] && BodyDiverged(n.heads[w])) n.headValid[w] = false;
+    }
+    return bad;
+}
+
+// Fires once per episode, when the stand-in's bodies have been diverged for kDivergedHoldMs without a clean frame in
+// between. Reset when a new stand-in is bound.
+class DivergeWatch {
+public:
+    bool Update(double nowMs, bool diverged) {
+        if (!diverged) { since_ = kNone; fired_ = false; return false; }
+        if (since_ == kNone) since_ = nowMs;
+        if (fired_ || nowMs - since_ < kDivergedHoldMs) return false;
+        fired_ = true;
+        return true;
+    }
+    void Reset() { since_ = kNone; fired_ = false; }
+
+private:
+    static constexpr double kNone = -1.0e300;
+    double since_ = kNone;
+    bool fired_ = false;
+};
+
 // Moves every read body (bones and weapons) by `d`: what a rigid placement does to the stand-in.
 inline void ShiftFighterNow(FighterNow& n, const V3& d) {
     for (int i = 0; i < kPoseBones; ++i) if (n.valid[i]) n.bones[i].pos = sidetail::Add(n.bones[i].pos, d);
@@ -219,6 +269,7 @@ struct DriverStep {
     V3 shift{};
     double pelvisErrUu = -1.0;  // stand-in pelvis vs this frame's target, before any placement; -1 = pelvis not read
     bool struck = false;        // a contact body was knocked off its last command: the servo yields from this frame
+    uint32_t divergedBones = 0; // bones (bit per index) read this frame but out of the world (BodyDiverged): left out of everything below
     SampleInfo info{};
     FighterCommand cmd{};       // for the stand-in after the placement; empty while the pelvis is not read
 };
@@ -245,8 +296,10 @@ public:
 
     // now: the stand-in's bodies as read this frame; nextDtS: the coming physics step (clamped here); target
     // receives this frame's sampled pose.
-    DriverStep Step(PosePlayer& player, double nowMs, const FighterNow& now, double nextDtS, bool snapBlocked, PoseFrame& target) {
+    DriverStep Step(PosePlayer& player, double nowMs, const FighterNow& nowRead, double nextDtS, bool snapBlocked, PoseFrame& target) {
         DriverStep s;
+        FighterNow now = nowRead;
+        s.divergedBones = DropDiverged(now);
         s.struck = DetectImpact(nowMs, now);
         if (s.struck) state_.NotifyImpact(nowMs, params_);   // yielding from this frame's command on
         lastCmd_ = FighterCommand{};                          // until a command is computed below

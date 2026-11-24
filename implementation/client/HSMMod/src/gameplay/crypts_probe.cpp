@@ -19,13 +19,14 @@ constexpr const char* kDoorClass = "BP_Door_Gate_A_001_C";
 constexpr const char* kStaticMeshActorClass = "StaticMeshActor";
 constexpr const char* kActorClass = "Actor";
 constexpr const char* kStreamingClass = "LevelStreamingDynamic";
+constexpr const char* kGameInstanceClass = "GI_Settings_C";
 constexpr const char* kBlockBoolFields[] = {"Is Entrance?", "Is Exit?", "Is Treasury?", "Is Boss Arena?", "Pre Boss", "Is Shortcut",
                                             "Has Shortcut", "Is Purgatory", "Has Treasury", "Has Exit", "Has Stairs Up",
                                             "Has Stairs Down", "Leads To Exit", "Door Barricated", "Fully Loaded"};
 
 constexpr uint32_t kCatalogAfterMs = 8000;   // the first room is spawned 2 s after the level loads
 constexpr uint32_t kScanGapMs = 2000;
-constexpr uint32_t kFarGapMs = 1500;         // between one far room's unload and the next load
+constexpr uint32_t kFarGapMs = 1500;         // between one far room's measure and the next load
 constexpr uint32_t kFarTimeoutMs = 25000;
 constexpr double kFarX = 300000, kFarStep = 25000;   // 3 km out, 250 m apart
 constexpr int kMaxListed = 24;                       // spawn points per log line
@@ -135,6 +136,7 @@ struct State {
     UObject* world = nullptr;
     uint32_t armedAt = 0, nextScan = 0, nextFar = 0;
     bool catalogued = false, farDone = false, layoutOk = false;
+    int playMode = -1, gameMode = -1;   // the game instance's Current Play Mode and Current Game Mode enum at arming
     UClass* blockCls = nullptr; UClass* spawnerCls = nullptr; UClass* doorCls = nullptr; UClass* smaCls = nullptr; UClass* actorCls = nullptr;
     UObject* streamingCdo = nullptr;
     std::vector<RoomClass> rooms;
@@ -227,7 +229,7 @@ void Catalog() {
 
 // What a loaded level holds, in `frame` (the room's Origin Point, or the far spot it was loaded at).
 void MeasureLevel(UObject* level, const FTransform& frame, const std::string& tag, const RoomClass* room) {
-    std::map<std::string, int> classes;
+    std::map<std::string, int> classes, async;
     Box mesh, all;
     std::vector<std::pair<double, std::string>> big;
     std::vector<FVector> spawns;
@@ -240,6 +242,7 @@ void MeasureLevel(UObject* level, const FTransform& frame, const std::string& ta
         UClass* c = ClassOf(o);
         const std::string cn = ClassName(c);
         ++classes[cn];
+        if (bool on = false; GetBool(o, "bAsyncPhysicsTickEnabled", on) && on) ++async[cn];
         Call b(o, "GetActorBounds");
         b.set<bool>("bOnlyCollidingComponents", true).set<bool>("bIncludeFromChildActors", false);
         if (b.invoke()) {
@@ -293,6 +296,11 @@ void MeasureLevel(UObject* level, const FTransform& frame, const std::string& ta
             tag.c_str(), ObjectName(OuterOf(level)).c_str(), actors, mesh.Str().c_str(), all.Str().c_str(),
             bigS.empty() ? "-" : bigS.c_str(), loot, spawns.size());
     HSM_LOG("cryptsprobe: %s classes %s", tag.c_str(), topS.c_str());
+    if (!async.empty()) {
+        std::string a;
+        for (const auto& [k, v] : async) a += (a.empty() ? "" : " ") + k + "x" + std::to_string(v);
+        HSM_LOG("cryptsprobe: %s async-physics actors %s", tag.c_str(), a.c_str());
+    }
     for (size_t i = 0; i < spawns.size(); i += kMaxListed) {
         std::string s;
         for (size_t k = i; k < spawns.size() && k < i + kMaxListed; ++k) s += (k > i ? " " : "") + V(spawns[k]);
@@ -376,21 +384,21 @@ UObject* LoadFar(void* softPtr, const FTransform& at) {
     return c.get<bool>("bOutSuccess") ? c.get<UObject*>("ReturnValue") : nullptr;
 }
 
-void UnloadFar() {
-    for (int s = 0; s < 3; ++s) {
-        UObject* st = g.job.streams[s];
-        if (!Alive(st, g.job.index[s])) continue;
-        Call(st, "SetIsRequestingUnloadAndRemoval").set<bool>("bInIsRequestingUnloadAndRemoval", true).invoke();
-        Call(st, "SetShouldBeLoaded").set<bool>("bInShouldBeLoaded", false).invoke();
-    }
-    g.job = FarJob{};
-    g.farBusy = false;
-}
-
 void FarTick(uint32_t now) {
+    // In a progression run (Play Mode 0) every spawn point with Spawn Player whose team matches the deaths so far spawns a
+    // new player fighter and possesses it as it begins play (BP_SpawnerPoint_Willies ReceiveBeginPlay, Check Purgatory
+    // Spawner): a far-loaded Logic level would move the player 3 to 7 km away, asleep. The far measure runs only outside it
+    // (and not when the mode could not be read).
+    if (g.playMode <= 0 && !g.farBusy) {
+        if (!g.farDone) {
+            g.farDone = true;
+            HSM_LOG("cryptsprobe: far measure: skipped (play mode %d: in a progression run a far spawn point could take the player)", g.playMode);
+        }
+        return;
+    }
     if (!g.farBusy) {
         if (g.farQueue.empty()) {
-            if (!g.farDone) { g.farDone = true; HSM_LOG("cryptsprobe: far measure: done, %d room levels", g.farCount); }
+            if (!g.farDone) { g.farDone = true; HSM_LOG("cryptsprobe: far measure: done, %d room levels (they stay loaded)", g.farCount); }
             return;
         }
         if (int32_t(now - g.nextFar) < 0) return;
@@ -430,7 +438,11 @@ void FarTick(uint32_t now) {
     for (int s = 0; s < 3; ++s)
         if (levels[s]) MeasureLevel(levels[s], g.job.at, "far " + r.name + " " + kPart[s], &r);
     HSM_LOG("cryptsprobe: far %s: shown after %ums", r.name.c_str(), now - g.job.startMs);
-    UnloadFar();
+    // Measured rooms stay loaded until the Crypts close. Unloading one crashed the game: the engine drops an actor
+    // with async physics tick (Chamber_3's chains) from its tick list only on destroy or rename, not when its level
+    // streams out, so the next physics step called the freed actor (docs/REVERSE_ENGINEERING.md, section 14).
+    g.job = FarJob{};
+    g.farBusy = false;
     g.nextFar = now + kFarGapMs;
 }
 
@@ -449,9 +461,15 @@ void CryptsProbeLevel(bool on, bool cryptsLevel, UObject* world, uint32_t nowMs)
     g.actorCls = FindClass(kActorClass);
     g.streamingCdo = DefaultObject(FindClass(kStreamingClass));
     FProperty* sp = g.blockCls ? FindProperty(g.blockCls, "Start Position") : nullptr;
+    const std::vector<UObject*> gis = FindInstances(kGameInstanceClass);
+    if (!gis.empty()) {
+        if (const uint8_t* m = Field<uint8_t>(gis[0], "Current Play Mode")) g.playMode = *m;
+        if (const uint8_t* m = Field<uint8_t>(gis[0], "Current Game Mode enum")) g.gameMode = *m;
+    }
     g.layoutOk = g.blockCls && g.actorCls && sp && PropertySize(sp) == int32_t(sizeof(FTransform));
-    HSM_LOG("cryptsprobe: armed (room class %s, transform %d bytes, spawner %s, door %s, streaming %s)", g.blockCls ? "found" : "MISSING",
-            sp ? PropertySize(sp) : -1, g.spawnerCls ? "found" : "missing", g.doorCls ? "found" : "missing", g.streamingCdo ? "found" : "missing");
+    HSM_LOG("cryptsprobe: armed (room class %s, transform %d bytes, spawner %s, door %s, streaming %s, play mode %d, game mode %d)",
+            g.blockCls ? "found" : "MISSING", sp ? PropertySize(sp) : -1, g.spawnerCls ? "found" : "missing",
+            g.doorCls ? "found" : "missing", g.streamingCdo ? "found" : "missing", g.playMode, g.gameMode);
     if (!g.layoutOk) { HSM_LOG("cryptsprobe: off: the room class or its transform layout is not as expected"); g.on = false; }
 }
 

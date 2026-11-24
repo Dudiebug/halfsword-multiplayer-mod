@@ -376,7 +376,7 @@ inline std::string ClassSummary(const ClassSheet& c) {
     const auto add = [&](const std::string& part) { out += (out.empty() ? "" : ", ") + part; };
     const auto stat = [&](const char* name, double v) { if (std::abs(v - 1.0) > 1e-3) add(std::string(name) + " " + std::to_string(int(std::lround(v * 100))) + "%"); };
     if (std::abs(c.mass - 1.0) > 1e-3) { char w[32]; std::snprintf(w, sizeof w, "weight %.1f", c.mass); add(w); }
-    if (c.heal == ClassHeal::Logan) add("heals: Logan"); else if (c.heal == ClassHeal::Weathered) add("heals: Weathered");
+    if (c.heal == ClassHeal::Logan) add("heals slowly"); else if (c.heal == ClassHeal::Weathered) add("heals fast");
     if (c.metalSkeleton) add("adamantium skeleton");
     if (c.claws) add(c.metalClaws ? "ADAMANTIUM CLAWS" : "bone claws");
     if (c.muscle) add("muscle");
@@ -424,24 +424,24 @@ inline ClassFieldView ClassField(const ClassSheet& c, int i) {
 // What a row does, for the CLASSES tab's description box.
 inline const char* ClassFieldInfo(int i) {
     switch (i) {
-        case 0: return "Closes your wounds over time, from Half Wolverine. Off is the base game. Logan is slow and Weathered is faster. Any healing also protects you from pain, dismemberment and dislocation, so it costs a lot: 50 power for Logan, 80 for Weathered.";
-        case 1: return "What your bones are made of, from Half Wolverine. Bone is the game's own bones and costs nothing. Adamantium is metal, so nothing can be cut off you, for 80 power.";
-        case 2: return "Blades you draw from your hands, from Half Wolverine. Fighters can't hold weapons with claws out, so sheathe them to use one. Bone claws cost 60 power and armour stops them. Adamantium claws cut through armour, for 180 power: nearly every stat has to be at its lowest to afford them.";
-        case 3: return "A bigger, more muscular build in fights, from Half Wolverine, and the strongest grip and lift there is. Costs 40 power.";
-        case 4: return "You ignore pain and its effects, so hits don't slow you down. Very strong: it costs 100 power, so you have to give up a lot for it.";
+        case 0: return "Heals wounds over time (Half Wolverine). Logan is slow, Weathered faster. Also stops pain and dislocation. 50/80 power.";
+        case 1: return "Adamantium bones can't be cut off (Half Wolverine), for 80 power. Bone is the game's own and costs nothing.";
+        case 2: return "Blades from your hands (Half Wolverine). Sheathe them to hold a weapon. Bone 60 power; adamantium 180, cuts armour.";
+        case 3: return "A bigger, more muscular build and the strongest grip and lift there is (Half Wolverine). Costs 40 power.";
+        case 4: return "You ignore pain, so hits don't slow you down. Very strong: it costs 100 power.";
         case 5: return "Removes the wait between kicks, so you can kick again straight away. Costs 25 power.";
         case 6: return "Your joints can't be dislocated. Costs 20 power.";
-        case 7: return "How fast you run. Most fighting happens at a walk, so this costs and earns less than WALK. Lowering it earns nothing while WALK is raised, and pays fully only when WALK comes down too.";
-        case 8: return "How fast you walk, your main speed in a fight, so this costs and earns more than RUN. Lowering it earns nothing while RUN is raised, and pays fully only when RUN comes down too.";
-        case 9: return "How strong your body is: it's what lets you lift and hold people, carry armour without slowing, and it makes you heavier. Costs 60 power per 100%, and earns power when lowered, down to 70%.";
-        case 10: return "How fast your body heals by itself: your health and each limb's. No mod needed. Costs 30 power per 100%, and earns power when lowered, down to 70%.";
-        case 11: return "How long your stamina lasts. Above 100% you tire more slowly. Costs 25 power per 100%, and earns power when lowered, down to 70%.";
-        case 12: return "How rigid your hands are, which makes your punches hit harder. It only starts to matter well above 100% without gauntlets. Costs 15 power per 100%. Lowering it earns nothing.";
+        case 7: return "How fast you run. Costs and earns less than WALK. Lowering it pays fully only when WALK comes down too.";
+        case 8: return "How fast you walk, your main speed in a fight. Costs and earns more than RUN. Lowering it pays only with RUN.";
+        case 9: return "How strong your body is: lifting, holding, carrying armour. Costs 60 power per 100%; lowering earns down to 70%.";
+        case 10: return "How fast your body heals by itself. No mod needed. Costs 30 power per 100%; lowering earns down to 70%.";
+        case 11: return "How long your stamina lasts. Above 100% you tire more slowly. Costs 25 power per 100%; lowering earns down to 70%.";
+        case 12: return "How rigid your hands are: punches hit harder past 100% without gauntlets. 15 power per 100%; lowering earns nothing.";
         case 13: return "How far your blows push and throw people. Earns power when lowered, down to 70%.";
         case 14: return "How much force your kicks have. Earns power when lowered, down to 70%.";
         case 15: return "How much force it takes to break your bones. Lower breaks easier. Earns power when lowered, down to 70%.";
-        case 16: return "How heavy your body is, in half steps from 0.5 to 5.0, where 1.0 is the game's own. Heavier is harder to push and throw. Costs 60 power per 1.0, and earns power when lowered, down to 0.7.";
-        case 17: return "You carry anyone you hold the way the game carries an NPC, whatever their weight or armour, so you can lift and throw them. They also have a harder time breaking free. Does nothing else. Costs 6 power.";
+        case 16: return "How heavy your body is, from 0.5 to 5.0 (1.0 is the game's own). Heavier is harder to push. 60 power per 1.0.";
+        case 17: return "You carry anyone you hold as the game carries an NPC, so you can lift and throw them. Costs 6 power.";
         default: return "Below half health you panic: your stamina drains half as fast again. Earns 5 power.";
     }
 }
@@ -554,8 +554,17 @@ inline std::string ClassTagLine(std::string_view name, const ClassSheet& c) {
     if (differs(c.bones)) out += " BONES " + percent(c.bones);
     return out;
 }
-// Where a class is in force: fighting alone, or in a lobby whose rule is Classes. Anywhere else it would be an unfair edge.
+// Where a class is in force: fighting alone, or in a lobby whose Classes row is On or Unrestricted. Anywhere else it would be an unfair edge.
 inline bool ClassAppliesHere(bool inLobby, bool classesLobby) { return !inLobby || classesLobby; }
+// The class picker's first words in a lobby whose Classes row is Off (#3396: a host on Mods allowed: Vanilla picked seven
+// classes and was never told they were off). `ruled`: the lobby names a mod rule at all; `host`: this machine hosts, so it can
+// turn the row on itself.
+inline std::string ClassesOffNote(bool ruled, bool host) {
+    std::string s = ruled ? std::string("Classes are off in this lobby.") : std::string("Classes are off in this lobby (it has no mod rule).");
+    if (!host) return s + " The host turns them on with the Classes row in the MODS tab. Until then you fight as the game's plain fighter.";
+    if (!ruled) return s + " Mod rules are switched off on this computer, so Classes cannot be turned on here.";
+    return s + " Turn them on with the Classes row in the lobby's MODS tab.";
+}
 
 // The game's own values for two stats its Blueprints only ever read (Willie_BP's defaults). Nothing in the game changes them, so
 // a fighter who has anything else there, class aside, had them changed by something else. The class's multiplier goes on top.

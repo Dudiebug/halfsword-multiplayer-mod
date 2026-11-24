@@ -283,8 +283,9 @@ struct ChatStep {
 // Not typing: Enter (when it is the key) or OpenKey starts a line and takes the keyboard; the key that opened it is not
 // typed; everything else is the game's. Typing: OpenKey and Char type their text (whole, or not at all when it holds a
 // control character, invalid UTF-8 or would pass kMaxChatBytes), Backspace takes the last code point, Enter sends the
-// sanitized draft (an empty or blank one only closes and costs no token), and Escape, FocusLost, HudHidden and Paused
-// drop the draft. Every close gives the keyboard back, once.
+// sanitized draft (an empty or blank one only closes and costs no token), and Escape and HudHidden drop the draft. A
+// Paused or FocusLost closes the line too but keeps what was typed (kept()): the next open starts with it. Every close
+// gives the keyboard back, once.
 class ChatSession {
 public:
     explicit ChatSession(ChatKey key = ChatKey::Enter) : key_(key) {}
@@ -294,7 +295,8 @@ public:
         if (!typing_) {
             if (e == ChatEvent::OpenKey || (e == ChatEvent::Enter && key_ == ChatKey::Enter)) {
                 typing_ = true;
-                draft_.clear();
+                draft_ = kept_;                  // what a pause or lost focus closed comes back
+                kept_.clear();
                 st.captureChanged = true;
             }
             st.capture = typing_;
@@ -325,7 +327,7 @@ public:
             case ChatEvent::FocusLost:
             case ChatEvent::HudHidden:
             case ChatEvent::Paused:
-                Close(st);
+                Close(st, e == ChatEvent::FocusLost || e == ChatEvent::Paused);   // those two keep the line for the next open
                 break;
         }
         st.capture = typing_;
@@ -336,6 +338,8 @@ public:
     const std::string& draft() const { return draft_; }
     size_t freeBytes() const { return draft_.size() < kMaxChatBytes ? kMaxChatBytes - draft_.size() : 0; }   // room left in the draft
     ChatKey key() const { return key_; }
+    const std::string& kept() const { return kept_; }   // the line a pause or lost focus closed: the next open starts with it
+    void ForgetDraft() { kept_.clear(); }               // the match or the session is over, or a prefilled line is coming
 
 private:
     // Non-empty valid UTF-8 without a control character (C0, DEL, C1).
@@ -349,7 +353,9 @@ private:
         }
         return true;
     }
-    void Close(ChatStep& st) {
+    // `keep`: remember the draft for the next open (a blank one is not worth it).
+    void Close(ChatStep& st, bool keep = false) {
+        kept_ = keep && !SanitizeChat(draft_).empty() ? draft_ : std::string();
         typing_ = false;
         draft_.clear();
         st.captureChanged = true;
@@ -358,7 +364,26 @@ private:
     ChatKey key_;
     bool typing_ = false;
     std::string draft_;
+    std::string kept_;
     ChatRateLimiter limiter_;
+};
+
+// "Close the menu to chat." is said once each time a menu opens, not at every press of the chat key (the default key is Enter,
+// which a menu uses too). Step once per poll: `menuOpen` (the game's pause or a mod menu is up) and `keyFired` (the chat key was
+// pressed this poll). True when the notice is to show now. The flag is cleared when the menu is seen closed, or by Reset (the
+// polls stopped: another window in front, no HUD).
+class ChatMenuNote {
+public:
+    bool Step(bool menuOpen, bool keyFired) {
+        if (!menuOpen) { said_ = false; return false; }
+        if (!keyFired || said_) return false;
+        said_ = true;
+        return true;
+    }
+    void Reset() { said_ = false; }
+
+private:
+    bool said_ = false;
 };
 
 }  // namespace hsm

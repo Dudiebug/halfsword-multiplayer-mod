@@ -23,9 +23,9 @@ inline const char* WinByName(WinBy w) {
 }
 inline const char* WinByHint(WinBy w) {
     switch (w) {
-        case WinBy::FirstBlood: return "The first fighter to bleed from a hit loses the round, as in the game's own duel.";
-        case WinBy::Knockdown: return "A fighter who falls and is still down 1.5 s later loses the round, as in the game's own duel.";
-        default: return "A fighter is out of the round when they die or give up.";
+        case WinBy::FirstBlood: return "The first to bleed loses the round.";
+        case WinBy::Knockdown: return "Still down 1.5 s after a fall loses the round.";
+        default: return "Out when you die or give up.";
     }
 }
 

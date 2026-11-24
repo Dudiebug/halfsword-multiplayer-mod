@@ -38,14 +38,14 @@ int main() {
     CHECK(ParseServerMaps("", Format::FreeForAll).size() == ffaMaps);
     auto z = ParseServerMaps("all", Format::Zombies);
     CHECK(z.size() == 1 && z[0] == Idx("Abyss_Map_Open_EA"));
-    CHECK(ParseServerMaps("all", Format::Duel).size() == 9);                             // arenas only, Forest too
+    CHECK(ParseServerMaps("all", Format::Duel).size() == ffaMaps);                       // Duel is the Last man standing card with two players (0.9.0): the same maps
     CHECK(ParseServerMaps("all", Format::LastManStanding).size() == ffaMaps);            // like free-for-all: arenas and big levels
     std::vector<std::string> unk;
     auto m = ParseServerMaps(" yard , EAST TOWER,Map_Arena_Cellar, nope, yard, Tavern", Format::FreeForAll, &unk);
     CHECK(m.size() == 4 && m[0] == Idx("Map_Arena_Yard") && m[1] == Idx("Map_Arena_EastTower") && m[2] == Idx("Map_Arena_Cellar"));
     CHECK(unk.size() == 1 && unk[0] == "nope");
-    auto d = ParseServerMaps("Yard,Tavern,Abyss", Format::Duel);                         // the big maps are refused for Duel
-    CHECK(d.size() == 1 && d[0] == Idx("Map_Arena_Yard"));
+    auto d = ParseServerMaps("Yard,Tavern,Abyss", Format::Duel);                         // like Last man standing: the Tavern level is fine, the Abyss is for Zombies only
+    CHECK(d.size() == 2 && d[0] == Idx("Map_Arena_Yard") && d[1] == Idx("Map_Hub_Tavern_Frank"));
     CHECK(ParseServerMaps("Yard", Format::Zombies).size() == 1);                         // nothing usable: every allowed map
     CHECK(ParseServerMaps("Yard", Format::Zombies)[0] == Idx("Abyss_Map_Open_EA"));
     CHECK(ParseServerMaps("garbage", Format::FreeForAll, &unk).size() == ffaMaps);

@@ -135,6 +135,26 @@ struct HitClaim {
 constexpr double kMaxStuckRawDamage = 2e9;
 constexpr double kMaxStuckCuttingPower = 1e6;   // and so is a Cutting Power above this (the game's own are a few thousand at most)
 
+// Hit velocity bound (#3845, blows of 4,000+ damage). The game hands Deal Complex Damage max(|Weapon Velocity|, |Normal
+// Impulse|) as the hit velocity (ModularWeaponBP.cpp:775-783), and its damage is Rigidity x |Hit Velocity| less the
+// defence (Willie_BP.cpp:3708-3716), with the rigidity up to x1.666 more for a blunt face-on blow. Nothing bounds the
+// velocity: a stand-in is a body the servo drives onto the owner's pose, so a swing met by one catching up reads a contact
+// impulse far above anything a hand swings. (The game itself clamps a hit velocity to 1000 for 0.1 s after its own
+// rubber-banding; the stand-in never sets that.) Contacts in the 2026-11 reports: a weapon's own velocity on real bodies
+// is p99 about 2100; contacts on stand-ins reached 5000 to 18000. The sender scales a faster hit velocity down to this,
+// direction kept, and never drops the claim (claims.cpp). Not applied to a prop's contact, a fired bolt (Extra High
+// Velocity) or a flail, whose head is whipped well past a hand's speed.
+constexpr double kMaxBlowSpeed = 3500.0;
+
+// Scales v down to maxSpeed, keeping its direction. False, v unchanged, when it is within the bound, zero, or not a number.
+inline bool CapBlowSpeed(V3& v, double maxSpeed = kMaxBlowSpeed) {
+    const double len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (!std::isfinite(len) || !(len > maxSpeed) || !(maxSpeed > 0)) return false;
+    const double k = maxSpeed / len;
+    v = V3{ v.x * k, v.y * k, v.z * k };
+    return true;
+}
+
 // The world-space "Deal Complex Damage" call inputs, same fields as the decompiled signature
 // minus the two component pointers (Hit Component, Collided Component), which never cross the
 // wire: the victim replays against its own pawn/bone, and "what struck" travels as HitClaim's

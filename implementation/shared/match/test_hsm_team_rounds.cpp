@@ -197,10 +197,12 @@ static std::vector<LobbyRow> RowIds(const LobbyScene& s) { std::vector<LobbyRow>
 static void TestLobby() {
     using R = LobbyRow;
     const LobbyScene riot = BuildLobbyScene(InLobby(Format::Riot, 4));
-    CHECK(RowIds(riot) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::FriendlyFire, R::Damage, R::DeadWeight, R::WeaponWeight, R::TeamKit, R::Crossbows, R::Sync}));   // no Gear, Tier, Weapons, Teams, My team; the camera, Team colours and Crossbows rows apply
+    CHECK(RowIds(riot) == (std::vector<R>{R::Players, R::Limit, R::Time, R::WinBy, R::Respawn, R::Damage, R::DeadWeight, R::WeaponWeight, R::Bite, R::FriendlyFire, R::TeamKit, R::Crossbows,
+                                           R::Strip, R::TimeOfDay, R::Props, R::Sync}));   // no Gear, Weapons, Teams, My team; the camera, Team colours and Crossbows rows apply
     CHECK(RowIds(BuildLobbyScene(InLobby(Format::Juggernaut, 4))) == RowIds(riot));
     const LobbyScene td = BuildLobbyScene(InLobby(Format::TeamDuel, 4));
-    CHECK(RowIds(td) == (std::vector<R>{R::Limit, R::Time, R::Respawn, R::FreeCam, R::Gear, R::Tier, R::Bodies, R::Teams, R::FriendlyFire, R::Damage, R::DeadWeight, R::WeaponWeight, R::MyTeam, R::TeamKit, R::Shuffle, R::Crossbows, R::Sync}));
+    CHECK(RowIds(td) == (std::vector<R>{R::Players, R::Limit, R::Time, R::WinBy, R::Respawn, R::Damage, R::DeadWeight, R::WeaponWeight, R::Bite, R::Teams, R::FriendlyFire, R::MyTeam, R::TeamKit, R::Shuffle,
+                                           R::Gear, R::Bodies, R::Crossbows, R::Strip, R::TimeOfDay, R::Props, R::Sync}));
     CHECK(SettingsFor(MatchConfig{Format::Riot}) == SettingsFor(MatchConfig{Format::Juggernaut}));
     // Teams row: Team Duel counts 2..4 and steps; Riot's rows hold none to step.
     MatchConfig c; c.format = Format::TeamDuel;
@@ -226,8 +228,8 @@ static void TestLobby() {
         if (m.format == Format::Riot || m.format == Format::Juggernaut) CHECK(!m.enabled && m.hint == "Needs 3 or more players");
         if (m.format == Format::TeamDuel) CHECK(m.enabled);
     }
-    CHECK(!two.start && two.waiting == "Needs 3 or more players");
-    CHECK(BuildLobbyScene(InLobby(Format::Riot, 3)).waiting != "Needs 3 or more players");
+    CHECK(!two.start && two.waiting == "Needs 3 or more players.");
+    CHECK(BuildLobbyScene(InLobby(Format::Riot, 3)).waiting != "Needs 3 or more players.");
     // Roster: Team Duel shows teams and the auto-balance; Riot's teams come from the roles, so none are shown.
     LobbyLocal tl = InLobby(Format::TeamDuel, 3); tl.players[1].team = 1;
     LobbyScene ts = BuildLobbyScene(tl);
@@ -236,9 +238,9 @@ static void TestLobby() {
     LobbyScene rs = BuildLobbyScene(rl);
     CHECK(!rs.balance && rs.roster[1].team.empty() && !rs.roster[1].movable);
     // The summary names the mode, not a gear the roles override; Team Duel's keeps it.
-    CHECK(Has(rs.summary, "RIOT") && !Has(rs.summary, "Own loadouts") && !Has(rs.summary, "tier"));
+    CHECK(Has(rs.summary, "RIOT") && !Has(rs.summary, "Own kits") && !Has(rs.summary, "tier"));
     LobbyLocal tg = InLobby(Format::TeamDuel, 3); tg.config.teams = 3; tg.config.gear = Gear::RandomTier;
-    CHECK(Has(BuildLobbyScene(tg).summary, "TEAM DUEL (3)") && Has(BuildLobbyScene(tg).summary, "Random by tier"));
+    CHECK(Has(BuildLobbyScene(tg).summary, "TEAM DUEL (3)") && Has(BuildLobbyScene(tg).summary, "Random"));
     // Names, and the browser.
     CHECK(FormatName(Format::TeamDuel) == "Team duel" && FormatName(Format::Riot) == "Riot" && FormatName(Format::Juggernaut) == "Juggernaut");
     CHECK(ModeName(Format::TeamDuel, Gear::Own, 3) == "Team duel (3)" && ModeName(Format::Riot, Gear::RandomTier, 2) == "Riot");

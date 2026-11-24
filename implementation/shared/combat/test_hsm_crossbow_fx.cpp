@@ -39,6 +39,12 @@ void TestSameFrame() {
 void TestLostBolt() {
     CHECK(!CrossbowEdge(kLoaded, kDrawn));
     CHECK(!CrossbowEdge(kBoltOnly, kEmpty));
+    CHECK(CrossbowBoltLost(kLoaded, kDrawn));
+    CHECK(!CrossbowBoltLost(kLoaded, kEmpty));      // the shot
+    CHECK(!CrossbowBoltLost(kLoaded, kLoaded) && !CrossbowBoltLost(kDrawn, kDrawn) && !CrossbowBoltLost(kDrawn, kLoaded));
+    CHECK(!CrossbowBoltLost(kBoltOnly, kEmpty));    // no drawn string: not the case being looked for
+    CHECK(!CrossbowBoltLost(kBoltOnly, kDrawn));    // the string drawn in the same frame the bolt left
+    CHECK(!CrossbowBoltLost(kEmpty, kEmpty));
 }
 
 void TestReplayPlans() {
@@ -75,6 +81,40 @@ void TestReplayFollowsOwner() {
     }
 }
 
+// #4118: the owner dropped its drawn crossbow, shot it empty and took it back; the shot reached a stand-in holding no
+// crossbow. Kept as the state after it, the stand-in's still-drawn crossbow is shot slack once it is held again, where a
+// replay of the next draw does nothing.
+void TestReconcile() {
+    auto apply = [](CrossbowState s, const Steps& steps) {
+        for (CrossbowStep st : steps) {
+            if (st == CrossbowStep::LoadString) s.string = true;
+            else if (st == CrossbowStep::LoadBolt) { if (s.string) s.bolt = true; }
+            else if (s.string) s = kEmpty;
+        }
+        return s;
+    };
+    const CrossbowState states[] = {kEmpty, kDrawn, kLoaded};
+    const CrossbowAction actions[] = {CrossbowAction::String, CrossbowAction::Bolt, CrossbowAction::Shoot, CrossbowAction::ShootEmpty};
+    for (CrossbowAction a : actions) {
+        const CrossbowTarget t = CrossbowAfter(a);
+        for (CrossbowState s : states) {
+            const CrossbowState r = apply(s, PlanCrossbowReconcile(s, t));
+            CHECK(r.string == t.string);
+            if (t.boltKnown) CHECK(r.bolt == t.bolt);
+            else CHECK(r.bolt == s.bolt);   // a draw leaves the bolt as it was
+        }
+    }
+    // The report's case: drawn on the stand-in, the owner shot empty.
+    CHECK((PlanCrossbowReconcile(kDrawn, CrossbowAfter(CrossbowAction::ShootEmpty)) == Steps{CrossbowStep::Shoot}));
+    CHECK((PlanCrossbowReplay(kDrawn, CrossbowAction::String).empty()));   // what the old path did with the next draw
+    // Already there: nothing to run.
+    CHECK(PlanCrossbowReconcile(kEmpty, CrossbowAfter(CrossbowAction::Shoot)).empty());
+    CHECK(PlanCrossbowReconcile(kLoaded, CrossbowAfter(CrossbowAction::Bolt)).empty());
+    CHECK(PlanCrossbowReconcile(kLoaded, CrossbowAfter(CrossbowAction::String)).empty());
+    CHECK((PlanCrossbowReconcile(kEmpty, CrossbowAfter(CrossbowAction::Bolt)) == Steps{CrossbowStep::LoadString, CrossbowStep::LoadBolt}));
+    CHECK(!CrossbowAfter(CrossbowAction(9)).string);
+}
+
 void TestNames() {
     CHECK(IsCrossbowHand("hand_r") && IsCrossbowHand("hand_l"));
     CHECK(!IsCrossbowHand("") && !IsCrossbowHand("hand_R") && !IsCrossbowHand("hand_r ") && !IsCrossbowHand("pelvis"));
@@ -92,6 +132,7 @@ int main() {
     TestLostBolt();
     TestReplayPlans();
     TestReplayFollowsOwner();
+    TestReconcile();
     TestNames();
     if (g_fail) { std::printf("test_hsm_crossbow_fx: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_crossbow_fx: ok\n");

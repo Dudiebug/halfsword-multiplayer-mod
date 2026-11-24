@@ -15,6 +15,9 @@ static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 using namespace hsm;
 
+// A listed lobby that advertises `mode`, three players in of eight (the Duel card reads Last man standing from three), against a browser entry.
+static bool Matches(const char* mode, const char* entry) { LobbyFound f; f.mode = mode; f.players = 3; f.maxPlayers = 8; return ModeMatches(f, entry); }
+
 static MatchConfig One() { MatchConfig c; c.format = Format::OneCrossbow; return Sanitize(c); }
 
 // The format: a round format with no teams and no roles; bare peasants; exactly one crossbow whatever the lobby held.
@@ -79,14 +82,14 @@ static void TestEndlessBolts() {
 // puts gear, tier and the Crossbows row back.
 static void TestLobby() {
     const Format f = Format::OneCrossbow;
-    CHECK(FormatName(f) == "One crossbow" && std::string(FormatBlurb(f)).find("crossbow that never runs out of bolts") != std::string::npos);
-    CHECK(SettingsFor(One()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight,
+    CHECK(FormatName(f) == "One crossbow" && std::string(FormatBlurb(f)) == "Peasants and one crossbow.");
+    CHECK(SettingsFor(One()) == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight,
                                                       LobbyRow::WeaponWeight, LobbyRow::Sync}));
     CHECK(!ModeAvailable(f, 1).ok && ModeAvailable(f, 2).ok && ModeAvailable(f, 20).ok && std::string(ModeAvailable(f, 1).hint) == "Needs 2 or more players");
     bool card = false, browser = false;
-    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || kModeOrder[i] == f;
+    for (size_t i = 0; i < kModeOrderCount; ++i) card = card || (kModeOrder[i].format == f && !kModeOrder[i].blossfechten);
     for (const std::string& n : BrowserModes()) browser = browser || n == "One crossbow";
-    CHECK(card && browser && ModeMatches("One crossbow", "One crossbow"));
+    CHECK(card && browser && Matches("One crossbow", "One crossbow"));
     Format parsed = Format::FreeForAll;
     CHECK(ParseServerFormat("onecrossbow", &parsed) && parsed == f);
     for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, f) == MapAllowsFormat(m, Format::LastManStanding));
@@ -111,7 +114,7 @@ static void TestLobby() {
     const LobbyScene s = BuildLobbyScene(l);
     bool selected = false;
     for (const ModeCard& m : s.modes) if (m.format == f && !m.brawl && !m.progression) selected = m.selected && m.name == "ONE CROSSBOW" && m.enabled;
-    CHECK(selected && s.summary.find("ONE CROSSBOW") == 0 && s.summary.find("Bare") == std::string::npos && s.summary.find("Own loadouts") == std::string::npos);
+    CHECK(selected && s.summary.find("ONE CROSSBOW") == 0 && s.summary.find("Bare") == std::string::npos && s.summary.find("Own kits") == std::string::npos);
     MatchInfo mi; mi.format = uint8_t(f); mi.phase = uint8_t(MatchPhase::Live); mi.round = 1; mi.scoreLimit = 3;
     FighterEntry a; a.entity = 1; a.name = "Ann"; a.alive = true;
     FighterEntry b; b.entity = 2; b.name = "Bo"; b.alive = true;

@@ -9,6 +9,7 @@
 #include "match/hsm_dll_rules.h"
 #include "match/hsm_online_rules.h"
 #include "miniz.h"
+#include "ue4ss_load.h"
 
 // The zip as UE4SS published it, read-only data in this DLL. The path is relative to build.sh's folder.
 __asm__(
@@ -16,7 +17,7 @@ __asm__(
     ".p2align 4\n"
     ".globl hsm_ue4ss_zip\n"
     "hsm_ue4ss_zip:\n"
-    ".incbin \"third_party/ue4ss/UE4SS_v3.0.1-1217-g4fb9b615.zip\"\n"
+    ".incbin \"third_party/ue4ss/UE4SS_v4.0.0.zip\"\n"
     ".globl hsm_ue4ss_zip_end\n"
     "hsm_ue4ss_zip_end:\n"
     ".text\n");
@@ -91,18 +92,6 @@ bool UnpackZip(const std::wstring& dir, BundleStep step) {
     HSM_LOG("ue4ss: bundled build %s: %d file(s) written, %d failed", step == BundleStep::Install ? "installed" : "replaced another build", written, failed);
     return dllIn;
 }
-// On the worker thread, so only UE4SS waits for the answer. No answer at all (the box couldn't open): it stays, and they're asked next time.
-bool AskToReplace(const std::string& sha256) {
-    const int answer = MessageBoxW(nullptr,
-        L"ue4ss\\UE4SS.dll isn't a UE4SS build the mod knows. It may be one of your own.\n\n"
-        L"Replace it with the UE4SS that comes with the mod? Your UE4SS mods and settings stay, but this DLL is overwritten.\n\n"
-        L"Yes: replace it.\n"
-        L"No: keep it. Online play will refuse it, and the mod won't ask about this file again.",
-        L"Half Sword Multiplayer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
-    HSM_LOG("ue4ss: unknown UE4SS.dll %s: %s", sha256.c_str(), answer == IDYES ? "the player chose to replace it" : answer == IDNO ? "the player kept it" : "no answer, kept for now");
-    if (answer == IDNO && !SaveIniValues({{"ue4ss_keep", sha256}}, "mod")) HSM_LOG("ue4ss: could not save that answer; the mod will ask again");
-    return answer == IDYES;
-}
 // A rename works on a DLL that is running, and the player can undo it.
 void SetAside(const std::wstring& dir, const char* name) {
     const std::wstring from = dir + WideAscii(name);
@@ -111,16 +100,15 @@ void SetAside(const std::wstring& dir, const char* name) {
 }
 }  // namespace
 
-void InstallBundled(const std::wstring& dir, const Files& files, const std::string& keep) {
-    std::string have;
+void InstallBundled(const std::wstring& dir, const Files& files) {
+    std::string have, version;
     Sha256Digest sha{};
     if (files.sub && HashFile(dir + WideAscii(kBundleDll), sha)) have = Sha256Hex(sha);
-    BundleStep step = ChooseBundleStep(files.sub, have == kBundledUe4ss, IsKnownUe4ss(have), !have.empty() && have == keep);
-    if (step == BundleStep::Keep) return;
-    if (step == BundleStep::Ask) {
-        if (!AskToReplace(have)) return;
-        step = BundleStep::Replace;
-    }
+    if (files.sub) version = FileVersion(dir + WideAscii(kBundleDll));
+    const BundleStep step = ChooseBundleStep(files.sub, have == kBundledUe4ss);
+    if (step == BundleStep::Replace)   // Whatever it is, the bundled build takes its place: that's the one HSMMod is built and tested with.
+        HSM_LOG("ue4ss: ue4ss\\UE4SS.dll is another build (%s, %s): the bundled build replaces it", have.empty() ? "not readable" : have.c_str(),
+                version.empty() ? "no version info" : version.c_str());
     if (step != BundleStep::None && !UnpackZip(dir, step)) return;   // The old one stays rather than leave no UE4SS at all.
     if (files.beside) SetAside(dir, "UE4SS.dll");
     if (files.xinput2x) SetAside(dir, "xinput1_3.dll");

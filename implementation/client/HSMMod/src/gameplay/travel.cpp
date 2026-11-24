@@ -1,4 +1,6 @@
 #include "gameplay/travel.h"
+#include "gameplay/crypts_layout.h"
+#include "gameplay/world_context.h"
 #include "log.h"
 #include "session/hsm_travel_gate.h"
 #include "ue/hook.h"
@@ -11,15 +13,21 @@ namespace {
 // UGameplayStatics::OpenLevel(const UObject*, FName, bool, FString) for builds 24185754 and 26568321 (same RVA); both Blueprint thunks
 // (OpenLevel, OpenLevelBySoftObjectPtr) end here. The FString is passed by hidden pointer and destroyed by the callee.
 constexpr uintptr_t kOpenLevelRva = 0x35E3590;
+constexpr uint8_t kOpenLevelPrologue[] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x41, 0x56, 0x48, 0x8D};
 using OpenLevelFn = void (*)(UObject*, FName, bool, void*);
 OpenLevelFn g_original = nullptr;
 OpenLevelFilter g_filter;
 bool g_bypass = false;
 
 void Detour(UObject* ctx, FName level, bool absolute, void* options) {
-    if (!g_bypass && g_filter) {
+    if (!g_bypass) {
+        const crypts::Layout* armed = cryptslayout::Armed();
+        const bool coop = cryptslayout::CoopArmed();
+        cryptslayout::Arm(nullptr);   // the game's own level change: never a shared Crypts map (the filter may arm one)
         std::string name = NameToString(level), opts = ReadFString(options);
-        if (!g_filter(name, absolute, opts)) {
+        if (g_filter && !g_filter(name, absolute, opts)) {
+            cryptslayout::Arm(armed);   // the level stays
+            cryptslayout::ArmCoop(coop);
             HSM_LOG("travel: blocked OpenLevel(%s)", name.c_str());
             // Swallowed: the callee would have destroyed the by-value FString. It is owned by the caller's
             // temporary here, which leaks only its small buffer; acceptable for a blocked menu action.
@@ -45,18 +53,39 @@ bool PlainType(const std::string& t) {
     return t == "BoolProperty" || t == "ByteProperty" || t == "EnumProperty" || t == "IntProperty" || t == "FloatProperty" || t == "DoubleProperty";
 }
 UObject* GameInstance() { auto v = FindInstances("GI_Settings_C"); return v.empty() ? nullptr : v[0]; }
+
+// kOpenLevelRva while the exe's bytes there are OpenLevel's; on an exe that moved it, the one call to a function with
+// OpenLevel's prologue in the Blueprint thunk GameplayStatics.OpenLevel (execOpenLevel calls it directly).
+void* OpenLevelAddress() {
+    if (void* p = CheckedFunction(kOpenLevelRva, kOpenLevelPrologue, sizeof kOpenLevelPrologue)) return p;
+    UObject* statics = FindObject("GameplayStatics", "Class");
+    UFunction* thunk = statics ? FindFunction(reinterpret_cast<UClass*>(statics), "OpenLevel") : nullptr;
+    void* p = CalleeOfNative(thunk, kOpenLevelPrologue, sizeof kOpenLevelPrologue);
+    if (p) HSM_LOG("travel: UGameplayStatics::OpenLevel is at exe+0x%zx in this exe (found through GameplayStatics.OpenLevel)",
+                   reinterpret_cast<uintptr_t>(p) - ModuleBase());
+    return p;
+}
 }  // namespace
 
 bool InstallTravelHook(OpenLevelFilter filter) {
     g_filter = std::move(filter);
-    return HookNative(reinterpret_cast<void*>(ModuleBase() + kOpenLevelRva), reinterpret_cast<void*>(&Detour),
-                      reinterpret_cast<void**>(&g_original), "UGameplayStatics::OpenLevel");
+    void* target = OpenLevelAddress();
+    if (!target) {
+        HSM_LOG("travel: UGameplayStatics::OpenLevel not found in this exe; the game's own level changes are not filtered");
+        return false;
+    }
+    return HookNative(target, reinterpret_cast<void*>(&Detour), reinterpret_cast<void**>(&g_original), "UGameplayStatics::OpenLevel");
 }
 
-void OpenLevel(UObject* ctx, const std::string& level, bool absolute, const std::string& options) {
+void OpenLevel(UObject* ctx, const std::string& level, bool absolute, const std::string& options, std::source_location at) {
+    // Every caller hands its cached game mode (Session::lastGameMode_): after a level change it may be the old level's,
+    // freed (public #855). The live mode takes its place; with none alive the level is not opened.
+    ctx = worldctx::For(ctx, at);
+    if (!ctx) { HSM_LOG("travel: OpenLevel(%s) not sent: no live world to open it from", level.c_str()); return; }
     static UObject* statics = nullptr;
     if (!statics) if (UObject* c = FindObject("GameplayStatics", "Class")) statics = DefaultObject(reinterpret_cast<UClass*>(c));
     FStringArgHolder opts(options);
+    cryptslayout::Arm(nullptr);   // any level opened here is the game's own; a loader layout is armed by whoever opens it, after this
     Call c(statics, "OpenLevel");
     c.set<UObject*>("WorldContextObject", ctx).setName("LevelName", MakeName(level)).set<bool>("bAbsolute", absolute).set("Options", opts.arg);
     g_bypass = true;

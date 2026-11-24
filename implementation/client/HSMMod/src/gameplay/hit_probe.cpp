@@ -1,4 +1,5 @@
 #include "gameplay/hit_probe.h"
+#include "combat/hsm_armor_audit.h"
 #include "log.h"
 #include <algorithm>
 #include <cmath>
@@ -98,6 +99,7 @@ int Response(UObject* comp, uint8_t channel) {
 void HitProbe::Clear() {
     offsets_.clear();
     census_.clear();
+    armor_.clear();
     primitive_ = nullptr;
 }
 
@@ -241,6 +243,76 @@ void HitProbe::Census(uint8_t entity, UObject* willie, UObject* mesh) {
     char summary[64];
     std::snprintf(summary, sizeof summary, "%d colliding of %d parts on %d actors", colliding, total, int(actors.size()));
     note("total", summary, "");
+}
+
+// The game's simulated armour colliders (Willie_BP.cpp Set_Up_Proxy_Collisions, NewFunction_0): the Willie keeps them in
+// 'Armor Collision Meshes Simulated'. Each blocks weapons and bodies, and is placed once, from a bone at the moment the
+// armour was set up. A line when a piece appears or its verdict or place (25 cm steps) changes.
+void HitProbe::ArmorAudit(uint8_t entity, UObject* willie, UObject* mesh) {
+    constexpr int kArmorLines = 96;   // per fighter per level
+    if (!on_ || !willie || !mesh) return;
+    const FObjArray* pieces = Field<FObjArray>(willie, "Armor Collision Meshes Simulated");
+    if (!pieces || !pieces->data || pieces->num <= 0 || pieces->num > 64) return;
+    BodyBones bones;
+    if (!ReadBones(mesh, bones)) return;
+    Seen& seen = armor_[entity];
+    char who[16];
+    if (entity) std::snprintf(who, sizeof who, "e%u", entity); else std::snprintf(who, sizeof who, "mine");
+    for (int32_t i = 0; i < pieces->num; ++i) {
+        UObject* comp = pieces->data[i];
+        if (!comp) continue;
+        UObject* asset = ObjField(comp, "StaticMesh");
+        const std::string assetName = asset ? ObjectName(asset) : std::string();
+        Call parentCall(comp, "GetAttachParent");
+        UObject* parent = parentCall.invoke() ? parentCall.get<UObject*>("ReturnValue") : nullptr;
+        combat::ArmorPlace place;
+        // The piece's pivot is not where its geometry is: the game drops the component origin to the character root and
+        // models the collision in character space (Set_Up_Proxy_Collisions: spine_04 less 115 cm for the cuirass). The
+        // world bounds' centre is where the geometry is.
+        struct Bounds { FVector origin, extent; double radius; };
+        const Bounds* bounds = Field<Bounds>(comp, "Bounds");
+        FVector at{};
+        bool haveAt = false;
+        static bool noBoundsLogged = false;
+        if (!bounds && !noBoundsLogged) {
+            noBoundsLogged = true;
+            HSM_LOG("probe: armor %s: %s has no readable Bounds; its place is not logged", who, ObjectName(comp).c_str());
+        }
+        if (bounds && std::isfinite(bounds->origin.x) && std::isfinite(bounds->origin.y) && std::isfinite(bounds->origin.z)) {
+            at = bounds->origin;
+            haveAt = true;
+            place.haveSize = true;
+            place.sizeCm = std::max({std::fabs(bounds->extent.x), std::fabs(bounds->extent.y), std::fabs(bounds->extent.z)});
+        }
+        if (haveAt) {
+            combat::BodyOffset b;
+            if (OnBody(bones, at, b)) {
+                place.haveBody = true;
+                place.forward = b.forward; place.right = b.right; place.up = b.up;
+            }
+            if (parent) {
+                Call pl(parent, "K2_GetComponentLocation");
+                if (pl.invoke()) {
+                    const FVector pat = pl.get<FVector>("ReturnValue");
+                    place.haveParent = true;
+                    place.fromParentCm = Between(at, pat);
+                }
+            }
+        }
+        const combat::ArmorVerdict verdict = combat::JudgeArmorPiece(assetName, place);
+        const std::string key = ObjectName(comp);
+        std::string& last = seen.state[key];
+        const std::string now = combat::ArmorChangeKey(assetName, verdict, place);
+        if (last == now) continue;
+        last = now;
+        if (seen.lines >= kArmorLines) {
+            if (!seen.full) HSM_LOG("probe: armor %s: line limit reached for this level", who);
+            seen.full = true;
+            continue;
+        }
+        ++seen.lines;
+        HSM_LOG("%s", combat::ArmorLine(who, key, parent ? ObjectName(parent) : std::string(), assetName, verdict, place).c_str());
+    }
 }
 
 }  // namespace hsm::game

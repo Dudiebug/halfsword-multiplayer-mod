@@ -29,6 +29,7 @@ struct Event {
     bool ok = true;
     SteamId lobby = 0, user = 0;
     uint32_t a = 0;
+    int result = 0;       // LobbyCreated, LobbyList when !ok: Steam's EResult, or kResultNoResult / kResultNoAnswer (steam/hsm_steam_result.h)
     std::string text;
     std::vector<SteamId> lobbies;
 };

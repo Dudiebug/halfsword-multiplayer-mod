@@ -203,7 +203,8 @@ static void TestText() {
     r.how = ProgWin::HostPick; CHECK(ProgResultLine(r).find("host's pick") != std::string::npos);
     r.how = ProgWin::Votes; CHECK(ProgResultLine(r).find("by votes") != std::string::npos);
     r.how = ProgWin::Cancelled; CHECK(ProgResultLine(r).find("cancelled") != std::string::npos);
-    CHECK(ProgStartByHandLine("Pit Brawl") == "Vote result: Pit Brawl - start it from the Fencer");
+    CHECK(ProgStartByHandLine("Pit Brawl") == "Vote result: Pit Brawl. The host starts the fight by talking to the Fencer.");
+    CHECK(ProgStartByHandLine("Pit Brawl").find(" - ") == std::string::npos);
 }
 
 // Own inventory: whatever the lobby last said about gear, the Tavern's co-op fight uses every player's own career kit.

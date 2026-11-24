@@ -191,10 +191,11 @@ bool IniWriteTime(FILETIME& out) {
 }
 
 void ApplyRule(const Config& cfg) {
-    ModPreset p = ModChoice{}.preset;
-    if (!ParseModPreset(cfg.modRule, p)) HSM_LOG("modrules: mod_rule=%s is not vanilla, maps, bundle, custom, anything or classes; using vanilla", cfg.modRule.c_str());
+    const ModChoiceKeys keys = ChoiceFromKeys(cfg.modRule, cfg.modClasses);
+    if (!keys.known) HSM_LOG("modrules: mod_rule=%s is not vanilla, maps, bundle, custom or anything; using vanilla", cfg.modRule.c_str());
     g_chosen = ModRule{};
-    g_chosen.preset = p;
+    g_chosen.preset = keys.preset;
+    g_chosen.classes = keys.classes;
     g_chosen.blockHse = cfg.blockHse;
     g_chosen.officialOnly = cfg.modOfficialOnly;
     g_allowFromIni = !cfg.modAllow.empty();
@@ -211,7 +212,7 @@ void CheckIni() {
     g_iniTime = t;
     Config c = g_cfg;
     ReadModRuleKeys(c);
-    if (c.modRule == g_cfg.modRule && c.blockHse == g_cfg.blockHse && c.modOfficialOnly == g_cfg.modOfficialOnly && c.modAllow == g_cfg.modAllow) return;
+    if (c.modRule == g_cfg.modRule && c.modClasses == g_cfg.modClasses && c.blockHse == g_cfg.blockHse && c.modOfficialOnly == g_cfg.modOfficialOnly && c.modAllow == g_cfg.modAllow) return;
     g_cfg = c;
     ApplyRule(c);
     HSM_LOG("modrules: HSMMod.ini changed; my lobbies: %s", RuleSummary(g_chosen).c_str());
@@ -654,11 +655,13 @@ ModChoice Chosen() { return ChoiceOf(g_chosen); }
 
 bool SetChoice(const ModChoice& c) {
     if (c == ChoiceOf(g_chosen)) return true;
-    g_cfg.modRule = ModPresetKey(c.preset);
+    const ModChoiceStrings keys = KeysOfChoice(c);   // Anything with classes keeps the old words, so the launcher still reads them
+    g_cfg.modRule = keys.modRule;
+    g_cfg.modClasses = keys.modClasses;
     g_cfg.blockHse = c.blockHse;
     g_cfg.modOfficialOnly = c.officialOnly;
     ApplyRule(g_cfg);
-    const bool saved = SaveIniValues({{"mod_rule", g_cfg.modRule}, {"block_hse", c.blockHse ? "1" : "0"},
+    const bool saved = SaveIniValues({{"mod_rule", g_cfg.modRule}, {"mod_classes", g_cfg.modClasses}, {"block_hse", c.blockHse ? "1" : "0"},
                                       {"mod_official", c.officialOnly ? "1" : "0"}}, "mod");
     IniWriteTime(g_iniTime);   // our own write: CheckIni must not read it back as a hand edit
     HSM_LOG("modrules: MODS tab: my lobbies: %s%s", RuleSummary(g_chosen).c_str(), saved ? "" : " (could not write HSMMod.ini)");

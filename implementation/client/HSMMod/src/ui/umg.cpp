@@ -406,6 +406,7 @@ Slot Box::Add(const Widget& child) {
 }
 
 void Box::ScrollToEnd() { if (w_ && kind_ == Kind::Scroll) Call(w_, "ScrollToEnd").invoke(); }
+void Box::ScrollTo(float offset) { if (w_ && kind_ == Kind::Scroll) Call(w_, "SetScrollOffset").setReal("NewScrollOffset", offset).invoke(); }
 
 Slot Fixed::Content(const Widget& child) {
     Call c(w_, "SetContent"); c.set<UObject*>("Content", child.get()).invoke();
@@ -571,7 +572,7 @@ EditBox Kit::MakeEditBox() {
         ++painted;
     };
     const bool classic = style::ClassicMenus();
-    const Rgba field = style::ParchmentMenus() ? Rgba{0.86f, 0.80f, 0.66f, 1} : Rgba{0.016f, 0.014f, 0.012f, classic ? 1.f : 0.85f};   // parchment, or dark
+    const Rgba field = style::kMenuField;   // parchment, or dark
     const Rgba ink = style::kMenuText;
     for (FProperty* p : {StructMember(boxStyle, "BackgroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, field);
     for (FProperty* p : {StructMember(boxStyle, "ForegroundColor"), StructMember(boxStyle, "FocusedForegroundColor")}) if (p) paint(size_t(PropertyOffset(p)), p, ink);
@@ -583,7 +584,7 @@ EditBox Kit::MakeEditBox() {
         FProperty* f = StructMember(textStyle, "Font");
         if (f && fl.ok && size_t(PropertySize(f)) >= fl.end) {
             uint8_t* font = ws + base + size_t(PropertyOffset(f));
-            const float size = 17;
+            const float size = style::type::kRow;
             std::memcpy(font + fl.size, &size, sizeof size);
             const bool roomForFace = size_t(PropertySize(f)) >= std::max(fl.fontObject + sizeof(UObject*), fl.typeface + sizeof(FName));
             if (UObject* face = fl.face && roomForFace && !classic ? GameFont("Willies_Way_02_Font") : nullptr) {

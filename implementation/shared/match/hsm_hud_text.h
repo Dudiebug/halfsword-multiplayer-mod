@@ -120,6 +120,53 @@ inline std::string TeamScores(const MatchInfo& m) {
     return s;
 }
 
+// The line under the pill sits on a small panel, so it stays short: at most kInfoMaxChars characters (code points). A longer
+// line loses whole parts from the end (the parts of a line are set apart by three spaces, so "Ann vs Bo   Next: Cy vs Di"
+// keeps the pairing and drops what is next); a first part that is too long on its own is cut and ends in "...".
+inline constexpr size_t kInfoMaxChars = 80;
+inline size_t Utf8Chars(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+inline std::string FitInfo(const std::string& line, size_t cap = kInfoMaxChars) {
+    if (Utf8Chars(line) <= cap) return line;
+    std::string out;
+    size_t at = 0;
+    while (at < line.size()) {
+        size_t end = line.find("   ", at);
+        if (end == std::string::npos) end = line.size();
+        const std::string part = line.substr(at, end - at);
+        at = end;
+        while (at < line.size() && line[at] == ' ') ++at;                 // the gap between two parts
+        if (part.empty()) continue;
+        const std::string next = out.empty() ? part : out + "   " + part;
+        if (Utf8Chars(next) <= cap) { out = next; continue; }
+        if (out.empty()) {                                               // the key part alone is too long: cut it
+            const size_t keep = cap > 3 ? cap - 3 : 0;
+            size_t n = 0, cut = 0;
+            while (cut < part.size() && (n < keep || (static_cast<unsigned char>(part[cut]) & 0xC0) == 0x80)) {
+                if ((static_cast<unsigned char>(part[cut]) & 0xC0) != 0x80) ++n;
+                ++cut;
+            }
+            out = part.substr(0, cut);
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            out += cap > 3 ? "..." : "";
+        }
+        break;
+    }
+    return out;
+}
+
+// The scoreboard's column heads and the line under it that says what DOWN and DEAD mean (the board's status column).
+inline constexpr const char* kBoardHeadPlayer = "PLAYER";
+inline constexpr const char* kBoardHeadKills = "KILLS";
+inline constexpr const char* kBoardHeadDeaths = "DEATHS";
+inline constexpr const char* kBoardHeadScore = "SCORE";
+inline constexpr const char* kBoardHeadPing = "PING";
+inline constexpr const char* kBoardLegendDown = "DOWN: can still get up";
+inline constexpr const char* kBoardLegendDead = "DEAD: out of the fight";
+
 // MatchInfo `m` as of `nowMs`, when it arrived at `receivedAtMs` (tick counts, wrap-safe): its clocks run down by
 // the time since, stopping at 0. A receive time ahead of now (a clock that stepped back) counts as no time.
 inline MatchInfo Extrapolate(const MatchInfo& m, uint32_t receivedAtMs, uint32_t nowMs) {
@@ -212,59 +259,8 @@ inline std::string StatusLine(const MatchInfo& m, uint8_t myEntity, bool oneFigh
     return s;
 }
 
-// The line under a dead player. Duel: the round is over and everybody returns together after the gap; the bot
-// formats: the downed return when the wave is cleared; otherwise the respawn delay counts down.
-inline std::string RespawnLine(const MatchInfo& m, uint32_t sinceDeathMs) {
-    if (m.phase == uint8_t(MatchPhase::Idle) || m.phase == uint8_t(MatchPhase::Results)) return {};
-    Format f = Format(m.format);
-    if (IsRoundFormat(f)) return m.roundGapLeftMs ? "Round over   next round in " + Seconds(m.roundGapLeftMs) : "Round over";
-    if (IsBotFormat(f)) return "Down   back next wave";
-    uint32_t delay = uint32_t(m.respawnDelayS) * 1000u;
-    return sinceDeathMs < delay ? "Respawning in " + Seconds(delay - sinceDeathMs) : "Respawning...";
-}
-
 // A drawn Duel round (Kill flags 16/32): "Ann and Bo drew the round (both down)".
 inline std::string DrawnWhy(const Kill& k) { return (k.flags & 32) ? " drew the round (no hits)" : " drew the round (both down)"; }
-inline std::string DrawnLine(const MatchInfo& m, const Kill& k) {
-    std::string who = NameOf(m, k.victim);
-    if (k.killer != 0) who += " and " + NameOf(m, k.killer);
-    return who + DrawnWhy(k);
-}
-
-// A mode event as a feed line: "Ann tagged Bo", "Ann burned out", "Ann infected Bo", "Bo was infected".
-inline std::string ModeEventLine(const MatchInfo& m, const ModeEventMsg& e) {
-    switch (e.kind) {
-        case ModeEventKind::TagPass: return NameOf(m, e.a) + " tagged " + NameOf(m, e.b);
-        case ModeEventKind::TagBurn: return NameOf(m, e.a) + " burned out";
-        case ModeEventKind::Infected: return e.a ? NameOf(m, e.a) + " infected " + NameOf(m, e.b) : NameOf(m, e.b) + " was infected";
-        case ModeEventKind::RouletteClick: return e.a == e.b ? NameOf(m, e.a) + " pulled the trigger: click  +1" : NameOf(m, e.a) + " pulled on " + NameOf(m, e.b) + ": click";
-        case ModeEventKind::RouletteBang: return e.a == e.b ? NameOf(m, e.a) + " pulled the trigger: BANG" : NameOf(m, e.a) + " has a live round for " + NameOf(m, e.b);
-        case ModeEventKind::RoulettePull: case ModeEventKind::RouletteFired: break;   // a client's asks: never shown
-    }
-    return {};
-}
-
-inline std::string KillLine(const MatchInfo& m, const Kill& k) {
-    std::string victim = NameOf(m, k.victim);
-    if (k.flags & (16 | 32)) return DrawnLine(m, k);
-    if (k.flags & 8) return victim + " gave up";
-    if (k.flags & 2) return victim + " killed themselves";
-    if ((k.flags & 4) || k.killer == 0) return victim + " died";
-    return NameOf(m, k.killer) + ((k.flags & 1) ? " killed teammate " : " killed ") + victim;
-}
-
-inline std::string Scoreboard(const MatchInfo& m) {
-    std::vector<FighterEntry> rows = m.fighters;
-    std::stable_sort(rows.begin(), rows.end(), [](const FighterEntry& a, const FighterEntry& b) { return a.kills > b.kills; });
-    std::string s = "Player            Team     K / D\n";
-    for (const FighterEntry& f : rows) {
-        std::string name = f.name.empty() ? "#" + std::to_string(f.entity) : f.name;
-        name.resize(18, ' ');
-        std::string team = TeamName(f.team); team.resize(9, ' ');
-        s += name + team + std::to_string(f.kills) + " / " + std::to_string(f.deaths) + "\n";
-    }
-    return s;
-}
 
 // Lobby panel labels and cycling.
 inline std::string FormatName(Format f) {
@@ -287,14 +283,14 @@ inline std::string FormatName(Format f) {
         case Format::OneCrossbow: return "One crossbow";
         case Format::Roulette: return "Roulette";
         case Format::HideSeek: return "Hide and seek";
-        default: return "Free-for-all";
+        default: return "Carnage";   // Free-for-all, by the name the players use (the internal Format name stays)
     }
 }
-// What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name and Crypts
-// with its battle ("Crypts (Teams)"). `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
+// What a match is called to the players: FormatName, but Brawl (free-for-all with bare fists) by its own name and Crypt Royale
+// with its battle ("Crypt Royale (Teams)"; ModeNameFor names Grave Robbers). `teams` (the Teams format's count, 2..4; 0 = leave it out) makes "Teams (3)".
 inline std::string ModeName(Format f, Gear g, int teams = 0) {
     if (IsBrawl(f, g)) return "Brawl";
-    if (IsCrypts(g)) return "Crypts (" + FormatName(f) + ")";
+    if (IsCrypts(g)) return "Crypt Royale (" + FormatName(f) + ")";
     return PicksTeams(f) && teams > 0 ? FormatName(f) + " (" + std::to_string(TeamCount(f, teams)) + ")" : FormatName(f);
 }
 inline std::string ModeName(uint8_t format, uint8_t gear, int teams = 0) { return ModeName(Format(format), Gear(gear), teams); }
@@ -312,13 +308,13 @@ inline std::string TeamLabel(int team) {
 }
 // The lobby's gear setting, with when it changes (RegearFor). The bot formats roll once, at the run's start.
 inline std::string GearLabel(Gear g, Format f) {
-    if (!GearAllowed(f, g)) return "Own loadouts";
+    if (!GearAllowed(f, g)) return "Own kits";
     if (g == Gear::Fists) return "Bare fists";
-    if (g == Gear::HostKit) return "The host's loadout";
-    if (IsBotFormat(f)) return g == Gear::RandomTier ? "Random by tier, kept all run" : g == Gear::Mirror ? "Everyone identical, kept all run" : "Own loadouts";
+    if (g == Gear::HostKit) return "The host's kit";
+    if (IsBotFormat(f)) return g == Gear::RandomTier ? "Random by tier, kept all run" : g == Gear::Mirror ? "Everyone identical, kept all run" : "Own kits";
     if (g == Gear::RandomTier) return IsRoundFormat(f) ? "Random by tier, new each round" : "Random by tier, new each life";
     if (g == Gear::Mirror) return IsRoundFormat(f) ? "Everyone identical, new each round" : "Everyone identical";
-    return "Own loadouts";
+    return "Own kits";
 }
 inline std::string TimeLabel(uint16_t seconds) { return seconds ? std::to_string(seconds / 60) + " min" : "off"; }
 // A tier by the game's own name for it (Enum_Ranks: 0 Beggar ... 8 Lord; the mod's tiers run 0..7). Every place the player
@@ -358,10 +354,13 @@ inline std::string HideSeekLine(const MatchInfo& m, uint8_t myEntity) {
 }
 // Crypts (#3199): the gather pill on this machine, from the host's clock and what its player is doing. Empty with no gather.
 // Looting: "CRYPTS 12:34 - gather your kit"; after a death, an exit or a late join: "Kit kept, waiting 4:10"; while the
-// last kits come in: "Battle starting".
-inline std::string CryptsLine(GatherPhase phase, GatherSelf self, uint32_t leftMs) {
+// last kits come in: "Battle starting". Together (one shared crypt): "CRYPTS 12:34 - loot together, then fight in
+// what you carry", and "... - into the Crypts together" while the level loads.
+inline std::string CryptsLine(GatherPhase phase, GatherSelf self, uint32_t leftMs, bool together = false) {
     if (phase == GatherPhase::Off) return {};
     if (phase == GatherPhase::Collecting) return "Battle starting";
+    if (together && self == GatherSelf::Opening) return "CRYPTS " + Clock(leftMs) + " - into the Crypts together";
+    if (together && self == GatherSelf::Gathering) return "CRYPTS " + Clock(leftMs) + " - loot together, then fight in what you carry";
     switch (self) {
         case GatherSelf::Opening: return "CRYPTS " + Clock(leftMs) + " - opening your Crypts";
         case GatherSelf::Gathering: return "CRYPTS " + Clock(leftMs) + " - gather your kit";

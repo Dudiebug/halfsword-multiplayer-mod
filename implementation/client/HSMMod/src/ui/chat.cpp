@@ -1,4 +1,6 @@
 #include "ui/chat.h"
+#include "ui/hud_host.h"
+#include "ui/notices.h"
 #include "ui/umg.h"
 #include "match/hsm_hud_style.h"
 #include "hsm_chat.h"
@@ -13,26 +15,23 @@ namespace hsm::ui {
 using namespace hsm::ue;
 namespace {
 
-constexpr ULONGLONG kScanEveryMs = 1000;
 constexpr uint32_t kRepeatDelayMs = 400, kRepeatEveryMs = 60;
 constexpr uint32_t kPendingMs = 5000;                          // how long ChatOpenWith waits for the chat to be openable
 constexpr int kZOrder = 60;
 constexpr float kWidth = 620;                                  // the panel's width: longer lines wrap
-constexpr Rgba kInputBack{0.02f, 0.017f, 0.014f, 0.92f};
+constexpr Rgba kInputBack = style::kSmokeDense;
 
 struct LogRow { Box row; Text name, text; };
 
+hsm::ui::HudHost host{"chat"};   // the UI_HUD the overlay sits on
+
 // Widget state. Rebuilt when the UI_HUD instance goes away; chat data below survives that.
 struct Widgets {
-    UClass* hudClass = nullptr;
-    UObject* hud = nullptr; int32_t hudIndex = -1;
-    ULONGLONG nextScan = 0;
-    ULONGLONG nextLive = 0;   // when to check that the UI_HUD we sit on is still the one on screen
     bool built = false;
     Kit kit;
     Box column;
     Fixed logBox; Panel logPanel; std::array<LogRow, kChatLogLines> rows;
-    Fixed inputBox; Text prompt, draft, hint;
+    Fixed inputBox; Text prompt, draft, counter, hint;
     Text idle;
 } w;
 
@@ -42,6 +41,7 @@ struct Data {
     std::deque<ChatEntry> lines;
     std::deque<std::string> outgoing;
     hsm::ChatSession session;
+    hsm::ChatMenuNote menuNote;             // "Close the menu to chat." once per opening of a menu
     std::function<void(bool)> capture;
     std::function<bool()> paused;
     int openVk = VK_RETURN;
@@ -62,7 +62,7 @@ uint32_t NowMs() { return uint32_t(GetTickCount64()); }   // wrap-safe for elaps
 Text MakeText(float size, Rgba color) {
     Text t = w.kit.MakeText();
     if (!t) return t;
-    t.Font(size, 1, {0, 0, 0, 0.9f});
+    t.Font(size, 1, style::kOutlineInk);
     t.Color(color);
     t.Align(Justify::Left);
     return t;
@@ -82,10 +82,10 @@ Panel MakeBand(Fixed& box, Rgba color, Margin padding) {
 
 bool Build() {
     w.built = true;
-    w.kit = Kit(w.hud, Vis::HitTestInvisible);
+    w.kit = Kit(host.Obj(), Vis::HitTestInvisible);
     Canvas root = w.kit.Root();
     if (!root) { HSM_LOG("chat: UI_HUD root is not a CanvasPanel; chat overlay disabled"); return false; }
-    ProbeFont(w.kit, w.hud);
+    ProbeFont(w.kit, host.Obj());
     // Bottom-left, growing upwards: the log panel, the input row under it, the idle hint at the bottom.
     w.column = w.kit.MakeColumn();
     root.Add(w.column).Anchor({{0.012, 0.965}, {0.012, 0.965}}, {0, 1}).AutoSize().Z(kZOrder);
@@ -96,26 +96,34 @@ bool Build() {
     for (LogRow& r : w.rows) {
         r.row = w.kit.MakeRow();
         lines.Add(r.row).Align(HAlign::Fill, VAlign::Top).Padding({0, 1, 0, 1});
-        r.name = MakeText(20, style::kIron);
+        r.name = MakeText(style::type::kEmphasis, style::kIron);
         r.row.Add(r.name).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
-        r.text = MakeText(20, style::kBone);
+        r.text = MakeText(style::type::kEmphasis, style::kBone);
         r.text.Wrap(true);
         r.row.Add(r.text).Fill().Align(HAlign::Fill, VAlign::Top);
     }
     Panel input = MakeBand(w.inputBox, kInputBack, {12, 4, 12, 4});
+    Box inputColumn = w.kit.MakeColumn();
+    input.Content(inputColumn).Align(HAlign::Fill, VAlign::Center);
     Box row = w.kit.MakeRow();
-    input.Content(row).Align(HAlign::Fill, VAlign::Center);
-    w.prompt = MakeText(20, style::kBloodInk);
+    inputColumn.Add(row).Align(HAlign::Fill, VAlign::Top);
+    w.prompt = MakeText(style::type::kEmphasis, style::kBloodInk);
     w.prompt.Set(">");
     row.Add(w.prompt).Align(HAlign::Left, VAlign::Top).Padding({0, 0, 8, 0});
-    w.draft = MakeText(20, style::kBone);
+    w.draft = MakeText(style::type::kEmphasis, style::kBone);
     w.draft.Wrap(true);
     row.Add(w.draft).Fill().Align(HAlign::Fill, VAlign::Top);
-    w.hint = MakeText(14, style::kIron);
-    row.Add(w.hint).Align(HAlign::Right, VAlign::Center).Padding({12, 0, 0, 0});
-    w.idle = MakeText(16, style::kIron);
+    Box foot = w.kit.MakeRow();                          // under the line: "(N left)" near the byte cap, then the keys, at the right
+    inputColumn.Add(foot).Align(HAlign::Fill, VAlign::Top).Padding({0, 2, 0, 0});
+    w.counter = MakeText(style::type::kBody, style::kWarn);
+    w.counter.Align(Justify::Right);
+    foot.Add(w.counter).Fill().Align(HAlign::Fill, VAlign::Center);
+    w.hint = MakeText(style::type::kBody, style::kIron);
+    foot.Add(w.hint).Align(HAlign::Right, VAlign::Center).Padding({12, 0, 0, 0});
+    w.idle = MakeText(style::type::kBody, style::kIron);
+    w.idle.Shadow({style::kShadowPx, style::kShadowPx}, style::kShadowInk);   // outline and a shadow: it reads on a bright map
     w.column.Add(w.idle).Align(HAlign::Left, VAlign::Bottom).Padding({2, 0, 0, 0});
-    if (!w.draft || !w.idle) { HSM_LOG("chat: could not make the chat widgets"); return false; }
+    if (!w.draft || !w.counter || !w.hint || !w.idle) { HSM_LOG("chat: could not make the chat widgets"); return false; }
     HSM_LOG("chat: overlay added to UI_HUD");
     return true;
 }
@@ -224,8 +232,13 @@ void DrainOnOpen(const char* how) {
 
 void Poll(uint32_t now) {
     if (!d.session.typing()) {
-        if (!Fires(d.openVk, now, false)) return;
-        if (d.paused && d.paused()) return;   // no chat over the pause menu
+        const bool fired = Fires(d.openVk, now, false);
+        const bool menu = d.paused && d.paused();
+        if (d.menuNote.Step(menu, fired)) {   // no chat over a menu: the first press in it says so (Enter is a menu key too), and what was typed before is kept
+            Notify(hsm::notices::Id::ChatPaused);
+            HSM_LOG("chat: the chat key was pressed with a menu open; said so once, no chat");
+        }
+        if (!fired || menu) return;
         if (d.openVk != VK_RETURN) d.swallowVk = d.openVk;
         Feed(d.openVk == VK_RETURN ? hsm::ChatEvent::Enter : hsm::ChatEvent::OpenKey, now);
         if (d.session.typing()) DrainOnOpen("key");
@@ -256,46 +269,29 @@ void Poll(uint32_t now) {
     }
 }
 
+// ChatOpenWith's request that never came true. REPORT A BUG waits for the chat to type /bug into it: when the chat does not open,
+// a notice says to press the chat key and type it.
+void GiveUpPending(const char* why) {
+    d.pending = false;
+    HSM_LOG("chat: could not open with text: %s", why);
+    if (d.pendingText.rfind("/bug", 0) == 0) Notify(hsm::notices::BugChatTimeout(hsm::ChatKeyLabel(d.session.key())));
+}
+
 // ChatOpenWith's request, once the chat can open (the key press would be refused the same way).
 void OpenPending(uint32_t now) {
-    if (uint32_t(now - d.pendingAt) > kPendingMs) { d.pending = false; HSM_LOG("chat: could not open with text; gave up"); return; }
+    if (uint32_t(now - d.pendingAt) > kPendingMs) { GiveUpPending("gave up"); return; }
     if (d.session.typing()) { d.pending = false; return; }
     if (d.paused && d.paused()) return;
     d.pending = false;
+    d.session.ForgetDraft();   // the prefilled line is the whole line, not added to what a pause kept
     Feed(hsm::ChatEvent::OpenKey, now, std::string(), "text prefilled");
     if (d.session.typing()) { DrainOnOpen("text prefilled"); Feed(hsm::ChatEvent::Char, now, d.pendingText); }
 }
 
 void Draw(const ChatScene& s) {
-    if (!w.hudClass) {   // not loaded yet (a menu): four full name scans, so at most once per kScanEveryMs
-        const ULONGLONG now = GetTickCount64();
-        if (now < w.nextScan) return;
-        if (!(w.hudClass = FindClass("UI_HUD_C"))) { w.nextScan = now + kScanEveryMs; return; }
-    }
-    if (!w.hud || ObjectAt(w.hudIndex) != w.hud || ClassOf(w.hud) != w.hudClass) {
-        if (w.hud) { UClass* cls = w.hudClass; ULONGLONG next = w.nextScan; w = Widgets{}; w.hudClass = cls; w.nextScan = next; }
-        ULONGLONG now = GetTickCount64();
-        if (!s.visible || now < w.nextScan) return;
-        w.nextScan = now + kScanEveryMs;
-        w.hud = OnScreen(FindInstances("UI_HUD_C"));
-        if (!w.hud) return;
-        w.hudIndex = ObjectIndex(w.hud);
-    }
-    // The game swaps UI_HUD on a respawn or a new round: the old one leaves the screen but lives until garbage
-    // collection (about a minute), and our widgets went with it. Move to the one on screen now.
-    if (w.built) {
-        const ULONGLONG now = GetTickCount64();
-        if (now >= w.nextLive) {
-            // Within 100 ms while a line is being typed: a respawn mid-line took the box away for up to a second (#65).
-            w.nextLive = now + (d.session.typing() ? 100 : 1000);
-            if (!InViewport(w.hud))
-                if (UObject* on = OnScreen(FindInstances("UI_HUD_C")); on && on != w.hud) {
-                    UClass* cls = w.hudClass; w = Widgets{}; w.hudClass = cls; w.hud = on; w.hudIndex = ObjectIndex(on);
-                    w.nextLive = now + (d.session.typing() ? 100 : 1000);
-                    HSM_LOG("chat: UI_HUD replaced by the game; moving to the new one");
-                }
-        }
-    }
+    // Within 100 ms while a line is being typed: a respawn mid-line took the box away for up to a second (#65).
+    if (host.Follow(s.visible, w.built, d.session.typing() ? 100 : 1000) == hsm::ui::HudHost::Step::Changed) w = Widgets{};
+    if (!host.Obj()) return;
     if (!w.built && !Build()) return;
     w.column.Show(s.visible);
     if (!s.visible) return;
@@ -314,6 +310,7 @@ void Draw(const ChatScene& s) {
     if (s.input) {
         w.draft.Set(s.draft + (s.caret ? "_" : " "));
         w.hint.Set(s.hint.text); w.hint.Color(s.hint.color);
+        w.counter.Set(s.counter.text); w.counter.Color(s.counter.color);
     }
     w.idle.Show(s.idle.visible);
     if (s.idle.visible) { w.idle.Set(s.idle.text); w.idle.Color(s.idle.color); w.idle.Opacity(s.idle.opacity); }
@@ -348,6 +345,7 @@ void ChatTick(const HudScene& m) {
         for (Key& k : d.keys) k.down = false;
         d.swallowVk = 0;
         d.stale = true;
+        d.menuNote.Reset();
         if (d.session.typing()) Feed(!Foreground() ? hsm::ChatEvent::FocusLost : hsm::ChatEvent::HudHidden, now);
     } else if (!d.session.typing() && game::fetchlink::KeysHeld()) {
         // Fetch's menu has the keyboard: the chat key is Fetch's, and what is pressed meanwhile is forgotten when it closes
@@ -359,8 +357,7 @@ void ChatTick(const HudScene& m) {
         Poll(now);
     }
     if (d.pending && uint32_t(now - d.pendingAt) > kPendingMs) {   // the chat never came up (no fight on screen)
-        d.pending = false;
-        HSM_LOG("chat: could not open with text: the chat is not on this screen (%s)", m.visible ? "it was busy" : "no fight here");
+        GiveUpPending(m.visible ? "the chat is not on this screen (it was busy)" : "the chat is not on this screen (no fight here)");
     }
     ChatLocal c;
     c.hud = m.visible; c.hudAtMs = d.hudAt; c.key = d.session.key();
@@ -368,6 +365,7 @@ void ChatTick(const HudScene& m) {
     c.typing = d.session.typing(); c.typingAtMs = d.typingAt; c.draft = d.session.draft();
     c.refused = d.refused; c.refusedAtMs = d.refusedAt;
     Draw(BuildChatScene(c, now));
+    NoticesTick(m);   // the notices and the kill feed, in the corner opposite the chat
 }
 
 std::optional<std::string> TakeOutgoing() {
@@ -399,7 +397,9 @@ uint32_t ChatLinesAdded() { return d.added; }
 void ChatClearLines() { d.lines.clear(); }
 
 void ChatDrop(const char* why) {
+    NoticesDrop();    // no HUD to show them on (the chat is gone with it)
     d.stale = true;   // no ChatTick this frame (no session): the keys go unread
+    d.session.ForgetDraft();   // what a pause kept belongs to this match
     if (!d.session.typing()) return;
     d.swallowVk = 0;
     Feed(hsm::ChatEvent::HudHidden, NowMs(), std::string(), why);

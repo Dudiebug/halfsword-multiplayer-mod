@@ -131,7 +131,10 @@ static void TestSlotClassifiers() {
 // Tabard), but its bolts never are, whatever their meshes are called.
 static void TestProjectilesAreNeverDressed() {
     CHECK(IsProjectileClass("BP_Weapon_Ranged_Projectle_Bolt1_C") && IsProjectileClass("BP_Weapon_Ranged_Projectile_Arrow_C") && IsProjectileClass("Bolt"));
-    CHECK(!IsProjectileClass("BP_Weapon_Ranged_Weapon_CrossbowLight_C") && !IsProjectileClass("BP_Weapon_Sword_Arming_C") && !IsProjectileClass(""));
+    CHECK(IsProjectileClass(kCrossbowBoltClassName) && !IsProjectileClass(kCrossbowClassName));
+    CHECK(std::string(kCrossbowClassName) == "BP_Weapon_Ranged_Weapon_Crossbow_Light_C");   // the game's spelling, as re/ shows it
+    CHECK(std::string(kCrossbowBoltClassName) == "BP_Weapon_Ranged_Projectle_Bolt_1_C");
+    CHECK(!IsProjectileClass("BP_Weapon_Ranged_Weapon_Crossbow_Light_C") && !IsProjectileClass("BP_Weapon_Sword_Arming_C") && !IsProjectileClass(""));
     CHECK(SlotForWeaponPart("Handle", false) == KitSlot::Grip && SlotForWeaponPart("CrossbowStock", false) == KitSlot::Blade);
     CHECK(KitTints(TeamKit::Full, KitSlot::Grip) && !KitTints(TeamKit::Tabard, KitSlot::Grip) && !KitTints(TeamKit::Full, KitSlot::Blade));
 }

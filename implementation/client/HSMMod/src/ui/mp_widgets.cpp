@@ -1,8 +1,10 @@
 #include "ui/mp_widgets.h"
+#include "ui/dropdown.h"
 #include "ui/skin.h"
 #include "gameplay/fetch_link.h"
 #include "gameplay/session.h"
 #include "match/hsm_hud_style.h"
+#include "match/hsm_pause_panel.h"
 #include "log.h"
 #include <windows.h>
 #include <algorithm>
@@ -29,15 +31,15 @@ Text Maker::NewText(const std::string& text, float size, Rgba color) {
     Text t = kit_ ? kit_->MakeText() : Text{};
     if (!t) return t;
     t.Set(text);
-    if (style::DarkMenus()) t.Font(size, 1, {0, 0, 0, 0.85f}); else t.Font(size);   // dark: the scene shows behind
-    skin::Font(t, size >= 26 ? skin::Face::Heading : skin::Face::Body);
+    if (style::DarkMenus()) t.Font(size, 1, style::kOutlineInk); else t.Font(size);   // dark: the scene shows behind
+    skin::Font(t, style::type::IsHeading(size) ? skin::Face::Heading : skin::Face::Body);   // the typeface follows the role
     t.Color(color);
     return t;
 }
 
 Text Maker::Section(Box& column, const std::string& text, float padTop) {
-    Text t = NewText(skin::Title(text), 23, style::kMenuAccentInk);   // a rubric, as on the game's scrolls
-    if (t) { skin::Font(t, skin::Face::Heading); AddV(column, t, padTop); }
+    Text t = NewText(skin::Title(text), style::type::kSection, style::kMenuAccentInk);   // a rubric, as on the game's scrolls
+    if (t) AddV(column, t, padTop);
     return t;
 }
 
@@ -79,6 +81,14 @@ Flat Maker::MakeArrow(bool next, float size) {
     return f;
 }
 
+Flat Maker::MakePlate(float size) {
+    Flat f = MakeFlat("", size, {12, 5, 12, 5});
+    if (!f.card) return f;
+    f.label.Align(Justify::Center);
+    f.card.face.ContentAlign(HAlign::Center, VAlign::Center);
+    return f;
+}
+
 Rgba Mix(Rgba a, Rgba b, float t) { return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t}; }
 
 void Paint(Card& c) {
@@ -102,8 +112,9 @@ void Paint(Card& c) {
     }
     c.frame.Padding({2, 2, 2, 2});
     c.frame.Texture(Look{});
-    c.frame.Color(c.selected ? style::kMenuAccent : Mix(style::kMenuFrame, style::kMenuFrameHover, c.glow));
-    c.face.Color(Mix(style::kMenuCard, style::kMenuCardHover, c.glow));
+    const bool picked = c.selected && !style::ClassicMenus();   // the game and dark looks paint the whole card in the picked colour
+    c.frame.Color(c.selected ? style::kMenuPickedFrame : Mix(style::kMenuFrame, style::kMenuFrameHover, c.glow));
+    c.face.Color(picked ? style::kMenuPicked : Mix(style::kMenuCard, style::kMenuCardHover, c.glow));
 }
 
 bool Clicked(Card& c) { return c && c.button.Clicked(); }
@@ -112,7 +123,22 @@ void Live(Flat& f, bool on) {
     if (!f.card) return;
     f.card.live = on;
     f.card.button.Enabled(on);
-    f.card.button.Opacity(on ? 1.f : 0.3f);
+    f.card.button.Opacity(on ? 1.f : style::kDisabledAlpha);
+}
+
+void Dimmed(Card& c, bool on) {
+    if (!c) return;
+    c.live = on;
+    c.button.Enabled(true);
+    c.button.Opacity(on ? 1.f : style::kDisabledAlpha);
+}
+
+void PaintPlate(Flat& f, const std::string& value, bool open, bool usable) {
+    if (!f.card) return;
+    f.label.Set(usable ? value + (open ? "  ^" : "  v") : value);
+    f.card.selected = open && usable;
+    f.label.Color(InkOn(f.card, usable ? style::kMenuText : style::kMenuDim));
+    Dimmed(f.card, usable);
 }
 
 Slot AddV(Box& column, const Widget& child, float padTop) { return column.Add(child).Padding({0, padTop, 0, 0}); }
@@ -126,24 +152,33 @@ Slot AddH(Box& row, const Widget& child, float fill, float padRight) {
 
 // ---------------------------------------------------------------- the voice block
 
-bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
+bool VoiceBlock::Build(Maker& m, Box& column, float padTop, DropdownLayer* drops) {
     Kit& kit = m.kit();
+    drops_ = drops;
     root_ = kit.MakeColumn();
     if (!root_) { HSM_LOG("ui: voice block widgets could not be made"); return false; }
     AddV(column, root_, padTop);
     m.Section(root_, "VOICE CHAT", 0);
-    for (RowView& v : rows_) {
+    for (size_t k = 0; k < rows_.size(); ++k) {
+        RowView& v = rows_[k];
+        const bool list = drops && *drops && VoiceRowIsChoice(VoiceRow(k));   // voice chat, microphone and device pick from a list
         v.box = kit.MakeColumn();
         Box row = kit.MakeRow();
         Fixed valueBox = kit.MakeFixed();
-        v.label = m.NewText("", 17, style::kMenuText); v.value = m.NewText("", 17, style::kMenuText); v.hint = m.NewText("", 13, style::kMenuDim);
-        v.prev = m.MakeArrow(false, 17); v.next = m.MakeArrow(true, 17);
-        v.bind = m.MakeFlat("CHANGE", 15, {12, 3, 12, 3});
-        if (!v.box || !row || !valueBox || !v.label || !v.value || !v.hint || !v.prev.card || !v.next.card || !v.bind.card) { v = RowView{}; continue; }
+        v.label = m.NewText("", style::type::kRow, style::kMenuText); v.value = m.NewText("", style::type::kRow, style::kMenuText); v.hint = m.NewText("", style::type::kHint, style::kMenuDim);
+        v.prev = m.MakeArrow(false, style::type::kRow); v.next = m.MakeArrow(true, style::type::kRow);
+        v.bind = m.MakeFlat("CHANGE", style::type::kBody, {12, 3, 12, 3});
+        if (list) v.plate = m.MakePlate(style::type::kRow);
+        if (!v.box || !row || !valueBox || !v.label || !v.value || !v.hint || !v.prev.card || !v.next.card || !v.bind.card || (list && !v.plate.card)) { v = RowView{}; continue; }
         v.value.Align(Justify::Center);
         v.hint.Wrap(true);
         valueBox.Width(230);
-        valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
+        if (list) {
+            valueBox.Content(v.plate.card.button).Align(HAlign::Fill, VAlign::Center);
+            v.value = Text{};                    // the plate shows the value; a text in no tree is freed by garbage collection, so it is never written
+        } else {
+            valueBox.Content(v.value).Align(HAlign::Fill, VAlign::Center);
+        }
         AddH(row, v.label, 1, 12).Align(HAlign::Fill, VAlign::Center);
         AddH(row, v.prev.card.button, 0, 6);
         AddH(row, valueBox, 0, 6).Align(HAlign::Fill, VAlign::Center);
@@ -158,7 +193,7 @@ bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
     Box stack = kit.MakeStack();
     meter_ = kit.MakeBar();
     mark_ = kit.MakeIcon();
-    meterText_ = m.NewText("", 14, style::kMenuDim);
+    meterText_ = m.NewText("", style::type::kHint, style::kMenuDim);
     if (meterRow && meterBox && stack && meter_ && mark_ && meterText_) {
         meterBox.Width(kMeterWidth);
         meterBox.Height(14);
@@ -174,7 +209,7 @@ bool VoiceBlock::Build(Maker& m, Box& column, float padTop) {
     } else {
         meter_ = Bar{};
     }
-    note_ = m.NewText("", 14, style::kMenuAccentInk);
+    note_ = m.NewText("", style::type::kHint, style::kMenuAccentInk);
     if (note_) { note_.Wrap(true); AddV(root_, note_, 8); }
     return true;
 }
@@ -210,10 +245,11 @@ void VoiceBlock::Tick(Session& session) {
     for (size_t i = 0; i < rows_.size(); ++i) {
         RowView& r = rows_[i];
         if (!r.box) continue;
-        Paint(r.prev.card); Paint(r.next.card); Paint(r.bind.card);
+        Paint(r.prev.card); Paint(r.next.card); Paint(r.bind.card); Paint(r.plate.card);
         int dir = Clicked(r.prev.card) ? -1 : 0;
         if (Clicked(r.next.card)) dir = 1;
         const bool bindClicked = Clicked(r.bind.card);
+        const bool plateClicked = Clicked(r.plate.card);
         const VoiceRowView* row = nullptr;
         for (const VoiceRowView& x : sc.rows) if (size_t(x.id) == i) row = &x;
         r.box.Show(row != nullptr);
@@ -225,13 +261,27 @@ void VoiceBlock::Tick(Session& session) {
         r.value.Color(key && binding_ ? style::kMenuAccentInk : style::kMenuText);
         r.hint.Set(row->hint);
         r.hint.Show(!row->hint.empty());
-        r.prev.card.button.Show(!key);
-        r.next.card.button.Show(!key);
+        const bool list = bool(r.plate.card);
+        const uint32_t owner = dropdown_owner::kVoiceRow + uint32_t(i);
+        r.prev.card.button.Show(!key && !list);
+        r.next.card.button.Show(!key && !list);
+        r.plate.card.button.Show(list);
         r.bind.card.button.Show(key);
         r.bind.label.Set(binding_ ? "CANCEL" : "CHANGE");
         r.bind.card.selected = binding_;
+        r.bind.label.Color(InkOn(r.bind.card, style::kMenuText));
         Live(r.prev, row->enabled);
         Live(r.next, row->enabled);
+        if (list) {                              // a dropdown: the plate opens the list, a pick sets the option
+            PaintPlate(r.plate, row->value, drops_->IsOpen(owner), row->enabled);
+            if (plateClicked && row->enabled) drops_->Open(owner, row->label, r.plate.card.button, row->choices, row->choice);
+            size_t pick = 0;
+            if (drops_->TakePick(owner, pick) && row->enabled) {
+                const MpVoice n = WithVoiceChoice(v, row->id, pick);
+                if (row->id == VoiceRow::Reach) session.SetVoiceReach(n.reach); else session.SetVoicePrefs(n);
+            }
+            continue;
+        }
         if (key && bindClicked) {
             binding_ = !binding_;
             heldAtBind_.clear();
@@ -284,8 +334,8 @@ bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
     sheet.Content(page).Align(HAlign::Fill, VAlign::Fill);
 
     AddV(page, header, 0);
-    title_ = m_.NewText(skin::Title("Multiplayer"), 44, style::kMenuAccentInk);
-    sub_ = m_.NewText("", 17, style::kMenuDim);
+    title_ = m_.NewText(skin::Title(layout == Layout::Pause ? "Players" : "Multiplayer"), style::type::kPage, style::kMenuAccentInk);   // the page is named for the button that leads here
+    sub_ = m_.NewText("", style::type::kRow, style::kMenuDim);
     if (title_) AddH(header, title_, 0, 28).Align(HAlign::Left, VAlign::Center);
     if (sub_) AddH(header, sub_, 1, 0).Align(HAlign::Left, VAlign::Center);
     rule.Height(3);
@@ -296,7 +346,7 @@ bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
     AddV(page, tabs, 14);
     const char* const tabNames[3] = {"PLAYERS", "VOICE", "NETWORK"};
     for (size_t i = 0; i < tabs_.size(); ++i) {
-        tabs_[i] = m_.MakeFlat(tabNames[i], 18);
+        tabs_[i] = m_.MakeFlat(tabNames[i], style::type::kRow);
         if (tabs_[i].card) AddH(tabs, tabs_[i].card.button, 0, 8);
     }
     AddV(page, body, 14).Fill();
@@ -306,9 +356,9 @@ bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
     Box& players = pages_[0];
     voteBar_ = kit.MakePanel();
     Box vrow = kit.MakeRow();
-    voteText_ = m_.NewText("", 18, style::kMenuText);
-    voteYes_ = m_.MakeFlat("YES", 17);
-    voteNo_ = m_.MakeFlat("NO", 17);
+    voteText_ = m_.NewText("", style::type::kRow, style::kMenuText);
+    voteYes_ = m_.MakeFlat("YES", style::type::kRow);
+    voteNo_ = m_.MakeFlat("NO", style::type::kRow);
     if (voteBar_ && vrow && voteText_ && voteYes_.card && voteNo_.card) {
         voteText_.Wrap(true);
         voteBar_.Color({style::kMenuAccent.r, style::kMenuAccent.g, style::kMenuAccent.b, 0.18f});
@@ -327,11 +377,11 @@ bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
         Box names = kit.MakeColumn();
         Fixed volBox = kit.MakeFixed();
         r.talk = kit.MakeIcon();
-        r.name = m_.NewText("", 18, style::kMenuText); r.detail = m_.NewText("", 14, style::kMenuDim); r.volume = m_.NewText("", 15, style::kMenuText);
+        r.name = m_.NewText("", style::type::kRow, style::kMenuText); r.detail = m_.NewText("", style::type::kHint, style::kMenuDim); r.volume = m_.NewText("", style::type::kBody, style::kMenuText);
         const Margin small{12, 4, 12, 4};
-        r.mute = m_.MakeFlat("MUTE", 15, small); r.down = m_.MakeFlat("-", 15, small); r.up = m_.MakeFlat("+", 15, small);
-        r.kick = m_.MakeFlat("KICK", 15, small); r.ban = m_.MakeFlat("BAN", 15, small); r.vote = m_.MakeFlat("VOTE KICK", 15, small);
-        r.voteBan = m_.MakeFlat("VOTE BAN", 15, small);
+        r.mute = m_.MakeFlat("MUTE", style::type::kBody, small); r.down = m_.MakeFlat("-", style::type::kBody, small); r.up = m_.MakeFlat("+", style::type::kBody, small);
+        r.kick = m_.MakeFlat("KICK", style::type::kBody, small); r.ban = m_.MakeFlat("BAN", style::type::kBody, small); r.vote = m_.MakeFlat("VOTE KICK", style::type::kBody, small);
+        r.voteBan = m_.MakeFlat("VOTE BAN", style::type::kBody, small);
         if (!r.row || !names || !volBox || !r.talk || !r.name || !r.detail || !r.volume || !r.mute.card || !r.down.card || !r.up.card ||
             !r.kick.card || !r.ban.card || !r.vote.card || !r.voteBan.card) {
             r = PlayerView{};
@@ -352,30 +402,38 @@ bool EscPanel::Build(Kit& kit, Canvas root, Layout layout) {
         AddV(players, r.row, 8);
         r.row.Show(false);
     }
-    alone_ = m_.NewText("Nobody else is here yet.", 16, style::kMenuDim);
+    alone_ = m_.NewText("Nobody else is here yet.", style::type::kBody, style::kMenuDim);
     if (alone_) AddV(players, alone_, 12);
 
-    // VOICE: the same block as the multiplayer page.
-    voice_.Build(m_, pages_[1], 0);
+    // VOICE: the same block as the multiplayer page, its lists in a layer of its own over the panel (the pause panel has no VOICE tab).
+    if (layout == Layout::Overlay) {
+        drops_ = std::make_shared<DropdownLayer>();
+        if (!drops_->Build(kit, root, 1001)) drops_.reset();
+    }
+    voice_.Build(m_, pages_[1], 0, drops_.get());
 
     // NETWORK: read-only lines.
     for (Text& t : netLines_) {
-        t = m_.NewText("", 17, style::kMenuText);
+        t = m_.NewText("", style::type::kRow, style::kMenuText);
         if (t) { AddV(pages_[2], t, 6); t.Show(false); }
     }
 
-    loadoutNote_ = m_.NewText("", 16, style::kMenuDim);
-    if (loadoutNote_) { loadoutNote_.Wrap(true); AddV(page, loadoutNote_, 12); loadoutNote_.Show(false); }
+    if (layout == Layout::Overlay) {   // the pause panel has CHANGE LOADOUT on its own list, with the reason as its hint
+        loadoutNote_ = m_.NewText("", style::type::kBody, style::kMenuDim);
+        if (loadoutNote_) { loadoutNote_.Wrap(true); AddV(page, loadoutNote_, 12); loadoutNote_.Show(false); }
+    }
     AddV(page, footer, 16);
-    resume_ = m_.MakeFlat("RESUME", 18);
-    loadout_ = m_.MakeFlat("CHANGE LOADOUT", 18);
-    gameMenu_ = m_.MakeFlat("GAME MENU", 18);
-    report_ = m_.MakeFlat("REPORT A BUG", 18);
-    help_ = m_.MakeFlat("HELP IMPROVE THE MOD: OFF", 18);
-    leave_ = m_.MakeFlat("LEAVE SESSION", 18);
-    back_ = m_.MakeFlat("BACK", 18);
-    // The pause panel's page: BACK to its list and CHANGE LOADOUT. The rest of the footer is the pause panel's own buttons.
-    const std::vector<Flat*> footerButtons = layout == Layout::Pause ? std::vector<Flat*>{&back_, &loadout_}
+    const float foot = layout == Layout::Pause ? style::type::kEmphasis : style::type::kRow;   // BACK TO MENU is a button of the pause list's size
+    resume_ = m_.MakeFlat("RESUME", foot);
+    loadout_ = m_.MakeFlat("CHANGE LOADOUT", foot);
+    gameMenu_ = m_.MakeFlat("GAME MENU", foot);
+    report_ = m_.MakeFlat("REPORT A BUG", foot);
+    help_ = m_.MakeFlat("HELP IMPROVE THE MOD: OFF", foot);
+    leave_ = m_.MakeFlat("LEAVE SESSION", foot);
+    back_ = m_.MakeFlat(layout == Layout::Pause ? kPauseBackLabel : "BACK", foot);
+    // The pause panel's page: BACK TO MENU alone (CHANGE LOADOUT is on its list), and no VOICE tab: the voice settings are in MOD SETTINGS.
+    if (layout == Layout::Pause && tabs_[1].card) tabs_[1].card.button.Show(false);
+    const std::vector<Flat*> footerButtons = layout == Layout::Pause ? std::vector<Flat*>{&back_}
         : std::vector<Flat*>{&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_};
     for (Flat* f : footerButtons) if (f->card) AddH(footer, f->card.button, 0, 10).Align(HAlign::Left, VAlign::Center);
     panel_.Show(false);
@@ -386,7 +444,7 @@ void EscPanel::Show(bool on) {
     if (!panel_) return;
     shown_ = on;
     panel_.Show(on);
-    if (!on) voice_.StopBinding();
+    if (!on) { voice_.StopBinding(); if (drops_) drops_->Close("page"); }
     nextData_ = 0;
     leaveArmedAt_ = 0;
     confirmRow_ = -1;
@@ -413,6 +471,7 @@ void EscPanel::Refresh(Session& session) {
         r.mute.card.button.Show(v.showMute);
         r.mute.label.Set(v.muteLabel);
         r.mute.card.selected = v.muteLabel == "UNMUTE";
+        r.mute.label.Color(InkOn(r.mute.card, style::kMenuText));
         r.down.card.button.Show(v.showVolume);
         r.up.card.button.Show(v.showVolume);
         r.volume.Show(v.showVolume);
@@ -426,6 +485,8 @@ void EscPanel::Refresh(Session& session) {
         r.ban.label.Set(confirm && confirmBan_ ? "CONFIRM BAN" : "BAN");
         r.kick.card.selected = confirm && !confirmBan_;
         r.ban.card.selected = confirm && confirmBan_;
+        r.kick.label.Color(InkOn(r.kick.card, style::kMenuText));
+        r.ban.label.Color(InkOn(r.ban.card, style::kMenuText));
     }
     if (alone_) alone_.Show(players_.size() <= 1);
     if (voteBar_) {
@@ -436,6 +497,8 @@ void EscPanel::Refresh(Session& session) {
         voteNo_.card.button.Show(b.showButtons);
         voteYes_.card.selected = b.yesOn;
         voteNo_.card.selected = b.noOn;
+        voteYes_.label.Color(InkOn(voteYes_.card, style::kMenuText));
+        voteNo_.label.Color(InkOn(voteNo_.card, style::kMenuText));
     }
     const std::vector<std::string> lines = session.NetworkLines();
     for (size_t i = 0; i < netLines_.size(); ++i) {
@@ -475,12 +538,13 @@ void EscPanel::HandlePlayers(Session& session, uint32_t now) {
 EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (!panel_ || !shown_) return Action::None;
     const uint32_t now = GetTickCount();
+    if (drops_) drops_->Tick(uint32_t(tab_));   // an open list takes its click first, and a change of tab closes it
     for (size_t i = 0; i < tabs_.size(); ++i) {
         if (!tabs_[i].card) continue;
         if (Clicked(tabs_[i].card)) { tab_ = int(i); nextData_ = 0; }
         tabs_[i].card.selected = tab_ == int(i);
         Paint(tabs_[i].card);                   // after the click: the chosen tab's art is its highlight
-        tabs_[i].label.Color(tab_ == int(i) ? style::kMenuText : style::kMenuDim);
+        tabs_[i].label.Color(InkOn(tabs_[i].card, style::kMenuDim));
         pages_[i].Show(tab_ == int(i));
     }
     if (tab_ != 1) voice_.StopBinding();
@@ -489,27 +553,28 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (tab_ == 1) voice_.Tick(session);
 
     const bool pausePage = layout_ == Layout::Pause;
-    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_, &back_}) if (!pausePage || f == &back_ || f == &loadout_) Paint(f->card);
+    for (Flat* f : {&resume_, &loadout_, &gameMenu_, &report_, &help_, &leave_, &back_}) if (!pausePage || f == &back_) Paint(f->card);
     if (report_.card && !pausePage) report_.card.button.Show(reportOn);
-    // CHANGE LOADOUT: only in a match; dimmed, with the reason under the buttons, while the rule says no. A click re-reads the
-    // passport (edited in the game's own menu) and asks the host for the new kit; the answer shows in the same line.
-    if (loadout_.card) {
+    // CHANGE LOADOUT (the stock-menu overlay; the pause panel has it on its list): only in a match; dimmed, with the reason under
+    // the buttons, while the rule says no. A click re-reads the passport (edited in the game's own menu) and asks the host for
+    // the new kit; the answer is a notice.
+    if (loadout_.card && !pausePage) {
         const MpLoadout lv = session.LoadoutView();
         loadout_.card.button.Show(lv.shown);
         Live(loadout_, lv.available);
         if (lv.shown && lv.available && Clicked(loadout_.card)) session.ChangeLoadout();
         if (loadoutNote_) {
-            const std::string& text = lv.note.empty() ? lv.hint : lv.note;
+            const std::string& text = lv.hint;
             loadoutNote_.Show(lv.shown && !text.empty());
             if (lv.shown && !text.empty()) loadoutNote_.Set(text);
         }
     }
-    if (help_.card && !pausePage) {             // the multiplayer page's switch: on gets the blood frame and a green label
+    if (help_.card && !pausePage) {             // the multiplayer page's switch: on gets the picked card and its ink
         const bool help = session.HelpImprove();
         help_.card.button.Show(reportOn);
         help_.label.Set(help ? "HELP IMPROVE THE MOD: ON" : "HELP IMPROVE THE MOD: OFF");
-        help_.label.Color(help ? style::kMenuOk : style::kMenuText);
         help_.card.selected = help;
+        help_.label.Color(InkOn(help_.card, style::kMenuText));
         if (reportOn && Clicked(help_.card)) { session.SetHelpImprove(!help); nextData_ = 0; }
     }
     if (pausePage) return Clicked(back_.card) ? Action::Back : Action::None;
@@ -518,6 +583,7 @@ EscPanel::Action EscPanel::Tick(Session& session, bool reportOn) {
     if (leave_.card) {
         leave_.label.Set(leaveArmedAt_ ? "CLICK AGAIN TO LEAVE" : "LEAVE SESSION");
         leave_.card.selected = leaveArmedAt_ != 0;
+        leave_.label.Color(InkOn(leave_.card, style::kMenuText));
     }
     if (resume) return Action::Resume;
     if (game) return Action::GameMenu;

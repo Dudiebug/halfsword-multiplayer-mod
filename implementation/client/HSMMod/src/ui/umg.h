@@ -157,6 +157,7 @@ public:
     enum class Kind : uint8_t { Row, Column, Stack, Scroll };
     Slot Add(const Widget& child);
     void ScrollToEnd();                       // a Scroll: show its last child
+    void ScrollTo(float offset);              // a Scroll: this many px from its top
 private:
     friend class Kit;
     Kind kind_ = Kind::Column;

@@ -34,7 +34,7 @@ static void TestSanitize() {
     c.teams = 4; CHECK(Sanitize(c).format == Format::TwoTeams && Sanitize(c).teams == 3);
     c = Cfg(Format::LastManStanding, 250); CHECK(Sanitize(c).format == Format::LastManStanding && Sanitize(c).scoreLimit == 100 && kFormatCount == 20);
     CHECK(DefaultScoreLimit(Format::LastManStanding) == 3 && IsRoundFormat(Format::Duel) && IsRoundFormat(Format::LastManStanding) && !IsRoundFormat(Format::FreeForAll));
-    c = Cfg(Format::LastManStanding, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);   // like Duel: cleared each round
+    c = Cfg(Format::LastManStanding, 3); c.clearGroundS = 300; CHECK(Sanitize(c).clearGroundS == 0);   // like Duel: cleared each round
     CHECK(DefaultScoreLimit(Format::FreeForAll) == 5 && DefaultScoreLimit(Format::TwoTeams) == 10);
     // The Weapons row is a set of the game's types, one bit each: bit N-1 is game type N. Sanitize keeps the seven bits.
     c = MatchConfig{}; CHECK(c.weapons == 0);
@@ -921,12 +921,41 @@ static void TestWaveBreakAndClearSettings() {
     CHECK(Sanitize(c).waveBreakS == 0);                                          // default: the format's own
     c.waveBreakS = 30; CHECK(Sanitize(c).waveBreakS == 30);
     c.waveBreakS = 45; CHECK(Sanitize(c).waveBreakS == 0);                       // not an option
-    c = Cfg(Format::TwoTeams, 10); c.waveBreakS = 30; c.clearGroundMin = 3;
-    CHECK(Sanitize(c).waveBreakS == 0 && Sanitize(c).clearGroundMin == 3);       // wave break: bot formats only
-    c.clearGroundMin = 4; CHECK(Sanitize(c).clearGroundMin == 0);
-    c = Cfg(Format::Duel, 3); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);
-    c = Cfg(Format::Zombies, 10); c.clearGroundMin = 5; CHECK(Sanitize(c).clearGroundMin == 0);
-    c = Cfg(Format::FreeForAll, 5); c.gear = Gear::Fists; c.clearGroundMin = 2; CHECK(Sanitize(c).clearGroundMin == 2);   // Brawl
+    c = Cfg(Format::TwoTeams, 10); c.waveBreakS = 30; c.clearGroundS = 180;
+    CHECK(Sanitize(c).waveBreakS == 0 && Sanitize(c).clearGroundS == 180);       // wave break: bot formats only
+    c.clearGroundS = 240; CHECK(Sanitize(c).clearGroundS == 0);                  // not a stop
+    c = Cfg(Format::Duel, 3); c.clearGroundS = 300; CHECK(Sanitize(c).clearGroundS == 0);
+    c = Cfg(Format::Zombies, 10); c.clearGroundS = 300; CHECK(Sanitize(c).clearGroundS == 0);
+    c = Cfg(Format::FreeForAll, 5); c.gear = Gear::Fists; c.clearGroundS = 120; CHECK(Sanitize(c).clearGroundS == 120);   // Brawl
+    // Clear ground (the owner's third default): every 30 s, 1, 2, 3, 5 or 10 min, no Off. 2 min is the lobby's start; the struct's 0 is "never"
+    // for the matches that have no lobby. Every stop survives Sanitize in the formats that have the row, and only there.
+    CHECK(kClearGroundDefaultS == 120 && ValidClearGroundS(kClearGroundDefaultS) && MatchConfig{}.clearGroundS == 0);
+    {
+        const uint16_t stops[6] = {30, 60, 120, 180, 300, 600};
+        for (size_t i = 0; i < 6; ++i) CHECK(kClearGroundOptionsS[i] == stops[i] && ValidClearGroundS(stops[i]));
+        for (uint16_t bad : {1, 29, 31, 45, 90, 121, 240, 599, 601, 3600, 65535}) CHECK(!ValidClearGroundS(bad));
+        CHECK(ValidClearGroundS(0));
+        for (int f = 0; f < kFormatCount; ++f) {
+            const Format fmt = Format(f);
+            if (fmt == Format::ThreeTeams || fmt == Format::CaptureTheFlag) continue;   // Sanitize rewrites these two
+            for (uint16_t s : stops) {
+                c = Cfg(fmt, 5); c.clearGroundS = s;
+                CHECK(Sanitize(c).clearGroundS == (ClearGroundApplies(Sanitize(c).format) ? s : 0));
+            }
+        }
+        CHECK(ClearGroundApplies(Format::FreeForAll) && ClearGroundApplies(Format::TwoTeams) && !ClearGroundApplies(Format::Duel) && !ClearGroundApplies(Format::Zombies));
+        CHECK(!ClearGroundApplies(Format::PlayersVsBots) && !ClearGroundApplies(Format::Infection) && !ClearGroundApplies(Format::LastManStanding));
+    }
+    // The wire still carries whole minutes (0, 2, 3, 5: ValidClearGroundMin), whatever the seconds: no wire change, so no revision.
+    CHECK(ClearGroundWireMin(0) == 0 && ClearGroundWireMin(30) == 2 && ClearGroundWireMin(60) == 2 && ClearGroundWireMin(120) == 2);
+    CHECK(ClearGroundWireMin(180) == 3 && ClearGroundWireMin(300) == 5 && ClearGroundWireMin(600) == 5);
+    for (uint16_t s : {0, 30, 60, 120, 180, 300, 600}) CHECK(ValidClearGroundMin(ClearGroundWireMin(s)) && (s == 0) == (ClearGroundWireMin(s) == 0));
+    // An older host's hsm_clr (whole minutes; 0 = off) reads as seconds; its 2, 3 and 5 min are stops of the new row; hsm_clrs wins.
+    CHECK(ClearGroundFromKeys(false, 0, 0) == 0 && ClearGroundFromKeys(false, 0, 2) == 120 && ClearGroundFromKeys(false, 0, 3) == 180 && ClearGroundFromKeys(false, 0, 5) == 300);
+    CHECK(ClearGroundFromKeys(true, 30, 5) == 30 && ClearGroundFromKeys(true, 600, 0) == 600 && ClearGroundFromKeys(true, 0, 2) == 0);
+    CHECK(ClearGroundFromKeys(true, -5, 2) == 0 && ClearGroundFromKeys(true, 999999, 2) == 65535 && ClearGroundFromKeys(false, 0, -3) == 0 && ClearGroundFromKeys(false, 0, 5000) == 60000);
+    for (int m : {0, 2, 3, 5}) CHECK(ValidClearGroundS(ClearGroundFromKeys(false, 0, m)));
+    CHECK(!ValidClearGroundS(ClearGroundFromKeys(false, 0, 4)) && ValidClearGroundS(ClearGroundFromKeys(false, 0, 1)));   // 4 min was no stop: Sanitize reads it as never
     // The break the match runs: 60 s Survival, 10 s Zombies, or the pick.
     for (Format f : {Format::PlayersVsBots, Format::Zombies}) {
         for (uint16_t s : {0, 10, 30, 60, 120}) {

@@ -115,9 +115,9 @@ struct PanelRow {
 inline std::vector<std::string> NetPanel(uint16_t delayMs, bool lateSend, const std::vector<PanelRow>& rows) {
     std::vector<std::string> out;
     char b[200];
-    std::snprintf(b, sizeof b, "netcode: input delay %u ms%s", unsigned(delayMs), lateSend ? ", poses sent right after physics" : "");
+    std::snprintf(b, sizeof b, "Input delay: %u ms%s", unsigned(delayMs), lateSend ? ", positions sent right after each physics step" : "");
     out.push_back(b);
-    if (rows.empty()) { out.push_back("netcode: no other players"); return out; }
+    if (rows.empty()) { out.push_back("No other players."); return out; }
     for (const PanelRow& r : rows) {
         std::string line = r.name + ": ";
         if (r.rttMs >= 0) { std::snprintf(b, sizeof b, "%.0f ms", r.rttMs); line += b; } else line += "ping ?";

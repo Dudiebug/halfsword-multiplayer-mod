@@ -70,14 +70,14 @@ public:
     void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
     // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
     // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
-    // With mod_pause=1 the mod's own panel counts too (SetModPanelOpen), so the input-mode logic that gives the stock menu
-    // its cursor gives the panel the same.
+    // The mod's own panel counts too (SetModPanelOpen), so the input-mode logic that gives the stock menu its cursor gives
+    // the panel the same.
     bool PauseMenuOpen();
     // The stock menu or one of its settings screens only (the search PauseMenuOpen is built on).
     bool StockPauseOpen();
     // The pause menu widget StockPauseOpen found (nullptr: none on screen, or it is a settings screen).
     ue::UObject* PauseMenu();
-    // mod_pause=1: the mod's pause panel (ui/pause_panel.h) is up. Counted by PauseMenuOpen.
+    // The mod's pause panel (ui/pause_panel.h) is up. Counted by PauseMenuOpen.
     void SetModPanelOpen(bool on) { modPanelOpen_ = on; }
     bool ModPanelOpen() const { return modPanelOpen_; }
     // One of the game's settings screens (the ones the panel's SETTINGS opens) is on screen. Its Back and its Esc make a new
@@ -94,7 +94,7 @@ public:
     void CloseScreen(ue::UObject* w, int32_t index);
     bool PossessLocal(ue::UObject* pawn);
     // loadout_trial: the inventory screen's own exit makes the Tavern's hub menu (UI_Hub_Tavern_C). While on, that menu's
-    // Construct is skipped and it is removed the next tick, as the pause screen is for mod_pause.
+    // Construct is skipped and it is removed the next tick, as the game's pause screen is in a session match.
     void SwallowTavernHub(bool on);
     uint32_t TakeHubSwallowed() { const uint32_t n = hubSwallowed_; hubSwallowed_ = 0; return n; }
     // The game's pause screen class path, the "Go Back To" of the screens the panel opens.
@@ -109,6 +109,12 @@ public:
     bool PlayUiSound(const char* name);
     // The player controller's cursor is hidden (something set game-only input under the open pause menu).
     bool PauseCursorLost();
+    // What player 0's controller takes after a respawn (#3490): its move and look input ignored, its cursor shown, the
+    // chat's capture on. read is false with no controller.
+    struct InputState { bool read = false, moveIgnored = false, lookIgnored = false, cursor = false, captured = false; };
+    InputState ReadInputState();
+    // Player 0's controller takes move and look input again (AController::ResetIgnoreInputFlags, as RespawnLocalPlayer).
+    void ResetIgnoreInput();
     // A menu level loaded after the mod took the cursor: game-and-UI input, cursor shown, as ShowPauseCursor. Leaving a
     // session skips the stock flow that gives the menus their input (#19, #23). Does nothing when the mod never touched it.
     bool MenuInputBack();
@@ -167,7 +173,7 @@ public:
     // BP_SpawnerPoint_Willies actors in the loaded level that the level kept: BP_LevelManager::Spawn_Combatants destroys
     // every spawner not made for the current game, combat and play modes or the number of combatants (the Pit's bridge
     // and outer ring in Free Mode), and a destroyed one reads (0,0,0), the middle of the Pit.
-    std::vector<ue::FVector> SpawnCandidates();
+    std::vector<ue::FVector> SpawnCandidates(std::vector<int>* rows = nullptr);   // rows: each point's shared Crypts row (-1: none)
     // Pit Bridge Duels: the world bounds (centre, half extents) of every BP_Structure_Board_Destructible_1X6M_C in the level, the
     // Pit's bridge (shared/match/hsm_pitbridge.h works the ends out). Empty when the level has none.
     struct ActorBox { ue::FVector origin, extent; };
@@ -217,6 +223,12 @@ public:
     // modifier, and the director takes the tier of each room the player walks into).
     struct CryptsTierHold { bool director = false; int lowered = -1, rooms = 0; };   // lowered: the highest tier brought down, -1 none
     CryptsTierHold HoldCryptsTier(uint8_t cap, bool rooms);
+    // The Crypts key marker (match/hsm_crypts_marker.h): where the Willie holds a Crypts key (IsCryptsKeyClass), as
+    // "Weapon R: BP_Weapon_ToolKey_C", or "MyKey: <class>" when the Willie has an object field MyKey that is set; empty
+    // when it holds none. A field this build lacks reads as none. handR/handL (optional): the class of what each hand holds.
+    std::string HeldCryptsKey(ue::UObject* willie, std::string* handR = nullptr, std::string* handL = nullptr);
+    // The Crypts' gate doors live now (BP_Door_Gate_A_001_C): a full object scan, so call it seldom.
+    void CryptsDoors(std::vector<ue::UObject*>& out);
     // Combat scenarios (match/hsm_scenarios.h): the world settings on the game instance, set before a travel (they reach the
     // clients with its settings). The host's own values are kept the first time and put back by RestoreScenario.
     // False when none of the fields it needed could be set.
@@ -225,7 +237,7 @@ public:
     // The Time of day row: GI "Current FreeMode Time" (an Enum_DayTime, 0..3) for the next level, "FreeMode Time Random" off. The
     // host's own values are kept and come back with RestoreScenario. False when the game instance has no such field.
     bool ApplyDayTime(int dayTime);
-    // The Fenced-ring scenario's lose condition back on the game instance (hsm::kLoseConditionFence), after the level
+    // An older host's Fenced-ring lose condition back on the game instance (hsm::kLoseConditionFence), after the level
     // manager's level-load reset wiped it and before the level script checks it to keep the BP_Fence_Bags (#706).
     // True when the field was set.
     bool KeepFenceLoseCondition();
@@ -284,6 +296,7 @@ public:
     // Brawl: every fighter spawned from now on (own body, stand-ins, whatever loadout it was sent) has no armour and
     // holds no weapon. Done on the fighter's own copy of the passport, so no save and no uploaded loadout changes.
     void SetBare(bool on) { bare_ = on; }
+    void SetBlossfechten(bool on) { blossfechten_ = on; }   // every body spawns with Blossfechten Gear (a bare one stays bare)
     void QuitGame();
     bool GamePaused();
     void SetGamePaused(bool paused);
@@ -319,6 +332,13 @@ public:
     std::vector<ue::UObject*> LevelWeapons();
     // A new actor of a class (a Blueprint or native actor class with no setup of its own) at a place, spawned always.
     ue::UObject* SpawnActorAt(ue::UClass* cls, const ue::FVector& at, const ue::FRotator& rot);
+    // Crypts co-op loot (docs/PLAN_CRYPTS_COOP.md, PR D2): one weapon (kind 1: "Weapon Passport") or armour piece (kind 2: "Armor Passport")
+    // as a save file. ExportItemState copies the actor's passport struct into the weapon or armour array of a fresh SG_GameProgress_C
+    // and serializes it (the array header borrows a mod-owned buffer for the save and is reset after); false if it could not.
+    // SpawnItemFromState loads such a file through LoadPassportSave (CheckPassportSave first) and spawns `cls` with the struct copied in
+    // before the spawn finishes, as the game's loot points do. `cls` must be the class the struct names. nullptr, and `why`, on failure.
+    bool ExportItemState(ue::UObject* item, uint8_t kind, std::vector<uint8_t>& out);
+    ue::UObject* SpawnItemFromState(const std::vector<uint8_t>& blob, uint8_t kind, ue::UClass* cls, const ue::FVector& at, const ue::FRotator& rot, std::string& why);
     // Crossbows in the lobby (experimental, behind a runtime check): whether this level has the game's crossbow weapon and bolt
     // classes. Logs "crossbow: class <name> found|missing, bolt class <name> found|missing" each time `log` is set. The classes
     // are Blueprint classes, found only while some loaded asset references them; missing ones leave the Crossbows row without effect.
@@ -342,6 +362,10 @@ public:
     // Armour pieces lying loose (no attach parent): what a strip, a pick-up swap or a fallen bot's loot left. Worn and
     // carried pieces are attached. One pass over the object array.
     std::vector<ue::UObject*> LooseArmor();
+    // A fighter wears it: the actor hangs on another actor, or it is the bolt quiver a live fighter names in "Attached Bolt Quiver"
+    // (a quiver is not attached but held to the pelvis by a physics constraint; its "MyWillie" names the wearer). #3909.
+    bool WornGear(ue::UObject* actor);
+    bool QuiverWorn(ue::UObject* actor);   // the second half of WornGear alone: no engine call
     // Survival loot: a fallen fighter lets go of what its hands hold and sheds the worn pieces LootPicks(seed) picks
     // through its own Remove Armor (a loose piece each, reported to the other machines like a strip). Returns how many
     // pieces it shed; weapons: how many hands let go.
@@ -370,7 +394,7 @@ public:
     bool ExportPassportOf(ue::UObject* willie, std::vector<uint8_t>& out);
     // Per tick: UI_DED / UI_DeathDoor / UI_WinScreen / UI_WIN never construct while on. ownerMatch (owner sync) also
     // suppresses UI_Lose / UI_GiveUp / UI_NextFIght, the single-player lose flow that pauses the game.
-    // swallowPause (mod_pause=1 in a session match): the game's pause screen never constructs either, whoever makes it (the
+    // swallowPause (a session match): the game's pause screen never constructs either, whoever makes it (the
     // settings screens' Back does), so no pause, no input-mode change; the mod's panel is the pause menu there.
     void SuppressStockScreens(bool on, bool ownerMatch = false, bool swallowPause = false);
     // How many pause screens were swallowed since the last call (the settings screen's Back: the panel shows again).
@@ -445,6 +469,7 @@ private:
     bool buildOn_ = false;
     int buildTier_ = 0;
     bool bare_ = false;
+    bool blossfechten_ = false;   // SetBlossfechten: the lobby's Blossfechten scenario
     ue::UClass* boltClass_ = nullptr;               // CrossbowBoltClass
     int32_t boltClassIndex_ = -1;
     struct ScenarioSaved { bool saved = false, carnage = false, brawling = false, hasLose = false; uint8_t lose = 0; } scenarioSaved_;

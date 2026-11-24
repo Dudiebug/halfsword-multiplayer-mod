@@ -191,9 +191,9 @@ static void TestRematch() {
 
 // Criterion: Infection always has a clock, no friendly fire, no crossbows and no ground clear; it is two fixed teams without picks.
 static void TestConfig() {
-    MatchConfig c; c.format = Format::Infection; c.timeLimitS = 0; c.friendlyFire = true; c.crossbows = 3; c.clearGroundMin = 3; c.teams = 4;
+    MatchConfig c; c.format = Format::Infection; c.timeLimitS = 0; c.friendlyFire = true; c.crossbows = 3; c.clearGroundS = 180; c.teams = 4;
     const MatchConfig s = Sanitize(c);
-    CHECK(s.timeLimitS == kInfectionDefaultTimeS && kInfectionDefaultTimeS == 300 && !s.friendlyFire && s.crossbows == 0 && s.clearGroundMin == 0);
+    CHECK(s.timeLimitS == kInfectionDefaultTimeS && kInfectionDefaultTimeS == 300 && !s.friendlyFire && s.crossbows == 0 && s.clearGroundS == 0);
     c.timeLimitS = 900; CHECK(Sanitize(c).timeLimitS == 900);
     CHECK(HasTeams(Format::Infection) && !PicksTeams(Format::Infection) && !HasRoles(Format::Infection) && !IsRoundFormat(Format::Infection));
     CHECK(TeamCount(Format::Infection, 4) == 2 && !ScoresPerFighter(Format::Infection) && !IsBotFormat(Format::Infection));
@@ -290,12 +290,11 @@ static void TestHud() {
     BannerTracker j; j.Observe(Info(MatchPhase::Live, {1, 1}, {true, true}), 2, 50);
     CHECK(j.shot().text.empty());
     // Feed.
-    CHECK(ModeEventLine(m, ModeEventMsg{ModeEventKind::Infected, 1, 2}) == "Ann infected Bo");
-    CHECK(ModeEventLine(m, ModeEventMsg{ModeEventKind::Infected, 0, 2}) == "Bo was infected");
     const FeedRow inf = MakeModeFeedRow(m, ModeEventMsg{ModeEventKind::Infected, 1, 2}, 2);
-    CHECK(inf.spans.size() == 3 && inf.spans[1].text == " infected " && inf.mine && inf.spans[0].color.g == style::kInfectedInk.g);
+    CHECK(inf.spans.size() == 3 && inf.spans[0].text == "Ann" && inf.spans[1].text == " infected " && inf.spans[2].text == "Bo");   // "Ann infected Bo"
+    CHECK(inf.mine && inf.spans[0].color.g == style::kInfectedInk.g);
     const FeedRow was = MakeModeFeedRow(m, ModeEventMsg{ModeEventKind::Infected, 0, 2}, 3);
-    CHECK(was.spans.size() == 2 && was.spans[1].text == " was infected" && !was.mine);
+    CHECK(was.spans.size() == 2 && was.spans[0].text == "Bo" && was.spans[1].text == " was infected" && !was.mine);                 // "Bo was infected"
 }
 
 static LobbyLocal InLobby(Format f, int players = 4) {
@@ -304,17 +303,18 @@ static LobbyLocal InLobby(Format f, int players = 4) {
 }
 static std::vector<LobbyRow> RowIds(const LobbyScene& s) { std::vector<LobbyRow> v; for (const SettingRow& r : s.settings) v.push_back(r.id); return v; }
 
-// Criterion: the card, its rows (Time, Respawn, Damage, FreeCam, Sync, Gear/Tier/Weapons; no Teams, no Crossbows, no ground clear),
+// Criterion: the card, its rows (Time, Respawn, Damage, FreeCam, Sync, Gear with its tier chips, Bodies; no Teams, no Crossbows, no ground clear),
 // the clock's stops without "no clock", 2+ players.
 static void TestLobby() {
     LobbyScene s = BuildLobbyScene(InLobby(Format::Infection));
     const ModeCard* card = nullptr;
     for (const ModeCard& m : s.modes) if (m.format == Format::Infection) card = &m;
     CHECK(card && card->name == "INFECTION" && card->selected && card->enabled && card->group == ModeGroup::Versus && !card->description.empty());
-    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier, LobbyRow::Bodies, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}));
+    CHECK(RowIds(s) == (std::vector<LobbyRow>{LobbyRow::Players, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Bite,
+                                              LobbyRow::Gear, LobbyRow::Bodies, LobbyRow::Strip, LobbyRow::TimeOfDay, LobbyRow::Props, LobbyRow::Sync}));
     for (const SettingRow& r : s.settings) {
-        if (r.id == LobbyRow::Time) CHECK(r.label == "Time limit" && r.value == "5 min" && Has(r.hint, "survivors"));
-        if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay" && Has(r.hint, "infected"));
+        if (r.id == LobbyRow::Time) CHECK(r.label == "Time limit" && r.value == "5 min" && r.hint.empty());
+        if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay" && r.hint.empty());
     }
     MatchConfig c = Sanitize(InLobby(Format::Infection).config);
     CHECK(StepSetting(c, LobbyRow::Time, 1).timeLimitS == 600 && StepSetting(c, LobbyRow::Time, -1).timeLimitS == 1200);   // never 0
@@ -322,7 +322,8 @@ static void TestLobby() {
     c.format = Format::FreeForAll; c.timeLimitS = 300; CHECK(StepSetting(c, LobbyRow::Time, -1).timeLimitS == 0);       // other modes keep "no clock"
     CHECK(!ModeAvailable(Format::Infection, 1).ok && ModeAvailable(Format::Infection, 2).ok);
     LobbyLocal rolled = InLobby(Format::Infection); rolled.config.gear = Gear::Mirror;
-    CHECK(RowIds(BuildLobbyScene(rolled)).size() == 10);
+    CHECK(RowIds(BuildLobbyScene(rolled)) == (std::vector<LobbyRow>{LobbyRow::Players, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Bite,
+                                                                    LobbyRow::Gear, LobbyRow::Weapons, LobbyRow::Strip, LobbyRow::TimeOfDay, LobbyRow::Props, LobbyRow::Sync}));   // Bodies gives way to Weapons
     LobbyLocal withPlayers = InLobby(Format::Infection);
     LobbyPlayer ann, bo; ann.name = "Ann"; ann.host = ann.me = true; bo.name = "Bo";
     withPlayers.players = {ann, bo};
@@ -330,7 +331,7 @@ static void TestLobby() {
     CHECK(s.roster.size() == 2 && s.roster[0].team.empty() && !s.balance);               // no team picks, no auto-balance
     CHECK(Has(s.summary, "INFECTION"));
     bool browser = false; for (const std::string& n : BrowserModes()) browser = browser || n == "Infection";
-    CHECK(browser && Has(FormatBlurb(Format::Infection), "Patient zero"));
+    CHECK(browser && std::string(FormatBlurb(Format::Infection)) == "The fallen join the infected.");
     CHECK(ModeName(Format::Infection, Gear::Own, 3) == "Infection");
 }
 

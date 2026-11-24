@@ -22,6 +22,7 @@ static LobbyLocal Lobby(Format f, bool host = true) {
     return l;
 }
 static bool Listed(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return true; return false; }
+static SettingRow Row(const LobbyScene& s, LobbyRow id) { for (const SettingRow& r : s.settings) if (r.id == id) return r; CHECK(false); return SettingRow{}; }   // a copy: the scene is often a temporary
 
 int main() {
     // The formats: every round format but Tag, and only under per player sync.
@@ -92,41 +93,40 @@ int main() {
     }
     CHECK(MatchConfig{}.winBy == 0);                                   // Death by default: lobbies run as before
 
-    // The row: in the round formats but Tag, apart from `settings` (their lists stay as they were), in MATCH.
+    // The row: in the round formats but Tag, in MATCH.
     CHECK(SectionOf(LobbyRow::WinBy) == LobbySection::Match);
-    CHECK(size_t(LobbyRow::WinBy) < size_t(LobbyRow::Scenario) && size_t(LobbyRow::Scenario) + 1 == size_t(LobbyRow::Sync));
+    CHECK(size_t(LobbyRow::WinBy) < size_t(LobbyRow::Sync));
     {
         LobbyLocal l = Lobby(Format::Duel);
         l.config.winBy = 2;
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasWinBy);
-        CHECK(s.winBy.id == LobbyRow::WinBy && s.winBy.label == "Win by" && s.winBy.value == "Knockdown" && s.winBy.enabled);
-        CHECK(s.winBy.hint == WinByHint(WinBy::Knockdown));
-        CHECK(!Listed(s, LobbyRow::WinBy));
+        CHECK(Listed(s, LobbyRow::WinBy));
+        CHECK(Row(s, LobbyRow::WinBy).id == LobbyRow::WinBy && Row(s, LobbyRow::WinBy).label == "Win by" && Row(s, LobbyRow::WinBy).value == "Knockdown" && Row(s, LobbyRow::WinBy).enabled);
+        CHECK(Row(s, LobbyRow::WinBy).hint == WinByHint(WinBy::Knockdown));
         LobbyLocal d = Lobby(Format::Duel);
         CHECK(BuildLobbyScene(d).settings.size() == s.settings.size());   // the pick changes no other row
-        CHECK(BuildLobbyScene(d).winBy.value == "Death");
+        CHECK(Row(BuildLobbyScene(d), LobbyRow::WinBy).value == "Death");
     }
     {
         LobbyLocal l = Lobby(Format::Duel, false);                     // a member reads it, cannot step it
         l.config.winBy = 1;
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(s.hasWinBy && s.winBy.value == "First blood" && !s.winBy.enabled);
+        CHECK(Listed(s, LobbyRow::WinBy) && Row(s, LobbyRow::WinBy).value == "First blood" && !Row(s, LobbyRow::WinBy).enabled);
     }
     for (Format f : {Format::Tag, Format::FreeForAll, Format::PlayersVsBots}) {
         LobbyLocal l = Lobby(f);
         l.config.winBy = 1;
         LobbyScene s = BuildLobbyScene(l);
-        CHECK(!s.hasWinBy && !Listed(s, LobbyRow::WinBy));
+        CHECK(!Listed(s, LobbyRow::WinBy));
     }
     {
         LobbyLocal l = Lobby(Format::Duel);
         l.config.hostPhysics = true;
         l.config.winBy = 1;
-        CHECK(!BuildLobbyScene(l).hasWinBy);
+        CHECK(!Listed(BuildLobbyScene(l), LobbyRow::WinBy));
         l = Lobby(Format::Duel);
         l.progression = true;
-        CHECK(!BuildLobbyScene(l).hasWinBy);
+        CHECK(!Listed(BuildLobbyScene(l), LobbyRow::WinBy));
     }
 
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }

@@ -27,17 +27,17 @@ constexpr std::array<ArtSpec, size_t(Art::Count)> kArt{{
 // The plain fill that stands for the art: in the classic look always (its dark panels: the HUD's smoke, the menus'
 // faces), in the game's look when the art is not loaded (its parchment colours).
 Rgba Plain(Art art) {
-    constexpr Rgba kAmber{0.85f, 0.45f, 0.03f, 1}, kMineClassic{0.22f, 0.025f, 0.02f, 0.80f}, kNone{0, 0, 0, 0};
+    constexpr Rgba kNone{0, 0, 0, 0};
     const bool classic = style::ClassicMenus();
     switch (art) {
         case Art::Backdrop: return style::kMenuBg;
         case Art::Scroll: case Art::Note: return style::kMenuPanel;
         case Art::Sheet: return classic ? style::kSmoke : style::kMenuPanel;
         case Art::Card: case Art::Strip: return style::kMenuCard;
-        case Art::CardPicked: return classic ? style::kMenuAccent : kAmber;
+        case Art::CardPicked: return classic ? style::kMenuAccent : style::kMenuPicked;
         case Art::CardRed: return style::kMenuAccent;
         case Art::Plate: return classic ? style::kSmoke : style::kMenuCard;
-        case Art::PlatePicked: return classic ? kMineClassic : kAmber;
+        case Art::PlatePicked: return style::kMenuPlatePicked;
         case Art::Ribbon: case Art::Count: break;
     }
     return kNone;
@@ -68,8 +68,8 @@ Shade DarkShade(Art art) {
         case Art::Backdrop: return {0.18f, 1};                         // a page: the tavern, dark and opaque
         case Art::Note: return {0.25f, 0.95f};                        // a question over the page
         case Art::Card: return {0.26f, 0.94f};
-        case Art::CardPicked: case Art::CardRed: return {0.55f, 0.95f};
-        case Art::PlatePicked: return {0.50f, 0.93f};
+        case Art::CardPicked: case Art::CardRed: return {style::kDarkKeepPicked, 0.95f};
+        case Art::PlatePicked: return {style::kDarkKeepPlate, 0.93f};
         case Art::Ribbon: return {0.30f, 0.92f};
         default: return {0.22f, 0.92f};                               // scrolls, sheets, strips, plates
     }
@@ -122,7 +122,7 @@ void Font(Text& t, Face face) {
 std::string Title(const std::string& upper) { return style::MenuTitle(upper); }
 
 Rgba CardTint(float glow) {
-    constexpr Rgba kNormal{0.86f, 0.84f, 0.80f, 1}, kHover{1, 0.97f, 0.88f, 1};
+    const Rgba kNormal = style::kCardTint, kHover = style::kCardTintHover;
     return {kNormal.r + (kHover.r - kNormal.r) * glow, kNormal.g + (kHover.g - kNormal.g) * glow, kNormal.b + (kHover.b - kNormal.b) * glow, 1};
 }
 

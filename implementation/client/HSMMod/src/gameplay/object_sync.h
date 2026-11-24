@@ -27,6 +27,7 @@
 #include "session/hsm_prop_census.h"
 #include "session/hsm_structure.h"
 #include "session/hsm_walk_cache.h"
+#include "sync/hsm_crossbow_copy.h"
 #include "sync/hsm_handmatch.h"
 #include "sync/hsm_moving_follow.h"
 #include "sync/hsm_rest_lock.h"
@@ -40,6 +41,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -68,6 +70,9 @@ public:
         // Whether this machine is in a fight level, whose physics props the census covers (a client ticks props only
         // once its level gate is open). Without it no level prop is synced.
         std::function<bool()> fightLevel;
+        // A client in the shared Crypts run with rooms of the host's still to build here: an announce no actor matches yet is
+        // held (GhostTable::Expire), since its room may not be built. Null or false elsewhere.
+        std::function<bool()> roomsToBuild;
         // sync_structures (default soft): how constraint-built level props are synced (session/hsm_structure.h). full is
         // 0.8.0-pre17 (streamed, teleported, leased, reset); local keeps every machine's copy to itself; soft streams it from the
         // host as one snapshot and steers the receivers' copies (sync/hsm_soft_correct.h).
@@ -105,6 +110,9 @@ public:
     bool OnObjectEvent(const uint8_t* d, size_t n, uint8_t fromSlot);
     // Something spawned that should be looked for now (armour knocked off): the re-check is brought forward.
     void NoteSpawn();
+    // A fighter's Spawn was heard (every machine, the host included): its Spawn.flags say whether it was given the crossbow,
+    // whose copy its stand-in then builds at once (sync::GiftBook, #3910).
+    void NoteGift(uint8_t entity, uint8_t spawnFlags);
     // Host: every announced object as canonical announces, then the event history, for a machine that has just joined.
     std::vector<std::vector<uint8_t>> ObjectsForJoiner() const;
     // Host migration (0.8.0-pre2). ExportKnown: every spawned object this machine knows by its canonical id, as announces (the
@@ -261,7 +269,7 @@ private:
                  requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
                  attached = 0, attachMiss = 0, resetUnmoved = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
-                 spawned = 0, spawnFailed = 0,
+                 spawned = 0, spawnFailed = 0, giftCopies = 0, copiesMoved = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0,
                  despawned = 0,
                  announced = 0, proposed = 0, refused = 0, rekeyed = 0, bound = 0, ghostsExpired = 0, announceRejected = 0,
@@ -433,6 +441,7 @@ private:
     std::array<uint8_t, kMaxWillies + 1> dropSeq_{};
     std::array<uint32_t, kMaxWillies + 1> dropEpoch_{};                // seeded per process at Start (MakeDropPropId)
     std::array<StandInHands, kMaxWillies + 1> standInHands_{};
+    sync::GiftBook gift_;                                            // the crossbow gifts of the Spawns heard (#3910)
     std::vector<Loose> loose_;
     std::vector<Candidate> weapons_;
     bool logWalks_ = true;                 // false for the recorder's walks
@@ -485,6 +494,8 @@ private:
     uint64_t spawnRefused_ = 0;
     SpawnedIdMinter minter_;
     GhostTable ghosts_;
+    bool ghostsHeld_ = false;                                   // roomsToBuild at the last BindAnnounced (logged on change)
+    std::unordered_map<uint32_t, uint32_t> ghostExpiredByClass_; // class hash: announces that expired with no actor here
     std::map<uint64_t, Announced> announced_;                        // canonical announces with no actor here yet
     std::unordered_map<const ue::UObject*, double> refused_;         // actors the host would not name -> when to try again
     bool rekeyRefusedLogged_ = false;                                // Rekey's refusal of a proposal is logged once per session
@@ -500,6 +511,7 @@ private:
     double baselineMs_ = -1;
     std::vector<LevelWeapon> levelWeapons_;
     std::vector<ResetItem> resetQueue_;
+    std::unordered_set<uint64_t> wornKept_;                          // worn gear the props-off sweep spared, logged once each (#3909)
     size_t resetPerFrame_ = 0;
     ResetTally resetTally_;
     double recheckMs_ = 0, eventMs_ = 0, hintMs_ = -1e18;

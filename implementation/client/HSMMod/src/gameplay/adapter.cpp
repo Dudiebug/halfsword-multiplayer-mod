@@ -1,16 +1,20 @@
 #include "gameplay/adapter.h"
 #include <windows.h>
 #include "gameplay/combat_sync.h"
+#include "gameplay/crypts_layout.h"
 #include "gameplay/damage_pin.h"
+#include "gameplay/world_context.h"
 #include "hsm_chat.h"
 #include "hsm_owner.h"
 #include "log.h"
 #include "match/hsm_crypts.h"
+#include "match/hsm_crypts_marker.h"
 #include "match/hsm_input_mode.h"
 #include "match/hsm_roles.h"
 #include "match/hsm_match.h"
 #include "match/hsm_modes.h"
 #include "match/hsm_team_kit.h"
+#include "session/hsm_crypt_loot.h"
 #include "session/hsm_ground_clear.h"
 #include "session/hsm_gvas.h"
 #include "sync/hsm_gore.h"
@@ -116,7 +120,7 @@ bool Adapter::Resolve(UObject* worldContext) {
 
 UObject* Adapter::PlayerWillie(int localIndex) {
     Call c(statics_, "GetPlayerCharacter");
-    c.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", localIndex);
+    c.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", localIndex);
     if (!c.invoke()) return nullptr;
     UObject* ch = c.get<UObject*>("ReturnValue");
     if (!ch) return nullptr;
@@ -139,7 +143,7 @@ UObject* WidgetLibrary() {
 // stock menu flow that would otherwise leave the menu's UI input mode and cursor behind.
 void Adapter::RestoreGameInput() {
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
     inputTouched_ = true;
@@ -229,7 +233,7 @@ bool Adapter::ContinueFromPauseMenu() {
 
 void Adapter::ShowPauseCursor() {
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
     Call mode(WidgetLibrary(), "SetInputMode_GameAndUIEx");
@@ -244,17 +248,39 @@ bool Adapter::PlayUiSound(const char* name) {
     UClass* base = FindClass("SoundBase");
     if (!sound || !base || IsDefaultObject(sound) || !IsA(sound, base)) return false;
     Call c(statics_, "PlaySound2D");
-    c.set<UObject*>("WorldContextObject", world_).set<UObject*>("Sound", sound).set<float>("VolumeMultiplier", 1.f)
+    c.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UObject*>("Sound", sound).set<float>("VolumeMultiplier", 1.f)
         .set<float>("PitchMultiplier", 1.f).set<bool>("bIsUISound", true);
     return c.invoke();
 }
 
 bool Adapter::PauseCursorLost() {
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     bool shown = true;
     return ctrl && GetBool(ctrl, "bShowMouseCursor", shown) && !shown;
+}
+
+Adapter::InputState Adapter::ReadInputState() {
+    InputState s;
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
+    UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    if (!ctrl) return s;
+    s.read = true;
+    Call move(ctrl, "IsMoveInputIgnored");
+    if (move.invoke()) s.moveIgnored = move.get<bool>("ReturnValue");
+    Call look(ctrl, "IsLookInputIgnored");
+    if (look.invoke()) s.lookIgnored = look.get<bool>("ReturnValue");
+    GetBool(ctrl, "bShowMouseCursor", s.cursor);
+    s.captured = inputCaptured_;
+    return s;
+}
+
+void Adapter::ResetIgnoreInput() {
+    Call pc(statics_, "GetPlayerController");
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
+    if (UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr) Call(ctrl, "ResetIgnoreInputFlags").invoke();
 }
 
 bool Adapter::MenuInputBack() {
@@ -273,7 +299,7 @@ void Adapter::CaptureInput(bool on) {
     inputCaptured_ = on;
     if (!on) { if (PauseMenuOpen()) ShowPauseCursor(); else RestoreGameInput(); return; }   // closing the chat must not take the pause menu's cursor
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return;
     inputTouched_ = true;
@@ -291,7 +317,7 @@ bool Adapter::TraceLine(const FVector& start, const FVector& end, const std::vec
     std::vector<UObject*> ignored = ignore;
     ActorArray skip{ignored.data(), int32_t(ignored.size()), int32_t(ignored.size())};
     Call t(ksl, "LineTraceSingle");
-    t.set<UObject*>("WorldContextObject", world_).set("Start", start).set("End", end)
+    t.set<UObject*>("WorldContextObject", worldctx::For(world_)).set("Start", start).set("End", end)
      .set<uint8_t>("TraceChannel", 0).set<bool>("bTraceComplex", false).set("ActorsToIgnore", skip).set<uint8_t>("DrawDebugType", 0)
      .set<bool>("bIgnoreSelf", true).set<float>("DrawTime", 0.f);
     if (!t.invoke() || !t.get<bool>("ReturnValue")) return false;
@@ -318,7 +344,7 @@ bool Adapter::FloorZ(const FVector& at, const std::vector<UObject*>& ignore, dou
 // Where the player's camera is now: the game's own camera, or our follow camera while spectating.
 bool Adapter::CameraLocation(FVector& out) {
     Call pc(statics_, "GetPlayerCameraManager");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* cm = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!cm) return false;
     Call loc(cm, "GetCameraLocation");
@@ -329,7 +355,7 @@ bool Adapter::CameraLocation(FVector& out) {
 
 bool Adapter::SetBlind(bool on) {
     Call pc(statics_, "GetPlayerCameraManager");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* cm = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!cm) return false;
     if (!on) return Call(cm, "StopCameraFade").invoke();
@@ -371,7 +397,7 @@ bool Adapter::ReachablePointNear(const FVector& from, const FVector& aim, double
     bool found = false;
     for (int i = 0; i < 24; ++i) {
         Call c(nav, "K2_GetRandomReachablePointInRadius");
-        c.set<UObject*>("WorldContextObject", world_).set("Origin", from).setReal("Radius", reach)
+        c.set<UObject*>("WorldContextObject", worldctx::For(world_)).set("Origin", from).setReal("Radius", reach)
          .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
         if (!c.invoke() || !c.get<bool>("ReturnValue")) return found;
         const FVector v = c.get<FVector>("RandomLocation");
@@ -401,7 +427,7 @@ std::vector<UObject*> Adapter::BodiesAndGear() {
 
 bool Adapter::ControlRotation(int localIndex, float& yaw, float& pitch) {
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", localIndex);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", localIndex);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return false;
     Call r(ctrl, "GetControlRotation");
@@ -413,7 +439,7 @@ bool Adapter::ControlRotation(int localIndex, float& yaw, float& pitch) {
 
 bool Adapter::SetControlRotation(int localIndex, float yaw, float pitch) {
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", localIndex);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", localIndex);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     return ctrl && Call(ctrl, "SetControlRotation").set("NewRotation", FRotator{pitch, yaw, 0}).invoke();
 }
@@ -1036,7 +1062,7 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
     double rad = o.yawDeg * 0.017453292519943295;
     FTransform t; t.rotation = {0, 0, std::sin(rad / 2), std::cos(rad / 2)}; t.translation = o.at;
     Call begin(statics_, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", willie).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("ActorClass", willie).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 2).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* w = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!w) { HSM_LOG("adapter: BeginDeferredActorSpawnFromClass failed"); return nullptr; }
@@ -1059,10 +1085,15 @@ UObject* Adapter::SpawnFighter(const SpawnOptions& o) {
     // A career Brawl or Blossfechten fight: the stock spawner's kit flags, on every fighter as the stock spawner does
     // (session/hsm_career.h CareerSpawnKitFor); the fighter's BeginPlay leaves the weapons off by them.
     const hsm::CareerSpawnKit kit = hsm::CareerSpawnKitFor(FreeModeActive(), CareerCombatMode());
-    if ((kit.pants && !SetBool(w, "Spawn in Pants", true)) || (kit.blossfechten && !SetBool(w, "Blossfechten Gear", true)))
+    // The lobby's Blossfechten scenario (match/hsm_scenarios.h, SetBlossfechten): the career fight's flag, on every body. A
+    // bare body (Brawl, Tag, the Brawling scenario, a hider) stays bare.
+    const bool lobbyBloss = blossfechten_ && !kit.pants && !kit.blossfechten && !bare_ && !o.bare;
+    if ((kit.pants && !SetBool(w, "Spawn in Pants", true)) || ((kit.blossfechten || lobbyBloss) && !SetBool(w, "Blossfechten Gear", true)))
         HSM_LOG("adapter: the fight's %s kit could not be set on the fighter (field missing)", kit.pants ? "Brawl" : "Blossfechten");
     else if (kit.pants || kit.blossfechten)   // a few fighters a fight: each one is the tester's evidence
         HSM_LOG("adapter: a career %s: this fighter starts %s", kit.pants ? "Brawl" : "Blossfechten", kit.pants ? "in pants, no weapons" : "in training gear");
+    else if (lobbyBloss)
+        HSM_LOG("adapter: the lobby's Blossfechten scenario: this %s starts with Blossfechten Gear (no armour, right hand only)", o.stockBrain ? "bot" : o.brain ? "fighter" : "puppet");
     Call finish(statics_, "FinishSpawningActor");
     finish.set<UObject*>("Actor", w).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
     UObject* done = finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
@@ -1332,7 +1363,7 @@ double Adapter::ActorYaw(UObject* actor) {
 double Adapter::WorldSeconds() {
     if (!statics_ || !world_) return -1;
     Call c(statics_, "GetTimeSeconds");
-    c.set<UObject*>("WorldContextObject", world_);
+    c.set<UObject*>("WorldContextObject", worldctx::For(world_));
     FProperty* rv = c.valid() ? FindProperty(c.function(), "ReturnValue") : nullptr;
     if (!rv || !c.invoke()) return -1;
     if (PropertySize(rv) == int32_t(sizeof(double))) return c.get<double>("ReturnValue");
@@ -1340,12 +1371,17 @@ double Adapter::WorldSeconds() {
     return -1;
 }
 
-std::vector<FVector> Adapter::SpawnCandidates() {
+std::vector<FVector> Adapter::SpawnCandidates(std::vector<int>* rows) {
     std::vector<FVector> out;
+    if (rows) rows->clear();
+    const bool layout = cryptslayout::Active();   // a shared Crypts map: only its rooms' spawn points
     for (UObject* a : FindInstances(kSpawnerClass)) {
         if (IsGarbage(a) || BeingDestroyed(a)) continue;
+        if (layout && !cryptslayout::InLayout(OuterOf(a))) continue;
         const FVector v = ActorLocation(a);
-        if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) > 1.0) out.push_back(v);   // (0,0,0): destroyed, its root gone
+        if (std::fabs(v.x) + std::fabs(v.y) + std::fabs(v.z) <= 1.0) continue;   // (0,0,0): destroyed, its root gone
+        out.push_back(v);
+        if (rows) rows->push_back(layout ? cryptslayout::RowOfLevel(OuterOf(a)) : -1);
     }
     return out;
 }
@@ -1393,7 +1429,7 @@ bool Adapter::NavigablePoint(FVector& out) {
     if (aims.size() > 9) aims.resize(9);
     for (const FVector& aim : aims) {
         Call c(nav, "K2_ProjectPointToNavigation");
-        c.set<UObject*>("WorldContextObject", world_).set("Point", aim).set("QueryExtent", FVector{5000, 5000, 10000})
+        c.set<UObject*>("WorldContextObject", worldctx::For(world_)).set("Point", aim).set("QueryExtent", FVector{5000, 5000, 10000})
          .set<UObject*>("NavData", nullptr).set<UObject*>("FilterClass", nullptr);
         if (!c.invoke() || !c.get<bool>("ReturnValue")) continue;
         const FVector v = c.get<FVector>("ProjectedLocation");
@@ -1922,6 +1958,36 @@ Adapter::CryptsTierHold Adapter::HoldCryptsTier(uint8_t cap, bool rooms) {
     return r;
 }
 
+std::string Adapter::HeldCryptsKey(UObject* willie, std::string* handR, std::string* handL) {
+    if (handR) handR->clear();
+    if (handL) handL->clear();
+    if (!willie) return {};
+    std::string key;
+    for (const char* hand : {"Weapon R", "Weapon L"}) {
+        UObject* const* wp = Field<UObject*>(willie, hand);
+        UObject* w = wp ? *wp : nullptr;
+        if (!w || IsGarbage(w)) continue;
+        const std::string cls = ObjectName(reinterpret_cast<UObject*>(ClassOf(w)));
+        if (std::string* seen = hand[7] == 'R' ? handR : handL) *seen = cls;
+        if (key.empty() && hsm::IsCryptsKeyClass(cls)) key = std::string(hand) + ": " + cls;
+    }
+    if (!key.empty()) return key;
+    FProperty* p = FindProperty(ClassOf(willie), "MyKey");   // only an object field: another type is not read as a pointer
+    if (!p || PropertyType(p) != "ObjectProperty" || PropertySize(p) != int32_t(sizeof(UObject*))) return {};
+    UObject* k = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(willie) + PropertyOffset(p));
+    return k && !IsGarbage(k) ? "MyKey: " + ObjectName(reinterpret_cast<UObject*>(ClassOf(k))) : std::string();
+}
+
+void Adapter::CryptsDoors(std::vector<UObject*>& out) {
+    out.clear();
+    UClass* door = FindClass("BP_Door_Gate_A_001_C");
+    if (!door) return;
+    for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
+        UObject* o = ObjectAt(i);
+        if (o && !IsDefaultObject(o) && !IsGarbage(o) && IsA(o, door)) out.push_back(o);
+    }
+}
+
 bool Adapter::ApplyScenario(const hsm::ScenarioWorld& w) {
     UObject* gi = GameInstance();
     if (!gi) return false;
@@ -1931,7 +1997,7 @@ bool Adapter::ApplyScenario(const hsm::ScenarioWorld& w) {
         GetBool(gi, "Free Mode Brawling", scenarioSaved_.brawling);
         if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { scenarioSaved_.hasLose = true; scenarioSaved_.lose = *l; }
     }
-    bool any = false;   // Carnage and Brawling set nothing here: the mod does them (match/hsm_scenarios.h EffectsOf)
+    bool any = false;   // Brawling and Blossfechten set nothing here: the mod does them (match/hsm_scenarios.h EffectsOf)
     if (w.loseCondition >= 0) if (uint8_t* l = Field<uint8_t>(gi, "Current Lose Condition")) { *l = uint8_t(w.loseCondition); any = true; }
     return any;
 }
@@ -1983,7 +2049,7 @@ UObject* Adapter::SpawnFenceBags(const FVector& at, double radius) {
     if (!cls || !statics_ || !world_) return nullptr;
     FTransform t; t.translation = at;
     Call begin(statics_, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* a = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!a) return nullptr;
@@ -2201,19 +2267,19 @@ void Adapter::SetFreeModeFoes(int foes) {
 
 bool Adapter::GamePaused() {
     Call c(statics_, "IsGamePaused");
-    c.set<UObject*>("WorldContextObject", world_);
+    c.set<UObject*>("WorldContextObject", worldctx::For(world_));
     return c.invoke() && c.get<bool>("ReturnValue");
 }
 
 void Adapter::SetGamePaused(bool paused) {
-    Call(statics_, "SetGamePaused").set<UObject*>("WorldContextObject", world_).set<bool>("bPaused", paused).invoke();
+    Call(statics_, "SetGamePaused").set<UObject*>("WorldContextObject", worldctx::For(world_)).set<bool>("bPaused", paused).invoke();
 }
 
 bool Adapter::ResetTimeDilation() {
     Call g(statics_, "GetGlobalTimeDilation");
-    g.set<UObject*>("WorldContextObject", world_);
+    g.set<UObject*>("WorldContextObject", worldctx::For(world_));
     if (!g.invoke() || g.get<float>("ReturnValue") == 1.f) return false;
-    Call(statics_, "SetGlobalTimeDilation").set<UObject*>("WorldContextObject", world_).set<float>("TimeDilation", 1.f).invoke();
+    Call(statics_, "SetGlobalTimeDilation").set<UObject*>("WorldContextObject", worldctx::For(world_)).set<float>("TimeDilation", 1.f).invoke();
     return true;
 }
 
@@ -2278,7 +2344,7 @@ void Adapter::QuitGame() {
     UObject* ksl = nullptr;
     if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
     Call q(ksl, "QuitGame");
-    q.set<UObject*>("WorldContextObject", world_).set<UObject*>("SpecificPlayer", nullptr).set<uint8_t>("QuitPreference", 0).set<bool>("bIgnorePlatformRestrictions", true);
+    q.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UObject*>("SpecificPlayer", nullptr).set<uint8_t>("QuitPreference", 0).set<bool>("bIgnorePlatformRestrictions", true);
     if (!q.invoke()) ExitProcess(0);
 }
 
@@ -2307,7 +2373,7 @@ UClass* Adapter::LoadClassBlocking(const std::string& path) {
 
 // What the stock pause screen's SETTINGS button does (decomp UI/UI_Pause_Eng.cpp LatentResume_Lf), minus removing the pause
 // screen: Create, 'Go Back To' = the pause class, AddToViewport(99). The settings screen's Back and Esc then make the
-// pause class (UI_DisplaySettings2.cpp:1508, 1718), which the Construct hook swallows in a mod_pause session match.
+// pause class (UI_DisplaySettings2.cpp:1508, 1718), which the Construct hook swallows in a session match.
 UObject* Adapter::OpenStockScreen(const std::string& objectPath, const std::string& goBackToPath) {
     UClass* cls = LoadClassBlocking(objectPath);
     UClass* back = goBackToPath.empty() ? nullptr : LoadClassBlocking(goBackToPath);
@@ -2316,7 +2382,7 @@ UObject* Adapter::OpenStockScreen(const std::string& objectPath, const std::stri
         return nullptr;
     }
     Call make(WidgetLibrary(), "Create");
-    make.set<UObject*>("WorldContextObject", world_).set<UClass*>("WidgetType", cls).set<UObject*>("OwningPlayer", nullptr);
+    make.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("WidgetType", cls).set<UObject*>("OwningPlayer", nullptr);
     UObject* w = make.valid() && make.invoke() ? make.get<UObject*>("ReturnValue") : nullptr;
     if (!w) { HSM_LOG("adapter: stock screen %s not opened: Create failed", objectPath.c_str()); return nullptr; }
     if (back) {
@@ -2343,7 +2409,7 @@ void Adapter::CloseScreen(UObject* w, int32_t index) {
 bool Adapter::PossessLocal(UObject* pawn) {
     if (!pawn) return false;
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) return false;
     Call(ctrl, "Possess").set<UObject*>("InPawn", pawn).invoke();
@@ -2356,7 +2422,7 @@ void Adapter::ConsoleCommand(const std::string& command) {
     UObject* ksl = nullptr;
     if (UObject* cls = FindObject("KismetSystemLibrary", "Class")) ksl = DefaultObject(reinterpret_cast<UClass*>(cls));
     FStringArgHolder cmd(command);
-    Call(ksl, "ExecuteConsoleCommand").set<UObject*>("WorldContextObject", world_).set("Command", cmd.arg).set<UObject*>("SpecificPlayer", nullptr).invoke();
+    Call(ksl, "ExecuteConsoleCommand").set<UObject*>("WorldContextObject", worldctx::For(world_)).set("Command", cmd.arg).set<UObject*>("SpecificPlayer", nullptr).invoke();
 }
 
 bool Adapter::IsDead(UObject* willie) { bool d = false; return GetBool(willie, "DED", d) && d; }
@@ -2475,7 +2541,7 @@ UObject* Adapter::SpawnActorAt(UClass* cls, const FVector& at, const FRotator& r
     if (!cls || !statics_ || !world_) return nullptr;
     FTransform t; t.translation = at;
     Call begin(statics_, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* a = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!a) return nullptr;
@@ -2483,6 +2549,69 @@ UObject* Adapter::SpawnActorAt(UClass* cls, const FVector& at, const FRotator& r
     finish.set<UObject*>("Actor", a).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
     a = finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
     if (!a) return nullptr;
+    Call move(a, "K2_SetActorLocationAndRotation");
+    move.set<FVector>("NewLocation", at).set<FRotator>("NewRotation", rot).set<bool>("bSweep", false).set<bool>("bTeleport", true);
+    move.invoke();
+    return a;
+}
+
+namespace {
+// One loot item's state is one passport struct on the actor; the save object keeps that struct type in an array (docs/PLAN_CRYPTS_COOP.md, PR D2).
+struct ItemFields { const char* actor; const char* save; };
+bool ItemFieldsFor(uint8_t kind, ItemFields& f) {
+    if (kind == hsm::crypt::kItemWeapon) { f = {"Weapon Passport", "Available Weapons 1H"}; return true; }
+    if (kind == hsm::crypt::kItemArmor) { f = {"Armor Passport", "Available Custom Armor"}; return true; }
+    return false;
+}
+}
+
+// The save array's header (data, num, max) points at the actor's own passport struct for the one SaveGameToSlot call, which only reads it,
+// and is reset to empty before anything else can run: the engine never owns or frees that memory.
+bool Adapter::ExportItemState(UObject* item, uint8_t kind, std::vector<uint8_t>& out) {
+    out.clear();
+    ItemFields f;
+    if (!item || !ItemFieldsFor(kind, f)) return false;
+    FProperty* src = FindProperty(ClassOf(item), f.actor);
+    if (!src || PropertyType(src) != "StructProperty") return false;
+    UObject* sg = NewSaveObject();
+    FProperty* arr = sg ? FindProperty(ClassOf(sg), f.save) : nullptr;
+    if (!arr || PropertyType(arr) != "ArrayProperty") return false;
+    FByteArray* head = reinterpret_cast<FByteArray*>(reinterpret_cast<uint8_t*>(sg) + PropertyOffset(arr));
+    if (head->data || head->num != 0) return false;                       // not the empty default: do not guess
+    head->data = reinterpret_cast<uint8_t*>(item) + PropertyOffset(src);
+    head->num = head->max = 1;
+    const bool saved = SaveToMemory(sg, out);
+    *head = FByteArray{};                                                  // the save object owns nothing again
+    std::string why;
+    if (!saved || !hsm::CheckPassportSave(out.data(), out.size(), &why, hsm::crypt::kMaxItemBytes)) {
+        if (saved) HSM_LOG("adapter: an item's save file fails the loadout check (%s)", why.c_str());
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+UObject* Adapter::SpawnItemFromState(const std::vector<uint8_t>& blob, uint8_t kind, UClass* cls, const FVector& at, const FRotator& rot, std::string& why) {
+    ItemFields f;
+    if (!cls || !statics_ || !world_ || !ItemFieldsFor(kind, f)) { why = "no world or class"; return nullptr; }
+    FProperty* dst = FindProperty(cls, f.actor);
+    if (!dst || PropertyType(dst) != "StructProperty") { why = "the class has no passport"; return nullptr; }
+    if (!hsm::CheckPassportSave(blob.data(), blob.size(), &why, hsm::crypt::kMaxItemBytes)) return nullptr;
+    UObject* sg = LoadPassportSave(blob);
+    FProperty* arr = sg ? FindProperty(ClassOf(sg), f.save) : nullptr;
+    const FByteArray* head = arr ? reinterpret_cast<const FByteArray*>(reinterpret_cast<uint8_t*>(sg) + PropertyOffset(arr)) : nullptr;
+    if (!head || !head->data || head->num != 1) { why = "the save file holds no item"; return nullptr; }
+    FTransform t; t.translation = at;
+    Call begin(statics_, "BeginDeferredActorSpawnFromClass");
+    begin.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("ActorClass", cls).set("SpawnTransform", t)
+         .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
+    UObject* a = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
+    if (!a) { why = "the spawn failed"; return nullptr; }
+    CopyPropertyValue(dst, reinterpret_cast<uint8_t*>(a) + PropertyOffset(dst), head->data);   // as the loot point's SetStructurePropertyByName, before FinishSpawningActor
+    Call finish(statics_, "FinishSpawningActor");
+    finish.set<UObject*>("Actor", a).set("SpawnTransform", t).set<uint8_t>("TransformScaleMethod", 1);
+    a = finish.invoke() ? finish.get<UObject*>("ReturnValue") : nullptr;
+    if (!a) { why = "finishing the spawn failed"; return nullptr; }
     Call move(a, "K2_SetActorLocationAndRotation");
     move.set<FVector>("NewLocation", at).set<FRotator>("NewRotation", rot).set<bool>("bSweep", false).set<bool>("bTeleport", true);
     move.invoke();
@@ -2511,13 +2640,30 @@ std::vector<UObject*> Adapter::LooseArmor() {
     return out;
 }
 
+// A quiver a fighter wears is a free-standing physics actor held to the pelvis by a constraint (Willie_BP.cpp Attach_Bolt_Quiver),
+// so it has no attach parent. Both ends of the link are tested: the quiver's MyWillie and that fighter's Attached Bolt Quiver.
+bool Adapter::WornGear(UObject* actor) {
+    if (!actor) return false;
+    Call parent(actor, "GetAttachParentActor");
+    if (parent.invoke() && parent.get<UObject*>("ReturnValue")) return true;
+    return QuiverWorn(actor);
+}
+
+bool Adapter::QuiverWorn(UObject* actor) {
+    if (!actor) return false;
+    UObject** const owner = Field<UObject*>(actor, "MyWillie");
+    if (!owner || !*owner || IsGarbage(*owner) || (destroyAware_ && BeingDestroyed(*owner))) return false;
+    UObject** const worn = Field<UObject*>(*owner, "Attached Bolt Quiver");
+    return worn && *worn == actor;
+}
+
 // ---------------------------------------------------------------- crossbows (experimental; the owner's crossbow test)
-// The game's crossbow is a Blueprint ranged weapon (BP_Weapon_Ranged_Weapon_CrossbowLight_C) that fires BP_Weapon_Ranged_Projectle_Bolt1_C
-// ("Projectle" is the game's spelling) from a bolt quiver the fighter wears ("Attached Bolt Quiver"). Names are from
-// tools/reflection_index.json; the class objects exist only while a loaded asset references them.
+// The game's crossbow is a Blueprint ranged weapon (BP_Weapon_Ranged_Weapon_Crossbow_Light_C) that fires BP_Weapon_Ranged_Projectle_Bolt_1_C
+// ("Projectle" is the game's spelling) from a bolt quiver the fighter wears ("Attached Bolt Quiver"). The names are the game's
+// (match/hsm_team_kit.h); the class objects exist only while a loaded asset references them.
 namespace {
-constexpr const char* kCrossbowClass = "BP_Weapon_Ranged_Weapon_CrossbowLight_C";
-constexpr const char* kBoltClass = "BP_Weapon_Ranged_Projectle_Bolt1_C";
+constexpr const char* kCrossbowClass = kCrossbowClassName;
+constexpr const char* kBoltClass = kCrossbowBoltClassName;
 constexpr int32_t kCrossbowStartBolts = 8;
 
 std::string Squash(const std::string& s) {      // the index's normal form: lowercase letters and digits only
@@ -2527,15 +2673,25 @@ std::string Squash(const std::string& s) {      // the index's normal form: lowe
 }
 
 // The class by its exact name, else the Blueprint class whose name matches ignoring case and underscores (the game's real
-// spelling may differ from the index's normalized one). Null: not loaded.
+// spelling may differ from the index's normalized one). Null: not loaded. A miss is a walk over every object (FindClass's
+// four kinds, then this one), so a name that missed is not looked for again for kLooseMissMs: Roulette and One Crossbow ask
+// for each fighter every tick, and a miss each time stalled whole frames.
+constexpr uint64_t kLooseMissMs = 1000;
 UClass* FindClassLoose(const char* exact) {
     if (UClass* c = FindClass(exact)) return c;
+    static std::map<std::string, uint64_t> missedAt;
+    const uint64_t now = GetTickCount64();
+    if (auto it = missedAt.find(exact); it != missedAt.end() && now - it->second < kLooseMissMs) return nullptr;
     const std::string want = Squash(exact);
     for (int32_t i = 0, n = ObjectCount(); i < n; ++i) {
         UObject* o = ObjectAt(i);
         if (!o || Squash(ObjectName(o)) != want) continue;
-        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).find("Class") != std::string::npos) return reinterpret_cast<UClass*>(o);
+        if (ObjectName(reinterpret_cast<UObject*>(ClassOf(o))).find("Class") != std::string::npos) {
+            missedAt.erase(exact);
+            return reinterpret_cast<UClass*>(o);
+        }
     }
+    missedAt[exact] = now;
     return nullptr;
 }
 }  // namespace
@@ -3023,7 +3179,7 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
     UObject* w = SpawnFighter(puppet);
     if (!w) { HSM_LOG("adapter: local player respawn failed: the new fighter did not spawn"); return nullptr; }
     Call pc(statics_, "GetPlayerController");
-    pc.set<UObject*>("WorldContextObject", world_).set<int32_t>("PlayerIndex", 0);
+    pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
     if (!ctrl) { HSM_LOG("adapter: local player respawn failed: no player controller (new body destroyed)"); DestroyActor(w); return nullptr; }
     Call(ctrl, "Possess").set<UObject*>("InPawn", w).invoke();
@@ -3072,7 +3228,7 @@ UObject* Adapter::SpawnBot(int rank, const FVector& at, double yawDeg, int teamI
     if (!gen || !willie) { HSM_LOG("adapter: bot generator not loaded"); return nullptr; }
     FTransform t; t.translation = at;
     Call begin(statics_, "BeginDeferredActorSpawnFromClass");
-    begin.set<UObject*>("WorldContextObject", world_).set<UClass*>("ActorClass", gen).set("SpawnTransform", t)
+    begin.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<UClass*>("ActorClass", gen).set("SpawnTransform", t)
          .set<uint8_t>("CollisionHandlingOverride", 1).set<UObject*>("Owner", nullptr).set<uint8_t>("TransformScaleMethod", 1);
     UObject* g = begin.invoke() ? begin.get<UObject*>("ReturnValue") : nullptr;
     if (!g) return nullptr;
@@ -3115,7 +3271,7 @@ void Adapter::SuppressStockScreens(bool on, bool ownerMatch, bool swallowPause) 
             g_suppressed.push_back({obj, ObjectIndex(obj)});
             return true;
         }
-        // mod_pause=1 in a session match: the mod's panel is the pause menu. Willie's Esc action is blocked, so a pause
+        // In a session match the mod's panel is the pause menu. Willie's Esc action is blocked, so a pause
         // screen only comes from a settings screen's Back or Esc ("Go Back To"): skipping its Construct means no pause, no
         // input-mode change and no cursor change; it is removed next tick and the panel shows again (session.cpp ModPauseTick).
         if (g_swallowPause && ObjectName(reinterpret_cast<UObject*>(ClassOf(obj))).find("UI_Pause") != std::string::npos) {

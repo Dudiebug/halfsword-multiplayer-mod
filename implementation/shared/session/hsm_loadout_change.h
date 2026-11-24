@@ -43,7 +43,7 @@ inline LoadoutVerdict CanChangeLoadout(Gear gear, MatchPhase phase, bool alive, 
 
 inline const char* LoadoutVerdictText(LoadoutVerdict v) {
     switch (v) {
-        case LoadoutVerdict::NotOwnGear: return "Own loadouts only: the host deals the gear in this match";
+        case LoadoutVerdict::NotOwnGear: return "Own kits only: the host deals the gear in this match";
         case LoadoutVerdict::InFight: return "Change loadout when you are out of the fight";
         case LoadoutVerdict::TooSoon: return "Wait a few seconds before changing your loadout again";
         case LoadoutVerdict::BadBlob: return "The host could not use that loadout";

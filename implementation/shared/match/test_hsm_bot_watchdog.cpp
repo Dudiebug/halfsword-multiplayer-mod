@@ -115,9 +115,62 @@ static void TestWaveStalled() {
     CHECK(WaveStalled(1000, 1000 + 300000, 1));
 }
 
+// The Pit (#3370): a bot that gave up 3 m or more under its spawn height for 3 s is out; one that yields on the floor, or
+// lies under it without giving up (the 20 m rule's case), is not.
+static void TestOutBelow() {
+    BotWatch w;
+    w.Arm(5, 100, 0);
+    for (uint32_t t = 1000; t <= 60000; t += 1000) CHECK(!w.OutBelow(5, 100 - 120, true, t));   // yielded, lying on the floor
+    CHECK(!w.OutBelow(5, 100 - 299, true, 61000) && !w.OutBelow(5, 100 - 299, true, 70000));   // just short of 3 m
+    CHECK(!w.OutBelow(5, 100 - 300, true, 71000));                                     // exactly 3 m under: the count starts
+    CHECK(!w.OutBelow(5, 100 - 600, true, 73999));
+    CHECK(w.OutBelow(5, 100 - 600, true, 74000));                                      // held for 3 s
+    BotWatch n;
+    n.Arm(6, 100, 0);
+    for (uint32_t t = 1000; t <= 30000; t += 1000) CHECK(!n.OutBelow(6, -1500, false, t));   // under it, not given up
+    // The count starts again when the flag goes off, or the bot climbs back up.
+    BotWatch r;
+    r.Arm(7, 0, 0);
+    CHECK(!r.OutBelow(7, -400, true, 1000));
+    CHECK(!r.OutBelow(7, -400, false, 3000));
+    CHECK(!r.OutBelow(7, -400, true, 3500) && !r.OutBelow(7, -400, true, 6499) && r.OutBelow(7, -400, true, 6500));
+    BotWatch c;
+    c.Arm(8, 0, 0);
+    CHECK(!c.OutBelow(8, -400, true, 1000));
+    CHECK(!c.OutBelow(8, -100, true, 3000));
+    CHECK(!c.OutBelow(8, -400, true, 3500) && c.OutBelow(8, -400, true, 6500));
+    // Measured from where it was armed; a bot never armed takes its first height.
+    BotWatch h;
+    h.Arm(9, 500, 0);
+    CHECK(!h.OutBelow(9, 250, true, 1000) && !h.OutBelow(9, 250, true, 9000));
+    CHECK(!h.OutBelow(9, 200, true, 10000) && h.OutBelow(9, 200, true, 13000));
+    BotWatch u;
+    CHECK(!u.OutBelow(4, 1000, true, 0) && !u.OutBelow(4, 1000, true, 10000) && !u.OutBelow(4, 701, true, 20000));
+    CHECK(!u.OutBelow(4, 700, true, 30000) && u.OutBelow(4, 700, true, 33000));
+    double z = 1;
+    CHECK(!u.SpawnZ(3, z) && z == 1 && u.SpawnZ(4, z) && z == 1000 && h.SpawnZ(9, z) && z == 500);
+    u.NoteLoseMatch(5);                                                                // a mark, but no height yet
+    z = 1;
+    CHECK(!u.SpawnZ(5, z) && z == 1);
+    // The lose volume's call counts as given up (a zombie never gets Give Up), until the entity is armed again.
+    BotWatch z1;
+    z1.Arm(10, 100, 0);
+    CHECK(!z1.OutBelow(10, -400, false, 1000));
+    z1.NoteLoseMatch(10);
+    CHECK(!z1.OutBelow(10, -400, false, 2000) && !z1.OutBelow(10, -400, false, 4999) && z1.OutBelow(10, -400, false, 5000));
+    CHECK(!z1.OutBelow(10, 50, false, 6000));                                          // on the floor: still not out
+    z1.Arm(10, 100, 7000);
+    CHECK(!z1.OutBelow(10, -400, false, 7000) && !z1.OutBelow(10, -400, false, 20000));   // a new bot in the entity
+    // Forget: a reused entity starts afresh.
+    w.Forget(5);
+    w.Arm(5, 100, 80000);
+    CHECK(!w.OutBelow(5, -500, true, 80000) && !w.OutBelow(5, -500, true, 82999) && w.OutBelow(5, -500, true, 83000));
+    CHECK(BotWatchLimits{}.outBelowCm == 300 && BotWatchLimits{}.outMs == 3000);
+}
+
 int main() {
     TestDefaultsAreConservative(); TestBelowFloor(); TestSpawnHeightIsWhereItWasArmed(); TestStill(); TestMovingResetsTheClock(); TestSmallDriftIsStillStuck();
-    TestPlayerNearbyMeansFighting(); TestForget(); TestEntitiesAreIndependent(); TestWrap(); TestWaveStalled();
+    TestPlayerNearbyMeansFighting(); TestForget(); TestEntitiesAreIndependent(); TestWrap(); TestWaveStalled(); TestOutBelow();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("ok");
     return 0;

@@ -3,6 +3,7 @@
 // them. Pure maths, game-independent and unit-tested; gameplay/spectate.cpp moves our CameraActor to the result.
 // Units are Unreal's: centimetres and degrees (yaw to the right is positive, pitch up is positive, +Z is up).
 #pragma once
+#include "match/hsm_notice_text.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -254,18 +255,20 @@ inline PhotoKey PhotoKeyAnswer(const PhotoWorld& w) {
     if (!w.ready) return PhotoKey::NotReady;
     return PhotoKey::Open;
 }
-// What the player is told when the key did nothing (empty: nothing).
-inline const char* PhotoKeyLine(PhotoKey a) {
+// What the player is told when the key did nothing: a notice of the catalogue (match/hsm_notice_text.h), or Id::Count for
+// nothing. A dead player is told too (the key does nothing for them, and the spectator's camera has its own keys); Busy
+// stays quiet, as the mod's own screen that has the keyboard (chat, the menu) took the key.
+inline notices::Id PhotoKeyNotice(PhotoKey a) {
     switch (a) {
-        case PhotoKey::NoMatch: return "Photo mode works during a match";
-        case PhotoKey::NotAllowed: return "The host turned free cameras off for this match, photo mode with them";
-        case PhotoKey::NotReady: return "Photo mode could not start here";
-        case PhotoKey::Dead: return "";    // a dead player has the spectator's camera and its F key
-        case PhotoKey::Busy: return "";    // the screen that has the keyboard got the key
-        case PhotoKey::Open: return "";    // the game's own screen says the rest
-        case PhotoKey::Close: return "";
+        case PhotoKey::NoMatch: return notices::Id::PhotoNoMatch;
+        case PhotoKey::NotAllowed: return notices::Id::PhotoNotAllowed;
+        case PhotoKey::NotReady: return notices::Id::PhotoNotReady;
+        case PhotoKey::Dead: return notices::Id::PhotoDead;
+        case PhotoKey::Busy: break;    // the screen that has the keyboard got the key, or photo mode only just closed
+        case PhotoKey::Open: break;    // the game's own screen says the rest
+        case PhotoKey::Close: break;
     }
-    return "";
+    return notices::Id::Count;
 }
 // While it is open: why the mod closes it, or Keep. One of the mod's screens never ends it (none opens over it).
 enum class PhotoEnd : uint8_t { Keep, MatchOver, Down, HostOff };

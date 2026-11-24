@@ -7,9 +7,12 @@ their own loadout. Delete the DLL to
 return to vanilla. (Earlier builds used `xinput1_4.dll`, which the game only loads on its first controller poll, so
 the mod never started on PCs without a gamepad; delete any old copy.)
 
-Supported build: Steam 26820056 only (exe key `0xA54B1DAD09712000`, the same exe as 26568321, 26615445, 26641406 and 26737211).
-On a game with another exe the mod logs "unsupported build" and does nothing. On 26568321, 26615445, 26641406 or 26737211, whose exe is
-the same, the multiplayer page says to update the game in Steam, and lobbies show which side is behind (Steam's build id, `session/hsm_game_build.h`).
+Supported build: the current Steam build. The build it was last checked on is the newest `tools/game_build_<N>.json`
+(exe key `0xA54B1DAD09712000`, CL-2980, shared by every Steam build since 26568321). On an exe it has not seen, the mod
+checks the game's code first, and logs "staying vanilla" and does nothing only if something it needs is missing
+(`ue/engine.cpp`). On a newer build it checks the game names it uses, and the multiplayer page says if the update changed
+any (`gameplay/game_check.cpp`). On an older Steam build the multiplayer page says to update the game in Steam, and
+lobbies show which side is behind (Steam's build id, `session/hsm_game_build.h`).
 
 ## Build and checks (Linux, no MSVC)
 
@@ -74,14 +77,15 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **Team colours row** (lobby key `hsm_kit`: 0 Off, 1 Tabard, 2 Full kit): what takes the team colour on each machine's own
   copies of the fighters; blades stay steel. Every team format has it (Teams, Team Duel, Riot, Juggernaut).
 - **Spectator camera:** a dead player orbits the fighter watched with the mouse, zooms with the wheel, and presses F for a free
-  camera (W A S D, Space, Ctrl, Shift). The host's Free camera row (lobby key `hsm_fcam`) turns it off.
+  camera (W A S D, Space, Ctrl, Shift). Always on since 0.9.0: the Free camera row is gone, the lobby key `hsm_fcam` and
+  the match info byte are written as on, and an older host's off is ignored.
 - **Photo mode in a match** (#2624): as the game ships it, photo mode pauses the world, which stalls a session. In a
   session match the mod switches that pause off on your fighter's photo mode (and its gallery's) and lets the key
-  through while your fighter lives, a match runs and the host's Free camera row is on. The fight goes on around you:
+  through while your fighter lives and a match runs. The fight goes on around you:
   your fighter's own input is held, the mod's HUD and name tags are hidden and its hotkeys are quiet until photo mode
-  closes. It closes by its own key and buttons, and when you die, the match ends or the host turns the row off.
-- **CHANGE LOADOUT** in the Esc menu: edit your kit in the game's menu, then bring it into the match out of the fight. Own
-  gear only (not in Riot or Juggernaut); one change per 5 s.
+  closes. It closes by its own key and buttons, and when you die or the match ends.
+- **CHANGE LOADOUT** in the pause menu: edit your kit in the game's menu, then bring it into the match out of the fight.
+  Own gear only (not in Riot or Juggernaut); one change per 5 s.
 - **Crossbows row** (lobby key `hsm_xbow`: Off, 1, 2, Half, All; experimental): random players spawn with a crossbow,
   redrawn every round. The Knight and the Juggernauts never get one.
 
@@ -91,17 +95,20 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **Forest** (the Ambush arena, `/Game/Maps/Arenas/Map_Arena_Ambush_Test`) is an arena like the others, offered to every
   arena format. Capture the flag was removed (protocol rev 43): a lobby that still says Format 10 plays Teams.
 - **Tag** (11; `hsm_fuse` fuse seconds), **Infection** (12), **Crossbow TDM** (13), **Tournament** (14; `hsm_trnr` rounds
-  per fight) and **Pit Bridge Duels** (15, the Pit only; `hsm_pbwin` wins to take the match). Tournament and Pit Bridge
-  Duels bench everyone not fighting.
+  per fight) and **Pit Bridge Duels** (15, the Pit only; `hsm_pbwin` wins to take the match; no lobby card since 0.9.0, a
+  lobby of an older host that still runs it is shown as Carnage). Tournament and Pit Bridge Duels bench everyone not
+  fighting.
 - **Progression:** a next-fight vote in the Tavern (ProgressionVote 66; `/fight`, `/fight <n>`; `progression_vote=0`
   turns the automatic vote off) and everyone in their own career kit.
-- **Scenario row** (`hsm_scen`): Standard, Fenced ring (Pit, Yard, Cellar), Carnage, Brawling.
+- **Scenario** (`hsm_scen`): no row since 0.9.0. Brawling is the Brawl card and Blossfechten (4) is a mode card of its own
+  (Last man standing's rounds, swords only, no armour; Alley, Cellar, East Tower, Lords Hall, Pit, Slums and Yard). The Fenced
+  ring (1) and Carnage (2, bots join) are gone; a lobby of an older host that still has one reads Standard.
 - **UPDATE NOW:** downloads `dwmapi.dll` and `dwmapi.dll.sha256` of the newer public release, checks SHA-256, size and the PE
   exports, and swaps the DLL (the old one is kept as `dwmapi.dll.old` until the next start).
 - **Modpack:** `~mods/<pack>/HSMPack.ini` (tools/make_pack_manifest.py, docs/MODPACK.md); lobby keys `hsm_pack`,
   `hsm_packv`, `hsm_packh`; `[mod] pack=<name>|off`. A player without the host's pack is told what to install.
 - With `role=server`, `server_format` also takes `teamduel`, `riot`, `juggernaut`, `tag`, `infection`,
-  `crossbowtdm`, `tournament`, `pitbridge`, `chaos`, `onecrossbow`, `roulette` and `hideseek`.
+  `crossbowtdm`, `tournament`, `chaos`, `onecrossbow`, `roulette` and `hideseek`.
 
 
 ## New in 0.7.0 (pre-release)
@@ -175,9 +182,9 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **Hold G to give up** in FFA, team matches and Duel, downed or not: your fighter dies, and the last player who hit
   you within 60 s gets the kill (in a Duel, the round too); with none, nobody scores. The hold shows as a bar in the
   middle of the screen. Holding G with nothing to give up shows why.
-- **Brawl** (a mode card next to the formats): free-for-all with bare fists. Every fighter spawns and respawns with no
+- **Brawl** (a mode card next to the formats): Carnage with bare fists. Every fighter spawns and respawns with no
   armour and no weapons (tier 0), in the host's lobby, whatever loadout they brought; the Gear and Tier rows are hidden
-  and nobody's saved loadout is touched. Scoring, limits and respawns are free-for-all's. Weapons the level has lying
+  and nobody's saved loadout is touched. Scoring, limits and respawns are Carnage's. Weapons the level has lying
   around can still be picked up.
 - **Kick, ban and votekick:** the host types `/kick <name>` or `/ban <name> [30m|2h|7d|perm]` in the chat
   (`/players`, `/bans`, `/unban`); players can `/votekick <name>`, and on a `role=server` host also `/voteban <name>`
@@ -186,7 +193,7 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **Leavers:** a fighter who quits mid-fight counts as dead; in a Duel the one left standing takes the rounds.
   A rejoin within the reservation keeps its team; a reused FFA slot starts at 0.
 - **Spectating** follows only living fighters with a follow camera behind and above their head (Left/Right switch);
-  the pause menu shows the cursor so Continue works without Alt+Tab, and Esc no longer stacks a second pause menu.
+  the pause menu shows the cursor so RESUME works without Alt+Tab, and Esc no longer stacks a second pause menu.
 - **Map picker** offers only the arenas (the Abyss only for Zombies); **PROGRESSION (CO-OP)** card takes everyone to
   the Tavern hub; the lobby columns scroll.
 - **Bug reports from the game:** `/bug <what went wrong>` in the match or lobby chat (`/report` works too), **REPORT A
@@ -200,8 +207,8 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
   their team colour; "<name> joined/left" lines show too. The chat keeps the 120-byte cap and the one-line-a-second
   rate limit of the match chat, and the lines are still in the match chat after the travel. `/bug`, `/sendlog` and
   `/nolog` work in the box as in the match chat.
-- **HELP IMPROVE THE MOD** toggle on the multiplayer page (`help_improve=1` under `[net]`, default off); see
-  *In-game bug reports*.
+- **HELP IMPROVE THE MOD** toggle under SETTINGS on the multiplayer page and under MOD SETTINGS in the pause menu
+  (`help_improve=1` under `[net]`, default off); see *In-game bug reports*.
 - **Flails:** the stand-in's chain no longer drags on the floor and is moved along with teleports.
 - **Saves:** a stale or empty backup never overwrites a newer save (it is renamed `HSMMP_stale_*`); leftover backups
   are checked at every game start, even with `role=off`.
@@ -310,9 +317,8 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
    value is logged once as ignored and Steam is used. Players join through Steam lobbies.
 4. Logs go to `HSMMod.log` in the same folder.
    **UE4SS:** nothing to install. `dwmapi.dll` carries a UE4SS build (`third_party/ue4ss`) and unpacks it to `ue4ss/` next
-   to the exe, keeping any file already in that folder. An older accepted build in `ue4ss/` gets its DLL swapped. A
-   build the mod doesn't know gets a popup at start: Yes swaps it, No keeps and loads it, and online play refuses it.
-   `ue4ss_keep` under `[mod]` holds the hash you said no to; remove it to be asked again. An old-layout `UE4SS.dll` or
+   to the exe, keeping any file already in that folder. Any other `UE4SS.dll` in `ue4ss/` (older, newer
+   or your own) is replaced with the bundled 4.0.0, with no question; your mods and settings there stay. An old-layout `UE4SS.dll` or
    a 2.x `xinput1_3.dll` gets `.off` on its name, and mods in an old `Mods` folder beside the exe don't move. The
    console and cheat manager mods are off in the unpacked `mods.txt`. The log says `ue4ss: bundled build installed`
    or `replaced another build`. HSMMod
@@ -334,12 +340,12 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 
 ## Matches, teams and bots (Phase 3)
 
-- **Lobby settings** (Multiplayer panel, host edits, everyone sees them): mode (Free-for-all, 2 teams, 3 teams,
+- **Lobby settings** (Multiplayer panel, host edits, everyone sees them): mode (Carnage, 2 teams, 3 teams,
   Players vs bots), score limit, optional time limit, friendly fire (off by default). Each player picks a team
   ("My team"); the host clicks a player's row to move them, and "Auto-balance teams" clears the host's moves.
   Players without a pick go to the smallest team when the match starts.
 - **Match flow** (host-run, in any fight level except the Tavern hub, with 2+ players or Players vs bots):
-  5 s countdown, then one point per kill for the killer's team (or the player in Free-for-all). A teamkill or
+  5 s countdown, then one point per kill for the killer's team (or the player in Carnage). A teamkill or
   suicide costs a point; deaths with nobody to blame cost nothing. The first to the score limit wins; with a time
   limit the leader wins when time runs out, and a tie goes to sudden death. A 10 s results screen is followed by an
   in-place rematch (everyone respawns, no level reload).
@@ -352,7 +358,7 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
   With friendly fire off, weapon hits between teammates are dropped before the game computes damage.
 - **Respawns** after the respawn delay at the team's side of the map: the level's Willie spawn points are split
   into one contiguous arc per team, and each respawn picks the point farthest from living enemies.
-- **Team colours**: armor fabric is tinted red / blue / green / gold on every machine; Free-for-all keeps
+- **Team colours**: armor fabric is tinted red / blue / green / gold on every machine; Carnage keeps
   everyone's own colours.
 - **Players vs bots**: the host's stock foes become synced bots, and each cleared wave brings one more bot of a
   higher rank (up to 10 at a time) from the game's own random-character generator. Bots never score; the bots win
@@ -384,12 +390,18 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
 - **One world for everyone**: stock fighters that are not part of the match are removed on every machine, and the
   stock death/win screens are blocked during a session match (no slow motion, no input lock, and no Progression
   career reset on death).
-- **Pause menu**: in an owner-sync match (the default), Esc still opens the game's pause menu and it works, but the
-  fight does not pause. A paused game stopped your fighter on every other screen, and a host's pause sent the clients
-  back to the main menu after 7 s.
+- **Pause menu**: in a session match, Esc opens the mod's own pause menu (MENU) and the fight does not pause. A paused
+  game stopped your fighter on every other screen, and a host's pause sent the clients back to the main menu after 7 s.
+  Its buttons are RESUME, PLAYERS (the PLAYERS and NETWORK tabs), LOADOUT (the trial, only with `loadout_trial=1`),
+  CHANGE LOADOUT, GAME SETTINGS, MOD SETTINGS (HELP IMPROVE THE MOD, MENU LOOK, voice), REPORT A BUG, BACK TO LOBBY (the
+  host's ends the match for everyone; a guest's takes only that guest back to the lobby; dimmed during a Crypts run,
+  with no lobby, and for a guest in a Progression fight), LEAVE TO MAIN MENU and QUIT TO DESKTOP. The three leaving
+  buttons ask for a second click within 4 s. A dimmed button says why when clicked. The old `mod_pause` key is gone
+  (it logs "config: mod_pause is gone; the mod's pause menu is always used" once).
 - **Dropped weapons and armour are cleared** in an owner-sync match, so a long fight does not pile them up: in Duel at
-  each new round, in Free-for-all and teams at each rematch, and in Survival and Zombies a minute after each piece was
-  dropped (standing next to it does not keep it). Level props (barrels, stools) and armour the level already had stay.
+  each new round, in Carnage and teams at each rematch (and, with the lobby's Clear ground row, every 30 s to 10 min
+  in a match, Every 2 min to start with), and in Survival and Zombies a minute after each piece was dropped (standing
+  next to it does not keep it). Level props (barrels, stools) and armour the level already had stay.
 - **Survival loot**: about 2 s after a bot falls it lets go of its weapons and sheds two of its armour pieces for the
   players to pick up; its body goes 45 s later with what it still wore. The break between waves is a minute of
   looting; hold **G** to vote to skip it, and the next wave starts once every player has voted. Zombies keep their
@@ -405,13 +417,45 @@ Chat commands, run by the session host (the console of a `role=server` host take
 - `/players`: the slots and names. `/kick <who>`: out now; they can join again straight away.
 - `/ban <who> [30m|2h|7d|perm]`: out and kept out (default permanent); written to `HSMMod.bans`. `/unban <who>`,
   `/bans`. `<who>` is `#slot`, a name or a unique start of one.
-- `/votekick <who>` (`/vk`), `/yes`, `/no`, in every hosted session (the Esc menu's VOTE KICK, YES and NO send the
-  same). A passed vote (more than half of the players besides the target) keeps the player out for 15 minutes.
-- `role=server` only: `/voteban <who>` (`/vb`, or VOTE BAN in the Esc menu). It passes with two thirds of the players
+- `/votekick <who>` (`/vk`), `/yes`, `/no`, in every hosted session (VOTE KICK on the pause menu's PLAYERS tab and the
+  vote bar's YES and NO send the same). A passed vote (more than half of the players besides the target) keeps the
+  player out for 15 minutes.
+- `role=server` only: `/voteban <who>` (`/vb`, or VOTE BAN on the PLAYERS tab). It passes with two thirds of the players
   besides the target (rounded up) and bans the player for 7 days (in `HSMMod.bans`; `/unban` lifts it early).
 - `server_admins=` (Steam IDs) may kick and ban from the chat; `votekick=0` (or `server_votekick=0`) turns votes off.
 
 A kicked or banned player goes back to the main menu, and the multiplayer page opens with the reason in red.
+
+## The lobby page, notices and the menu look
+
+The host sets the match on tabs, in this order: **MODE**, **MAP**, **RULES**, **MODS** and **CLASSES** (only in a lobby
+that uses classes). RULES has a sub-tab for each part of the mode (**MATCH**, **COMBAT**, **TEAMS**, **GEAR**,
+**WORLD**), and a mode shows only the sub-tabs it has rules for. Duel and Last man standing are one mode card (Duel
+with exactly two players, Last man standing with any other number; `match/hsm_mode_merge.h`). A rule with named choices
+opens a dropdown list; a number steps with - and + or takes a typed value. START MATCH stays on screen: when it is
+dimmed, the reason sits under it and a click shows the same reason as a notice. Notices (a refused click, a Crypts
+reminder, a new host) stack at the top right of the screen and fade on their own. The text comes from
+`match/hsm_notice_text.h`; the look rules (type scale, the dimmed look of a disabled control) are in `docs/UI_STYLE.md`.
+
+A new lobby starts from these defaults: MODS has Mods allowed Vanilla, **Classes** Off (Off, On or Unrestricted, a
+dropdown that works with every Mods allowed value; the CLASSES tab and YOUR CLASS show only while it is On or
+Unrestricted), Block HS Enhancer On and Official builds only On. In RULES (WORLD), **Clear ground** is Every 2 min (Every 30 s,
+1, 2, 3, 5 or 10 min; there is no Off) and **Time of day** is Midday (Morning, Midday, Evening, Night; "Map's own" is
+gone, and an older host's reads as Midday). Clear ground travels in seconds as the lobby key `hsm_clrs`; the old
+whole-minute `hsm_clr` still goes out (30 s to 2 min as 2, 3 min as 3, 5 and 10 min as 5) and an older host's Off reads
+as Never. The Classes row travels as `hsm_mcls` (0, 1, 2); `hsm_mrule` stays the Mods allowed digit, and an older
+build's 5 and 6 read as Anything with Classes On and Unrestricted. Neither changes the wire protocol.
+
+Three keys in `HSMMod.ini` set how it looks and where the chat opens:
+
+| Key | Default | What it does |
+|---|---|---|
+| `ui_style` | `classic` | `classic` (dark panels, the default), `game` (the game's own art and typefaces) or `dark` (that art shaded dark). MENU LOOK under SETTINGS or MOD SETTINGS writes it; it applies from the next start (`ui_style_moved=1` marks the one-time move of the default from `game` to `classic`). |
+| `hud_opacity` | `1` | How solid the match HUD, the chat and the fighter card are, `0.3` to `1`. |
+| `chat_key` | `enter` | The key that opens the chat: `enter`, `t`, `y` or `u`. |
+
+`mod_pause` is gone: the mod's own pause menu is always used in a session match, and a leftover `mod_pause=` line logs
+"config: mod_pause is gone; the mod's pause menu is always used" once.
 
 ## Lobby mod rules
 
@@ -422,12 +466,17 @@ player's mods. Nothing outside the game folder is looked at, and no list judges 
 - `mod_rule=vanilla` (default): no mods. UE4SS alone is fine; its mods and its stock console mods aren't. `maps`: map
   paks (a pak with a map that replaces no stock file and has nothing under `/Game/Mods`) and proxy DLLs. `bundle`:
   exactly the files of the lobby's modpack (`pack=`). `custom`: the list in `mod_allow=`, or, when it is empty, whatever
-  the host runs ("Same as host"). `anything` and `classes`: every mod. An `HSMMod.ini` that already has a `mod_rule=`
-  line keeps it.
+  the host runs ("Same as host"). `anything`: every mod. An `HSMMod.ini` that already has a `mod_rule=` line keeps it.
+  The older words `mod_rule=classes` and `mod_rule=unrestricted` still mean `anything` with that Classes setting.
+- `mod_classes=off` (default) | `on` | `unrestricted` is the Classes row, with any `mod_rule`: `on` gives each player a
+  class held to the class power limit, `unrestricted` has no limit (expect glitches). The launcher's Unrestricted
+  warning reads `mod_rule` alone, so it sees `unrestricted` only with `mod_rule=anything` (written as
+  `mod_rule=unrestricted`).
 - `block_hse=1` (default) refuses anyone running HS Enhancer unlocked, in every mode; `0` lets them in. A joiner never
   has to remove it: its keys are held there (below). A host who runs it itself always allows it, and the lobby list says so. (Older builds wrote `mod_cheats=block|allow`; it is still read.)
-- `mod_official=1` takes official HSMMod releases only (checked against the release's `dwmapi.dll` by the update
-  check). A self-built HSMMod cannot turn it on.
+- `mod_official=1` (default) takes official HSMMod releases only (checked against the release's `dwmapi.dll` by the
+  update check); `0` takes any build. A self-built HSMMod cannot turn it on. An `HSMMod.ini` that already says
+  `mod_official=0` keeps it.
 - `mod_allow=A.pak, B*1a2b3c4d, +Needed.pak`: the custom list. `*` pins the first 8 hex digits of the file's SHA-256,
   `+` makes a mod required.
 
@@ -499,9 +548,10 @@ full releases; a full release only full releases (`session/hsm_version.h`). `upd
 (`kModVersion` is "0.7.0" for every 0.7.0 prerelease): tag the commit before building a release.
 
 **Help improve the mod.** `help_improve=1` under `[net]` (default `0`, off) is the switch behind the **HELP IMPROVE THE
-MOD: ON/OFF** button at the top of the multiplayer page and on the Esc menu in a session fight; the button writes the
-key back to `HSMMod.ini`, and nothing else in the file changes. The first MULTIPLAYER click asks once (YES turns it on,
-NO THANKS or Esc leaves it off; `help_improve_asked=1` records the answer). It is never turned on without that answer.
+MOD: ON/OFF** button under SETTINGS on the multiplayer page and under MOD SETTINGS in the pause menu; the button
+writes the key back to `HSMMod.ini`, and nothing else in the file changes. The first MULTIPLAYER click asks once (YES
+turns it on, NO THANKS or Esc leaves it off; `help_improve_asked=1` records the answer). It is never turned on without
+that answer.
 When on, your HSMMod log (same redaction as above: Steam IDs, IPs and your Windows user name removed; player names
 stay) is sent to
 the bug report server whenever someone in your lobby files a report, without waiting for you to type `/sendlog`. And if
@@ -603,12 +653,6 @@ writes `HSMTest.json` next to the exe. Check it from the repo root:
   are claimed by the attacker and replayed by the victim's machine through the game's own damage code, and gore,
   grabs, dropped weapons and level props are synced. `sync_mode` in `HSMMod.ini` and `-hsmsync` are ignored (the log
   says so once). It needs the script VM hook: without it multiplayer refuses to start a session.
-- Time of day follows the map; there is no way to change it yet (public issue #2). A lobby setting is planned. It is
-  not done because the part that needs the game's own data is unknown here: which game object decides a fight level's
-  lighting (the save and the game instance carry a `Day Time` / `Current Day Time` byte of `Enum_DayTime`, but the
-  reflection index lists no enum values and no owning class, and the maps also ship per-map morning, evening and night
-  lighting classes), and whether setting it before the level loads changes anything. It needs a look at the game's
-  Blueprints before any code is written.
 - Loadouts with no fabric armor show no team colour (adding a tabard is not done yet).
 - Progression co-op: a fight's end does not yet add the opponent who beat you to your nemeses or give a Lord's Tourney its
   Baron armour, and a contest's next round reloads the arena, so what lies on the ground does not carry over.

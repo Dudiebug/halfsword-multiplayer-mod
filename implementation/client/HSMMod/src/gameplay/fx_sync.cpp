@@ -1,5 +1,6 @@
 #include "gameplay/fx_sync.h"
 #include "combat/hsm_paintgate.h"
+#include "match/hsm_bite.h"
 #include "match/hsm_strip.h"
 #include "log.h"
 #include "ue/script_hook.h"
@@ -31,6 +32,7 @@ constexpr double kStripWaitMaxMs = 6000.0;
 constexpr size_t kHeldMax = 64;           // armour changes held at once; beyond it they apply at once, as before
 constexpr uint32_t kPaintLogFirst = 20;
 constexpr double kWoundRetryMs = 1500.0;   // longest a wound waits for its stand-in's Box Vertex Paint gate to open
+constexpr double kCrossbowOwedMs = 2000.0;   // #4118: longest a crossbow report waits for its stand-in to hold a crossbow again
 constexpr size_t kWoundRetryMax = 16;      // wounds waiting at once; beyond it they are dropped (they are cosmetic)
 
 bool ChangesArmor(const PaintFxMsg& m) {
@@ -132,6 +134,9 @@ bool FxSync::Start(Adapter& adapter, StandIns& standIns, Env env) {
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Equip Armor", {}, [this](ScriptCall& c) { OnEquipArmor(c); });   // was Pick Up Armor before build 26568321 (Willie_BP.cpp:4623)
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Remove Armor", {}, [this](ScriptCall& c) { OnRemoveArmor(c); });
     n += HookScript(kHookOwner, "Willie_BP_C", "Remove Armor", [this](ScriptCall& c) { return StripKeepsArmor(c); });   // the Stripping row Off
+    const int bite = HookScript(kHookOwner, "BP_Constraint_Bite_C", "ReceiveBeginPlay", [this](ScriptCall& c) { return StopBite(c); });   // the Biting row Off
+    n += bite;
+    if (!bite) HSM_LOG("fx: the bite constraint (BP_Constraint_Bite_C ReceiveBeginPlay) is not loaded yet: the Biting row takes hold once it resolves on a level load");
     n += ObserveScript(kHookOwner, "Willie_BP_C", "Strip Armor From Bone", [this](ScriptCall& c) { OnStripBegin(c); },
                        [this](ScriptCall&) { OnStripEnd(); });
     active_ = ScriptHookActive();
@@ -411,6 +416,29 @@ bool FxSync::StripKeepsArmor(ScriptCall& c) {
     return true;
 }
 
+// The Biting row Off: a bite a player's fighter simulated here makes on a fighter is stopped as its BP_Constraint_Bite_C begins play
+// (Willie_BP Timeline_6 spawns it once the head's trace hit; BP_Constraint_Bite.cpp). Its BeginPlay, which ties the biter's
+// head to the bitten bone, does not run, and its Bitten Component is cleared: the game's own Tick then finds it gone and runs
+// Event Stop Bite, as when bitten food is used up, which clears the biter's Biting and Bitten and destroys the actor. Nothing
+// is held and no bite damage is dealt. Bites on food and the bots' own bites run as usual. Under host physics the host plays
+// every player's keys on its copy of them, so their bites start, and are stopped, there.
+bool FxSync::StopBite(ScriptCall& c) {
+    if (!active_ || !env_.biteOff || !env_.playerFighter || !env_.biteOff()) return false;
+    UObject* self = c.self();
+    UObject* const* bitter = self ? Field<UObject*>(self, "Bitter Actor") : nullptr;
+    UObject* const* bitten = self ? Field<UObject*>(self, "Bitten Actor") : nullptr;
+    UObject** component = self ? Field<UObject*>(self, "Bitten Component") : nullptr;
+    if (!bitter || !bitten || !component) return false;
+    const bool player = *bitter && env_.playerFighter(*bitter);
+    const bool fighter = *bitten && adapter_->IsWillie(*bitten);
+    if (!BlockBite(true, player, fighter)) return false;
+    *component = nullptr;
+    if (n_.biteOff++ < kLogFirst)
+        HSM_LOG("fx: Biting is Off in this lobby: e%u's bite on another fighter was stopped (no hold, no damage) (%llu)",
+                unsigned(env_.ownedEntity(*bitter)), static_cast<unsigned long long>(n_.biteOff));
+    return true;
+}
+
 void FxSync::OnStripEnd() {
     stripping_ = nullptr;
     if (stripFallen_) SetBool(stripFallen_, "Fallen", false);
@@ -524,7 +552,7 @@ void FxSync::Refuse(const char* why, const PaintFxMsg& m, uint64_t& counter) {
 }
 
 void FxSync::Forget(uint8_t entity) {
-    if (entity <= kMaxWillies) crossbows_[entity] = {};
+    if (entity <= kMaxWillies) { crossbows_[entity] = {}; crossbowOwed_[entity] = {}; }
     limiter_.Forget(entity);
     rxLimiter_.Forget(entity);
     gate_.Forget(entity);
@@ -578,6 +606,7 @@ void FxSync::Apply(const PaintFxMsg& m) {
 
 void FxSync::Tick() {
     CrossbowTick();
+    CrossbowOwedTick();
     if (!woundRetry_.empty()) {
         std::vector<Held> todo;
         todo.swap(woundRetry_);
@@ -681,7 +710,10 @@ void FxSync::CrossbowTick() {
             if (!x || !ReadCrossbow(x, now)) { w = {}; continue; }
             if (x != w.crossbow || ObjectIndex(x) != w.index) { w = {x, ObjectIndex(x), now}; continue; }
             const auto action = combat::CrossbowEdge(w.state, now);
+            const bool lost = combat::CrossbowBoltLost(w.state, now);
             w.state = now;
+            if (action == combat::CrossbowAction::Bolt) LogBolt(true, e, hand, w);
+            else if (lost) LogBolt(false, e, hand, w);
             if (!action || !limiter_.Allow(e, FxKind::Crossbow, SteadyNowMs())) continue;
             PaintFxMsg m;
             m.entity = e;
@@ -695,6 +727,92 @@ void FxSync::CrossbowTick() {
                         hand == 0 ? "right" : "left");
         }
     }
+}
+
+// #3440: the owner's bolt fell through its crossbow when reloading (Bolt Loaded back to 0, string still drawn, no shot).
+// Each seat and each loss logs the bolt (Loaded Ammo, kept from the seat: it may be gone from the field by the loss) and
+// the crossbow's rails: whether they simulate and how they answer the Weapon and BodyCollision channels, which the prop
+// lease policy changes on weapons it holds. The seat and the loss lines diff into what changed. At most 24 per level.
+namespace {
+constexpr uint8_t kWeaponCh = 14, kBodyCollisionCh = 16;   // ECollisionChannel GameTraceChannel1 / 3 (hit_probe.cpp)
+int ChannelResponse(UObject* comp, uint8_t channel) {
+    Call c(comp, "GetCollisionResponseToChannel");
+    c.set<uint8_t>("Channel", channel);
+    return c.invoke() ? c.get<uint8_t>("ReturnValue") : -1;
+}
+int Simulates(UObject* comp) {
+    Call c(comp, "IsSimulatingPhysics");
+    c.setName("BoneName", FName{});
+    return c.invoke() ? (c.get<bool>("ReturnValue") ? 1 : 0) : -1;
+}
+bool Where(UObject* comp, FVector& at) {
+    Call c(comp, "K2_GetComponentLocation");
+    if (!c.invoke()) return false;
+    at = c.get<FVector>("ReturnValue");
+    return true;
+}
+UObject* RootOf(UObject* actor) {
+    Call r(actor, "K2_GetRootComponent");
+    return r.invoke() ? r.get<UObject*>("ReturnValue") : nullptr;
+}
+}  // namespace
+
+void FxSync::LogBolt(bool seated, uint8_t e, int hand, CrossbowWatch& w) {
+    const double now = SteadyNowMs();
+    if (seated) {
+        UObject** ammo = Field<UObject*>(w.crossbow, "Loaded Ammo");
+        w.bolt = ammo && *ammo && !IsGarbage(*ammo) ? *ammo : nullptr;
+        w.boltIndex = w.bolt ? ObjectIndex(w.bolt) : -1;
+        w.seatedMs = now;
+    }
+    if (++boltLogs_ > kBoltLogsPerLevel) return;
+    std::string bolt = w.bolt ? "the bolt is gone" : "no bolt read";
+    if (w.bolt && adapter_->StillValid(w.bolt, w.boltIndex)) {
+        UObject* root = RootOf(w.bolt);
+        Call parent(w.bolt, "GetAttachParentActor");
+        UObject* by = parent.invoke() ? parent.get<UObject*>("ReturnValue") : nullptr;
+        const FObjArray* holders = Field<FObjArray>(w.bolt, "Parent Actors");
+        int gravity = -1;
+        double cm = -1;
+        if (root) {
+            Call g(root, "IsGravityEnabled");
+            if (g.invoke()) gravity = g.get<bool>("ReturnValue") ? 1 : 0;
+            UObject* xroot = RootOf(w.crossbow);
+            FVector a{}, b{};
+            if (xroot && Where(root, a) && Where(xroot, b))
+                cm = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+        }
+        char buf[320];
+        std::snprintf(buf, sizeof buf, "%s sim %d gravity %d weapon %d bodycoll %d, attached to %s, holders %d, %.0f cm from the crossbow",
+                      ObjectName(w.bolt).c_str(), root ? Simulates(root) : -1, gravity, root ? ChannelResponse(root, kWeaponCh) : -1,
+                      root ? ChannelResponse(root, kBodyCollisionCh) : -1, by ? ObjectName(by).c_str() : "nothing",
+                      holders ? int(holders->num) : -1, cm);
+        bolt = buf;
+    }
+    std::string rails;
+    if (!primitiveClass_) primitiveClass_ = FindClass("PrimitiveComponent");
+    if (primitiveClass_) {
+        Call comps(w.crossbow, "K2_GetComponentsByClass");
+        comps.set<UClass*>("ComponentClass", primitiveClass_);
+        if (comps.invoke()) {
+            void* value = comps.paramPtr("ReturnValue");
+            const FObjArray* arr = static_cast<const FObjArray*>(value);
+            if (arr && arr->data && arr->num > 0 && arr->num <= 256)
+                for (int32_t i = 0; i < arr->num; ++i) {
+                    UObject* c = arr->data[i];
+                    const std::string n = c ? ObjectName(c) : std::string();
+                    if (n.rfind("CM_Test_Border", 0) != 0 && n.rfind("CM_Test_Holder", 0) != 0 && n.rfind("CM_Test_Peg", 0) != 0) continue;
+                    char part[96];
+                    std::snprintf(part, sizeof part, "%s%s s%d w%d b%d", rails.empty() ? "" : ", ", n.c_str() + 8, Simulates(c),
+                                  ChannelResponse(c, kWeaponCh), ChannelResponse(c, kBodyCollisionCh));
+                    rails += part;
+                }
+            if (FProperty* prop = FindProperty(comps.function(), "ReturnValue"); prop && value) ClearPropertyValue(prop, value);
+        }
+    }
+    HSM_LOG("fx: crossbow bolt %s on e%u (%s hand, %.0f ms after the seat): %s | rails: %s", seated ? "seated" : "lost without a shot",
+            e, hand == 0 ? "right" : "left", seated ? 0.0 : now - w.seatedMs, bolt.c_str(),
+            rails.empty() ? "none found" : rails.c_str());
 }
 
 // A bolt of the stand-in's own on its crossbow: the bolt Event Add Bolt left waiting, else a new one spawned out of the
@@ -730,19 +848,66 @@ bool FxSync::LoadBolt(UObject* crossbow, UObject* standIn) {
     return false;
 }
 
+UObject* FxSync::StandInCrossbow(UObject* standIn, int hand) {
+    UObject* x = CrossbowIn(standIn, hand);
+    return x ? x : CrossbowIn(standIn, 1 - hand);
+}
+
 // Everyone else: the stand-in's crossbow in the owner's hand (or the other one) runs what it needs to match the owner.
 void FxSync::ApplyCrossbow(const PaintFxMsg& m, UObject* standIn) {
     const int hand = m.bone == "hand_l" ? 1 : 0;
-    UObject* x = CrossbowIn(standIn, hand);
-    if (!x) x = CrossbowIn(standIn, 1 - hand);
+    const auto action = combat::CrossbowAction(m.bodyPart);
+    UObject* x = StandInCrossbow(standIn, hand);
     combat::CrossbowState s;
     if (!x || !ReadCrossbow(x, s)) {
-        ++n_.skipped;
-        if (n_.skipped <= 3) HSM_LOG("fx: #%u crossbow on e%u: its stand-in holds no crossbow", m.seq, m.entity);
+        // #4118: the owner dropped and took back its crossbow, and this report came in between. Kept as the state it
+        // leaves, for when the stand-in holds the crossbow again (CrossbowOwedTick), instead of being lost.
+        if (m.entity <= kMaxWillies)
+            crossbowOwed_[m.entity] = {true, hand, m.seq, SteadyNowMs(), combat::CrossbowAfter(action)};
+        if (++crossbowKept_ <= kLogFirst)
+            HSM_LOG("fx: #%u crossbow %s on e%u: its stand-in holds no crossbow, kept for when it holds one again (%llu)", m.seq,
+                    combat::CrossbowActionName(action), m.entity, static_cast<unsigned long long>(crossbowKept_));
         return;
     }
-    const auto action = combat::CrossbowAction(m.bodyPart);
+    if (m.entity <= kMaxWillies) crossbowOwed_[m.entity].owed = false;   // this report is newer than the kept one
     const std::vector<combat::CrossbowStep> steps = combat::PlanCrossbowReplay(s, action);
+    const bool ok = RunCrossbowSteps(x, standIn, steps);
+    ++n_.crossbowReplayed;
+    if (!ok) { Count(false, m); return; }
+    ++n_.applied;
+    if (n_.crossbowReplayed <= kLogFirst * 3)
+        HSM_LOG("fx: replayed #%u crossbow %s on the stand-in of e%u (%zu step(s), was string %d bolt %d)", m.seq,
+                combat::CrossbowActionName(action), m.entity, steps.size(), int(s.string), int(s.bolt));
+}
+
+// #4118: a kept report's stand-in holds its crossbow again: brought to the owner's state, un-drawn if it has to be.
+void FxSync::CrossbowOwedTick() {
+    if (!active_) return;
+    const double now = SteadyNowMs();
+    for (uint8_t e = 1; e <= kMaxWillies; ++e) {
+        CrossbowOwed& o = crossbowOwed_[e];
+        if (!o.owed) continue;
+        if (now - o.since > kCrossbowOwedMs) {
+            o.owed = false;
+            if (++crossbowOwedLapsed_ <= kLogFirst)
+                HSM_LOG("fx: kept crossbow #%u on e%u dropped: its stand-in held no crossbow for %.0f ms", o.seq, e, now - o.since);
+            continue;
+        }
+        UObject* standIn = standIns_->ActorOf(e);
+        UObject* x = standIn ? StandInCrossbow(standIn, o.hand) : nullptr;
+        combat::CrossbowState s;
+        if (!x || !ReadCrossbow(x, s)) continue;
+        o.owed = false;
+        const std::vector<combat::CrossbowStep> steps = combat::PlanCrossbowReconcile(s, o.target);
+        const bool ok = steps.empty() || RunCrossbowSteps(x, standIn, steps);
+        if (++crossbowCaughtUp_ <= kLogFirst * 3)
+            HSM_LOG("fx: kept crossbow #%u on e%u caught up %.0f ms later: %zu step(s), was string %d bolt %d, now the owner's string %d%s%s",
+                    o.seq, e, now - o.since, steps.size(), int(s.string), int(s.bolt), int(o.target.string),
+                    o.target.boltKnown ? (o.target.bolt ? " bolt 1" : " bolt 0") : "", ok ? "" : " (a step failed)");
+    }
+}
+
+bool FxSync::RunCrossbowSteps(UObject* x, UObject* standIn, const std::vector<combat::CrossbowStep>& steps) {
     ScriptHookBypass bypass;   // our own calls
     bool ok = true;
     for (combat::CrossbowStep step : steps) {
@@ -758,12 +923,7 @@ void FxSync::ApplyCrossbow(const PaintFxMsg& m, UObject* standIn) {
             case combat::CrossbowStep::Shoot: ok &= Call(x, "Event Shoot").invoke(); break;
         }
     }
-    ++n_.crossbowReplayed;
-    if (!ok) { Count(false, m); return; }
-    ++n_.applied;
-    if (n_.crossbowReplayed <= kLogFirst * 3)
-        HSM_LOG("fx: replayed #%u crossbow %s on the stand-in of e%u (%zu step(s), was string %d bolt %d)", m.seq,
-                combat::CrossbowActionName(action), m.entity, steps.size(), int(s.string), int(s.bolt));
+    return ok;
 }
 
 // The owner's cue on the stand-in's own Voice Audio, then its Helmet Muffle Voice (the low-pass a helmet puts on it).

@@ -7,6 +7,7 @@
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
+#define CHECKF(c, i) do { if (!(c)) { std::printf("FAIL %s:%d: %s (case %d)\n", __FILE__, __LINE__, #c, int(i)); ++g_fail; } } while (0)
 
 using namespace hsm;
 
@@ -79,6 +80,14 @@ static void TestTierCap() {
     for (int t = 0; t <= 8; ++t) CHECK(CappedCryptsTier(uint8_t(t), kCryptsTierTop) == t);
     CHECK(CappedCryptsTier(3, 0) == 0);
     CHECK(CryptsTierCapFrom(-1) == 0 && CryptsTierCapFrom(0) == 0 && CryptsTierCapFrom(1) == 1 && CryptsTierCapFrom(8) == 8 && CryptsTierCapFrom(99) == 8);
+    // A run's cap (#3350): the lobby's Dungeon tier row, unless this machine's crypts_max_tier is set (>= 0).
+    CHECK(CryptsRunCap(-1, 1) == 1 && CryptsRunCap(-1, 0) == 0 && CryptsRunCap(-1, 5) == 5 && CryptsRunCap(-1, 8) == 8 && CryptsRunCap(-1, 200) == 8);
+    CHECK(CryptsRunCap(0, 5) == 0 && CryptsRunCap(8, 1) == 8 && CryptsRunCap(3, 8) == 3 && CryptsRunCap(99, 0) == 8);
+    for (int t = 0; t <= 8; ++t) {                                                       // the row's stepper: a ring of nine
+        CHECK(StepCryptsTier(uint8_t(t), 1) == (t + 1) % 9 && StepCryptsTier(uint8_t(t), -1) == (t + 8) % 9);
+        CHECK(StepCryptsTier(StepCryptsTier(uint8_t(t), 1), -1) == t);
+    }
+    CHECK(StepCryptsTier(9, 1) == 0 && StepCryptsTier(200, 1) == 0 && StepCryptsTier(200, -1) == 7);   // a stale value steps from the game's own
 }
 
 // Each player's gathered kit is dealt when everybody starts (the battle, a rematch) and kept for every life after.
@@ -95,41 +104,37 @@ static void TestRegear() {
     }
 }
 
-// The battle's maps: the format's, and the Abyss for the formats that take large levels; Duel and Tournament stay in the arenas.
+// The maps: the Crypts modes are played on the Crypts map and nowhere else, every other mode is refused it, and the fight after a
+// Crypt Royale run is on the Fight map (the Abyss for the formats that take large levels; Duel and Tournament stay in the arenas).
 static void TestMaps() {
-    const size_t abyss = MapIndex("Abyss"), alley = MapIndex("Alley"), tavern = MapIndex("Tavern");
-    CHECK(abyss < MapCount() && alley < MapCount() && tavern < MapCount() && kMaps[abyss].abyss);
+    const size_t abyss = MapIndex("Abyss"), alley = MapIndex("Alley"), tavern = MapIndex("Tavern"), crypts = CryptsMapIndex();
+    CHECK(abyss < MapCount() && alley < MapCount() && tavern < MapCount() && crypts < MapCount() && kMaps[abyss].abyss && kMaps[crypts].crypts);
     for (uint8_t i = 0; i < kFormatCount; ++i) {
         const Format f = Format(i);
         for (size_t m = 0; m < MapCount(); ++m) {
             for (Gear g : {Gear::Own, Gear::RandomTier, Gear::Mirror, Gear::Fists, Gear::HostKit})
-                CHECK(MapAllowsMatch(kMaps[m], f, g) == MapAllowsFormat(kMaps[m], f));   // only Crypts widens a format's maps
-            if (MapAllowsFormat(kMaps[m], f)) CHECK(MapAllowsMatch(kMaps[m], f, Gear::Crypts));
+                CHECK(MapAllowsMatch(kMaps[m], f, g) == MapAllowsFormat(kMaps[m], f));   // the other gears keep the format's maps
+            CHECK(!kMaps[m].crypts || !MapAllowsFormat(kMaps[m], f));                    // the Crypts map is no format's
+            CHECK(MapAllowsMatch(kMaps[m], f, Gear::Crypts) == (kMaps[m].crypts && CryptsBattleFormat(f)));   // Crypts gear: that map alone
+            CHECK(!MapAllowsMatch(kMaps[m], f, Gear::Crypts, true));                     // never the Blossfechten card
         }
     }
-    for (Format f : {Format::LastManStanding, Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::TeamDuel, Format::PlayersVsBots}) {
-        CHECK(!MapAllowsFormat(kMaps[abyss], f) && MapAllowsMatch(kMaps[abyss], f, Gear::Crypts));
-        CHECK(CryptsDefaultMap(f) == abyss);                                             // the Crypts card's first pick
-        CHECK(EffectiveMap(f, Gear::Crypts, "/Game/Maps/Abyss/Abyss_Map_Open_EA") == abyss);
-        CHECK(EffectiveMap(f, Gear::Own, "/Game/Maps/Abyss/Abyss_Map_Open_EA") != abyss);   // the same pick without Crypts gear: not the Abyss
-        CHECK(EffectiveMap(f, Gear::Crypts, kMaps[alley].path) == alley);                // the host may pick an arena
-        CHECK(EffectiveMap(f, Gear::Crypts, kMaps[tavern].path) != tavern);              // never a menu-only map
+    for (Format f : {Format::LastManStanding, Format::Duel, Format::FreeForAll, Format::TwoTeams, Format::ThreeTeams, Format::TeamDuel, Format::PlayersVsBots}) {   // Duel is the Last man standing card with two players (0.9.0)
+        CHECK(!MapAllowsFormat(kMaps[abyss], f) && !MapAllowsMatch(kMaps[abyss], f, Gear::Crypts) && MapAllowsMatch(kMaps[crypts], f, Gear::Crypts));
+        CHECK(MapAllowsFight(kMaps[abyss], f) && MapAllowsFight(kMaps[alley], f) && !MapAllowsFight(kMaps[crypts], f) && !kMaps[tavern].pick);
+        CHECK(CryptsDefaultMap(f) == abyss);                                             // the Fight map row's default
+        CHECK(EffectiveFightMap(f, "") == abyss && EffectiveFightMap(f, "/Game/Maps/Abyss/Abyss_Map_Open_EA") == abyss);
+        CHECK(EffectiveFightMap(f, kMaps[alley].path) == alley);                         // the host may pick an arena
+        CHECK(EffectiveFightMap(f, kMaps[tavern].path) == abyss && EffectiveFightMap(f, kMaps[crypts].path) == abyss);   // never a menu-only map or the Crypts
+        CHECK(EffectiveMap(f, Gear::Crypts, "") == crypts && EffectiveMap(f, Gear::Own, "/Game/Maps/Abyss/Abyss_Map_Open_EA") != abyss);
     }
-    for (Format f : {Format::Duel, Format::Tournament}) {
-        CHECK(!MapAllowsMatch(kMaps[abyss], f, Gear::Crypts));
+    for (Format f : {Format::Tournament}) {
+        CHECK(!MapAllowsFight(kMaps[abyss], f));
         CHECK(CryptsDefaultMap(f) < MapCount() && kMaps[CryptsDefaultMap(f)].arena && kMaps[CryptsDefaultMap(f)].pick);
-        CHECK(EffectiveMap(f, Gear::Crypts, "/Game/Maps/Abyss/Abyss_Map_Open_EA") != abyss);
+        CHECK(EffectiveFightMap(f, "/Game/Maps/Abyss/Abyss_Map_Open_EA") != abyss);
     }
-    CHECK(!MapAllowsMatch(kMaps[abyss], Format::Tag, Gear::Crypts));                     // not a battle format: no widening
-    CHECK(NextMap(alley, Format::LastManStanding, Gear::Crypts) == NextMap(alley, Format::LastManStanding));
-    // Cycling with Crypts gear reaches the Abyss; it never stops on a map the picker hides.
-    bool sawAbyss = false; size_t at = 0;
-    for (size_t step = 0; step < 2 * MapCount(); ++step) {
-        at = NextMap(at, Format::FreeForAll, Gear::Crypts);
-        CHECK(at < MapCount() && kMaps[at].pick);
-        sawAbyss = sawAbyss || at == abyss;
-    }
-    CHECK(sawAbyss);
+    CHECK(!MapAllowsMatch(kMaps[crypts], Format::Tag, Gear::Crypts) && !MapAllowsMatch(kMaps[crypts], Format::Zombies, Gear::Crypts));   // not battle formats
+    CHECK(NextMap(alley, Format::LastManStanding, Gear::Crypts) == crypts && NextMap(crypts, Format::LastManStanding, Gear::Crypts) == crypts);
 }
 
 static void TestGatherFlow() {
@@ -184,6 +189,48 @@ static void TestGatherEarlyAndTimeout() {
     // The gather time is clamped.
     g.Start(0, 10, {0}); CHECK(g.LeftMs(0) == uint32_t(kGatherMinS) * 1000u);
     g.Start(0, 60000, {0}); CHECK(g.LeftMs(0) == uint32_t(kGatherMaxS) * 1000u);
+}
+
+// Together: the gather knows it; CollectNow ends the gathering early (every player down), then the last kits as at the clock.
+static void TestGatherTogether() {
+    CryptsGather g;
+    CHECK(!g.together() && !g.CollectNow(0) && g.phase() == GatherPhase::Off);           // no gather: nothing to collect
+    g.Start(1000, 600, {0, 1}, true);
+    CHECK(g.together() && g.phase() == GatherPhase::Gathering);
+    g.OnNote(0, GatherNote::InCrypts); g.OnNote(1, GatherNote::InCrypts);
+    g.OnKit(0); CHECK(g.HasKit(0) && g.Update(5000) == GatherStep::None);
+    CHECK(g.CollectNow(60000) && g.phase() == GatherPhase::Collecting && g.LeftMs(60000) == kGatherCollectMs);
+    CHECK(!g.CollectNow(61000) && g.LeftMs(61000) == kGatherCollectMs - 1000);           // once: the collect clock does not restart
+    CHECK(g.Update(61000) == GatherStep::None);                                          // the last kits: none yet
+    CHECK(g.TakesKit(1)); g.OnKit(1); CHECK(g.Update(62000) == GatherStep::None);        // 1's final kit; 0 has not sent one since
+    g.OnKit(0); CHECK(g.Update(63000) == GatherStep::Battle && !g.Active() && !g.CollectNow(63000));
+    // Timed out: the battle at kGatherCollectMs after CollectNow.
+    g.Start(0, 600, {0}, true); g.OnNote(0, GatherNote::InCrypts);
+    CHECK(g.CollectNow(1000) && g.Update(1000 + kGatherCollectMs - 1) == GatherStep::None && g.Update(1000 + kGatherCollectMs) == GatherStep::Battle);
+    // The next gather is Apart unless it says so.
+    g.Start(0, 600, {0}); CHECK(!g.together());
+    g.Start(0, 600, {0}, true); g.Stop(); CHECK(!g.CollectNow(1));
+    GatherClock c; c.Set(0, GatherPhase::Gathering, 60000, 3, true); CHECK(c.together() && c.Active());
+    c.Set(0, GatherPhase::Gathering, 60000, 4); CHECK(!c.together());
+    c.Set(0, GatherPhase::Gathering, 60000, 5, true); c.Clear(); CHECK(!c.together() && !c.Active());
+}
+
+// Together's match: Players vs Bots in Crypts gear, whatever the battle's format; the rest of the lobby goes on.
+static void TestTogetherRunConfig() {
+    for (Format f : {Format::FreeForAll, Format::TwoTeams, Format::Duel, Format::Tournament, Format::LastManStanding, Format::PlayersVsBots}) {
+        MatchConfig c; c.format = f; c.gear = Gear::Crypts; c.scoreLimit = 7; c.timeLimitS = 600; c.friendlyFire = true;
+        c.shuffle = TeamShuffle::EachMatch; c.tier = 3; c.weapons = 5; c.gatherS = 900; c.cryptsTogether = true; c.respawnDelayS = 9;
+        const MatchConfig t = TogetherRunConfig(c);
+        CHECKF(t.format == Format::PlayersVsBots && t.gear == Gear::Crypts && t.scoreLimit == DefaultScoreLimit(Format::PlayersVsBots), int(f));
+        CHECKF(t.timeLimitS == 0 && !t.friendlyFire && t.shuffle == TeamShuffle::Off, int(f));
+        CHECKF(t.tier == 3 && t.weapons == 5 && t.gatherS == 900 && t.cryptsTogether && t.respawnDelayS == 9, int(f));
+        g_cryptsCoopOffered = true;                                                      // Together is held back until [mod] crypts_coop=1
+        const MatchConfig s = Sanitize(t);                                               // as StartMatch deals it
+        g_cryptsCoopOffered = false;
+        CHECKF(s.format == Format::PlayersVsBots && s.gear == Gear::Crypts && s.cryptsTogether && s.timeLimitS == 0 && !s.friendlyFire, int(f));
+    }
+    MatchConfig own; own.gear = Gear::Own;                                               // any gear: the run is Crypts
+    CHECK(TogetherRunConfig(own).gear == Gear::Crypts);
 }
 
 static void TestGatherJoinLeave() {
@@ -249,6 +296,8 @@ int main() {
     TestMaps();
     TestGatherFlow();
     TestGatherEarlyAndTimeout();
+    TestGatherTogether();
+    TestTogetherRunConfig();
     TestGatherJoinLeave();
     TestClock();
     TestSnapshots();

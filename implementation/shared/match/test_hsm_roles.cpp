@@ -281,7 +281,7 @@ static void TestChaosScreens() {
     // the lobby: the match's own rows; two players are enough (Riot and Juggernaut still need three)
     MatchConfig c; c.format = Format::Chaos;
     const std::vector<LobbyRow> rows = SettingsFor(Sanitize(c));
-    CHECK(rows == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Crossbows, LobbyRow::Sync}));
+    CHECK(rows == std::vector<LobbyRow>({LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Crossbows, LobbyRow::Sync}));
     CHECK(!ModeAvailable(Format::Chaos, 1).ok && ModeAvailable(Format::Chaos, 2).ok && !ModeAvailable(Format::Riot, 2).ok && ModeAvailable(Format::Riot, 3).ok && !ModeAvailable(Format::Juggernaut, 2).ok);
     CHECK(FormatName(Format::Chaos) == "Chaos" && std::string(FormatBlurb(Format::Chaos)).find("every round") != std::string::npos);
     Format f = Format::FreeForAll;

@@ -281,6 +281,26 @@ static void TestDownPill() {
     for (const BoardRow& r : s.board.rows) if (r.name == "Host") CHECK(r.dead && !r.down);
 }
 
+// A guest back in the lobby while the match runs (rev 49, session/hsm_bench.h) is shown so, not as dead and not as down.
+static void TestBoardLobbyRow() {
+    MatchInfo m = Ffa();
+    m.fighters[1].alive = false; m.fighters[1].lobby = true;                              // Ann: the host sends the benched as not alive
+    m.fighters[2].alive = true; m.fighters[2].down = true; m.fighters[2].lobby = true;    // Bo: even a body the board thinks down and alive
+    LocalHud tab = Me(); tab.tab = true;
+    HudScene s = BuildHudScene(m, tab, kAt);
+    int seen = 0;
+    for (const BoardRow& r : s.board.rows) {
+        if (r.name == "Ann" || r.name == "Bo") { ++seen; CHECK(r.tag == "LOBBY" && !r.dead && !r.down); CHECK(Same(r.ink, kIron)); }
+        else CHECK(r.tag != "LOBBY");
+    }
+    CHECK(seen == 2);
+    m.fighters[1].lobby = false; m.fighters[2].lobby = false;                             // the same fighters, not benched
+    for (const BoardRow& r : BuildHudScene(m, tab, kAt).board.rows) {
+        if (r.name == "Ann") CHECK(r.tag != "LOBBY" && r.dead);
+        if (r.name == "Bo") CHECK(r.tag != "LOBBY" && r.down && !Same(r.ink, kIron));
+    }
+}
+
 // The countdown before a fight between players says how to give up, under the digits, in their look.
 static void TestDuelCountdownHint() {
     MatchInfo d = Duel(); d.phase = uint8_t(MatchPhase::Countdown); d.timeLeftMs = 3000;
@@ -374,12 +394,17 @@ static void TestBannerTracker() {
     b.Observe(sv, 1, 300); CHECK(b.shot().atMs == 200);
 
     // Fired by the session (a regear), newest wins either way.
-    b.Fire("NEW GEAR", "TIER 3", kWarn, 400);
-    CHECK(b.shot().text == "NEW GEAR" && b.shot().sub == "TIER 3" && b.shot().atMs == 400);
+    b.NewGear(7, 400);                                                   // the tier by its name, not "TIER 7"
+    CHECK(b.shot().text == "NEW GEAR" && b.shot().sub == "KNIGHT" && b.shot().atMs == 400 && Same(b.shot().color, kWarn));
     sv.scores = {{kHumanTeam, 5}}; b.Observe(sv, 1, 450);
     CHECK(b.shot().text == "WAVE CLEARED" && b.shot().atMs == 450);
-    b.Fire("NEW GEAR", "TIER 3", kWarn, 460);
-    CHECK(b.shot().text == "NEW GEAR");
+    b.NewGear(3, 460);
+    CHECK(b.shot().text == "NEW GEAR" && b.shot().sub == "MILITIA" && b.shot().atMs == 460);
+    b.NewGear(0, 470); CHECK(b.shot().sub == "BEGGAR");
+    b.NewGear(6, 480); CHECK(b.shot().sub == "MAN-AT-ARMS");
+    b.NewGear(250, 490); CHECK(b.shot().sub == "LORD");                  // past the last tier is the last name
+    b.NewGear(7, 500); CHECK(!Has(b.shot().sub, "TIER") && !Has(b.shot().sub, "7"));
+    b.Fire("NEW GEAR", "", kWarn, 510); CHECK(b.shot().sub.empty());     // Fire still takes any words
 
     // A new match config (another format) and a reset only record.
     BannerTracker r; MatchInfo a = Ffa(); a.phase = uint8_t(MatchPhase::Countdown); r.Observe(a, 1, 100);
@@ -415,17 +440,17 @@ static void TestDeadPanel() {
     CHECK(s.dead.title == "RESPAWNING" && !s.dead.bar);
     m = Ffa(); for (FighterEntry& f : m.fighters) if (f.entity != 1) f.alive = false;
     CHECK(BuildHudScene(m, l, 2000).dead.hint.empty());               // nobody else standing to watch
-    {   // the free camera key: offered while watching someone, "follow <name>" while flying, silent when the host turned it off
+    {   // the free camera key: offered while watching someone, "follow <name>" while flying; always on since 0.9.0 (an older host that sent it off is ignored)
         LocalHud w = l; w.watching = 2;
         std::string name = NameOf(Ffa(), 2);
         CHECK(Has(BuildHudScene(Ffa(), w, 2000).dead.hint, "watch another fighter") && Has(BuildHudScene(Ffa(), w, 2000).dead.hint, "F: free camera"));
         w.flying = true;
         CHECK(BuildHudScene(Ffa(), w, 2000).dead.hint == "F: follow " + name);
         w.watching = 0; CHECK(BuildHudScene(Ffa(), w, 2000).dead.hint == "F: follow");
-        MatchInfo off = Ffa(); off.freeCam = 0; w.watching = 2;
-        CHECK(!Has(BuildHudScene(off, w, 2000).dead.hint, "F:") && Has(BuildHudScene(off, w, 2000).dead.hint, "watch another fighter"));
-        w.flying = false; CHECK(!Has(BuildHudScene(off, w, 2000).dead.hint, "F:"));
-        w.flying = true; CHECK(!Has(BuildHudScene(off, w, 2000).dead.hint, "F: follow"));
+        MatchInfo off = Ffa(); off.freeCam = 0; w.watching = 2;   // pinned on purpose: the flag is carried but no longer gates the key
+        w.flying = false;
+        CHECK(Has(BuildHudScene(off, w, 2000).dead.hint, "F: free camera") && Has(BuildHudScene(off, w, 2000).dead.hint, "watch another fighter"));
+        w.flying = true; CHECK(BuildHudScene(off, w, 2000).dead.hint == "F: follow " + name);
         LocalHud nobody = l; nobody.watching = 0; CHECK(!Has(BuildHudScene(Ffa(), nobody, 2000).dead.hint, "F: free"));   // nothing watched: no camera to free
     }
 
@@ -540,8 +565,12 @@ static void TestFeedRows() {
     CHECK(r.spans.size() == 4 && r.spans[2].text == "Bo" && Same(r.spans[2].color, TeamInk(0)) && Same(r.spans[3].color, kIron));
     r = MakeFeedRow(t, {0, 2, 32}, 1);
     CHECK(!r.mine && r.spans.size() == 2 && r.spans[1].text == " drew the round (no hits)" && Same(r.spans[1].color, kIron));
-    for (Kill k : {Kill{2, 1, 0}, Kill{4, 2, 1}, Kill{3, 3, 2}, Kill{2, 3, 4}, Kill{0, 4, 0}, Kill{9, 8, 0}, Kill{3, 2, 16}, Kill{3, 2, 32 | 8}, Kill{0, 2, 16}})
-        CHECK(Joined(MakeFeedRow(t, k, 1)) == KillLine(t, k));       // the same words as the text HUD
+    struct Said { Kill k; const char* words; };                           // the words of every kind of kill, as the feed reads them
+    for (const Said& w : {Said{{2, 1, 0}, "Ann killed Host"}, Said{{4, 2, 1}, "Cy killed teammate Ann"}, Said{{3, 3, 2}, "Bo killed themselves"},
+                          Said{{2, 3, 4}, "Bo died"}, Said{{0, 4, 0}, "Cy died"}, Said{{9, 8, 0}, "#9 killed #8"},
+                          Said{{3, 2, 16}, "Ann and Bo drew the round (both down)"}, Said{{3, 2, 32 | 8}, "Ann and Bo drew the round (no hits)"},
+                          Said{{0, 2, 16}, "Ann drew the round (both down)"}, Said{{0, 2, 8}, "Ann gave up"}, Said{{2, 2, 8 | 2}, "Ann gave up"}})
+        CHECK(Joined(MakeFeedRow(t, w.k, 1)) == w.words);
 
     r = MakeFeedRow(Ffa(), {2, 3, 0}, 1);                              // no teams: bone names
     CHECK(r.spans.size() == 3 && Same(r.spans[0].color, kBone) && Same(r.spans[2].color, kBone));
@@ -591,11 +620,19 @@ static void TestBoard() {
     CHECK(!BuildHudScene(Ffa(), l, kAt).board.visible);               // Tab not held
     l.tab = true;
     HudScene s = BuildHudScene(Ffa(), l, kAt);
-    CHECK(s.board.visible && Has(s.board.title, "FREE-FOR-ALL") && Has(s.board.title, "FIRST TO 5") && Has(s.board.title, "YARD"));
+    CHECK(s.board.visible && Has(s.board.title, "CARNAGE") && Has(s.board.title, "FIRST TO 5") && Has(s.board.title, "YARD"));
     CHECK(s.board.footer.empty());
+    CHECK(s.board.heads.player == "PLAYER" && s.board.heads.kills == "KILLS" && s.board.heads.deaths == "DEATHS");   // whole words, not K / D
+    CHECK(s.board.heads.score == "SCORE" && s.board.heads.ping == "PING");
+    CHECK(s.board.legendDown == "DOWN: can still get up" && s.board.legendDead == "DEAD: out of the fight");
+    { LocalHud off = Me(1); const Board nb = BuildHudScene(Ffa(), off, kAt).board;                                      // no Tab: no board, no words
+      CHECK(!nb.visible && nb.heads.kills.empty() && nb.legendDown.empty() && nb.legendDead.empty());
+      MatchInfo res = Ffa(); res.phase = uint8_t(MatchPhase::Results); res.winner = 2; res.timeLeftMs = 5000;           // the results board has them too
+      const Board rb = BuildHudScene(res, off, kAt).board;
+      CHECK(rb.visible && rb.results && rb.heads.deaths == "DEATHS" && rb.legendDead == "DEAD: out of the fight"); }
     { MatchInfo br = Ffa(); br.gear = uint8_t(Gear::Fists);           // Brawl: the same board under its own name
       HudScene bs = BuildHudScene(br, l, kAt);
-      CHECK(Has(bs.board.title, "BRAWL") && !Has(bs.board.title, "FREE-FOR-ALL") && Has(bs.board.title, "FIRST TO 5") && bs.board.rows.size() == 3); }
+      CHECK(Has(bs.board.title, "BRAWL") && !Has(bs.board.title, "CARNAGE") && Has(bs.board.title, "FIRST TO 5") && bs.board.rows.size() == 3); }
     CHECK(s.board.rows.size() == 3);
     if (s.board.rows.size() == 3) {
         CHECK(s.board.rows[0].name == "Ann" && s.board.rows[0].score == 4 && s.board.rows[0].pingMs == 80 && !s.board.rows[0].local);
@@ -705,7 +742,44 @@ static void TestHiddenForTheCamera() {
     CHECK(!LocalHud{}.hidden);
 }
 
+// The Crypts key marker is a chip of its own, beside the info line; it shows only while this machine gathers and holds a key.
+static void TestKeyChip() {
+    const std::string ahead = "Locked door 42 m, ahead-left", none = "Locked room not found yet";
+    ChipView c = KeyChip(true, true, ahead);
+    CHECK(c.visible && c.label == "KEY" && c.text == ahead && Same(c.labelColor, kWarn) && Same(c.color, kBone));
+    c = KeyChip(true, true, none); CHECK(c.visible && c.text == none);
+    CHECK(!KeyChip(false, true, ahead).visible && !KeyChip(true, false, ahead).visible && !KeyChip(true, true, "").visible);
+    CHECK(KeyChip(false, false, "").text.empty() && KeyChip(false, true, ahead).label.empty());                    // hidden: nothing to draw
+    CHECK(!HudScene{}.chip.visible && !BuildHudScene(Ffa(), Me(1), kAt).chip.visible);                              // the match HUD never sets it
+}
+
+// The info line is at most 80 characters, and the key fact (the pairing) stays when a Tournament line is too long.
+static void TestInfoCap() {
+    MatchInfo pit;
+    pit.format = uint8_t(Format::PitBridgeDuel); pit.scoreLimit = 5; pit.phase = uint8_t(MatchPhase::Live); pit.round = 4; pit.queueOrder = {2, 1, 3}; pit.streak = 7;
+    const std::string bo(14, 'B'), ann(14, 'A'), cy(14, 'C');
+    pit.fighters = {{1, kNoTeam, 0, 0, ann, 0, true}, {2, kNoTeam, 0, 0, bo, 0, true}, {3, kNoTeam, 0, 0, cy, 0, false}};
+    CHECK(QueueLine(pit).size() > 80);                                                                           // the full line is too long ...
+    HudScene s = BuildHudScene(pit, Me(1), kAt);
+    CHECK(s.info.visible && s.info.text == bo + ": 7 in a row   " + bo + " vs " + ann);                          // ... so what is next goes
+    CHECK(s.info.text == FitInfo(QueueLine(pit)) && Utf8Chars(s.info.text) <= 80 && !Has(s.info.text, "Up next"));
+    pit.streak = 0;
+    s = BuildHudScene(pit, Me(1), kAt);
+    CHECK(s.info.text == bo + " vs " + ann + "   Up next: " + cy && Utf8Chars(s.info.text) == 14 + 4 + 14 + 3 + 9 + 14);   // 58: whole
+    pit.fighters[1].name = std::string(100, 'B');                                                                // one name alone is over the cap
+    s = BuildHudScene(pit, Me(1), kAt);
+    CHECK(s.info.visible && Utf8Chars(s.info.text) == 80 && s.info.text.substr(77) == "...");
+    MatchInfo roul = Ffa(); roul.format = uint8_t(Format::Roulette); roul.tagIt = 2;
+    roul.fighters[1].name = std::string(100, 'N');
+    s = BuildHudScene(roul, Me(1), kAt);
+    CHECK(s.info.visible && Utf8Chars(s.info.text) <= 80 && s.info.text == FitInfo(RouletteLine(roul, 1, 6, false)));   // a long name cannot break the cap
+    MatchInfo chaos = Ffa(); chaos.format = uint8_t(Format::Chaos); chaos.damagePct = 150;
+    s = BuildHudScene(chaos, Me(1), kAt);
+    CHECK(s.info.visible && s.info.text == ChaosLine(chaos) && Utf8Chars(s.info.text) <= 80);                    // a short line is left alone
+}
+
 int main() {
+    TestKeyChip(); TestInfoCap();
     TestHiddenForTheCamera();
     TestBannerLook();
     TestFeedOpacity();
@@ -723,6 +797,7 @@ int main() {
     TestFeedRows();
     TestFeedView();
     TestBoard();
+    TestBoardLobbyRow();
     TestFourTeamsAndLms();
     if (g_fail) { std::printf("%d hud scene checks failed\n", g_fail); return 1; }
     std::printf("all hud scene tests passed\n");

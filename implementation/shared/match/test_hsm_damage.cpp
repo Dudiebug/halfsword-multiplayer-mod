@@ -34,7 +34,7 @@ static void TestStepStopsAtStock() {
     CHECK(StepDamage(350, -1, r) == 100 && StepDamage(350, 1, r) == 350);   // past the end: down onto the end, not further up
     CHECK(StepDamage(350, -1, DamageRangeFrom(0.0, 1.0, 0.1, 1.0)) == kDamageStock);   // the end is the stock value
     CHECK(DamageRate(kDamageStock, r) == 0.5 && DamageRate(80, r) == 0.8);
-    CHECK(DamageLabel(kDamageStock, r) == "50% (stock)" && DamageLabel(80, r) == "80%");
+    CHECK(DamageLabel(kDamageStock, r) == "50%" && DamageLabel(80, r) == "80%");
 }
 
 static void TestSliderSelectionAndClientClamp() {

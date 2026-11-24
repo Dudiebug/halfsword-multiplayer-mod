@@ -80,7 +80,7 @@ inline uint16_t StepDamage(uint16_t stored, int dir, const DamageRange& r) {
 
 inline std::string DamageLabel(uint16_t stored, const DamageRange& r) {
     const int p = DamagePct(stored, r);
-    return std::to_string(p) + "%" + (p == r.stockPct ? " (stock)" : "");
+    return std::to_string(p) + "%";
 }
 
 // The lobby slider runs from the vanilla slider's minimum to kDamageSliderMaxPct (or the vanilla end, if that is

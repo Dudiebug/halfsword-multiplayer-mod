@@ -6,9 +6,13 @@
 // onto widgets; the steppers' arithmetic is here too.
 #pragma once
 #include "match/hsm_crypts.h"
+#include "match/hsm_dropdown.h"
 #include "match/hsm_hud_scene.h"
 #include "match/hsm_kept_kit.h"
 #include "match/hsm_map_list.h"
+#include "match/hsm_mode_merge.h"
+#include "match/hsm_start_gate.h"
+#include "match/hsm_ui_text.h"
 #include "match/hsm_win_by.h"
 #include "session/hsm_build.h"
 #include "session/hsm_player_limit.h"
@@ -28,16 +32,17 @@ struct LobbyPlayer {
     int team = kNoTeam;                 // their own pick (Auto: kNoTeam)
     int hostOverride = kNoTeam;         // where the host moved them
     std::string build;                  // their mod build (session/hsm_build.h), empty until their member data comes
+    bool joined = false;                // the host has this player's Hello (the page's host side only): an empty build is then an older HSMMod
     std::string steamName;              // their Steam name when it is not the name shown (a nickname), for the host's row; empty: nothing to add
 };
 
-// The public-lobby list's filters (the page's chips, in this order): mode, room, compatibility, sorting, passwords, region.
+// The public-lobby list's filters (the page's chips, in this order): region, mode, room, compatibility, sorting, passwords.
 // All off: every lobby Steam returned, in its order.
 struct BrowserFilter {
     uint8_t mode = 0;                   // 0: any; else the kBrowserModes entry shown
     bool hasRoom = false, compatibleOnly = false, mostPlayers = false;
     bool noPassword = false;            // hide the locked lobbies
-    uint8_t region = 0;                 // 0: my region (what Steam finds nearby), 1: any region (asks Steam worldwide), 2+: one region (RegionFilterAt)
+    uint8_t region = 0;                 // 0: any region (asks Steam worldwide), 1: my region (what Steam finds nearby), 2+: one region (RegionFilterAt)
     Region mine = Region::Auto;         // this player's own region, set by the page; Auto: not known, so "my region" hides nothing
 };
 
@@ -47,6 +52,7 @@ inline constexpr const char* kLockedMarker = "[locked] ";
 
 struct LobbyFound {                     // a public lobby from Find
     std::string name, map, mode;
+    uint8_t scenario = 0;               // the lobby data hsm_scen: with the advertised mode it tells an older host's Brawling or Blossfechten (BrowserModeFor)
     int players = 0;
     int maxPlayers = 8;                 // the host's player limit (lobby data hsm_max; 8 when the lobby has none)
     bool locked = false;                // it asks for a password (lobby data hsm_lock = "1"); the password itself is never listed
@@ -72,6 +78,7 @@ struct LobbyLocal {
     MatchConfig config;
     DamageRange damage;                 // the game's own damage slider here (game::VanillaDamageRange)
     std::string mapPick;                // the host's pick (package path), empty until picked
+    std::string fightPick;              // the host's Fight map pick (lobby key hsm_fmap): where a Crypt Royale's Battle is fought; empty: CryptsDefaultMap
     bool progression = false;           // the host chose the Progression card (LobbyData hsm_prog): the stock hub, no match
     std::vector<LobbyModMap> modMaps;   // the custom maps found on this machine (modded maps, after the stock ones)
     bool modPickPending = false;        // the pick is a modded map whose pak is still being hashed: START waits
@@ -86,20 +93,44 @@ struct LobbyLocal {
     bool classBudget = false;           // the lobby uses classes with a budget (Classes, not Unrestricted): the Class power row shows
 };
 
-// Each section shows its rows in this order. Sync last: ui/menu.cpp makes one stepper per row up to it.
-// Players is the lobby's own player limit, not a MatchConfig field: the scene offers it as LobbyScene::playerLimit (it is
-// in no SettingsFor list) and the page applies it with Lobby::SetMaxPlayers. First, so it leads the MATCH section; the
-// Crypts card's Battle (the format fought after the gather) and Gather time (#3199) follow it.
-enum class LobbyRow : uint8_t { Players, Battle, Gather, Limit, Time, Respawn, FreeCam, Gear, Tier, Weapons, Teams, FriendlyFire, Damage, DeadWeight, WeaponWeight, WaveBreak, ClearGround, MyTeam, TeamKit, Crossbows, Fuse, Shuffle, TaggerSpeed, WinBy, ClassPower, Strip, KeepKit, Bodies, Props, TimeOfDay, Scenario, Sync };   // Sync last: the menu builds rows in this order
+// The rows, in the order a section shows them: the RULES tab lists each sub-tab's rows by this order, and ui/menu.cpp makes one
+// stepper per row up to Sync in it. A row's sub-tab is SectionOf(), the one place that classifies them; the groups below
+// follow the sections (MATCH, COMBAT, TEAMS, GEAR, WORLD). Players is the lobby's own player limit, not a MatchConfig field
+// (the page applies it with Lobby::SetMaxPlayers); the Crypts modes' Battle (the format fought after the loot run), Gather time
+// (#3199; Grave Robbers calls it Run time), Crypts run, Dungeon tier (#3350) and Fight map (the map the Battle is fought on, lobby key
+// hsm_fmap, not a MatchConfig field) follow it. Tier is the Crypts card's "Starting tier": everywhere else the tier is the chips
+// under Gear (SettingRow::tierChips).
+enum class LobbyRow : uint8_t {
+    Players, Battle, Gather, CryptsRun, CryptsTier, FightMap, Limit, Time, WinBy, Respawn, Fuse, TaggerSpeed, ClassPower,            // MATCH
+    Damage, DeadWeight, WeaponWeight, Bite,                                                                              // COMBAT
+    Teams, FriendlyFire, MyTeam, TeamKit, Shuffle,                                                                       // TEAMS
+    Gear, Tier, Bodies, Weapons, Crossbows, Strip, KeepKit,                                                              // GEAR
+    TimeOfDay, WaveBreak, ClearGround, Props, Sync                                                                       // WORLD; Sync last: the menu builds rows up to it
+};
 
+// How a row is changed: a stepper (a number, stepped with - and + and typed into), a choice (a name picked from a dropdown),
+// a toggle (On and Off), or chips (the Weapons row's tickable types; the Starting tier's eight). RowKindOf says which.
+enum class RowKind : uint8_t { Stepper, Choice, Toggle, Chips };
 // A chip a row shows in place of its arrows (the Weapons row's tickable types): a click on chip `i` toggles it. The row's value
 // still reads out the whole choice.
 struct RowChip { std::string label; bool on = false; };
-struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; std::vector<RowChip> chips; };
+// tierChips: the eight tiers, on the row that has a tier to pick (Gear while the tier is used, the Crypts card's Starting tier):
+// a click on chip `i` sets the tier to i. Under Gear the row keeps its arrows; the Starting tier row has chips alone
+// (RowHasArrows). Empty: the row has no tier.
+// choices / choice: a Choice row's dropdown, every option the row can take in the order of the list, and the one now picked
+// (choices[choice].label is value). Options a click cannot pick yet are disabled with the reason.
+struct SettingRow { LobbyRow id = LobbyRow::Limit; std::string label, value, hint; bool enabled = false; std::vector<RowChip> chips; std::vector<RowChip> tierChips;
+                    RowKind kind = RowKind::Stepper; std::vector<DropOption> choices; size_t choice = 0; };
+// Whether the row shows its arrows: not the Weapons row (its chips replace them), nor the Starting tier (its chips are the choice),
+// nor a Choice row (its value opens a list).
+inline bool RowHasArrows(const SettingRow& r) {
+    return r.chips.empty() && r.kind != RowKind::Choice && !(r.id == LobbyRow::Tier && !r.tierChips.empty());
+}
 // The mode cards' groups on the MODE tab (Party joins them with the party modes).
 enum class ModeGroup : uint8_t { Versus, Coop };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false;
-                  bool crypts = false; ModeGroup group = ModeGroup::Versus; std::string hint; };   // progression: the extra last card; brawl: free-for-all with gear = Fists; crypts: gear = Crypts, its Battle row picks the format; hint: why a card is disabled for the player count (ModeAvailable)
+                  bool crypts = false; bool blossfechten = false; ModeGroup group = ModeGroup::Versus; std::string hint;
+                  bool graveRobbers = false; bool shown = true; };   // progression: the extra last card; brawl: free-for-all with gear = Fists; crypts: gear = Crypts (the CRYPTS card picks the Crypts map and Crypt Royale; Crypt Royale's Battle row picks the format; graveRobbers: Grave Robbers); blossfechten: Last man standing with the Blossfechten scenario; hint: why a card is disabled for the player count (ModeAvailable); shown: the card is on the page (the CRYPTS card only off the Crypts map, Crypt Royale and Grave Robbers on it; Grave Robbers also needs g_cryptsCoopOffered)
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
                  bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
 struct BrowserRow {
@@ -119,87 +150,161 @@ struct RosterRow {
 
 inline constexpr size_t kBrowserRows = 6;
 
-// The RULES tab's sections, in page order; each row sits in one.
-enum class LobbySection : uint8_t { Match, Teams, Gear, World, Count };
+// The RULES tab's sub-tabs, in page order; each row sits in one.
+enum class LobbySection : uint8_t { Match, Combat, Teams, Gear, World, Count };
+inline constexpr size_t kSectionCount = size_t(LobbySection::Count);
+// No `default:` on purpose: a new row is a build error here until it has a sub-tab.
 inline LobbySection SectionOf(LobbyRow r) {
     switch (r) {
+        case LobbyRow::Players: case LobbyRow::Battle: case LobbyRow::Gather: case LobbyRow::CryptsRun: case LobbyRow::CryptsTier:
+        case LobbyRow::FightMap: case LobbyRow::Limit: case LobbyRow::Time: case LobbyRow::WinBy: case LobbyRow::Respawn:
+        case LobbyRow::Fuse: case LobbyRow::TaggerSpeed: case LobbyRow::ClassPower: return LobbySection::Match;
+        case LobbyRow::Damage: case LobbyRow::DeadWeight: case LobbyRow::WeaponWeight: case LobbyRow::Bite: return LobbySection::Combat;
         case LobbyRow::Teams: case LobbyRow::FriendlyFire: case LobbyRow::MyTeam: case LobbyRow::TeamKit: case LobbyRow::Shuffle: return LobbySection::Teams;
-        case LobbyRow::Gear: case LobbyRow::Tier: case LobbyRow::Weapons: case LobbyRow::Crossbows: case LobbyRow::Strip: case LobbyRow::KeepKit: case LobbyRow::Bodies: return LobbySection::Gear;
-        case LobbyRow::WaveBreak: case LobbyRow::ClearGround: case LobbyRow::Props: case LobbyRow::TimeOfDay: case LobbyRow::Scenario: case LobbyRow::Sync: return LobbySection::World;
-        default: return LobbySection::Match;
+        case LobbyRow::Gear: case LobbyRow::Tier: case LobbyRow::Bodies: case LobbyRow::Weapons: case LobbyRow::Crossbows:
+        case LobbyRow::Strip: case LobbyRow::KeepKit: return LobbySection::Gear;
+        case LobbyRow::TimeOfDay: case LobbyRow::WaveBreak: case LobbyRow::ClearGround: case LobbyRow::Props:
+        case LobbyRow::Sync: return LobbySection::World;
     }
+    return LobbySection::Match;
 }
 inline const char* SectionName(LobbySection s) {
     switch (s) {
+        case LobbySection::Match: return "MATCH";
+        case LobbySection::Combat: return "COMBAT";
         case LobbySection::Teams: return "TEAMS";
         case LobbySection::Gear: return "GEAR";
         case LobbySection::World: return "WORLD";
-        default: return "MATCH";
+        case LobbySection::Count: break;
     }
+    return "MATCH";
 }
 
 // The browser's mode chip steps through these (0: any).
 inline const std::vector<std::string>& BrowserModes() {
-    static const std::vector<std::string> m = {"Any mode", "Free-for-all", "Duel", "Last man standing", "Teams", "Team duel", "Riot", "Juggernaut", "Tag", "Infection", "Crossbow TDM", "Tournament", "Pit bridge duels", "Chaos", "One crossbow", "Roulette", "Hide and seek", "Brawl", "Crypts", "Survival", "Zombies"};
+    static const std::vector<std::string> m = {"Any mode", kCarnageName, kDuelCardChip, "Teams", "Team duel", "Riot", "Juggernaut", "Tag", "Infection", "Crossbow TDM", "Tournament", kBlossfechtenName, "Chaos", "One crossbow", "Roulette", "Hide and seek", kBrawlName, kCryptRoyaleName, kGraveRobbersName, "Survival", "Zombies"};
     return m;
 }
-// The region chip steps through my region, any region and the six regions (kRegionCount - 1 of them, Auto left out).
+// The region chip steps through any region, my region and the six regions (kRegionCount - 1 of them, Auto left out).
 inline constexpr uint8_t kRegionFilterStates = uint8_t(2 + kRegionCount - 1);
-inline const char* RegionFilterLabel(uint8_t state) {
-    if (state == 0) return "My region";
-    if (state == 1) return "Any region";
-    return state < kRegionFilterStates ? RegionLabel(Region(state - 1)) : "My region";
+inline constexpr uint8_t kRegionAny = 0, kRegionMine = 1;   // the first two stops; the regions follow
+// The chip's text. My region names the region when it is known: "My region (NA East)".
+inline std::string RegionFilterLabel(uint8_t state, Region mine = Region::Auto) {
+    if (state == kRegionMine) return RegionKnown(mine) ? std::string("My region (") + RegionLabel(mine) + ")" : std::string("My region");
+    if (state > kRegionMine && state < kRegionFilterStates) return RegionLabel(Region(state - 1));
+    return "Any region";
 }
-// The region a chip state shows (Auto: none, for my region and any region).
-inline Region RegionFilterAt(uint8_t state) { return state >= 2 && state < kRegionFilterStates ? Region(state - 1) : Region::Auto; }
+// The region a chip state shows (Auto: none, for any region and my region).
+inline Region RegionFilterAt(uint8_t state) { return state > kRegionMine && state < kRegionFilterStates ? Region(state - 1) : Region::Auto; }
 // How far Steam is asked to look: only my region stays with what Steam finds nearby.
-inline LobbyDistance DistanceFor(const BrowserFilter& f) { return f.region == 0 ? LobbyDistance::Default : LobbyDistance::Worldwide; }
+inline LobbyDistance DistanceFor(const BrowserFilter& f) { return f.region == kRegionMine ? LobbyDistance::Default : LobbyDistance::Worldwide; }
 
-inline constexpr size_t kFilterChips = 6;   // mode, has room, compatible only, most players first, no password, region
-inline constexpr size_t kRegionChip = 5;    // the last one: the page puts it by REFRESH
-struct FilterChip { std::string label; bool on = false; };
+// The filter chips, in the order the page draws them. The region leads the row.
+inline constexpr size_t kRegionChip = 0, kModeChip = 1, kRoomChip = 2, kCompatibleChip = 3, kMostPlayersChip = 4, kPasswordChip = 5;
+inline constexpr size_t kFilterChips = 6;
+struct FilterChip { std::string label; bool on = false; bool choice = false; };   // choice: the chip opens a list (the region, the mode)
 inline std::vector<FilterChip> FilterChips(const BrowserFilter& f) {
     const auto& modes = BrowserModes();
-    return {{modes[f.mode < modes.size() ? f.mode : 0], f.mode != 0}, {"Has room", f.hasRoom},
-            {"Compatible only", f.compatibleOnly}, {"Most players first", f.mostPlayers},
-            {"No password", f.noPassword}, {RegionFilterLabel(f.region), f.region != 0}};
+    std::vector<FilterChip> v(kFilterChips);
+    v[kRegionChip] = {RegionFilterLabel(f.region, f.mine), f.region != kRegionAny, true};
+    v[kModeChip] = {modes[f.mode < modes.size() ? f.mode : 0], f.mode != 0, true};
+    v[kRoomChip] = {"Has room", f.hasRoom};
+    v[kCompatibleChip] = {"Compatible only", f.compatibleOnly};
+    v[kMostPlayersChip] = {"Most players first", f.mostPlayers};
+    v[kPasswordChip] = {"No password", f.noPassword};
+    return v;
 }
-// A chip clicked: the mode steps on (wrapping to any), the others turn on or off.
+// The region and the mode pick from a list (FilterChoices); the other chips are toggles.
+inline bool FilterChipIsChoice(size_t chip) { return chip == kRegionChip || chip == kModeChip; }
+// The list a choice chip opens: any region, my region and the six regions; any mode and every mode. Empty for a toggle.
+inline std::vector<DropOption> FilterChoices(const BrowserFilter& f, size_t chip) {
+    std::vector<DropOption> v;
+    if (chip == kRegionChip) for (uint8_t i = 0; i < kRegionFilterStates; ++i) v.push_back({RegionFilterLabel(i, f.mine), true, ""});
+    else if (chip == kModeChip) for (const std::string& m : BrowserModes()) v.push_back({m, true, ""});
+    return v;
+}
+// The option of that list the filter shows now (a stale value reads the first option, as the chip's text does).
+inline size_t FilterChoiceAt(const BrowserFilter& f, size_t chip) {
+    return chip == kRegionChip ? (f.region < kRegionFilterStates ? size_t(f.region) : 0) : chip == kModeChip ? (f.mode < BrowserModes().size() ? size_t(f.mode) : 0) : 0;
+}
+// Option `i` of a choice chip's list picked.
+inline BrowserFilter WithFilterChoice(BrowserFilter f, size_t chip, size_t i) {
+    if (chip == kRegionChip && i < kRegionFilterStates) f.region = uint8_t(i);
+    else if (chip == kModeChip && i < BrowserModes().size()) f.mode = uint8_t(i);
+    return f;
+}
+// A chip clicked: the four toggles turn on or off. The region and the mode also step on here (the mode wraps to any); the page
+// opens their lists instead (FilterChoices).
 inline BrowserFilter ToggleFilter(BrowserFilter f, size_t chip) {
     switch (chip) {
-        case 0: f.mode = uint8_t((f.mode + 1) % BrowserModes().size()); break;
-        case 1: f.hasRoom = !f.hasRoom; break;
-        case 2: f.compatibleOnly = !f.compatibleOnly; break;
-        case 3: f.mostPlayers = !f.mostPlayers; break;
-        case 4: f.noPassword = !f.noPassword; break;
-        case 5: f.region = uint8_t((f.region + 1) % kRegionFilterStates); break;
+        case kRegionChip: f.region = uint8_t((f.region + 1) % kRegionFilterStates); break;
+        case kModeChip: f.mode = uint8_t((f.mode + 1) % BrowserModes().size()); break;
+        case kRoomChip: f.hasRoom = !f.hasRoom; break;
+        case kCompatibleChip: f.compatibleOnly = !f.compatibleOnly; break;
+        case kMostPlayersChip: f.mostPlayers = !f.mostPlayers; break;
+        case kPasswordChip: f.noPassword = !f.noPassword; break;
         default: break;
     }
     return f;
 }
-// A lobby's mode string against a browser entry: equal, or the entry plus the detail the host adds ("Teams (3)" is "Teams").
-inline bool ModeMatches(const std::string& lobbyMode, const std::string& entry) {
-    return lobbyMode == entry || (lobbyMode.size() > entry.size() && lobbyMode.compare(0, entry.size(), entry) == 0 && lobbyMode.compare(entry.size(), 2, " (") == 0);
-}
+// The mode a listed lobby shows and is filtered by (hsm_mode_merge.h BrowserModeFor): an older host's "Free-for-all" and Pit bridge
+// duels are Carnage, its Brawling scenario Brawl, and Duel and Last man standing are one, read by the row's player count.
+inline std::string BrowserModeShown(const LobbyFound& l) { return BrowserModeFor(l.mode, l.scenario, l.players, l.maxPlayers); }
+// A lobby against a browser entry: equal, or the entry plus the detail the host adds ("Teams (3)" is "Teams").
+inline bool ModeMatches(const LobbyFound& l, const std::string& entry) { return BrowserModeMatches(BrowserModeShown(l), entry); }
 inline bool PassesFilter(const LobbyFound& l, const BrowserFilter& f) {
     const auto& modes = BrowserModes();
-    if (f.mode != 0 && f.mode < modes.size() && !ModeMatches(l.mode, modes[f.mode])) return false;
+    if (f.mode != 0 && f.mode < modes.size() && !ModeMatches(l, modes[f.mode])) return false;
     if (f.hasRoom && LobbyIsFull(l.players, l.maxPlayers)) return false;   // each lobby's own limit
     if (f.compatibleOnly && !l.compatible && !l.switchable) return false;   // a restart away still counts
     if (f.noPassword && l.locked) return false;
-    if (f.region == 0) return !RegionKnown(f.mine) || !RegionKnown(l.region) || l.region == f.mine;   // a lobby that did not say, or no region of mine: nothing to hide
-    if (f.region >= 2) return l.region == RegionFilterAt(f.region);                                  // a region asked for: only lobbies that say they are in it
+    if (f.region == kRegionMine) return !RegionKnown(f.mine) || !RegionKnown(l.region) || l.region == f.mine;   // a lobby that did not say, or no region of mine: nothing to hide
+    if (f.region > kRegionMine) return l.region == RegionFilterAt(f.region);                                      // a region asked for: only lobbies that say they are in it
     return true;
 }
-// The format cards: every format but ThreeTeams (the old value of the Teams card's 3 teams) and CaptureTheFlag (removed);
-// then Brawl, Crypts and Progression.
-inline constexpr size_t kModeOrderCount = kFormatCount - 2;
-inline constexpr size_t kModeCardCount = kModeOrderCount + 3;
+// The chips that hide a lobby, each checked on its own: bit i is FilterChips(f)[i]; 0 when no chip hides it.
+inline uint32_t HidingChips(const LobbyFound& l, const BrowserFilter& f) {
+    BrowserFilter one[kFilterChips] = {};   // the default filter hides nothing (any region)
+    one[kRegionChip].region = f.region;
+    one[kRegionChip].mine = f.mine;
+    one[kModeChip].mode = f.mode;
+    one[kRoomChip].hasRoom = f.hasRoom;
+    one[kCompatibleChip].compatibleOnly = f.compatibleOnly;
+    one[kPasswordChip].noPassword = f.noPassword;
+    uint32_t bits = 0;
+    for (size_t i = 0; i < kFilterChips; ++i) if (!PassesFilter(l, one[i])) bits |= 1u << i;
+    return bits;
+}
+// The empty list's line when lobbies were found but the filters hide them all: how many, and the chips that do it.
+inline std::string HiddenByFiltersText(const std::vector<LobbyFound>& found, const BrowserFilter& f) {
+    uint32_t bits = 0;
+    for (const LobbyFound& l : found) bits |= HidingChips(l, f);
+    const std::vector<FilterChip> chips = FilterChips(f);
+    std::string names;
+    for (size_t i = 0; i < chips.size(); ++i) {
+        if (!(bits & (1u << i))) continue;
+        names += (names.empty() ? "" : ", ") + (i == kRegionChip ? RegionFilterLabel(f.region) : chips[i].label);   // plain words: no region in brackets inside the brackets
+    }
+    std::string s = std::to_string(found.size()) + (found.size() == 1 ? " lobby" : " lobbies") + " hidden by your filters";
+    return names.empty() ? s + "." : s + " (" + names + ").";
+}
+// The format cards, in page order: Duel is no card of its own (Last man standing reads Duel with two players, ModeCardName), nor are
+// Pit bridge duels (gone from the lobby), ThreeTeams (the old value of the Teams card's 3 teams) and CaptureTheFlag (removed);
+// Blossfechten is a card of Last man standing's rounds. Then Brawl, the CRYPTS card (off the Crypts map; it picks that map), Progression,
+// and on the Crypts map Crypt Royale and Grave Robbers (the Crypts modes, picked there).
+struct ModeSlot { Format format; bool blossfechten; };
+inline constexpr ModeSlot kModeOrder[] = {
+    {Format::FreeForAll, false}, {Format::LastManStanding, false}, {Format::TwoTeams, false}, {Format::TeamDuel, false}, {Format::Riot, false},
+    {Format::Juggernaut, false}, {Format::Tag, false}, {Format::Infection, false}, {Format::CrossbowTDM, false}, {Format::Tournament, false},
+    {Format::LastManStanding, true}, {Format::Chaos, false}, {Format::OneCrossbow, false}, {Format::Roulette, false}, {Format::HideSeek, false},
+    {Format::PlayersVsBots, false}, {Format::Zombies, false}};
+inline constexpr size_t kModeOrderCount = sizeof(kModeOrder) / sizeof(kModeOrder[0]);
+inline constexpr size_t kModeCardCount = kModeOrderCount + 5;   // + Brawl, CRYPTS, Progression, Crypt Royale, Grave Robbers
 
 struct LobbyScene {
     Span pill;
     std::string me, badge, status;      // status: not in a lobby only (in one, the pill says it)
-    std::string regionButton;           // the region picker at the top right: "Auto (Europe)", "Auto (unknown)", "NA East"
+    std::string regionButton;           // my region as SETTINGS shows it: "Auto (Europe)", "Auto (unknown)", "NA East"
     bool idle = false;                  // Host, Find, the browser and the idle hint
     std::vector<BrowserRow> browser;
     std::vector<FilterChip> filters;    // kFilterChips, while idle
@@ -212,35 +317,20 @@ struct LobbyScene {
     bool readyOn = false;               // we are marked ready: the toggle is framed, our row shows the dot
     std::string readyLabel;
     bool hostPassword = false;          // the host's password box (SET and CLEAR), in a lobby
-    std::string passwordNote;           // beside it: locked or open, and that changing it kicks nobody
     bool balance = false;               // Auto-balance: the host, in the formats with teams
     bool shuffle = false;               // SHUFFLE NOW: the host, in the formats with teams (deals everyone at random into the lobby's moves)
     std::string classLine;              // in a lobby that uses classes: which one we fight as, beside CHANGE; empty: no row
     std::vector<ModeCard> modes;        // the grid's reading order, two to a row
-    std::vector<SettingRow> settings;
-    SettingRow playerLimit;             // the Players stepper (LobbyRow::Players): the host steps it, members read it; in a lobby only
-    bool hasPlayerLimit = false;
-    SettingRow scenario;                // the Scenario stepper (LobbyRow::Scenario): only when the picked map offers more than Standard; kept apart from `settings` like the player limit
-    bool hasScenario = false;
-    SettingRow timeOfDay;               // the Time of day stepper (LobbyRow::TimeOfDay): only on an arena with a day cycle; apart from `settings` like the Scenario
-    bool hasTimeOfDay = false;
-    SettingRow winBy;                   // the Win by stepper (LobbyRow::WinBy): the round formats but Tag, per player sync; kept apart from `settings` like the scenario
-    bool hasWinBy = false;
-    SettingRow props;                   // the Props stepper (LobbyRow::Props): every lobby fight but Progression; kept apart from `settings` like the scenario
-    bool hasProps = false;
-    SettingRow classPower;              // the Class power stepper (LobbyRow::ClassPower): lobbies with a class budget; kept apart from `settings` like the scenario
-    bool hasClassPower = false;
-    SettingRow strip;                   // the Stripping stepper (LobbyRow::Strip): every lobby fight but Progression; kept apart from `settings` like the scenario
-    bool hasStrip = false;
-    SettingRow keepKit;                 // the Loadouts stepper (LobbyRow::KeepKit): a Tournament with random loadouts; kept apart from `settings` like the scenario
-    bool hasKeepKit = false;
+    std::vector<SettingRow> settings;   // every row of the RULES tab, in LobbyRow order (SceneRows): the Players limit and the map's own rows among them
+    std::string rulesNote;              // Progression: why RULES holds only three rows ("The game's own rules, in the Tavern."); empty in every other mode
     std::string hostOnly;               // members: "Only the host can change these."
     std::vector<MapCard> maps;          // the pickable maps, kMaps order; none for Progression
-    bool start = false;                 // START MATCH: the host, while every known build matches (or the override is on)
-    std::string waiting;                // members: "Waiting for the host"; anyone: the build warning, which replaces it
+    bool start = false;                 // START MATCH may be clicked (match/hsm_start_gate.h). The button shows in every lobby, dimmed when this is false
+    std::string startWhy;               // when !start: what a click on the dimmed button says (the gate's reason)
+    std::string waiting;                // the line under START: why it is dimmed, or what the host overrode; a member reads "Waiting for the host to start."
     std::string summary;                // beside START: the mode, the map and the gear, one line
-    bool buildMismatch = false;         // another player is on a different build (waiting says who)
-    std::string scenarioMap;            // the picked map's package path for the Scenario row's stepper (StepScenario); empty: a modded map
+    bool buildMismatch = false;         // another player is on a different build (waiting says who, in the warning colour)
+    bool waitingWarn = false;           // `waiting` is in the warning colour: the host is blocked, or another player is on another build
 };
 
 // ------------------------------------------------------------------ steppers
@@ -251,11 +341,12 @@ inline int PrevOf(const std::vector<int>& options, int cur) {
     auto it = std::find(options.begin(), options.end(), cur);
     return it == options.end() || it == options.begin() ? options.back() : *(it - 1);
 }
+// The Dungeon tier row's value (#3350): the rank it holds the Crypts at, or the game's own.
+inline std::string CryptsTierLabel(uint8_t t) { return t >= kCryptsTierTop ? "Game's own" : TierName(t); }
 inline int StepOf(const std::vector<int>& options, int cur, int dir) { return dir < 0 ? PrevOf(options, cur) : NextOf(options, cur); }
 
 inline std::vector<int> LimitOptions(Format f) {
     if (f == Format::Tournament) return {1};                          // one round a fight (no Limit row)
-    if (f == Format::PitBridgeDuel) return {3, 5, 7, 10, 15};         // fights won to take the match
     if (IsRoundFormat(f)) return {1, 2, 3, 5, 7, 10};                 // rounds to win
     return {3, 5, 10, 15, 20, 30, 50};
 }
@@ -266,14 +357,23 @@ inline const std::vector<int> kFuseOptions = {10, 15, 20, 30, 45, 60};         /
 inline const std::vector<int> kHideTimeOptions = {15, 20, 30, 45, 60};         // Hide and Seek: the Hide time, seconds (the Fuse row there)
 inline const std::vector<int> kSeekTimeOptions = {120, 180, 240, 300, 420, 600};   // Hide and Seek: a round's Seek time, seconds (the Time row there)
 // The Crypts card's Battle row (#3199): the formats a gather ends in, in the row's order (Teams takes 2 to 4 on its own row).
-inline constexpr Format kCryptsBattles[] = {Format::LastManStanding, Format::FreeForAll, Format::TwoTeams, Format::TeamDuel, Format::Tournament, Format::Duel, Format::PlayersVsBots};
+inline constexpr Format kCryptsBattles[] = {Format::LastManStanding, Format::FreeForAll, Format::TwoTeams, Format::TeamDuel, Format::Tournament, Format::PlayersVsBots};   // Duel is Last man standing's two-player name
 inline constexpr size_t kCryptsBattleCount = sizeof(kCryptsBattles) / sizeof(kCryptsBattles[0]);
 inline constexpr Format kCryptsDefaultBattle = Format::LastManStanding;
 inline const std::vector<int> kTaggerSpeedStops(std::begin(kTaggerSpeedOptions), std::end(kTaggerSpeedOptions));   // Tag's tagger speed, percent
 // The stops of the Shuffle teams row: Each round only where the format has rounds to deal for (Sanitize).
 inline std::vector<int> ShuffleOptions(Format f) { return IsTeamRound(f) ? std::vector<int>{0, 1, 2} : std::vector<int>{0, 1}; }
 // The wave break in seconds the match runs (0 = the format's own: Survival 60, Zombies 10).
+// The Clear ground row's value: "Every 30 s", "Every 1 min", "Every 2 min" .. "Every 10 min"; "Never" for the 0 that no step reaches (an older host's Off).
+inline std::string ClearGroundLabel(uint16_t s) {
+    if (s == 0) return "Never";
+    return "Every " + (s < 60 ? std::to_string(s) + " s" : std::to_string(s / 60) + " min");
+}
 inline int WaveBreakShown(const MatchConfig& c) { return c.waveBreakS ? c.waveBreakS : c.format == Format::Zombies ? int(Match::kZombieBreakMs / 1000) : int(Match::kWaveBreakMs / 1000); }
+
+// Whether the lobby uses a tier: the bots start at it, the Crypts character starts at it, and random or identical gear is
+// rolled at it. Then the tier chips show (under Gear, or as the Crypts card's Starting tier) and Bodies can read By tier.
+inline bool TierInUse(const MatchConfig& c) { return IsCrypts(c) || IsBotFormat(c.format) || GearRolled(c.gear); }
 
 // The format and team pick go their own ways (SelectFormat, StepTeamPick); every other row steps here, by +1 or -1.
 // A value out of range steps from where Sanitize would put it. damage: the game's own slider (the Damage row's range).
@@ -295,6 +395,9 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             break;
         }
         case LobbyRow::Gather: c.gatherS = StepGather(c.gatherS, dir); break;
+        case LobbyRow::FightMap: break;                         // the Fight map is the lobby's own pick (hsm_fmap), not a config field: LobbyLocal::fightPick
+        case LobbyRow::CryptsRun: c.cryptsTogether = !c.cryptsTogether; break;
+        case LobbyRow::CryptsTier: c.cryptsTier = StepCryptsTier(c.cryptsTier, dir); break;
         case LobbyRow::Limit: c.scoreLimit = uint16_t(StepOf(LimitOptions(c.format), c.scoreLimit, dir)); break;
         case LobbyRow::Time: c.timeLimitS = uint16_t(StepOf(IsInfection(c.format) ? kInfectionTimeOptions : kTimeOptions, c.timeLimitS, dir)); break;
         case LobbyRow::Fuse: c.fuseS = uint8_t(StepOf(kFuseOptions, c.fuseS, dir)); break;
@@ -303,6 +406,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
         case LobbyRow::WinBy: c.winBy = uint8_t(StepWinBy(c.winBy, dir)); break;
         case LobbyRow::Props: c.propsOff = !c.propsOff; break;
         case LobbyRow::Strip: c.stripOff = !c.stripOff; break;
+        case LobbyRow::Bite: c.biteOff = !c.biteOff; break;
         case LobbyRow::Bodies: c.ownBodies = !c.ownBodies; break;
         case LobbyRow::KeepKit: c.keepKit = !c.keepKit; break;
         case LobbyRow::Respawn: c.respawnDelayS = uint16_t(StepOf(kRespawnOptions, c.respawnDelayS, dir)); break;
@@ -310,6 +414,7 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             size_t at = 0;                           // Fists (the Brawl card) is no stop of the row: it steps as Own does
             for (size_t i = 0; i < kGearRowCount; ++i) if (kGearRow[i] == c.gear) at = i;
             c.gear = kGearRow[(at + (back ? kGearRowCount - 1 : 1)) % kGearRowCount];
+            if (!TierInUse(c)) c.tier = MatchConfig{}.tier;   // the chips are gone: a tier picked before must not go on setting the Same for all build unseen
             break;
         }
         case LobbyRow::Tier: c.tier = uint8_t((std::min<uint8_t>(c.tier, 7) + (back ? 7 : 1)) % 8); break;
@@ -319,7 +424,6 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             break;
         case LobbyRow::Teams: c.teams = uint8_t(StepOf({2, 3, 4}, c.teams, dir)); break;
         case LobbyRow::FriendlyFire: c.friendlyFire = !c.friendlyFire; break;
-        case LobbyRow::FreeCam: c.freeCam = !c.freeCam; break;
         case LobbyRow::Damage: c.damagePct = StepDamage(c.damagePct, dir, damage); break;
         case LobbyRow::DeadWeight: c.deadWeightPct = StepWeight(c.deadWeightPct, dir); break;
         case LobbyRow::WeaponWeight: c.weaponWeightPct = StepWeight(c.weaponWeightPct, dir); break;
@@ -327,10 +431,10 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
             std::vector<int> o(std::begin(kWaveBreakOptions), std::end(kWaveBreakOptions));
             c.waveBreakS = uint16_t(StepOf(o, WaveBreakShown(c), dir)); break;
         }
-        case LobbyRow::TimeOfDay: c.timeOfDay = uint8_t(StepOf({0, 1, 2, 3, 4}, c.timeOfDay, dir)); break;
-        case LobbyRow::ClearGround: {
-            std::vector<int> o(std::begin(kClearGroundOptions), std::end(kClearGroundOptions));
-            c.clearGroundMin = uint8_t(StepOf(o, c.clearGroundMin, dir)); break;
+        case LobbyRow::TimeOfDay: c.timeOfDay = uint8_t(StepOf({1, 2, 3, 4}, TimeOfDayRead(c.timeOfDay), dir)); break;   // no Map's own: Morning, Midday, Evening, Night
+        case LobbyRow::ClearGround: {                          // 30 s .. 10 min, no Off
+            std::vector<int> o(std::begin(kClearGroundOptionsS), std::end(kClearGroundOptionsS));
+            c.clearGroundS = uint16_t(StepOf(o, c.clearGroundS, dir)); break;
         }
         case LobbyRow::TeamKit: {      // the row reads Tabard / Full kit / Off
             static constexpr hsm::TeamKit kOrder[3] = {hsm::TeamKit::Tabard, hsm::TeamKit::Full, hsm::TeamKit::Off};
@@ -341,7 +445,6 @@ inline MatchConfig StepSetting(MatchConfig c, LobbyRow s, int dir, const DamageR
         }
         case LobbyRow::Players: case LobbyRow::MyTeam: break;   // the player limit is the lobby's (StepPlayerLimit); the team pick goes its own way
         case LobbyRow::ClassPower: c.classPower = StepClassPower(c.classPower, dir); break;
-        case LobbyRow::Scenario: break;                          // which scenarios there are depends on the map: StepScenario(LobbyScene::scenarioMap, ...)
         case LobbyRow::Sync: c.hostPhysics = !c.hostPhysics; break;
     }
     return c;
@@ -359,6 +462,11 @@ inline MatchConfig LeaveTag(MatchConfig c) {           // gear and tier back at 
     else if (c.damagePct == kTagDamagePct) c.damagePct = kDamageStock;
     return c;
 }
+// A format that hides the Clear ground row has it at 0 (Sanitize): coming back to one that shows it, the row starts at its default, not at "Never".
+inline MatchConfig ClearGroundBack(MatchConfig c) {
+    if (c.clearGroundS == 0 && ClearGroundApplies(c.format)) c.clearGroundS = kClearGroundDefaultS;
+    return c;
+}
 inline MatchConfig SelectFormat(MatchConfig c, Format f) {
     if (c.format == f) return c;
     c = LeaveTag(c);
@@ -368,17 +476,34 @@ inline MatchConfig SelectFormat(MatchConfig c, Format f) {
     if (IsOneCrossbow(f)) { c.gear = Gear::Fists; c.tier = kOneCrossbowTier; c.crossbows = uint8_t(Crossbows::One); }   // unarmed peasants and the one crossbow
     if (IsRoulette(f)) { c.gear = Gear::Fists; c.tier = kOneCrossbowTier; c.crossbows = 0; }   // unarmed peasants; the mode hands out its own crossbow
     if (IsHideSeek(f)) c.timeLimitS = kSeekDefaultS;   // a round's Seek time, not the clock the last mode had
-    return c;
+    return ClearGroundBack(c);
 }
 
 // A mode card picked: the Brawl card is free-for-all with bare fists (gear Fists, kBrawlTier, free-for-all's default limit);
-// the Crypts card is gear Crypts with Last man standing to start (its Battle row picks another); the format cards are
-// SelectFormat, and leaving Brawl or Crypts puts the gear and tier back at their defaults (even for the card of the same
-// format: other rules).
-inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts = false) {
+// the Crypts cards are gear Crypts with Last man standing to start (Crypt Royale's Battle row picks another): Crypt Royale, or
+// Grave Robbers (`graveRobbers`, no fight after); the Blossfechten card is Last
+// man standing's rounds with the Blossfechten scenario and its fixed kit (BlossfechtenKit: random swords, no armour); the
+// format cards are SelectFormat, and leaving Brawl, Crypts or Blossfechten puts the gear, tier and weapons back at their
+// defaults (even for the card of the same format: other rules). The Duel card is Last man standing (a Duel config reads as it).
+inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts = false, bool blossfechten = false, bool graveRobbers = false) {
+    if (f == Format::Duel) f = Format::LastManStanding;
+    const bool wasBlossfechten = IsBlossfechten(c);
+    if (wasBlossfechten && blossfechten && !brawl && !crypts) return c;
+    if (wasBlossfechten && !blossfechten) {          // leaving Blossfechten: its kit and scenario go (the Brawl and Crypts cards below start from Own gear as well)
+        c.scenario = uint8_t(Scenario::Standard);
+        c.gear = Gear::Own;
+        c.tier = MatchConfig{}.tier;
+        c.weapons = 0;
+        if (!brawl && !crypts && c.format == f) return c;
+    }
     if (crypts) {
-        if (IsCrypts(c)) return c;
+        if (IsCrypts(c)) {                           // the other Crypts mode: the run's rows stay
+            c.graveRobbers = graveRobbers;
+            if (graveRobbers) c.cryptsTogether = false;   // Grave Robbers is one shared crypt: no Apart or Together row
+            return c;
+        }
         c = LeaveTag(c);
+        c.graveRobbers = graveRobbers;
         c.format = kCryptsDefaultBattle;
         c.scoreLimit = DefaultScoreLimit(c.format);
         c.gear = Gear::Crypts;
@@ -387,7 +512,8 @@ inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts =
     }
     if (IsCrypts(c)) {                               // leaving Crypts: the same format's card keeps its settings
         c.gear = Gear::Own;
-        if (c.format == f && !brawl) return c;
+        c.graveRobbers = false; c.cryptsTogether = false;
+        if (c.format == f && !brawl && !blossfechten) return c;
     }
     if (brawl) {
         if (IsBrawl(c)) return c;
@@ -396,14 +522,30 @@ inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts =
         c.scoreLimit = DefaultScoreLimit(c.format);
         c.gear = Gear::Fists;
         c.tier = kBrawlTier;
-        return c;
+        return ClearGroundBack(c);
     }
     if (IsBrawl(c)) {                                // leaving Brawl (leaving Tag is SelectFormat's)
         c.gear = Gear::Own;
         c.tier = MatchConfig{}.tier;
         if (c.format == f) { c.scoreLimit = DefaultScoreLimit(f); return c; }
     }
+    if (blossfechten) {                              // Last man standing's rounds, swords only: the scenario value and the kit
+        c = SelectFormat(c, Format::LastManStanding);
+        c.scenario = uint8_t(Scenario::Blossfechten);
+        c = BlossfechtenKit(c);
+        c.crossbows = 0;                             // the card has no Crossbows row (Sanitize does the same)
+        return c;
+    }
     return SelectFormat(c, f);
+}
+
+// A map card picked. The Crypts map is where the Crypts modes are played, so picking it from any other mode enters Crypts mode
+// (Crypt Royale, as the CRYPTS card does), and picking any other map while in a Crypts mode leaves it (the Battle format stays, with
+// the player's own gear). Every other pick leaves the config alone.
+inline MatchConfig MapPicked(MatchConfig c, bool cryptsMap) {
+    if (cryptsMap && !IsCrypts(c)) return SelectMode(c, c.format, false, true);
+    if (!cryptsMap && IsCrypts(c)) return SelectMode(c, c.format, false);
+    return c;
 }
 
 // Forward: Auto, team 0, ..., the last team, Auto (NextTeamPick). Back the other way. A pick the format has no team
@@ -417,55 +559,83 @@ inline int8_t StepTeamPick(int8_t cur, int teams, int dir) {
 
 // ------------------------------------------------------------------ text
 
-inline constexpr const char* kBrawlBlurb = "Free-for-all with bare fists: everyone spawns naked, no weapons. First to the limit wins.";
-inline constexpr const char* kCryptsBlurb = "Everyone loots their own Crypts as a new random character of the tier for the Gather time, then fights in what they found. Die down there and you keep what you had.";
+// A mode card's one line (docs/UI_STYLE.md): what sets the mode apart, nothing the name and the rules already say.
+inline constexpr const char* kBrawlBlurb = "Bare fists, everyone for themselves.";
+inline constexpr const char* kCryptsBlurb = "The whole dungeon. Pick a mode on it.";       // the CRYPTS card: it picks the Crypts map
+inline constexpr const char* kCryptRoyaleBlurb = "Loot the Crypts, then fight.";
+inline constexpr const char* kGraveRobbersBlurb = "Loot the same crypt, together.";
+inline constexpr const char* kProgressionBlurb = "The game's Progression, together.";
+inline constexpr const char* kBlossfechtenBlurb = "Swords only, no armour.";
 
 inline const char* FormatBlurb(Format f) {
     switch (f) {
-        case Format::Duel: return "One on one, rounds to the last one standing. Everybody respawns together; new gear each round with random or identical gear.";
-        case Format::LastManStanding: return "Rounds to the last one standing, for two or more players. Everybody respawns together; new gear each round with random or identical gear.";
-        case Format::TwoTeams: case Format::ThreeTeams: case Format::CaptureTheFlag: return "Two to four teams (Red, Blue, Green, Gold). Every kill scores for the team; the first team to the limit wins.";
-        case Format::TeamDuel: return "Teams in rounds: the last team standing takes the round. Two to four teams; everybody respawns together, new gear each round with random or identical gear.";
-        case Format::Riot: return "One knight in the best kit against everyone else in lighter gear. The last side standing takes the round; the knight changes every match.";
-        case Format::Juggernaut: return "Tall, heavy juggernauts against shorter, lighter fighters with more gear. The last side standing takes the round; the juggernauts change every match.";
-        case Format::Tag: return "Bare fists and light hits. One fighter is it and carries a fuse: hit someone to pass it on, or burn out when it runs down. The last one standing takes the round. Two or more players.";
-        case Format::Infection: return "Survivors against the infected. Patient zero starts infected; whoever an infected fighter kills is infected too and comes back. Survive the clock to win.";
-        case Format::CrossbowTDM: return "Teams, with a crossbow for everyone as well as the usual kit. Every kill scores for the team; the first team to the limit wins. Experimental: needs the crossbow test.";
-        case Format::Tournament: return "A knockout bracket, one on one: two fight, everyone else watches. One round a fight: the winner advances, the last one left takes the match. Three or more players.";
-        case Format::PitBridgeDuel: return "On the Pit's bridge, the winner stays: the loser goes to the back of the line and the next player steps up. Most fights won takes the match.";
-        case Format::OneCrossbow: return "Rounds to the last one standing between unarmed peasants. One of them starts each round with a crossbow that never runs out of bolts; it falls with its holder for the next one to pick up. Two or more players.";
-        case Format::Roulette: return "Unarmed peasants pass one crossbow round: six chambers, one of them live. On your turn pull the trigger on yourself (X) for a point, or on the fighter you face (C) to hand it on. The live chamber puts you out, or loads a real bolt for the other. The last one standing scores too. Two or more players.";
-        case Format::HideSeek: return "Rounds of seekers against hiders, dealt anew each round: one seeker, or two with six players or more. The hiders, unarmed peasants with no name tags, get the Hide time while the seekers stand still and see nothing. Then the seekers hunt with two-handed swords for the Seek time. Every hider down: the seekers take the round. Time up: the hiders still standing do. Three or more players, on Slums or a custom map.";
-        case Format::Chaos: return "Rounds to the last one standing, and no two alike: every round each fighter gets a random rank of gear, weapon type, height and weight, and the round its own damage and weights. Two or more players.";
-        case Format::PlayersVsBots: return "Everyone against waves of bots that rank up. The fallen return when a wave is cleared.";
-        case Format::Zombies: return "Zombie waves in the Abyss, one zombie at a time per player. The fallen return when a wave is cleared.";
+        case Format::Duel:
+        case Format::LastManStanding: return "Rounds, last one standing.";   // one card (the Duel card is this one)
+        case Format::TwoTeams: case Format::ThreeTeams: case Format::CaptureTheFlag: return "Two to four teams.";
+        case Format::TeamDuel: return "Teams, in rounds.";
+        case Format::Riot: return "One knight against the rest.";
+        case Format::Juggernaut: return "Big and heavy against small and light.";
+        case Format::Tag: return "Tag.";
+        case Format::Infection: return "The fallen join the infected.";
+        case Format::CrossbowTDM: return "Teams, a crossbow each.";
+        case Format::Tournament: return "A one-on-one bracket.";
+        case Format::OneCrossbow: return "Peasants and one crossbow.";
+        case Format::Roulette: return "One crossbow, six chambers.";
+        case Format::HideSeek: return "Seekers against hiders.";
+        case Format::Chaos: return "Random everything, every round.";
+        case Format::PlayersVsBots: return "Waves of bots.";
+        case Format::Zombies: return "Zombie waves in the Abyss.";
+        case Format::PitBridgeDuel:   // no card since 0.9.0 (LobbyConfigOf reads it as Carnage)
         case Format::FreeForAll: break;
     }
-    return "Everyone for themselves. Every kill scores; the first to the limit wins.";
+    return "Everyone for themselves.";
 }
 
 inline const char* MapTag(const MapInfo& m) {
+    if (m.crypts) return "Large level \xC2\xB7 the whole dungeon";
     if (m.abyss) return "Large level \xC2\xB7 no spawn points: ring spawn";
     return m.bigArena ? "Large level" : "Arena";
 }
 
 inline const char* MapRefusal(Format f) {
     if (f == Format::Zombies) return "Zombies needs the Abyss";
-    if (f == Format::Duel) return "Duel needs an arena";
     if (f == Format::Tournament) return "Tournament needs an arena";
-    if (f == Format::PitBridgeDuel) return "Pit bridge duels need the Pit";
     return "Not for this mode";
 }
 
 inline const char* GearName(Gear g) {
-    if (g == Gear::RandomTier) return "Random by tier";
-    if (g == Gear::Mirror) return "Everyone identical";
-    if (g == Gear::HostKit) return "Host's loadout";
+    if (g == Gear::RandomTier) return "Random";
+    if (g == Gear::Mirror) return "Identical";
+    if (g == Gear::HostKit) return "Host's kit";
     if (g == Gear::Crypts) return "Crypts loot";
-    return "Own loadouts";
+    return "Own kits";
 }
 
 inline int TierBudget(int tier) { return kTierBudget[std::clamp(tier, 0, 7)]; }
+
+// The tier row's eight chips, one per tier; the chip of the current tier (a stale value reads as the top one) is on.
+inline std::vector<RowChip> TierChips(uint8_t tier) {
+    std::vector<RowChip> v;
+    for (int i = 0; i < 8; ++i) v.push_back({TierName(i), std::min<int>(tier, 7) == i});
+    return v;
+}
+// A click on tier chip `chip` sets the tier to it (a chip past the last is the top one).
+inline MatchConfig WithTier(MatchConfig c, size_t chip) { c.tier = uint8_t(std::min<size_t>(chip, 7)); return c; }
+// The Bodies row's value: Own, or the same build for everyone: By tier while the tier chips show (the strength is the tier's),
+// Same for all when the tier is hidden. The row is the one setting: it steps between Own and the other.
+inline const char* BodiesName(const MatchConfig& c) { return c.ownBodies ? "Own" : TierInUse(c) ? "By tier" : "Same for all"; }
+
+// The Score limit row keeps one label in every mode; the unit is in the value: "10 kills", "3 rounds", "6 points", "5 wins".
+inline std::string LimitValue(Format f, int n) {
+    if (IsRoulette(f)) return CountOf(n, "point", "points");
+    if (IsRoundFormat(f)) return CountOf(n, "round", "rounds");
+    return CountOf(n, "kill", "kills");
+}
+// The Time limit row: "No limit", "10 min", and in Hide and seek "5 min a round" (the clock restarts every round).
+inline std::string TimeValue(Format f, uint16_t seconds) {
+    if (seconds == 0) return "No limit";
+    return std::to_string(seconds / 60) + " min" + (IsHideSeek(f) ? " a round" : "");
+}
 
 namespace lobby_detail {
 inline bool SamePath(std::string_view a, std::string_view pick) {
@@ -480,13 +650,15 @@ inline bool SamePath(std::string_view a, std::string_view pick) {
     return true;
 }
 
-// The package path of the map a match of this lobby starts on; empty for a modded map (the scenarios offer Standard only).
-inline std::string ScenarioMap(const LobbyLocal& l) {
+// The package path of the map a match of this lobby starts on; empty for a modded map (the day cycle is the stock arenas' only).
+inline std::string MapPathOf(const LobbyLocal& l) {
     if (l.config.format != Format::Zombies)
         for (const LobbyModMap& m : l.modMaps) if (SamePath(m.path, l.mapPick)) return {};
-    const size_t i = EffectiveMap(l.config.format, l.config.gear, l.mapPick);
+    const size_t i = EffectiveMap(l.config.format, l.config.gear, l.mapPick, IsBlossfechten(l.config));
     return i < MapCount() ? std::string(kMaps[i].path) : std::string();
 }
+// The players the mode cards and names read: the host's count (a dedicated server's own seat is no player), else the roster's size.
+inline int PlayersOf(const LobbyLocal& l) { return l.playerCount >= 0 ? l.playerCount : int(l.players.size()); }
 
 inline bool ValidTeam(int t, Format f, int teams) { return PicksTeams(f) && t >= 0 && t < TeamCount(f, teams); }
 inline int EffectiveTeam(const LobbyPlayer& p, Format f, int teams) {
@@ -496,123 +668,103 @@ inline int EffectiveTeam(const LobbyPlayer& p, Format f, int teams) {
 inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
     const MatchConfig& c = l.config;
     Format f = c.format;
-    bool duel = IsRoundFormat(f), bots = IsBotFormat(f);
+    bool bots = IsBotFormat(f);
     SettingRow r;
     r.id = s;
     r.enabled = l.host;
     switch (s) {
         case LobbyRow::Players:
-            r.label = "Players";
+            r.label = "Player limit";
             r.value = std::to_string(l.maxPlayers);
-            r.hint = "How many players the lobby takes. It cannot go below the players already in; nobody is kicked.";
             break;
         case LobbyRow::Battle:
             r.label = "Battle";
-            r.value = FormatName(f);
-            r.hint = "What is fought once the gather is over, everyone in the kit they gathered. Every round and respawn keeps it; a rematch is a new gather.";
+            r.value = IsDuelCard(f) ? DuelCardName(PlayersOf(l)) : FormatName(f);
             break;
         case LobbyRow::Gather:
-            r.label = "Gather time";
+            r.label = c.graveRobbers ? "Run time" : "Gather time";
             r.value = std::to_string(c.gatherS / 60) + " min";
-            r.hint = "How long everyone loots their own Crypts (click the time to type 2 to 60 min). Reach an exit to keep what you carry; die and you keep what you had. Then everyone waits for the battle.";
+            break;
+        case LobbyRow::FightMap: {
+            const size_t at = EffectiveFightMap(f, l.fightPick);
+            r.label = "Fight map";
+            r.value = at < MapCount() ? kMaps[at].display : "None";
+            r.hint = "Where the Battle is fought.";
+            break;
+        }
+        case LobbyRow::CryptsRun:
+            r.label = "Crypts run";
+            r.value = c.cryptsTogether ? "Together" : "Apart";
+            r.hint = c.cryptsTogether ? "Everyone loots the same crypt." : "Each player loots their own Crypts.";
+            break;
+        case LobbyRow::CryptsTier:
+            r.label = "Dungeon tier";
+            r.value = CryptsTierLabel(c.cryptsTier);
             break;
         case LobbyRow::Limit:
-            r.label = f == Format::Tournament ? "Rounds per fight" : f == Format::PitBridgeDuel ? "Wins to take the match" : duel ? "Rounds to win" : "Score limit";
-            r.value = std::to_string(LimitToKey(f, c.scoreLimit));
-            r.hint = f == Format::Tournament ? "How many rounds a fight is (best of): the first to win " + std::to_string(c.scoreLimit) + " takes it and moves on."
-                   : f == Format::PitBridgeDuel ? "The first to win this many fights takes the match. The winner of a fight stays on the bridge."
-                   : duel ? "The first to win this many rounds takes the match."
-                   : HasTeams(f) ? "The first team to this many kills wins." : "The first to this many kills wins.";
-            if (IsRoulette(f)) { r.label = "Points to win"; r.hint = "The first to this many points takes the match: a point for every blank you pull on yourself, and one for the last one standing."; }
+            r.label = "Score limit";
+            r.value = LimitValue(f, LimitToKey(f, c.scoreLimit));
             break;
         case LobbyRow::Time:
             r.label = "Time limit";
-            r.value = TimeLabel(c.timeLimitS);
-            if (bots) r.hint = c.timeLimitS ? "Players win if they hold out to the end (one wave cleared)." : "No clock: hold out as long as you can.";
-            else if (IsInfection(f)) r.hint = "The survivors win if any of them are still standing when it runs out.";
-            else r.hint = c.timeLimitS ? "When it runs out the leader wins; a tie goes to sudden death." : "No clock: play to the limit.";
-            if (IsHideSeek(f)) { r.label = "Seek time"; r.hint = "How long the seekers have each round. The hiders still standing when it runs out take the round."; }
+            r.value = TimeValue(f, c.timeLimitS);
             break;
         case LobbyRow::Respawn:
-            r.label = duel ? "Round break" : "Respawn delay";
+            r.label = "Respawn delay";
             r.value = std::to_string(c.respawnDelayS) + " s";
-            r.hint = duel ? "The pause between the end of a round and the next." : IsInfection(f) ? "How long the infected wait to come back." : "How long the fallen wait to come back.";
             break;
         case LobbyRow::Gear:
             r.label = "Gear";
             r.value = GearName(c.gear);
-            if (c.gear == Gear::RandomTier) r.hint = bots ? "A random loadout for each player at the start, kept for the whole run."
-                                                    : duel ? "Fresh random gear for each fighter every round." : "Fresh random gear for each fighter every life.";
-            else if (c.gear == Gear::Mirror) r.hint = bots ? "One random loadout for everyone, kept for the whole run."
-                                                  : duel ? "One random loadout for everyone, new each round." : "One random loadout for everyone, until the rematch.";
-            else if (c.gear == Gear::HostKit) r.hint = "Everyone fights in the host's own loadout.";
-            else r.hint = "Everyone fights in their own loadout.";
+            if (bots) r.hint = "Bots start at the tier picked here, and rise.";
+            if (TierInUse(c)) r.tierChips = TierChips(c.tier);
             break;
-        case LobbyRow::Tier:
-            r.label = IsCrypts(c) ? "Character tier" : bots ? "Starting tier" : "Gear tier";
+        case LobbyRow::Tier:                                           // the Crypts card only: the other cards pick the tier under Gear
+            r.label = "Starting tier";
             r.value = TierName(c.tier);
-            if (GearRolled(c.gear) || IsCrypts(c)) r.value += " \xC2\xB7 budget " + std::to_string(TierBudget(c.tier));
-            // 0.8.0-pre20: the tier is every player's strength (muscle and grip, forced: ForcedWeight), with any gear.
-            r.hint = f == Format::Zombies ? "Zombies start at this rank and rise one every 3 waves. "
-                   : bots ? "Bots start at this rank and rise one every 2 waves. " : "";
-            if (IsCrypts(c)) r.hint += "Everyone starts the Crypts as a new random character of this rank, made as the game makes its fighters: the rank's build (weight and fat) and a weapon and armour within its budget. ";
-            r.hint += BodiesOwn(c) ? "The players' strength is their own (the Bodies row)." : !GearRolled(c.gear) ? (bots ? "Also every player's strength." : "Sets every player's strength (muscle and grip).")
-                                          : (bots ? "Also every player's strength and the random gear's budget." : "Sets every player's strength; the random gear is rolled within this budget.");
+            if (bots) r.hint = "Bots start at the tier picked here, and rise.";
+            r.tierChips = TierChips(c.tier);
             break;
         case LobbyRow::Weapons:
             r.label = "Weapons";
             r.value = WeaponMaskName(c.weapons);
-            if (IsCrypts(c)) r.hint = c.weapons == 0 ? "The new character may start with any weapon. Tick the types it may start with."
-                                                     : "The new character starts with a weapon of a ticked type (the game's own weapon filter). Untick them all for any.";
-            else r.hint = c.weapons == 0 ? "The random gear may hold any weapon. Tick the types it may hold."
-                   : "The random gear's weapons are only of the ticked types; each loadout holds one of them (the game's own weapon filter). Untick them all for any.";
             r.chips.push_back({"Any", c.weapons == 0});
             for (uint8_t t = 1; t <= kWeaponTypeCount; ++t) r.chips.push_back({WeaponTypeName(t), WeaponMaskHas(c.weapons, t)});
             break;
         case LobbyRow::Teams:
             r.label = "Teams";
             r.value = std::to_string(TeamCount(c.format, c.teams)) + " teams";
-            r.hint = "Players without a pick go to the smallest team.";
             break;
         case LobbyRow::FriendlyFire:
             r.label = "Friendly fire";
             r.value = c.friendlyFire ? "On" : "Off";
-            if (bots) r.hint = c.friendlyFire ? "Players can hurt each other." : "Players cannot hurt each other.";
-            else r.hint = c.friendlyFire ? "Hits on teammates count." : "Teammates cannot hurt each other.";
             break;
         case LobbyRow::Damage:
             r.label = "Player damage";
             r.value = DamageLabel(c.damagePct, l.damage);
-            r.hint = "How hard hits land on every player, the game's own slider for everyone. Click the number to type up to 1000%. Yours is back after the session.";
             break;
         case LobbyRow::DeadWeight:
             r.label = "Dead weight";
             r.value = WeightLabel(c.deadWeightPct);
-            r.hint = "How heavy fallen bodies are, the game's own Dead Weight slider for everyone (the game's own is 50%). Yours is back after the session.";
             break;
         case LobbyRow::WeaponWeight:
             r.label = "Weapon weight";
             r.value = WeightLabel(c.weaponWeightPct);
-            r.hint = "How heavy every weapon is, the game's own Weapon Weight slider for everyone (the game's own is 50%). Yours is back after the session.";
             break;
         case LobbyRow::WaveBreak: {
             const int s = WaveBreakShown(c);
             r.label = "Wave break";
             r.value = s == 120 ? "2 min" : std::to_string(s) + " s";
-            r.hint = "The pause between waves. Hold G to vote to skip it.";
+            r.hint = "Hold G to vote to skip it.";
             break;
         }
         case LobbyRow::TimeOfDay:
             r.label = "Time of day";
             r.value = TimeOfDayName(c.timeOfDay);
-            r.hint = c.timeOfDay == 0 ? "The arena's light is the host's own Free Mode time."
-                                      : "The arena's light and sounds for everyone, as the game's own time of day.";
             break;
         case LobbyRow::ClearGround:
             r.label = "Clear ground";
-            r.value = c.clearGroundMin ? "Every " + std::to_string(c.clearGroundMin) + " min" : "Off";
-            r.hint = c.clearGroundMin ? "Dropped weapons and loose armour are cleared on this timer, to keep the lag down. Held and worn gear stays."
-                                      : "Dropped weapons and loose armour stay until the next round.";
+            r.value = ClearGroundLabel(c.clearGroundS);
             break;
         case LobbyRow::MyTeam: {
             r.label = "My team";
@@ -621,47 +773,30 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
             for (const LobbyPlayer& p : l.players) if (p.me) me = &p;
             r.value = TeamLabel(me && ValidTeam(me->team, f, c.teams) ? me->team : kNoTeam);
             r.hint = me && ValidTeam(me->hostOverride, f, c.teams) ? "The host moved you to " + TeamLabel(me->hostOverride) + "."
-                   : c.shuffle != TeamShuffle::Off ? std::string("Your pick is ignored while Shuffle teams is on.")
-                                                   : std::string("Auto puts you on the smallest team.");
+                   : c.shuffle != TeamShuffle::Off ? std::string("Ignored while Shuffle teams is on.") : std::string();
             break;
         }
         case LobbyRow::TeamKit:
             r.label = "Team colours";
             r.value = c.teamKit == TeamKit::Off ? "Off" : c.teamKit == TeamKit::Tabard ? "Tabard" : "Full kit";
-            r.hint = c.teamKit == TeamKit::Off ? "Everyone keeps their own colours."
-                   : c.teamKit == TeamKit::Tabard ? "The tabard takes the team colour. Each player sees it on their own copy of every fighter."
-                   : "Clothes, tabard, shield and grips take the team colour; blades stay steel. Each player sees it on their own copy of every fighter.";
-            break;
-        case LobbyRow::FreeCam:
-            r.label = "Free camera";
-            r.value = c.freeCam ? "On" : "Off";
-            r.hint = c.freeCam ? "Dead players can press F to fly a camera round the map. It stays inside the level."
-                               : "Dead players can only follow the living.";
             break;
         case LobbyRow::Crossbows:
             r.label = "Crossbows";
             r.value = CrossbowsName(c.crossbows);
-            r.hint = "Experimental: needs the crossbow test. Random players spawn with a crossbow (a new draw each round).";
             break;
         case LobbyRow::Fuse:
             r.label = "Fuse time";
             r.value = std::to_string(c.fuseS) + " s";
-            r.hint = "How long \"it\" has before the fuse runs out and it is out of the round. Hitting someone passes the fuse on; it keeps burning.";
-            if (IsHideSeek(f)) { r.label = "Hide time"; r.hint = "How long the hiders have at the start of each round, while the seekers stand still and see nothing."; }
+            if (IsHideSeek(f)) r.label = "Hide time";
             break;
         case LobbyRow::Shuffle:
             r.label = "Shuffle teams";
             r.value = c.shuffle == TeamShuffle::EachRound ? "Each round" : c.shuffle == TeamShuffle::EachMatch ? "Each match" : "Off";
-            r.hint = c.shuffle == TeamShuffle::Off ? "The teams are dealt once, when the match starts, from the picks and the host's moves. SHUFFLE NOW deals them at random at once."
-                   : std::string(c.shuffle == TeamShuffle::EachRound ? "The teams are dealt again at random, balanced, at the start, at every rematch and every new round. "
-                                                                     : "The teams are dealt again at random, balanced, at the start and at every rematch. ")
-                     + "Picks are ignored. Moves made here before the first match stay for it; each later shuffle clears them.";
+            if (c.shuffle != TeamShuffle::Off) r.hint = "Teams are dealt again at random. Picks are ignored.";
             break;
         case LobbyRow::TaggerSpeed:
             r.label = "Tagger speed";
             r.value = std::to_string(c.taggerSpeedPct) + "%";
-            r.hint = c.taggerSpeedPct == 100 ? "\"It\" runs and walks at normal speed."
-                   : "\"It\" runs and walks " + std::to_string(c.taggerSpeedPct) + "% as fast while carrying the fuse. Passing the fuse on takes the bonus off.";
             break;
         case LobbyRow::WinBy: {
             const WinBy w = EffectiveWinBy(c.format, c.hostPhysics, c.winBy);
@@ -674,51 +809,36 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
         case LobbyRow::Props:
             r.label = "Props";
             r.value = c.propsOff ? "Off" : "On";
-            r.hint = c.propsOff ? "The map's loose props (barrels, crates, furniture) are removed when the match starts and while it runs, on every screen. Weapons, armour and the map's structures stay."
-                                : "The map's barrels, crates and other loose props stay.";
             break;
         case LobbyRow::ClassPower: {
             const int p = SnapClassPower(c.classPower);
             r.label = "Class power";
             r.value = "+" + std::to_string(p);
-            r.hint = p == kClassPowerDefault ? "How strong a class may be: +15 power, the usual limit. Raise it to let stronger classes fight."
-                   : "Classes up to +" + std::to_string(p) + " power may fight here (the usual limit is +15). A player whose class is stronger is warned, then removed after a minute.";
             break;
         }
         case LobbyRow::Strip:
             r.label = "Stripping";
             r.value = c.stripOff ? "Off" : "On";
-            r.hint = c.stripOff ? "A downed fighter's armour stays on: grabbing it and letting go takes nothing off. Weapons can still be taken."
-                                : "Grab a downed fighter's armour and let go to pull it off, as in the game.";
+            break;
+        case LobbyRow::Bite:
+            r.label = "Biting";
+            r.value = c.biteOff ? "Off" : "On";
+            if (c.biteOff) r.hint = "Players can't bite fighters; eating still works.";
             break;
         case LobbyRow::Bodies:
             r.label = "Bodies";
-            r.value = c.ownBodies ? "Own" : "Same for all";
-            r.hint = IsCrypts(c) ? (c.ownBodies ? "Every player keeps the build of the character they gathered with (rolled for the tier: its Weight)."
-                                                : "Every player is built for the Character tier: the same muscle and grip.")
-                   : c.ownBodies ? "Every player keeps the build of their own character (its Weight)."
-                                 : "Every player is built for the Gear tier: the same muscle and grip.";
+            r.value = BodiesName(c);
+            r.hint = c.ownBodies ? "Everyone keeps their own build." : TierInUse(c) ? "Strength from the tier." : "Everyone gets the same build.";
             break;
         case LobbyRow::KeepKit:
-            r.label = "Loadouts";
+            r.label = "Keep kit";
             r.value = c.keepKit ? "Keep for the bracket" : "New each fight";
-            r.hint = c.keepKit ? "Each player keeps the random loadout of their first fight for every fight of the bracket. A new tournament rolls new ones."
-                               : "Both fighters get a new random loadout for every fight.";
             break;
-        case LobbyRow::Scenario: {
-            const std::string map = ScenarioMap(l);
-            const Scenario sc = EffectiveScenario(map, c.scenario);   // a pick the map does not offer reads Standard
-            r.label = "Scenario";
-            r.value = ScenarioName(sc);
-            r.hint = ScenarioHintFor(sc, ScenarioFormatOf(c.format));   // says so where the format does not use it
-            r.enabled = l.host && ScenariosFor(map).size() > 1;
-            break;
-        }
         case LobbyRow::Sync:
             r.label = "Sync";
             r.value = c.hostPhysics ? "Host physics" : "Per player";
-            r.hint = c.hostPhysics ? "The host runs every fighter's physics, so every screen shows the same fight. Your own moves show about one ping late. From the next map."
-                                   : "Each player runs their own fighter: no delay on your own moves, but hits and grabs can differ between screens. From the next map.";
+            r.hint = c.hostPhysics ? "Every screen shows the same fight; your moves lag by your ping."
+                                   : "No delay for you; hits can differ between screens.";
             break;
     }
     return r;
@@ -731,9 +851,13 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 namespace lobby_detail {
 inline std::vector<LobbyRow> FormatRows(const MatchConfig& c) {
     Format f = c.format;
-    if (IsCrypts(c)) {                               // the Battle and the Gather time, then the battle format's own rows: the gathered kits are the gear
+    if (IsGraveRobbers(c)) return {LobbyRow::Gather, LobbyRow::CryptsTier};   // Run time and Dungeon tier: a shared crypt, no fight after
+    if (IsCrypts(c)) {                               // Crypt Royale: the Battle and the Gather time, then the battle format's own rows: the gathered kits are the gear
         MatchConfig own = c; own.gear = Gear::Own;
         std::vector<LobbyRow> v = {LobbyRow::Battle, LobbyRow::Gather};
+        if (g_cryptsCoopOffered) v.push_back(LobbyRow::CryptsRun);   // Together: hidden by [mod] crypts_coop=0
+        v.push_back(LobbyRow::CryptsTier);
+        v.push_back(LobbyRow::FightMap);
         for (LobbyRow r : FormatRows(own)) {
             if (r == LobbyRow::Gear) continue;
             v.push_back(r);
@@ -743,32 +867,33 @@ inline std::vector<LobbyRow> FormatRows(const MatchConfig& c) {
     }
     const bool rolled = GearRolled(c.gear);          // the Weapons row filters generated gear only
     if (IsBotFormat(f)) {                            // endless, back at a wave clear in the run's loadout
-        std::vector<LobbyRow> b = {LobbyRow::Time, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier};
+        std::vector<LobbyRow> b = {LobbyRow::Time, LobbyRow::Gear, LobbyRow::Tier};
         if (rolled) b.push_back(LobbyRow::Weapons);
         for (LobbyRow r : {LobbyRow::WaveBreak, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Crossbows, LobbyRow::Sync}) b.push_back(r);
         return b;
     }
-    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
-    if (IsRoulette(f)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // the same rows as One Crossbow
+    if (IsBlossfechten(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // swords only, no armour: the kit is the mode's own, no gear rows
+    if (IsBrawl(c)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::ClearGround, LobbyRow::Sync};   // everyone bare at kBrawlTier's strength
+    if (IsRoulette(f)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // the same rows as One Crossbow
     if (IsOneCrossbow(f))                            // unarmed peasants and one crossbow: no gear rows, no Crossbows row
-        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};
+        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};
     if (IsTag(f)) {                                  // rounds with a fuse: no clock, no teams
-        return {LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // bare fists: no gear rows
+        return {LobbyRow::Limit, LobbyRow::Respawn, LobbyRow::Fuse, LobbyRow::TaggerSpeed, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // bare fists: no gear rows
     }
     if (IsInfection(f)) {                            // two fixed sides: the infection decides the teams, the colours and the crossbows
-        std::vector<LobbyRow> t = {LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear, LobbyRow::Tier};
+        std::vector<LobbyRow> t = {LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Gear, LobbyRow::Tier};
         if (rolled) t.push_back(LobbyRow::Weapons);
         for (LobbyRow r : {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync}) t.push_back(r);
         return t;
     }
-    if (IsHideSeek(f)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Fuse, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // the Seek and the Hide time; the roles set the gear
+    if (IsHideSeek(f)) return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Fuse, LobbyRow::Respawn, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::Sync};   // the Seek and the Hide time; the roles set the gear
     if (IsChaos(f))                                  // the rounds draw the gear, the builds, the damage and the weights: the match's own rules only
-        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Crossbows, LobbyRow::Sync};
+        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::Crossbows, LobbyRow::Sync};
     if (HasRoles(f))                                 // the roles set the gear, tier, build and team: only the match's own rules are left
-        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::TeamKit, LobbyRow::Crossbows, LobbyRow::Sync};
+        return {LobbyRow::Limit, LobbyRow::Time, LobbyRow::Respawn, LobbyRow::FriendlyFire, LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight, LobbyRow::TeamKit, LobbyRow::Crossbows, LobbyRow::Sync};
     std::vector<LobbyRow> v;
     if (f != Format::Tournament) { v.push_back(LobbyRow::Limit); v.push_back(LobbyRow::Time); }   // a bracket: one round a fight, no clock
-    for (LobbyRow r : {LobbyRow::Respawn, LobbyRow::FreeCam, LobbyRow::Gear}) v.push_back(r);
+    for (LobbyRow r : {LobbyRow::Respawn, LobbyRow::Gear}) v.push_back(r);
     v.push_back(LobbyRow::Tier);                     // the tier is every player's strength, with own gear too
     if (rolled) v.push_back(LobbyRow::Weapons);
     if (HasTeams(f)) v.push_back(LobbyRow::Teams);
@@ -782,44 +907,217 @@ inline std::vector<LobbyRow> FormatRows(const MatchConfig& c) {
     return v;
 }
 }  // namespace lobby_detail
-// The format's rows, and the Bodies row (#1410) after the Gear tier wherever the players fight in their own loadouts.
+// The format's rows in LobbyRow order, and the Bodies row (#1410) after the gear wherever the players fight in their own
+// loadouts. The Gear row carries the tier chips, so the Tier row stays only where there is no Gear row: the Crypts card.
 inline std::vector<LobbyRow> SettingsFor(const MatchConfig& c) {
     std::vector<LobbyRow> v = lobby_detail::FormatRows(c);
-    const auto tier = std::find(v.begin(), v.end(), LobbyRow::Tier);
-    if ((c.gear == Gear::Own || c.gear == Gear::Crypts) && tier != v.end()) v.insert(tier + 1, LobbyRow::Bodies);
+    if (IsGraveRobbers(c)) { std::stable_sort(v.begin(), v.end()); return v; }   // two rows, no Bodies
+    if (!IsCrypts(c)) v.erase(std::remove(v.begin(), v.end(), LobbyRow::Tier), v.end());
+    const auto gear = std::find(v.begin(), v.end(), IsCrypts(c) ? LobbyRow::Tier : LobbyRow::Gear);
+    if ((c.gear == Gear::Own || c.gear == Gear::Crypts) && gear != v.end()) v.insert(gear + 1, LobbyRow::Bodies);
+    std::stable_sort(v.begin(), v.end());
     return v;
 }
 
-inline constexpr Format kModeOrder[kModeOrderCount] = {Format::FreeForAll, Format::Duel, Format::LastManStanding, Format::TwoTeams,
-                                                       Format::TeamDuel, Format::Riot, Format::Juggernaut, Format::Tag, Format::Infection,
-                                                       Format::CrossbowTDM, Format::Tournament, Format::PitBridgeDuel, Format::Chaos, Format::OneCrossbow, Format::Roulette, Format::HideSeek, Format::PlayersVsBots, Format::Zombies};
+// Every row the lobby's RULES tab lists, in LobbyRow order: the format's own rows (SettingsFor) and the ones that depend on more
+// than the format: the player limit, the map's day cycle, Win by, Props, Stripping, Biting, Keep kit and the class budget's Class
+// power. Progression co-op keeps the three combat rows (and the player limit) alone. `mapPath`: lobby_detail::MapPathOf.
+inline std::vector<LobbyRow> SceneRows(const LobbyLocal& l, const std::string& mapPath) {
+    const MatchConfig& c = l.config;
+    std::vector<LobbyRow> v;
+    if (l.progression) v = {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight};   // co-op fights take them too
+    else if (IsGraveRobbers(c)) v = SettingsFor(c);                                            // no fight: Run time and Dungeon tier alone
+    else {
+        v = SettingsFor(c);
+        if (MapHasDayTime(mapPath)) v.push_back(LobbyRow::TimeOfDay);                           // only the arenas with a day cycle
+        if (WinByApplies(c)) v.push_back(LobbyRow::WinBy);                                      // the round formats but Tag, per player sync
+        v.push_back(LobbyRow::Props);                                                           // every lobby fight but Progression
+        v.push_back(LobbyRow::Strip);
+        v.push_back(LobbyRow::Bite);                                                            // the Biting row, beside Stripping
+        if (c.format == Format::Tournament && c.gear == Gear::RandomTier) v.push_back(LobbyRow::KeepKit);   // a bracket with random loadouts
+    }
+    v.push_back(LobbyRow::Players);                                                             // the lobby's own limit, in every lobby
+    if (l.classBudget) v.push_back(LobbyRow::ClassPower);                                       // the Classes preset with a power budget
+    std::stable_sort(v.begin(), v.end());
+    return v;
+}
 
 // Which formats a lobby with `players` players can run (the host's count, a dedicated server's own seat not counted).
-// Duel is one on one; Last Man Standing and Team Duel need somebody to be the last of; Riot and Juggernaut need a side of
+// Last Man Standing (the Duel card with two) and Team Duel need somebody to be the last of; Riot and Juggernaut need a side of
 // two against the one; Tag, Infection and Crossbow TDM need a second player. `hint` says why not, for the card.
 struct ModeAvail { bool ok = true; const char* hint = ""; };
 inline ModeAvail ModeAvailable(Format f, int players) {
-    if (f == Format::Duel && players != 2) return {false, "Duel is for 2 players"};
     if (IsRoulette(f) && players < 2) return {false, "Needs 2 or more players"};
     if (IsHideSeek(f) && players < 3) return {false, "Needs 3 or more players"};
-    if ((f == Format::LastManStanding || IsChaos(f) || IsOneCrossbow(f) || f == Format::TeamDuel || IsTag(f) || IsInfection(f) || IsCrossbowTdm(f)) && players < 2) return {false, "Needs 2 or more players"};
+    if ((IsDuelCard(f) || IsChaos(f) || IsOneCrossbow(f) || f == Format::TeamDuel || IsTag(f) || IsInfection(f) || IsCrossbowTdm(f)) && players < 2) return {false, "Needs 2 or more players"};
     if ((HasRoleTeams(f) || f == Format::Tournament) && players < 3) return {false, "Needs 3 or more players"};
-    if (f == Format::PitBridgeDuel && players < 2) return {false, "Needs 2 or more players"};
     return {};
 }
-// A third player joins a lobby set to Duel: it becomes Last Man Standing, keeping the round count and the gear rows.
-inline bool DuelOutgrown(const MatchConfig& c, int players) { return c.format == Format::Duel && players > 2; }
-inline MatchConfig AdjustForPlayers(MatchConfig c, int players) {
-    if (DuelOutgrown(c, players)) c.format = Format::LastManStanding;
+// The same for a lobby's whole config: the co-op half of the Crypts (Grave Robbers, the Crypts run's Together) is playable only with
+// on by default; [mod] crypts_coop=0 (docs/PLAN_CRYPTS_COOP.md) turns them off, and then START is refused with a plain notice.
+inline ModeAvail ModeAvailable(const MatchConfig& c, int players) {
+    if (!g_cryptsCoopOffered) {
+        if (IsGraveRobbers(c)) return {false, "Grave Robbers is turned off (crypts_coop=0)"};
+        if (IsCrypts(c) && c.cryptsTogether) return {false, "Crypts run Together is turned off (crypts_coop=0)"};
+    }
+    return ModeAvailable(c.format, players);
+}
+// The card's name for `players`: the Duel card reads Duel with two and Last man standing otherwise (hsm_mode_merge.h), the
+// others their format's. The card keeps one id, so the players decide only what it says and what the match starts as.
+inline std::string ModeCardName(Format f, int players) { return IsDuelCard(f) ? std::string(DuelCardName(players)) : FormatName(f); }
+
+namespace lobby_detail {
+// ------------------------------------------------------------------ the dropdown rows
+// Rows that step through named values are dropdowns (docs/UI_STYLE.md): the value opens a list of every option. Numbers keep
+// - and + and click-to-type, On and Off rows stay toggles, the tier and weapon types stay chips. A row not named here is a
+// stepper (another change retires two of them), so test_hsm_dropdown_rows.cpp lists every row of every mode with its kind.
+inline RowKind RowKindOf(LobbyRow s) {
+    switch (s) {
+        case LobbyRow::Battle: case LobbyRow::CryptsRun: case LobbyRow::CryptsTier: case LobbyRow::FightMap: case LobbyRow::WinBy: case LobbyRow::Shuffle:
+        case LobbyRow::Gear: case LobbyRow::Bodies: case LobbyRow::Crossbows: case LobbyRow::KeepKit: case LobbyRow::TimeOfDay:
+        case LobbyRow::TeamKit: case LobbyRow::Sync: case LobbyRow::MyTeam: return RowKind::Choice;
+        case LobbyRow::FriendlyFire: case LobbyRow::Props: case LobbyRow::Strip: return RowKind::Toggle;
+        case LobbyRow::Bite: return RowKind::Toggle;
+        case LobbyRow::Weapons: case LobbyRow::Tier: return RowKind::Chips;
+        default: break;
+    }
+    return RowKind::Stepper;
+}
+// The Team colours row's options, in the order StepSetting steps them.
+inline constexpr hsm::TeamKit kTeamKitOrder[3] = {hsm::TeamKit::Tabard, hsm::TeamKit::Full, hsm::TeamKit::Off};
+// The Fight map row's maps, as kMaps indexes in catalog order: the picker's maps the Battle format fights on (MapAllowsFight).
+inline std::vector<size_t> FightMaps(Format f) {
+    std::vector<size_t> v;
+    for (size_t i = 0; i < MapCount(); ++i) if (kMaps[i].pick && MapAllowsFight(kMaps[i], f)) v.push_back(i);
+    return v;
+}
+// How many options a Choice row has for this config (0: not a Choice row). A two-valued row lists its default (off) state first.
+inline size_t ChoiceCount(const MatchConfig& c, LobbyRow s) {
+    switch (s) {
+        case LobbyRow::Battle: return kCryptsBattleCount;
+        case LobbyRow::CryptsRun: case LobbyRow::Bodies: case LobbyRow::KeepKit: case LobbyRow::Sync: return 2;
+        case LobbyRow::CryptsTier: return size_t(kCryptsTierTop) + 1;
+        case LobbyRow::FightMap: return FightMaps(c.format).size();
+        case LobbyRow::WinBy: return kWinByCount;
+        case LobbyRow::Shuffle: return ShuffleOptions(c.format).size();
+        case LobbyRow::Gear: return kGearRowCount;
+        case LobbyRow::Crossbows: return kCrossbowModeCount;
+        case LobbyRow::TimeOfDay: return kTimeOfDayPicks;                     // Morning, Midday, Evening, Night
+        case LobbyRow::TeamKit: return 3;
+        case LobbyRow::MyTeam: return size_t(1 + TeamCount(c.format, c.teams));   // Auto, then the teams
+        default: break;
+    }
+    return 0;
+}
+// The option the config shows now (the stop StepSetting would step from: a stale value counts as the first).
+inline size_t ChoiceAt(const MatchConfig& c, LobbyRow s) {
+    switch (s) {
+        case LobbyRow::Battle: {
+            size_t at = 0;
+            for (size_t i = 0; i < kCryptsBattleCount; ++i) if (kCryptsBattles[i] == c.format) at = i;
+            return at;
+        }
+        case LobbyRow::CryptsRun: return c.cryptsTogether ? 1 : 0;
+        case LobbyRow::CryptsTier: return std::min<size_t>(c.cryptsTier, kCryptsTierTop);
+        case LobbyRow::WinBy: return size_t(EffectiveWinBy(c.format, c.hostPhysics, c.winBy));
+        case LobbyRow::Shuffle: return size_t(c.shuffle) < ShuffleOptions(c.format).size() ? size_t(c.shuffle) : 0;
+        case LobbyRow::Gear: {
+            size_t at = 0;
+            for (size_t i = 0; i < kGearRowCount; ++i) if (kGearRow[i] == c.gear) at = i;
+            return at;
+        }
+        case LobbyRow::Bodies: return c.ownBodies ? 1 : 0;
+        case LobbyRow::Crossbows: return ValidCrossbows(c.crossbows) ? c.crossbows : 0;
+        case LobbyRow::KeepKit: return c.keepKit ? 1 : 0;
+        case LobbyRow::TimeOfDay: return TimeOfDayPickAt(c.timeOfDay);          // an older host's Map's own (0) and a stale value read Midday
+        case LobbyRow::TeamKit: {
+            size_t at = 1;                                        // a value out of range reads Full kit, as StepSetting steps it
+            for (size_t i = 0; i < 3; ++i) if (kTeamKitOrder[i] == c.teamKit) at = i;
+            return at;
+        }
+        case LobbyRow::Sync: return c.hostPhysics ? 1 : 0;
+        default: break;
+    }
+    return 0;
+}
+// The config after option `i` of a Choice row is picked: what StepSetting reaches by stepping to it. The team pick (My team)
+// is the player's own, not the config's: MyTeamPick.
+inline MatchConfig WithChoice(MatchConfig c, LobbyRow s, size_t i) {
+    if (i >= ChoiceCount(c, s)) return c;
+    switch (s) {
+        case LobbyRow::Battle: return SelectFormat(c, kCryptsBattles[i]);         // the gear stays Crypts
+        case LobbyRow::CryptsRun: c.cryptsTogether = i == 1; break;
+        case LobbyRow::CryptsTier: c.cryptsTier = uint8_t(i); break;
+        case LobbyRow::WinBy: c.winBy = uint8_t(i); break;
+        case LobbyRow::Shuffle: c.shuffle = TeamShuffle(i); break;
+        case LobbyRow::Gear:
+            c.gear = kGearRow[i];
+            if (!TierInUse(c)) c.tier = MatchConfig{}.tier;                       // as StepSetting: the chips are gone, a tier picked before must not stay
+            break;
+        case LobbyRow::Bodies: c.ownBodies = i == 1; break;
+        case LobbyRow::Crossbows: c.crossbows = uint8_t(i); break;
+        case LobbyRow::KeepKit: c.keepKit = i == 1; break;
+        case LobbyRow::TimeOfDay: c.timeOfDay = TimeOfDayOfPick(i); break;
+        case LobbyRow::TeamKit: c.teamKit = kTeamKitOrder[i]; break;
+        case LobbyRow::Sync: c.hostPhysics = i == 1; break;
+        default: break;
+    }
     return c;
 }
-inline constexpr const char* kDuelOutgrownLine = "Duel is for 2 players: switched to Last man standing";
+// My team's option `i`: Auto, then team 0, 1, ...
+inline int8_t MyTeamPick(size_t i) { return i == 0 ? kNoTeam : int8_t(i - 1); }
+// The options of a Choice row in list order. Each label is the row's own value text with that option picked, so the list and
+// the value cannot disagree. The Battle row's formats the player count cannot run are disabled with the mode card's reason.
+inline std::vector<DropOption> ChoicesFor(const LobbyLocal& l, LobbyRow s) {
+    const MatchConfig& c = l.config;
+    std::vector<DropOption> v;
+    if (s == LobbyRow::FightMap) {
+        for (size_t i : FightMaps(c.format)) v.push_back({kMaps[i].display, true, ""});
+        return v;
+    }
+    if (s == LobbyRow::MyTeam) {
+        for (size_t i = 0; i < ChoiceCount(c, s); ++i) v.push_back({TeamLabel(MyTeamPick(i)), true, ""});
+        return v;
+    }
+    const int players = PlayersOf(l);
+    LobbyLocal probe;                                                             // the config and the player count are all a value text reads
+    probe.playerCount = players;                                                  // (the Battle row's Last man standing reads Duel with two)
+    for (size_t i = 0; i < ChoiceCount(c, s); ++i) {
+        probe.config = WithChoice(c, s, i);
+        v.push_back({Row(probe, s).value, true, ""});
+        if (s != LobbyRow::Battle) continue;
+        const ModeAvail av = ModeAvailable(kCryptsBattles[i], players);
+        if (!av.ok) { v.back().enabled = false; v.back().why = av.hint; }
+    }
+    return v;
+}
+// The option the lobby shows now for a Choice row (My team: the player's own pick, Auto when it is not valid in this format).
+inline size_t ChoiceIndex(const LobbyLocal& l, LobbyRow s) {
+    if (s == LobbyRow::FightMap) {                                                // the pick, as the match would take it (a stale one reads the default)
+        const std::vector<size_t> maps = FightMaps(l.config.format);
+        const size_t at = EffectiveFightMap(l.config.format, l.fightPick);
+        for (size_t i = 0; i < maps.size(); ++i) if (maps[i] == at) return i;
+        return 0;
+    }
+    if (s != LobbyRow::MyTeam) return ChoiceAt(l.config, s);
+    for (const LobbyPlayer& p : l.players) if (p.me && ValidTeam(p.team, l.config.format, l.config.teams)) return size_t(p.team) + 1;
+    return 0;
+}
+// A row as the scene lists it: the value and hint, how it is changed, and for a Choice row its dropdown.
+inline SettingRow SceneRow(const LobbyLocal& l, LobbyRow s) {
+    SettingRow r = Row(l, s);
+    r.kind = RowKindOf(s);
+    if (r.kind == RowKind::Choice) { r.choices = ChoicesFor(l, s); r.choice = ChoiceIndex(l, s); }
+    return r;
+}
+
+}  // namespace lobby_detail
 
 // The group of the i-th mode card (kModeOrder, then Brawl, Crypts and Progression): known before any scene, so the page can
 // build each card in its group's grid.
 inline ModeGroup ModeGroupAt(size_t i) {
-    if (i < kModeOrderCount) return IsBotFormat(kModeOrder[i]) ? ModeGroup::Coop : ModeGroup::Versus;
-    return i <= kModeOrderCount + 1 ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl, Crypts; Progression
+    if (i < kModeOrderCount) return IsBotFormat(kModeOrder[i].format) ? ModeGroup::Coop : ModeGroup::Versus;
+    return i <= kModeOrderCount + 1 ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl, CRYPTS; Progression, Crypt Royale, Grave Robbers
 }
 
 inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
@@ -834,7 +1132,11 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         case LobbyPhase::Creating: s.pill = {"Creating a lobby", style::kWarn}; break;
         case LobbyPhase::Joining: s.pill = {"Joining a lobby", style::kWarn}; break;
         case LobbyPhase::InLobby: {
-            if (l.host) { s.pill = {l.publicLobby ? "Hosting \xC2\xB7 public" : "Hosting \xC2\xB7 friends", style::kOk}; break; }
+            if (l.host) {                                                       // and where: the region the lobby is listed under
+                const Region at = EffectiveRegion(l.regionPick, l.regionGuess);
+                s.pill = {std::string(l.publicLobby ? "Hosting \xC2\xB7 public" : "Hosting \xC2\xB7 friends") + (RegionKnown(at) ? std::string(" \xC2\xB7 ") + RegionLabel(at) : std::string()), style::kOk};
+                break;
+            }
             std::string owner;
             for (const LobbyPlayer& p : l.players) if (p.host) owner = p.name;
             s.pill = {owner.empty() ? std::string("In a lobby") : "In " + owner + "'s lobby", style::kOk};
@@ -855,7 +1157,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
             s.browserCount = shown.size() == l.found.size() ? std::to_string(l.found.size()) + (l.found.size() == 1 ? " lobby" : " lobbies")
                            : std::to_string(shown.size()) + " of " + std::to_string(l.found.size()) + " lobbies shown";
         if (l.found.empty()) s.browserEmpty = "No public lobbies yet. REFRESH looks again.";
-        else if (shown.empty()) s.browserEmpty = "No lobby matches these filters.";
+        else if (shown.empty()) s.browserEmpty = HiddenByFiltersText(l.found, l.filter);
         for (size_t at : shown) {
             if (s.browser.size() >= kBrowserRows) break;
             const LobbyFound& f = l.found[at];
@@ -867,7 +1169,7 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
             r.players = std::to_string(f.players) + "/" + std::to_string(f.maxPlayers);
             if (RegionKnown(f.region)) r.detail = RegionLabel(f.region);
             if (!f.map.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.map;
-            if (!f.mode.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mode;
+            if (!f.mode.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + BrowserModeShown(f);
             if (!f.pack.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.pack;
             if (!f.mods.empty()) r.detail += (r.detail.empty() ? "" : " \xC2\xB7 ") + f.mods;
             if (!f.compatible && f.switchable && !LobbyIsFull(f.players, f.maxPlayers)) { r.note = {f.switchTag.empty() ? std::string("Restart") : f.switchTag, style::kWarn}; r.joinable = r.restart = true; }
@@ -902,16 +1204,19 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         s.readyLabel = s.readyOn ? "Ready \xC2\xB7 click to undo" : "Mark me ready";
     }
     s.hostPassword = l.host;
-    if (l.host) s.passwordNote = l.locked ? "Locked: players need the password. Changing it kicks nobody."
-                                          : "Open: type a password and press SET to lock the lobby.";
     s.balance = l.host && PicksTeams(f);
     s.shuffle = l.host && PicksTeams(f);
-    const int players = l.playerCount >= 0 ? l.playerCount : int(l.players.size());
-    for (Format m : kModeOrder) {
+    const int players = PlayersOf(l);
+    const bool blossfechten = IsBlossfechten(c);
+    for (const ModeSlot& slot : kModeOrder) {
+        const Format m = slot.format;
         const ModeAvail av = ModeAvailable(m, players);
         ModeCard mc;
-        mc.format = m; mc.name = Upper(FormatName(m)); mc.description = FormatBlurb(m);
-        mc.selected = m == f && !IsBrawl(c) && !IsCrypts(c) && !l.progression; mc.enabled = l.host && av.ok;
+        mc.format = m; mc.blossfechten = slot.blossfechten;
+        mc.name = Upper(slot.blossfechten ? std::string(kBlossfechtenName) : ModeCardName(m, players));
+        mc.description = slot.blossfechten ? kBlossfechtenBlurb : FormatBlurb(m);
+        const bool formatCard = IsDuelCard(m) ? IsDuelCard(f) : m == f;                      // a Duel config sits on the Last man standing card
+        mc.selected = formatCard && blossfechten == slot.blossfechten && !IsBrawl(c) && !IsCrypts(c) && !l.progression; mc.enabled = l.host && av.ok;
         if (!av.ok) mc.hint = av.hint;
         s.modes.push_back(mc);
     }
@@ -923,46 +1228,54 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         b.selected = IsBrawl(c) && !l.progression; b.enabled = l.host; b.brawl = true;
         s.modes.push_back(b);
     }
-    {
+    {                                                // CRYPTS: picks the Crypts map (and Crypt Royale on it); on the map the two modes below take its place
         ModeCard k;
-        k.format = IsCrypts(c) ? f : kCryptsDefaultBattle;
+        k.format = kCryptsDefaultBattle;
         k.name = "CRYPTS";
         k.description = kCryptsBlurb;
-        k.selected = IsCrypts(c) && !l.progression; k.enabled = l.host; k.crypts = true;
+        k.enabled = l.host; k.crypts = true; k.shown = !IsCrypts(c) || l.progression;
         s.modes.push_back(k);
     }
     {
         ModeCard p;
         p.name = "PROGRESSION (CO-OP)";
-        p.description = "Stock Progression in the Tavern, together. Free Mode off; your own save is untouched.";
+        p.description = kProgressionBlurb;
         p.selected = l.progression; p.enabled = l.host; p.progression = true;
         s.modes.push_back(p);
     }
+    {                                                // the Crypts modes, on the Crypts map
+        ModeCard r;
+        r.format = IsCrypts(c) ? f : kCryptsDefaultBattle;
+        r.name = "CRYPT ROYALE";
+        r.description = kCryptRoyaleBlurb;
+        r.selected = IsCryptRoyale(c) && !l.progression; r.enabled = l.host; r.crypts = true; r.shown = IsCrypts(c) && !l.progression;
+        s.modes.push_back(r);
+        ModeCard g;
+        g.format = r.format;
+        g.name = "GRAVE ROBBERS";
+        g.description = kGraveRobbersBlurb;
+        g.selected = IsGraveRobbers(c) && !l.progression; g.enabled = l.host; g.crypts = true; g.graveRobbers = true;
+        g.shown = IsCrypts(c) && !l.progression && g_cryptsCoopOffered;   // hidden by [mod] crypts_coop=0
+        s.modes.push_back(g);
+    }
     for (size_t i = 0; i < s.modes.size(); ++i) s.modes[i].group = ModeGroupAt(i);
-    s.playerLimit = Row(l, LobbyRow::Players);
-    s.hasPlayerLimit = true;
-    s.scenarioMap = lobby_detail::ScenarioMap(l);
-    if (!l.progression) for (LobbyRow id : SettingsFor(c)) s.settings.push_back(Row(l, id));
-    else for (LobbyRow id : {LobbyRow::Damage, LobbyRow::DeadWeight, LobbyRow::WeaponWeight}) s.settings.push_back(Row(l, id));   // co-op fights take them too
-    if (!l.progression && MapHasDayTime(s.scenarioMap)) { s.timeOfDay = Row(l, LobbyRow::TimeOfDay); s.hasTimeOfDay = true; }   // only the arenas with a day cycle
-    if (!l.progression && WinByApplies(c)) { s.winBy = Row(l, LobbyRow::WinBy); s.hasWinBy = true; }   // MATCH section, after the format's rows
-    if (!l.progression) { s.props = Row(l, LobbyRow::Props); s.hasProps = true; }   // WORLD section, before the scenario
-    if (!l.progression) { s.strip = Row(l, LobbyRow::Strip); s.hasStrip = true; }   // GEAR section
-    if (!l.progression && c.format == Format::Tournament && c.gear == Gear::RandomTier) { s.keepKit = Row(l, LobbyRow::KeepKit); s.hasKeepKit = true; }   // GEAR section
-    if (!l.progression && ScenariosFor(s.scenarioMap).size() > 1) { s.scenario = Row(l, LobbyRow::Scenario); s.hasScenario = true; }   // WORLD section, before Sync
-    if (l.classBudget) { s.classPower = Row(l, LobbyRow::ClassPower); s.hasClassPower = true; }   // MATCH section
+    if (l.progression) s.rulesNote = "The game's own rules, in the Tavern.";
+    const std::string mapPath = lobby_detail::MapPathOf(l);
+    for (LobbyRow id : SceneRows(l, mapPath)) s.settings.push_back(SceneRow(l, id));
     if (!l.host) s.hostOnly = "Only the host can change these.";
     size_t customChosen = l.modMaps.size();   // the picked custom map (none: l.modMaps.size())
     if (f != Format::Zombies)
         for (size_t i = 0; i < l.modMaps.size(); ++i) if (lobby_detail::SamePath(l.modMaps[i].path, l.mapPick)) customChosen = i;
-    const size_t chosen = customChosen < l.modMaps.size() ? MapCount() : EffectiveMap(f, c.gear, l.mapPick);
+    const size_t chosen = customChosen < l.modMaps.size() ? MapCount() : EffectiveMap(f, c.gear, l.mapPick, blossfechten);
     for (size_t i = 0; i < MapCount() && !l.progression; ++i) {
         if (!kMaps[i].pick) continue;
         MapCard m;
         m.index = i;
         m.name = kMaps[i].display;
         m.tag = MapTag(kMaps[i]);
-        m.allowed = MapAllowsMatch(kMaps[i], f, c.gear);
+        // The Crypts map is picked from any mode (it enters Crypts mode); while in Crypts mode another map is picked as the Battle format's
+        // own (MapPicked leaves Crypts mode).
+        m.allowed = kMaps[i].crypts ? true : IsCrypts(c) ? MapAllowsMatch(kMaps[i], f, Gear::Own, false) : MapAllowsMatch(kMaps[i], f, c.gear, blossfechten);
         if (!m.allowed) m.reason = MapRefusal(f);
         m.selected = i == chosen;
         m.enabled = l.host && m.allowed;
@@ -975,35 +1288,39 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         m.path = l.modMaps[i].path;
         m.name = l.modMaps[i].display;
         m.tag = l.modMaps[i].pak.empty() ? "Modded map" : "Modded map \xC2\xB7 " + l.modMaps[i].pak;
-        m.allowed = f != Format::Zombies && f != Format::PitBridgeDuel;   // the Abyss is the only Zombies map, the Pit the only bridge
+        m.allowed = f != Format::Zombies && !blossfechten;   // the Abyss is the only Zombies map; Blossfechten fights in its arenas only
         if (!m.allowed) m.reason = MapRefusal(f);
         m.selected = i == customChosen;
         m.enabled = l.host && m.allowed;
         s.maps.push_back(m);
     }
-    std::vector<PeerBuild> others;
-    for (const LobbyPlayer& p : l.players) if (!p.me) others.push_back({p.name, p.build});
-    const std::string warn = BuildWarning(l.myBuild, others);
-    s.buildMismatch = !warn.empty();
-    s.start = l.host && MayStartMatch(l.myBuild, others, l.allowBuildMismatch);
-    const ModeAvail playable = l.progression ? ModeAvail{} : ModeAvailable(f, players);   // Duel needs exactly 2, Last Man Standing 2 or more
+    const ModeAvail playable = l.progression ? ModeAvail{} : ModeAvailable(c, players);   // Last Man Standing (the Duel card with two) needs 2 or more
     const bool modWait = l.host && customChosen < l.modMaps.size() && l.modPickPending;
-    if (modWait || !playable.ok) s.start = false;
+    StartInputs gate;                                                                   // one rule with the host's session (match/hsm_start_gate.h)
+    gate.host = l.host; gate.progression = l.progression; gate.allowMismatch = l.allowBuildMismatch; gate.modsChecking = modWait;
+    gate.modeOk = playable.ok; gate.modeHint = playable.hint; gate.mine = l.myBuild;
+    for (const LobbyPlayer& p : l.players) if (!p.me) gate.peers.push_back({p.name, p.build, p.joined});
+    const StartVerdict verdict = EvaluateStart(gate);
+    s.start = verdict.ok;
+    s.startWhy = verdict.text;
+    s.buildMismatch = verdict.warn;
+    s.waitingWarn = verdict.warn || (l.host && !verdict.ok);
     // The line beside START: what will be played.
     if (l.progression) s.summary = "PROGRESSION \xC2\xB7 the Tavern, together";
     else {
-        s.summary = Upper(ModeName(f, c.gear, c.teams));
+        s.summary = Upper(ModeNameFor(c, players));
         for (const MapCard& m : s.maps) if (m.selected) s.summary += " \xC2\xB7 " + m.name;
-        const bool gearRows = !IsBare(c) && !HasRoles(f);               // Riot and Juggernaut deal the gear by role; Brawl and Tag are bare
+        const bool gearRows = !IsBare(c) && !HasRoles(f) && !blossfechten && !IsGraveRobbers(c);   // Riot and Juggernaut deal the gear by role; Brawl and Tag are bare; Blossfechten's kit is the mode's
         if (gearRows) s.summary += " \xC2\xB7 " + std::string(GearName(c.gear));
         if (gearRows && GearRolled(c.gear)) s.summary += ", " + std::string(TierName(c.tier));
         if (gearRows && GearRolled(c.gear) && c.weapons != 0) s.summary += ", " + WeaponMaskName(c.weapons);
         if (IsCrypts(c)) s.summary += ", " + std::to_string(c.gatherS / 60) + " min";
+        if (IsCrypts(c) && c.cryptsTogether) s.summary += ", together";
+        if (IsCryptRoyale(c)) { const size_t fm = EffectiveFightMap(f, l.fightPick); if (fm < MapCount()) s.summary += std::string(", fight on ") + kMaps[fm].display; }
+        if (IsCrypts(c) && c.cryptsTier != kCryptsTierCap)   // the Dungeon tier when the host moved it off Peasant
+            s.summary += c.cryptsTier >= kCryptsTierTop ? std::string(", the game's own dungeon") : ", dungeon up to " + std::string(TierName(c.cryptsTier));
     }
-    if (!l.host) s.waiting = "Waiting for the host";
-    if (modWait) s.waiting = "Checking the map pack";
-    if (l.host && !playable.ok) s.waiting = playable.hint;
-    if (s.buildMismatch) s.waiting = l.host && l.allowBuildMismatch ? warn + " (allowed: allow_build_mismatch=1)" : warn;
+    s.waiting = verdict.line;
     return s;
 }
 

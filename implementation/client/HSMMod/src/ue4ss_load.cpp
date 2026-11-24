@@ -62,33 +62,6 @@ std::wstring OurModulePath() {
     return n && n < MAX_PATH ? std::wstring(p, n) : std::wstring();
 }
 
-// The fixed file version of a DLL, read from its version resource without running it or loading version.dll: the DLL is
-// mapped as a data file (RT_VERSION is resource type 16) and the VS_FIXEDFILEINFO (signature 0xFEEF04BD) is found in the RT_VERSION block. Empty: no
-// version resource (or the file cannot be mapped).
-std::string FileVersion(const std::wstring& path) {
-    HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
-    if (!m) return {};
-    std::string out;
-    if (HRSRC r = FindResourceW(m, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(16))) {
-        const DWORD size = SizeofResource(m, r);
-        if (HGLOBAL g = LoadResource(m, r)) {
-            const auto* p = static_cast<const uint8_t*>(LockResource(g));
-            for (DWORD off = 0; p && off + 16 <= size && off < 256; off += 4) {
-                uint32_t sig;
-                std::memcpy(&sig, p + off, 4);
-                if (sig != 0xFEEF04BDu) continue;
-                uint32_t ms, ls;
-                std::memcpy(&ms, p + off + 8, 4);
-                std::memcpy(&ls, p + off + 12, 4);
-                out = FormatFileVersion(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF);
-                break;
-            }
-        }
-    }
-    FreeLibrary(m);
-    return out;
-}
-
 std::string ReadModsTxt(const std::wstring& modsDir) {
     std::string text;
     if (FILE* f = _wfopen((modsDir + L"mods.txt").c_str(), L"rb")) {
@@ -160,6 +133,33 @@ void CheckProxies(const std::wstring& dir) {
 }
 }  // namespace
 
+// The fixed file version of a DLL, read from its version resource without running it or loading version.dll: the DLL is
+// mapped as a data file (RT_VERSION is resource type 16) and the VS_FIXEDFILEINFO (signature 0xFEEF04BD) is found in the RT_VERSION block. Empty: no
+// version resource (or the file cannot be mapped).
+std::string FileVersion(const std::wstring& path) {
+    HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
+    if (!m) return {};
+    std::string out;
+    if (HRSRC r = FindResourceW(m, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(16))) {
+        const DWORD size = SizeofResource(m, r);
+        if (HGLOBAL g = LoadResource(m, r)) {
+            const auto* p = static_cast<const uint8_t*>(LockResource(g));
+            for (DWORD off = 0; p && off + 16 <= size && off < 256; off += 4) {
+                uint32_t sig;
+                std::memcpy(&sig, p + off, 4);
+                if (sig != 0xFEEF04BDu) continue;
+                uint32_t ms, ls;
+                std::memcpy(&ms, p + off + 8, 4);
+                std::memcpy(&ls, p + off + 12, 4);
+                out = FormatFileVersion(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF);
+                break;
+            }
+        }
+    }
+    FreeLibrary(m);
+    return out;
+}
+
 void Run(const Config& cfg) {
     if (g_ran.exchange(true)) return;   // once per process
     Decide decide;
@@ -175,7 +175,7 @@ void Run(const Config& cfg) {
     files.beside = FileExists(dir + Wide(RelPath(Pick::Beside)));
     files.xinput2x = LooksLikeUe4ss2x(FileExists(dir + L"xinput1_3.dll"), FileExists(dir + L"UE4SS-settings.ini"), DirExists(dir + L"Mods"));
     const bool proxyRunning = files.xinput2x && GetModuleHandleW(L"xinput1_3.dll");
-    InstallBundled(dir, files, cfg.ue4ssKeep);
+    InstallBundled(dir, files);
     files.sub = FileExists(dir + Wide(RelPath(Pick::Sub)));
     files.beside = FileExists(dir + Wide(RelPath(Pick::Beside)));
     // A 2.x proxy that already started keeps this one game: a second UE4SS would double-hook. The next start has no proxy.
