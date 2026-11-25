@@ -447,6 +447,7 @@ MatchConfig Lobby::config() const {
     c.cryptsTier = uint8_t(std::clamp(IntOr(steam::LobbyData(lobby_, "hsm_ctier"), kCryptsTierCap), 0, int(kCryptsTierTop)));   // none: Peasant (Crypts)
     c.cryptsTogether = steam::LobbyData(lobby_, "hsm_ctog") == "1";                                        // none: Apart (Crypts)
     c.graveRobbers = steam::LobbyData(lobby_, "hsm_grave") == "1";                                         // none: Crypt Royale (Crypts)
+    c.coopCrypts = steam::LobbyData(lobby_, "hsm_ccoop") == "1";                                           // none: not Co-op Crypts (an older host)
     return Sanitize(LobbyConfigOf(c));   // an older host's Duel, Pit bridge duels, Fenced ring and Carnage scenarios read as the modes that are left; Free camera is always on
 }
 
@@ -488,6 +489,7 @@ void Lobby::SetConfig(const MatchConfig& in) {
     steam::SetLobbyData(lobby_, "hsm_ctier", std::to_string(c.cryptsTier));
     steam::SetLobbyData(lobby_, "hsm_ctog", c.cryptsTogether ? "1" : "0");
     steam::SetLobbyData(lobby_, "hsm_grave", c.graveRobbers ? "1" : "0");
+    steam::SetLobbyData(lobby_, "hsm_ccoop", c.coopCrypts ? "1" : "0");   // an older build reads hsm_grave alone: Grave Robbers
 }
 std::string Lobby::MapPick() const { return InLobby() ? steam::LobbyData(lobby_, "hsm_map") : std::string(); }
 void Lobby::SetMapPick(const std::string& path) { if (IsHost()) steam::SetLobbyData(lobby_, "hsm_map", path); }

@@ -49,6 +49,10 @@ struct WeaponSample {
     // bone origin's velocity. Only sent with a present weapon.
     bool hasHead = false;
     BoneSample head{};
+    // The held weapon's object id (session/hsm_lease.h: the id every machine agrees on), so a stand-in takes that very
+    // weapon rather than the nearest of its class (protocol rev 52, flags bits 4 and 5). 0: none known (a weapon no one
+    // has dropped, or one the owner's machine does not track): the receiver then matches by class.
+    uint64_t objectId = 0;
 };
 
 // How the owner's hands hold their weapon, read from the Willie's own variables (the game never gives the left hand a

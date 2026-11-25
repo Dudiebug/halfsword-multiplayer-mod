@@ -42,6 +42,21 @@ static void TestOffFightLevelLeaves() {
     CHECK(ChooseInputMode(S(false, false, true, false, false)) == InputMode::GameOnly);    // on a fight level it still restores once
 }
 
+static InputModeState Wheel(InputModeState s) { s.gameScreenOpen = true; return s; }
+
+// #3681 / #4167: the weapon wheel holds UI-only input until its own Close Widget. A restore under it took its keys and left
+// it on screen for good, so the restores leave it alone; the pause menu still opens over it (the caller closes it first).
+static void TestGameScreenLeaves() {
+    CHECK(ChooseInputMode(Wheel(S(false, false, false, true, false))) == InputMode::Leave);    // a respawn shot under the wheel
+    CHECK(ChooseInputMode(Wheel(S(false, false, false, false, true))) == InputMode::Leave);    // the after-load fix under it
+    CHECK(ChooseInputMode(Wheel(S(false, false, true, false, false))) == InputMode::Leave);    // the menu closed, the wheel up
+    CHECK(ChooseInputMode(Wheel(S(false, false, false, false, false))) == InputMode::Leave);
+    CHECK(ChooseInputMode(Wheel(S(false, true, false, true, false))) == InputMode::GameAndUI); // the pause menu opens over it
+    CHECK(ChooseInputMode(Wheel(S(false, true, true, false, false))) == InputMode::Leave);
+    CHECK(ChooseInputMode(Wheel(S(true, false, false, true, false))) == InputMode::Leave);     // typing still wins
+    CHECK(ChooseInputMode(S(false, false, false, true, false)) == InputMode::GameOnly);         // no wheel: restored as before
+}
+
 static void TestTypingWins() {
     CHECK(ChooseInputMode(S(true, false, false, true, true)) == InputMode::Leave);
     CHECK(ChooseInputMode(S(true, true, false, false, false)) == InputMode::Leave);
@@ -241,6 +256,7 @@ int main() {
     TestEscPress(); TestEscPressEvent(); TestEscPressGap(); TestEscPressWraps(); TestEscPressStartsFromZero();
     TestPauseScreens();
     TestMenuOpens(); TestMenuBlocksRestores(); TestMenuCloses(); TestNormalRestores(); TestOffFightLevelLeaves(); TestTypingWins();
+    TestGameScreenLeaves();
     if (g_fail) { std::printf("%d failure(s)\n", g_fail); return 1; }
     std::puts("hsm_input_mode ok");
     return 0;

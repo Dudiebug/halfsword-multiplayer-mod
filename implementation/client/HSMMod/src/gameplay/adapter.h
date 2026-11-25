@@ -68,6 +68,14 @@ public:
     // (SpawnFighter's brain), so KeepRemoteFighter can aim it. True when it has one.
     bool EnsureBrain(ue::UObject* willie);
     void RestoreGameInput();                               // game-only input, no cursor (as the stock death screens do)
+    // The game's weapon wheel (UI_WeaponSelection_C, match/hsm_input_mode.h kWeaponWheelClass) is on screen. It holds UI-only input
+    // until its own Close Widget, so a restore of game input under it leaves it up for good (#3681, #4167). Cheap: one class
+    // search, at most ten times a second.
+    bool GameScreenOpen();
+    // Closes each such screen with its own Close Widget (time dilation, input mode, cursor and RemoveFromParent, as the game's
+    // R and click handlers do), to be called before the mod sets an input mode of its own. Returns how many it closed; each is
+    // logged with `reason`.
+    int CloseGameScreens(const char* reason);
     // The stock pause menu (a UserWidget whose class name contains "UI_Pause") is on screen. Cheap to call every frame: the
     // widgets are only searched for a moment after Esc or a pause, and then at most four times a second.
     // The mod's own panel counts too (SetModPanelOpen), so the input-mode logic that gives the stock menu its cursor gives
@@ -247,6 +255,9 @@ public:
     ue::UObject* SpawnFenceBags(const ue::FVector& at, double radius);
     bool FenceBagsExist();
     ue::UClass* LoadClassBlocking(const std::string& objectPath);
+    // The fighter's pose ticks and its bones refresh even off this machine's screen (as stand-ins do, standin_rig.cpp): the host's
+    // adopted Crypts enemies fight clients the host cannot see. False when its mesh or the field cannot be read.
+    bool AlwaysTickPose(ue::UObject* willie);
     bool IsZombieBody(ue::UObject* willie);   // of the zombie Willie class (match/hsm_fighter_class.h)
     // The spike: logs the game's combat-event objects (BP_CombatEvent_*_C) with their Scenario Name, Available Combat Modes
     // and Available Lose Conditions, one line each ("scenario: map <name>: combat event ..."). Returns how many lines.
@@ -509,6 +520,9 @@ private:
     uint32_t hubSwallowed_ = 0;                    // Tavern hub menus kept from constructing (SwallowTavernHub)
     uint32_t surfaceFades_ = 0;                    // UI_FadeToSurface constructions (TakeSurfaceFades)
     uint32_t deathScreens_ = 0;                    // UI_DED constructions (TakeDeathScreens)
+    uint32_t gameScreenCheckAt_ = 0;   // GameScreenOpen: when it last searched, and what it found
+    bool gameScreenOpen_ = false;
+    int gameScreenLogs_ = 0;
     bool inputTouched_ = false;    // RestoreGameInput or CaptureInput ran since the last MenuInputBack
     bool inputCaptured_ = false;   // CaptureInput(true) holds: a respawn keeps the chat's keyboard
     bool subclassWeapons_ = false;

@@ -356,9 +356,17 @@ inline std::string HideSeekLine(const MatchInfo& m, uint8_t myEntity) {
 // Looting: "CRYPTS 12:34 - gather your kit"; after a death, an exit or a late join: "Kit kept, waiting 4:10"; while the
 // last kits come in: "Battle starting". Together (one shared crypt): "CRYPTS 12:34 - loot together, then fight in
 // what you carry", and "... - into the Crypts together" while the level loads.
-inline std::string CryptsLine(GatherPhase phase, GatherSelf self, uint32_t leftMs, bool together = false) {
+// noBattle: a Grave Robbers run (Co-op Crypts included): the run ends with the results, not a battle.
+inline std::string CryptsLine(GatherPhase phase, GatherSelf self, uint32_t leftMs, bool together = false, bool noBattle = false) {
     if (phase == GatherPhase::Off) return {};
-    if (phase == GatherPhase::Collecting) return "Battle starting";
+    if (phase == GatherPhase::Collecting) return noBattle ? "Run over" : "Battle starting";
+    if (GatherUntimed(leftMs)) {                        // Co-op Crypts: no clock
+        if (self == GatherSelf::Opening) return "CRYPTS - into the Crypts together";
+        if (self == GatherSelf::Gathering) return "CRYPTS - find the way out alive";
+        if (self == GatherSelf::Extracted) return "You got out - waiting for the others";
+        if (self == GatherSelf::Died) return "You fell - waiting for the others";
+        return "Waiting for the Crypts to open";
+    }
     if (together && self == GatherSelf::Opening) return "CRYPTS " + Clock(leftMs) + " - into the Crypts together";
     if (together && self == GatherSelf::Gathering) return "CRYPTS " + Clock(leftMs) + " - loot together, then fight in what you carry";
     switch (self) {

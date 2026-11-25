@@ -38,6 +38,8 @@ public:
     uint32_t ClockMs(double nowMs) const;             // this machine's stream clock (also every claim's attackerTsMs)
     // Once per frame: reads and sends every owned fighter that is due. owned: (entity, its live Willie).
     void Tick(Adapter& adapter, double nowMs, float dt, const std::vector<std::pair<uint8_t, ue::UObject*>>& owned, const Send& send);
+    // Rev 52: the object id of a held weapon's actor (0: none known), put in the pose so a stand-in takes that very weapon.
+    void SetWeaponIdOf(std::function<uint64_t(ue::UObject*)> idOf) { weaponIdOf_ = std::move(idOf); }
     bool PelvisOf(uint8_t entity, sync::V3& out) const;   // as of the latest read (the snap clearance)
     // The hand-off epoch each Pose and Vitals carries for its entity (sync/hsm_handoff.h); 0 when unset.
     void SetEpochOf(std::function<uint8_t(uint8_t)> epochOf) { epochOf_ = std::move(epochOf); }
@@ -60,6 +62,7 @@ private:
     double startMs_ = 0, prevDtS_ = 0;
     sync::SlowFrameMeter slowFrames_;   // item 7a: this machine's frames past 25 ms (a pose still goes each one)
     std::function<uint8_t(uint8_t)> epochOf_;
+    std::function<uint64_t(ue::UObject*)> weaponIdOf_;
     uint64_t posesSent_ = 0, vitalsSent_ = 0, readFailed_ = 0;
 };
 
@@ -97,6 +100,7 @@ public:
         uint32_t classHash = 0, prevClassHash = 0;
         double sinceMs = 0;
         sync::V3 pos{}, firstPos{};
+        uint64_t objectId = 0;   // rev 52: the object id the newest pose named for this hand's weapon, 0 none
     };
     bool PoseHandInfo(uint8_t entity, int hand, PoseHandView& out) const;
     // The owner's clock now (local time minus the minimum transit offset seen): how old a claim from that owner is.
@@ -151,6 +155,7 @@ private:
         std::array<uint32_t, sync::kPoseWeapons> handClass{};   // newest pose's weapon class per hand (0 = empty, 1 = unknown)
         std::array<uint32_t, sync::kPoseWeapons> handPrevClass{};   // the class each hand showed before that
         std::array<double, sync::kPoseWeapons> handSinceMs{};   // local time each hand's class last changed
+        std::array<uint64_t, sync::kPoseWeapons> handObjId{};   // rev 52: the newest pose's weapon object id per hand, 0 none
         std::array<sync::V3, sync::kPoseWeapons> handPos{}, handFirstPos{};   // its weapon's root: newest, and as the class first showed
         uint32_t handTs = 0;
         bool haveHands = false;

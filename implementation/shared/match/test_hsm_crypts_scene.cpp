@@ -280,6 +280,36 @@ static void TestGraveRobbers() {
 }
 
 // START: the co-op half is playable unless [mod] crypts_coop=0 (docs/PLAN_CRYPTS_COOP.md) and is refused with a plain notice then.
+// Co-op Crypts: the game's own Crypts with friends. A card of its own on every map; no rows but the player limit; the game's tiers.
+static const ModeCard* CoopCard(const LobbyScene& s) { return NamedCard(s, "CRYPTS (CO-OP)"); }
+static void TestCoopCrypts() {
+    CoopFlag on(true);
+    LobbyScene own = BuildLobbyScene(InLobby(true, MatchConfig{}));
+    const ModeCard* k = CoopCard(own);
+    CHECK(k && k->shown && !k->selected && k->enabled && k->coopCrypts && k->crypts && k->graveRobbers && k->group == ModeGroup::Coop && k->description == kCoopCryptsBlurb);
+    CHECK(&own.modes.back() == k);                                                        // the last card: the groups stay as they are
+    const MatchConfig c = SelectMode(MatchConfig{}, k->format, k->brawl, k->crypts, k->blossfechten, k->graveRobbers, k->coopCrypts);
+    CHECK(IsCoopCrypts(c) && IsCrypts(c) && c.cryptsTier == kCryptsTierTop && SettingsFor(c).empty());
+    LobbyScene s = BuildLobbyScene(InLobby(true, c));
+    std::vector<LobbyRow> ids; for (const SettingRow& r : s.settings) ids.push_back(r.id);
+    CHECK(ids == std::vector<LobbyRow>({LobbyRow::Players}));
+    CHECK(CoopCard(s)->selected && !GraveCard(s)->selected && !NamedCard(s, "CRYPT ROYALE")->selected);
+    CHECK(s.summary.rfind("CRYPTS (CO-OP)", 0) == 0 && s.summary.find("your own crypt character") != std::string::npos && s.summary.find(" min") == std::string::npos);
+    // Grave Robbers from it: its own tier row back at the default; out of the Crypts: nothing of it left
+    const MatchConfig g = SelectMode(c, Format::FreeForAll, false, true, false, true);
+    CHECK(IsGraveRobbers(g) && !IsCoopCrypts(g) && g.cryptsTier == MatchConfig{}.cryptsTier);
+    const MatchConfig out = SelectMode(c, Format::FreeForAll, false);
+    CHECK(!IsCrypts(out) && !out.coopCrypts && !out.graveRobbers && out.cryptsTier == MatchConfig{}.cryptsTier);
+    CHECK(ModeAvailable(c, 2).ok);
+}
+static void TestCoopCryptsOff() {
+    CoopFlag off(false);
+    MatchConfig c; c.gear = Gear::Crypts; c.coopCrypts = true; c.graveRobbers = true;
+    CHECK(!ModeAvailable(c, 2).ok);
+    LobbyScene s = BuildLobbyScene(InLobby(true, MatchConfig{}));
+    CHECK(CoopCard(s) && !CoopCard(s)->shown);
+}
+
 static void TestNotReady() {
     MatchConfig g = SelectMode(MatchConfig{}, Format::FreeForAll, false, true, false, true);
     MatchConfig t = Crypts(); t.cryptsTogether = true;
@@ -370,6 +400,7 @@ static void TestFightMap() {
 }
 
 int main() {
+    TestCoopCrypts(); TestCoopCryptsOff();
     TestCard();
     TestSelect();
     TestRows();

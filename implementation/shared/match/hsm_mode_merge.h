@@ -22,6 +22,7 @@ inline constexpr const char* kBrawlName = "Brawl";
 inline constexpr const char* kCarnageName = "Carnage";
 inline constexpr const char* kCryptRoyaleName = "Crypt Royale";
 inline constexpr const char* kGraveRobbersName = "Grave Robbers";
+inline constexpr const char* kCoopCryptsName = "Crypts (co-op)";
 inline constexpr const char* kDuelCardChip = "Duel or last man standing";   // the browser's mode chip stop for the merged card
 
 // Whether the merged card reads Duel: exactly two players, or a lobby that cannot hold more than two and has fewer so far (a
@@ -35,6 +36,7 @@ inline const char* DuelCardName(int players, int maxPlayers = 0) { return ReadsD
 // What a match is called to the players, with the merged cards: ModeName, but Blossfechten by its own name, and the Duel card
 // by the player count ("Crypt Royale (Duel)" where its battle is a Duel), and Grave Robbers by its own name.
 inline std::string ModeNameFor(const MatchConfig& c, int players, int maxPlayers = 0) {
+    if (IsCoopCrypts(c)) return kCoopCryptsName;
     if (IsGraveRobbers(c)) return kGraveRobbersName;
     if (IsBlossfechten(c)) return kBlossfechtenName;
     const Format shown = IsDuelCard(c.format) ? (ReadsDuel(players, maxPlayers) ? Format::Duel : Format::LastManStanding) : c.format;

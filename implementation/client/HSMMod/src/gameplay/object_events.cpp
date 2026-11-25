@@ -278,9 +278,13 @@ void ObjectSync::BindAnnounced(std::vector<LevelActor>& free, double nowMs) {
         ++n_.ghostsExpired;
         // One class (a clutter spawner's pieces, rolled on each machine) can make most of these: a few per class, then counted.
         const uint32_t seen = ++ghostExpiredByClass_[cls];
-        if (seen <= 3 || seen % 100 == 0)
-            HSM_LOG("props: no actor here for announced object %016llx (class %08x) after %.0f s; it is not synced here (%u of this class)",
-                    static_cast<unsigned long long>(id), cls, kGhostTtlMs / 1000.0, seen);
+        if (seen <= 3 || seen % 100 == 0) {
+            char heard[96] = "no stream heard";
+            if (const BodyStateMsg* s = view_.Find(id, 0))
+                std::snprintf(heard, sizeof heard, "last streamed at %.0f %.0f %.0f", double(s->px), double(s->py), double(s->pz));
+            HSM_LOG("props: no actor here for announced object %016llx (class %s) after %.0f s; it is not synced here (%u of this class; %s)",
+                    static_cast<unsigned long long>(id), classNames_.Describe(cls).c_str(), kGhostTtlMs / 1000.0, seen, heard);
+        }
     }
     if (announced_.empty() || free.empty()) {
         for (auto& [id, a] : announced_)

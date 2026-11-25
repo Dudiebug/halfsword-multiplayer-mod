@@ -20,7 +20,7 @@ static LobbyLocal Lobby(bool host, bool progression) {
 
 int main() {
     LobbyScene off = BuildLobbyScene(Lobby(true, false));
-    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == kModeOrderCount + 5);   // the formats, Brawl, CRYPTS, Progression, Crypt Royale, Grave Robbers
+    CHECK(off.modes.size() == kModeCardCount && off.modes.size() == kModeOrderCount + 6);   // the formats, Brawl, CRYPTS, Progression, Crypt Royale, Grave Robbers
     const auto prog = [](const LobbyScene& s) -> const ModeCard& { for (const ModeCard& m : s.modes) if (m.progression) return m; return s.modes.back(); };
     CHECK(prog(off).progression && !prog(off).selected && prog(off).enabled);
     CHECK(!off.settings.empty() && !off.maps.empty());

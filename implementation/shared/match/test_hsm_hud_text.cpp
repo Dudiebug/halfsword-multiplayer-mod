@@ -242,6 +242,16 @@ static void TestCryptsLine() {
     CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Waiting, 30000, true) == "Fresh character, waiting 0:30");
     CHECK(CryptsLine(GatherPhase::Collecting, GatherSelf::Gathering, 9000, true) == "Battle starting");
     CHECK(CryptsLine(GatherPhase::Off, GatherSelf::Gathering, 9000, true).empty());
+    // Co-op Crypts: no clock, no battle.
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Gathering, kGatherUntimedMs, true) == "CRYPTS - find the way out alive");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Opening, kGatherUntimedMs, true) == "CRYPTS - into the Crypts together");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Extracted, kGatherUntimedMs, true) == "You got out - waiting for the others");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Died, kGatherUntimedMs, true) == "You fell - waiting for the others");
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Waiting, kGatherUntimedMs, true) == "Waiting for the Crypts to open");
+    CHECK(CryptsLine(GatherPhase::Collecting, GatherSelf::Gathering, kGatherCollectMs, true, true) == "Run over");    // Grave Robbers, Co-op Crypts
+    CHECK(CryptsLine(GatherPhase::Collecting, GatherSelf::Gathering, kGatherCollectMs, true) == "Battle starting");
+    CHECK(CryptsLine(GatherPhase::Off, GatherSelf::Gathering, kGatherUntimedMs, true).empty());
+    CHECK(CryptsLine(GatherPhase::Gathering, GatherSelf::Gathering, kGatherUntimedMs).find("4294967") == std::string::npos);   // never a 71582-minute clock
 }
 
 int main() {

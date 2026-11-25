@@ -684,7 +684,12 @@ bool ObjectSync::OnBodyState(const uint8_t* d, size_t n, uint8_t fromSlot) {
     // An object put on another object is held there against the attacher's states still in flight (hsm_object_attach.h): a
     // stale state must not read as "streamed again" and take it off its parent. Not applied, and not relayed.
     if (attach_.Blocks(m.objId, m.lessee, SteadyNowMs())) { ++n_.attachHeld; return false; }
-    if (!view_.Apply(m)) { ++n_.statesStale; return false; }
+    switch (view_.Check(m)) {
+        case StateVerdict::Applied: break;
+        case StateVerdict::Duplicate: ++n_.statesDuplicate; return false;
+        case StateVerdict::OutOfOrder: ++n_.statesOutOfOrder; return false;
+        case StateVerdict::NotStreamer: ++n_.statesOffStream; return false;
+    }
     ++n_.statesApplied;
     if (auto it = props_.find(m.objId); it != props_.end()) {
         Prop& p = it->second;
@@ -1175,6 +1180,15 @@ UObject* ObjectSync::ActorOf(uint64_t propId) const {
     return it != props_.end() && adapter_->StillValid(it->second.actor, it->second.index) ? it->second.actor : nullptr;
 }
 
+uint64_t ObjectSync::IdOf(UObject* actor) const {
+    if (!active_ || !actor) return 0;
+    auto it = byActor_.find(actor);
+    if (it == byActor_.end()) return 0;
+    auto p = props_.find(it->second);
+    if (p == props_.end() || p->second.provisional || !adapter_->StillValid(p->second.actor, p->second.index)) return 0;   // a proposal's id is this machine's alone
+    return ValidObjectId(p->first) ? p->first : 0;
+}
+
 // ---------------------------------------------------------------- engine access
 
 bool ObjectSync::Read(Prop& p, size_t body, BodyStateMsg& out) {
@@ -1592,8 +1606,8 @@ std::string ObjectSync::HealthLine() {
     std::snprintf(line, sizeof line,
                   "props: live %zu pending %zu loose %zu | drops %llu minted %llu mintFailed %llu | resolved %llu forced %llu kept %llu "
                   "unresolved %llu adopted %llu releaseSkipped %llu releaseFailed %llu | requests %llu releases %llu holdDenied %llu contacts %llu islands %llu | "
-                  "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesStale %llu "
-                  "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu attachMiss %llu spawned %llu (failed %llu) "
+                  "grants %llu lapsed %llu leasesRejected %llu | statesSent %llu statesApplied %llu statesDuplicate %llu statesOutOfOrder %llu statesOffStream %llu "
+                  "statesRejected %llu driven %llu readFailed %llu lost %llu | hands: attached %llu (by id %llu, id fallback %llu, swapped to id %llu) attachMiss %llu spawned %llu (failed %llu) "
                   "released %llu selfDrops %llu reattached %llu leaseReleased %llu | level %zu of %zu streamed %llu driven %llu deferred %llu miss %zu "
                   "leftOut %zu purged %llu censuses %llu censusRejected %llu | despawned %llu resetUnmoved %llu",
                   props_.size(), pending_.size(), loose_.size(), d(a.drops, b.drops), d(a.minted, b.minted), d(a.mintFailed, b.mintFailed),
@@ -1601,8 +1615,8 @@ std::string ObjectSync::HealthLine() {
                   d(a.releaseFailed, b.releaseFailed), d(a.requests, b.requests), d(a.releases, b.releases),
                   d(a.holdDenied, b.holdDenied), d(a.contacts, b.contacts), d(a.islands, b.islands), d(a.grants, b.grants), d(a.lapsed, b.lapsed),
                   d(a.leasesRejected, b.leasesRejected), d(a.statesSent, b.statesSent), d(a.statesApplied, b.statesApplied),
-                  d(a.statesStale, b.statesStale), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
-                  d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.attachMiss, b.attachMiss), d(a.spawned, b.spawned), d(a.spawnFailed, b.spawnFailed),
+                  d(a.statesDuplicate, b.statesDuplicate), d(a.statesOutOfOrder, b.statesOutOfOrder), d(a.statesOffStream, b.statesOffStream), d(a.statesRejected, b.statesRejected), d(a.driven, b.driven),
+                  d(a.readFailed, b.readFailed), d(a.lost, b.lost), d(a.attached, b.attached), d(a.byId, b.byId), d(a.idFallback, b.idFallback), d(a.swappedToId, b.swappedToId), d(a.attachMiss, b.attachMiss), d(a.spawned, b.spawned), d(a.spawnFailed, b.spawnFailed),
                   d(a.matchReleased, b.matchReleased), d(a.selfDrops, b.selfDrops), d(a.reattached, b.reattached), d(a.leaseReleased, b.leaseReleased),
                   level,
                   censusIndex_.size(), d(a.levelStreamed, b.levelStreamed), d(a.levelDriven, b.levelDriven),

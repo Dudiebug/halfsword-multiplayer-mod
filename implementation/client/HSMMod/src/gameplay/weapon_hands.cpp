@@ -284,7 +284,11 @@ ObjectSync::DropResult ObjectSync::DropFromHands(UObject* standIn, int hand, UOb
 // ---------------------------------------------------------------- stand-in hands (sync/hsm_handmatch.h)
 
 uint32_t ObjectSync::ClassHashOf(UObject* actor) {
-    return actor ? sync::WeaponClassHash(ObjectName(reinterpret_cast<UObject*>(ClassOf(actor))).c_str()) : 0;
+    if (!actor) return 0;
+    const std::string name = ObjectName(reinterpret_cast<UObject*>(ClassOf(actor)));
+    const uint32_t h = sync::WeaponClassHash(name.c_str());
+    classNames_.Note(name);   // so a log line can name the class later
+    return h;
 }
 
 // What a stand-in holds as the pose counts it: real weapons only (no fists or feet), one weapon in both hands as the right's.
@@ -374,6 +378,11 @@ void ObjectSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObjec
         if (age >= sync::kAttachGraceMs && age < sync::kDrawGraceMs) f.mayBeDraw = env_.mayBeDraw(e, f.poseClass);
     }
     const sync::HandAct act = sh.match.Step(f, nowMs);
+    if (act == sync::HandAct::None && SwapToNamed(e, standIn, h, sh, pose, f.havePose, nowMs)) {
+        cur = HandsOf(standIn);
+        ForgetHeld(e, standIn);
+        return;
+    }
     // A hand a lease change let go of (NoticeDrop) takes nothing until the owner's pose for it moves on: the pose may still
     // show the weapon just dropped, and the hand would pick it straight up again from where it lies.
     if (sh.leaseLetGo) {
@@ -403,6 +412,33 @@ void ObjectSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObjec
     }
     cur = HandsOf(standIn);
     ForgetHeld(e, standIn);
+}
+
+// Rev 52 (feat/weapon-prop-id): the hand holds a copy of the pose's class, but the pose names another weapon by id, and that one is
+// here and free (sync::SwapToNamed): an earlier class pick took the wrong copy (two lay together), or the named weapon's announce
+// reached this machine after the pick (a late join). The copy in hand is let go of as any released weapon, the named one taken.
+bool ObjectSync::SwapToNamed(uint8_t e, UObject* standIn, int h, StandInHand& sh, const StandIns::PoseHandView& pose, bool havePose, double nowMs) {
+    if (!g_weaponPropId || !havePose || !pose.objectId || !sh.held || nowMs - sh.swapMs < kSwapMinMs) return false;
+    UObject* named = ValidObjectId(pose.objectId) ? ActorOf(pose.objectId) : nullptr;
+    const sync::IdAttach ia = sync::DecideIdAttach(pose.objectId, ValidObjectId(pose.objectId), named != nullptr,
+                                                   named && ClassHashOf(named) == pose.classHash, named && !ObjectField(named, 0));
+    if (!sync::SwapToNamed(true, sh.heldClass, pose.classHash, named == sh.held, ia)) return false;
+    if (env_.deadBones(e) & (1u << (h == 0 ? sync::kBoneHandR : sync::kBoneHandL))) return false;   // that hand is cut off here
+    sh.swapMs = nowMs;
+    UObject* w = sh.held;
+    const std::string was = ObjectName(w);
+    if (DropFromHands(standIn, h, w, was) != DropResult::Dropped) {
+        HSM_LOG("props: stand-in of e%u hand %d: could not let go of %s to take the weapon its owner holds (id %016llx)", e, h, was.c_str(),
+                (unsigned long long)pose.objectId);
+        return false;
+    }
+    LetLoose(e, h, w, nowMs);
+    const bool ok = TakeIntoHand(standIn, h, named);
+    if (ok) ++n_.swappedToId;
+    HSM_LOG("props: stand-in of e%u hand %d: %s %s for %s, the weapon its owner holds (id %016llx)%s", e, h, ok ? "swapped" : "let go of", was.c_str(),
+            ObjectName(named).c_str(), (unsigned long long)pose.objectId, ok ? "" : "; taking it failed, the hand retries");
+    if (env_.handsChanged) env_.handsChanged(e);
+    return true;
 }
 
 // A weapon left the stand-in's hand by itself. While the owner's pose still shows its class in that hand, the hand takes
@@ -529,21 +565,68 @@ bool ObjectSync::Attach(uint8_t e, UObject* standIn, int h, const StandIns::Pose
     // A level object that was at rest when the census walked (not a census prop, not a weapon): the owner may have
     // picked it up, and this machine's copy of it still lies there (0.8.0-pre7, #88 "holding an invisible rock").
     for (const Candidate& c : idle_) consider(c.actor, c.index, c.classHash);
-    int pick = sync::PickAttach(loose, pose.classHash, pose.pos, pose.firstPos);
-    if (pick < 0 && (pick = sync::PickAttachFar(loose, pose.classHash, pose.pos, pose.firstPos)) >= 0)
-        HSM_LOG("props: stand-in of e%u hand %d: the owner's weapon matched one of its class within %.0f uu here (drifted)", e, h,
-                sync::kAttachFarRadiusUu);
+    int pick = -1;
+    bool refused = false;   // the guard refused an ambiguous pick: waits, and says so (the hand-spawn below is not for it)
+    // Rev 52: the pose names the weapon by object id. The actor under that id here, when it is free and of the pose's class, is
+    // the owner's weapon exactly; any other answer falls back to the class pick below, with the reason logged (rate limited).
+    UObject* idActor = nullptr;
+    if (g_weaponPropId && pose.objectId) {
+        UObject* a = ValidObjectId(pose.objectId) ? ActorOf(pose.objectId) : nullptr;
+        const bool free = a && !ObjectField(a, 0);
+        const sync::IdAttach ia = sync::DecideIdAttach(pose.objectId, ValidObjectId(pose.objectId), a != nullptr,
+                                                       a && ClassHashOf(a) == pose.classHash, free);
+        StandInHand scratchId;
+        StandInHand& ih = ValidEntity(e) ? standInHands_[e].hand[size_t(h)] : scratchId;
+        if (ia == sync::IdAttach::Take) {
+            idActor = a;
+            ++n_.byId;
+            HSM_LOG("props: stand-in of e%u hand %d: weapon by id %016llx (class %08x), %s", e, h, (unsigned long long)pose.objectId, pose.classHash,
+                    ObjectName(a).c_str());
+        } else if (++n_.idFallback, nowMs - ih.pickLogMs >= kPickLogMs) {
+            ih.pickLogMs = nowMs;
+            HSM_LOG("props: stand-in of e%u hand %d: id %016llx (class %08x) not used, %s; picking by class", e, h, (unsigned long long)pose.objectId, pose.classHash,
+                    ia == sync::IdAttach::NoActor ? "no such actor here" : ia == sync::IdAttach::WrongClass ? "that actor is of another class" : "that actor is held");
+        }
+    }
+    if (idActor) {
+        pick = -1;
+    } else if (g_weaponPickGuard) {
+        const sync::GuardedPick gp = sync::PickGuarded(loose, pose.classHash, pose.pos, pose.firstPos);
+        pick = gp.index;
+        StandInHand scratch;   // an entity out of range keeps no log clock
+        StandInHand& sh = ValidEntity(e) ? standInHands_[e].hand[size_t(h)] : scratch;
+        if (pick >= 0 && gp.why == sync::PickWhy::FarOnly)
+            HSM_LOG("props: stand-in of e%u hand %d: pick class %08x: %.0f uu away, the only copy of its class within %.0f uu (drifted), %zu loose of the class", e, h,
+                    pose.classHash, gp.distUu, sync::kAttachFarRadiusUu, loose.size());
+        else if (pick >= 0)
+            HSM_LOG("props: stand-in of e%u hand %d: pick class %08x: %.0f uu away, %d within %.0f uu, %zu loose of the class", e, h, pose.classHash,
+                    gp.distUu, gp.inRange, sync::kAttachRadiusUu, loose.size());
+        else if (gp.why == sync::PickWhy::AmbiguousNear || gp.why == sync::PickWhy::AmbiguousFar) {
+            refused = true;
+            if (nowMs - sh.pickLogMs >= kPickLogMs) {
+                sh.pickLogMs = nowMs;
+                HSM_LOG("props: stand-in of e%u hand %d: pick refused, class %08x: %d copies within %.0f uu, nearest %.0f uu, %s; waits", e, h, pose.classHash,
+                        gp.inRange, gp.why == sync::PickWhy::AmbiguousNear ? sync::kAttachRadiusUu : sync::kAttachFarRadiusUu, gp.distUu,
+                        gp.why == sync::PickWhy::AmbiguousNear ? "the two nearest are too close to tell apart" : "none is near enough to be the owner's alone");
+            }
+        }
+    } else {
+        pick = sync::PickAttach(loose, pose.classHash, pose.pos, pose.firstPos);
+        if (pick < 0 && (pick = sync::PickAttachFar(loose, pose.classHash, pose.pos, pose.firstPos)) >= 0)
+            HSM_LOG("props: stand-in of e%u hand %d: the owner's weapon matched one of its class within %.0f uu here (drifted)", e, h,
+                    sync::kAttachFarRadiusUu);
+    }
     // No copy of that class lies anywhere here (a prop the levels disagree on, a weapon this machine never spawned): once
     // the pose has shown it long enough that it is no round-start loadout still on its way, the hand gets one of its own.
-    if (pick < 0 && loose.empty() && nowMs - pose.sinceMs >= kSpawnAfterMs && WeaponClassByHash(pose.classHash, nowMs))
+    if (pick < 0 && !idActor && !refused && loose.empty() && nowMs - pose.sinceMs >= kSpawnAfterMs && WeaponClassByHash(pose.classHash, nowMs))
         return SpawnIntoHand(e, standIn, h, pose.classHash);
-    if (pick < 0) {
-        if (n_.attachMiss < kLogFirst)
-            HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class %08x within %.0f uu here (%zu of that class loose)",
-                    e, h, pose.classHash, sync::kAttachRadiusUu, loose.size());
+    if (pick < 0 && !idActor) {
+        if (!refused && n_.attachMiss < kLogFirst)
+            HSM_LOG("props: stand-in of e%u hand %d: no loose weapon of the owner's class %s within %.0f uu here (%zu of that class loose)",
+                    e, h, classNames_.Describe(pose.classHash).c_str(), sync::kAttachRadiusUu, loose.size());
         return false;
     }
-    UObject* w = actors[size_t(pick)];
+    UObject* w = idActor ? idActor : actors[size_t(pick)];
     if (!TakeIntoHand(standIn, h, w)) {
         if (HandTornOff(standIn, h)) return false;   // the game's answer for a missing hand, said by HandTornOff
         HSM_LOG("props: stand-in of e%u did not take %s into hand %d", e, ObjectName(w).c_str(), h);
@@ -573,7 +656,9 @@ UClass* ObjectSync::WeaponClassByHash(uint32_t classHash, double nowMs) {
         if (!o || !IsDefaultObject(o)) continue;
         UClass* c = ClassOf(o);
         if (c == base || !IsChildOf(c, base)) continue;   // the bare base has no look of its own (its passport gives it one)
-        weaponClasses_[sync::WeaponClassHash(ObjectName(reinterpret_cast<UObject*>(c)).c_str())] = {c, ObjectIndex(reinterpret_cast<UObject*>(c))};
+        const std::string cname = ObjectName(reinterpret_cast<UObject*>(c));
+        classNames_.Note(cname);
+        weaponClasses_[sync::WeaponClassHash(cname.c_str())] = {c, ObjectIndex(reinterpret_cast<UObject*>(c))};
     }
     known = weaponClasses_.find(classHash);
     return known != weaponClasses_.end() ? known->second.first : nullptr;

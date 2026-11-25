@@ -325,7 +325,7 @@ static void TestLobby() {
     bool card = false, browser = false;
     for (size_t i = 0; i < kModeOrderCount; ++i) card = card || (kModeOrder[i].format == f && !kModeOrder[i].blossfechten);
     for (const std::string& n : BrowserModes()) browser = browser || n == "Roulette";
-    CHECK(card && browser && kModeOrderCount + 5 == kModeCardCount);
+    CHECK(card && browser && kModeOrderCount + 6 == kModeCardCount);
     Format parsed = Format::FreeForAll;
     CHECK(ParseServerFormat("roulette", &parsed) && parsed == f);
     for (const MapInfo& m : kMaps) CHECK(MapAllowsFormat(m, f) == MapAllowsFormat(m, Format::LastManStanding));

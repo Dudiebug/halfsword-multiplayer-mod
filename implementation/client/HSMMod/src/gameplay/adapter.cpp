@@ -153,6 +153,41 @@ void Adapter::RestoreGameInput() {
 }
 
 namespace {
+// The live weapon wheels: every one in the viewport (the game makes a new one on each open and never cleans up a stuck one).
+std::vector<UObject*> LiveGameScreens() {
+    std::vector<UObject*> out;
+    for (UObject* w : FindInstances(kWeaponWheelClass)) {
+        if (!w || IsGarbage(w)) continue;
+        Call v(w, "IsInViewport");
+        if (v.invoke() && v.get<bool>("ReturnValue")) out.push_back(w);
+    }
+    return out;
+}
+}  // namespace
+
+bool Adapter::GameScreenOpen() {
+    const uint32_t now = GetTickCount();
+    if (gameScreenCheckAt_ && now - gameScreenCheckAt_ < 100) return gameScreenOpen_;
+    gameScreenCheckAt_ = now;
+    gameScreenOpen_ = !LiveGameScreens().empty();
+    return gameScreenOpen_;
+}
+
+// UI_WeaponSelection's Close Widget (decomp UI/UI_WeaponSelection.cpp:185) is the game's own close: time dilation back to 1,
+// SetInputMode_GameOnly, the cursor hidden, RemoveFromParent. Nothing else of the wheel is touched.
+int Adapter::CloseGameScreens(const char* reason) {
+    int closed = 0;
+    for (UObject* w : LiveGameScreens()) {
+        if (Call(w, "Close Widget").invoke() || Call(w, "Close_Widget").invoke()) { ++closed; inputTouched_ = true; }
+        else if (gameScreenLogs_++ < 3) HSM_LOG("input: the game's weapon wheel (%s) has no Close Widget function; left up before %s", kWeaponWheelClass, reason);
+    }
+    gameScreenCheckAt_ = 0;
+    if (closed && gameScreenLogs_++ < 20)
+        HSM_LOG("input: closed the game's weapon wheel (%s) before %s%s", kWeaponWheelClass, reason, closed > 1 ? " (more than one was up)" : "");
+    return closed;
+}
+
+namespace {
 bool InViewportNow(UObject* w) {
     Call v(w, "IsInViewport");
     return v.invoke() && v.get<bool>("ReturnValue");
@@ -301,6 +336,7 @@ void Adapter::CaptureInput(bool on) {
     Call pc(statics_, "GetPlayerController");
     pc.set<UObject*>("WorldContextObject", worldctx::For(world_)).set<int32_t>("PlayerIndex", 0);
     UObject* ctrl = pc.invoke() ? pc.get<UObject*>("ReturnValue") : nullptr;
+    CloseGameScreens("the chat");
     if (!ctrl) return;
     inputTouched_ = true;
     Call mode(WidgetLibrary(), "SetInputMode_UIOnlyEx");
@@ -1512,6 +1548,15 @@ void Adapter::FireAction(UObject* willie, Action a, bool pressed) {
 UObject* Adapter::MeshOf(UObject* willie) {
     UObject** mesh = Field<UObject*>(willie, "Mesh");
     return mesh ? *mesh : nullptr;
+}
+
+bool Adapter::AlwaysTickPose(UObject* willie) {
+    UObject* mesh = willie ? MeshOf(willie) : nullptr;
+    if (!mesh || IsGarbage(mesh)) return false;
+    FProperty* p = FindProperty(ClassOf(mesh), "VisibilityBasedAnimTickOption");
+    if (!p || PropertySize(p) != 1) return false;
+    *(reinterpret_cast<uint8_t*>(mesh) + PropertyOffset(p)) = 0;   // EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones
+    return true;
 }
 
 bool Adapter::ResolveBones(UObject* mesh) {
@@ -3189,6 +3234,7 @@ UObject* Adapter::RespawnLocalPlayer(const SpawnOptions& o) {
         if (destroyAware_) DestroyFighter(old, ObjectIndex(old));   // owner sync: its feet and weapons go too (test 3 leaked them)
         else DestroyActor(old);
     }
+    CloseGameScreens("the respawn");                // a wheel left up by the death holds UI-only input and its time dilation
     Call(ctrl, "ResetIgnoreInputFlags").invoke();   // the new body must take input whatever the death left behind
     if (inputCaptured_) CaptureInput(true);         // a line being typed keeps the keyboard (the new controller's too)
     else if (!PauseMenuOpen()) RestoreGameInput();   // under the open pause menu the cursor stays (ShowPauseCursor)

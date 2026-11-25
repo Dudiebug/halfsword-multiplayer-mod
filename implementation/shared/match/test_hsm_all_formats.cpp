@@ -36,7 +36,7 @@ static void TestTables() {
           uint8_t(Format::CrossbowTDM) == 13 && uint8_t(Format::Tournament) == 14 && uint8_t(Format::PitBridgeDuel) == 15);
     // One card per format but ThreeTeams (the Teams card's 3 teams), CaptureTheFlag (removed), Duel (the Last man standing card with two
     // players) and Pit bridge duels (gone from the lobby), none twice; plus the Blossfechten card; then Brawl, CRYPTS, Progression, Crypt Royale and Grave Robbers.
-    CHECK(kModeOrderCount == kFormatCount - 4 + 1 && kModeCardCount == kModeOrderCount + 5);
+    CHECK(kModeOrderCount == kFormatCount - 4 + 1 && kModeCardCount == kModeOrderCount + 6);
     std::set<uint8_t> carded;
     for (const ModeSlot& k : kModeOrder) CHECK(k.blossfechten ? k.format == Format::LastManStanding : carded.insert(uint8_t(k.format)).second);
     {   int bloss = 0; for (const ModeSlot& k : kModeOrder) bloss += k.blossfechten ? 1 : 0; CHECK(bloss == 1); }

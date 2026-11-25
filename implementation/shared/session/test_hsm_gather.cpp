@@ -20,6 +20,14 @@ static void TestClockMsg() {
     { GatherMsg z = m; z.phase = GatherPhase(3); auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), y)); }
     { GatherMsg z = m; z.leftMs = uint32_t(kGatherMaxS) * 1000u; auto e = Encode(z); CHECK(Decode(e.data(), e.size(), y) && y.leftMs == 3600000); }
     { GatherMsg z = m; z.leftMs = uint32_t(kGatherMaxS) * 1000u + 1; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), y)); }
+    {
+    // Co-op Crypts: no clock, only while gathering and Together
+    GatherMsg u;
+    { GatherMsg z{GatherPhase::Gathering, kGatherUntimedMs, 4, true}; auto e = Encode(z); CHECK(Decode(e.data(), e.size(), u) && GatherUntimed(u.leftMs) && u.together); }
+    { GatherMsg z{GatherPhase::Gathering, kGatherUntimedMs, 4, false}; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), u)); }
+    { GatherMsg z{GatherPhase::Collecting, kGatherUntimedMs, 4, true}; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), u)); }
+    { GatherMsg z{GatherPhase::Gathering, kGatherUntimedMs - 1, 4, true}; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), u)); }
+    }
     { GatherMsg z = m; z.seq = 0; auto e = Encode(z); CHECK(!Decode(e.data(), e.size(), y)); }
     CHECK(b.back() == 0 && !y.together);                                                 // Apart: no flag
     { GatherMsg z = m; z.together = true; auto e = Encode(z); CHECK(e.size() == b.size() && e.back() == kGatherTogether);
@@ -48,7 +56,7 @@ static void TestNoteMsg() {
 
 static void TestBudget() {
     CHECK(BudgetClassOf(MsgType::Gather) == BudgetClass::Control);
-    CHECK(kProtocolRevision == 51 && kLastDecodedMsgType >= uint8_t(MsgType::Gather));
+    CHECK(kProtocolRevision == 52 && kLastDecodedMsgType >= uint8_t(MsgType::Gather));
 }
 
 int main() {

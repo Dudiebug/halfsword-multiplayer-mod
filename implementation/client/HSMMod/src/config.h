@@ -316,6 +316,18 @@ struct Config {
     // START opens them (the shared run: the host's dungeon rooms, enemies, loot and doors on every machine, and the run's end);
     // =0: neither shows and START refuses them.
     bool cryptsCoop = true;
+    // [mod] crypts_host_spawns=1 (the default): in the shared Crypts the host fills a room with enemies when any player first walks
+    // into it, choosing spawner points away from every player (gameplay/crypts_coop.h, session/hsm_crypt_spawn.h). =0: the 0.8.0 way,
+    // the room's own event (it skips every point near or in sight of the host, so a room a client opens often stays empty).
+    bool cryptsHostSpawns = true;
+    // [mod] weapon_pick_guard=1 (the default): a stand-in's hand takes a loose weapon for the owner's pose only when it is
+    // unambiguous (sync::PickGuarded: no two copies of the class about as near, and a copy beyond 150 uu only when it is the
+    // only one within 600 uu); the refusals are logged. =0: the old picks (nearest within 150 uu, then nearest within 600 uu).
+    bool weaponPickGuard = true;
+    // [mod] weapon_prop_id=1 (the default): the pose carries the held weapon's object id (protocol 52) and the other machine's stand-in
+    // takes that very weapon when it has it free; otherwise (no id, no such actor here, held, another class) the class pick above decides.
+    // =0: no id is sent and none is used.
+    bool weaponPropId = true;
     // [mod] crypts_layout_names=auto|short|long|engine: the form of the instance name each shared Crypts map level loads under
     // (gameplay/crypts_layout.h SetNameForm). Dev only; auto (the default) finds it on each build's first level.
     std::string cryptsLayoutNames = "auto";

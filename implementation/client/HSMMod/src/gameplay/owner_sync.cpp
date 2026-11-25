@@ -66,6 +66,9 @@ void OwnerStreams::Tick(Adapter& adapter, double nowMs, float dt, const std::vec
             o.nextPoseMs = std::max(o.nextPoseMs + (e > kMaxFighters ? kBotPoseEveryMs : kPoseEveryMs), nowMs);
             sync::PoseFrame f;
             if (o.rig.Bind(w) && o.rig.Read(ts, stepUs, &f, nullptr)) {
+                if (weaponIdOf_)
+                    for (int wi = 0; wi < sync::kPoseWeapons; ++wi)
+                        if (f.weapons[wi].present) f.weapons[wi].objectId = weaponIdOf_(o.rig.HeldWeaponActor(wi));
                 // #3906/#3907 (opf2ZCDQyj, SNv5QDo7Eu): this fighter's own bodies left the world (NaN, or past sync::kDivergedUu). The codec
                 // turned such a pelvis into 0,0,0, so everyone saw the player jump to the map origin and back, and the body took no hits at
                 // all: an "immortal" zombie. Nothing is streamed from it; after sync::kDivergedHoldMs the game's own Death runs on it and the
@@ -144,15 +147,17 @@ void StandIns::OnPose(const PoseMsg& m, const sync::PoseFrame& frame, double now
     if (!s.feed->haveHands || SeqNewer(frame.tsMs, s.feed->handTs)) {
         for (int h = 0; h < sync::kPoseWeapons; ++h) {
             uint32_t cls = 0;
+            uint64_t objId = 0;
             V3 pos{};
             for (const sync::WeaponSample& w : frame.weapons)
-                if (w.present && w.hand == h) { cls = w.classHash ? w.classHash : 1; pos = w.pos; }
+                if (w.present && w.hand == h) { cls = w.classHash ? w.classHash : 1; pos = w.pos; objId = w.objectId; }
             if (!s.feed->haveHands || cls != s.feed->handClass[h]) {
                 s.feed->handPrevClass[h] = s.feed->haveHands ? s.feed->handClass[h] : 0;
                 s.feed->handSinceMs[h] = nowMs;
                 s.feed->handFirstPos[h] = pos;
             }
             s.feed->handClass[h] = cls;
+            s.feed->handObjId[h] = objId;
             s.feed->handPos[h] = pos;
         }
         s.feed->handTs = frame.tsMs;
@@ -253,6 +258,7 @@ bool StandIns::PoseHandInfo(uint8_t entity, int hand, PoseHandView& out) const {
     out.sinceMs = f->handSinceMs[size_t(hand)];
     out.pos = f->handPos[size_t(hand)];
     out.firstPos = f->handFirstPos[size_t(hand)];
+    out.objectId = f->handObjId[size_t(hand)];
     return true;
 }
 

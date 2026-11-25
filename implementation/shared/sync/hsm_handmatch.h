@@ -30,6 +30,7 @@
 // go of from that hand already is the drop's only by AdoptCandidate. Pure, no engine headers.
 #pragma once
 #include "sync/hsm_pose.h"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -45,6 +46,7 @@ constexpr double kReattachMinMs = 2000.0;   // the hold above; prop_sync takes b
                                             // most this often
 constexpr double kAttachRadiusUu = 150.0;   // the pose's own "held" distance (standin_rig kHeldMaxUu)
 constexpr double kAttachFarRadiusUu = 600.0;   // PickAttachFar: a copy drifted this far still stands for the owner's (test 7)
+constexpr double kAmbiguousMarginUu = 30.0;    // PickGuarded: two copies of the class this close in distance are not told apart (see there)
 constexpr double kStandInSettleMs = 1500.0;    // a new stand-in's own loadout weapons arrive within this (logs 3-9: 0.85-1.2 s)
 
 struct HandFacts {
@@ -146,6 +148,90 @@ inline int PickAttach(const std::vector<LooseWeapon>& loose, uint32_t cls, const
 // and the stand-in's hand stayed empty): the same pick within kAttachFarRadiusUu.
 inline int PickAttachFar(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt) {
     return detail::PickAttachWithin(loose, cls, now, firstAt, kAttachFarRadiusUu);
+}
+
+// Why PickGuarded took or refused a weapon (logged: one log settles which rule fired).
+enum class PickWhy : uint8_t {
+    None,           // no loose copy of the class within kAttachFarRadiusUu (or the empty / unknown class)
+    Near,           // the nearest within kAttachRadiusUu, clearly nearer than any other copy
+    FarOnly,        // no copy within kAttachRadiusUu; exactly one within kAttachFarRadiusUu (test 7: a drifted copy)
+    AmbiguousNear,  // two or more copies within kAttachRadiusUu, the two nearest less than kAmbiguousMarginUu apart
+    AmbiguousFar    // none near; two or more within kAttachFarRadiusUu
+};
+struct GuardedPick {
+    int index = -1;             // into loose; -1 refuses
+    PickWhy why = PickWhy::None;
+    int inRange = 0;            // copies of the class within the radius the rule looked at (near, or far)
+    double distUu = 0;          // distance of the chosen copy, or of the nearest when refused
+};
+
+// The guarded pick (bugfix/weapon-pick-guard). The pose carries only a class hash, so with two copies of a class around
+// the nearest one is often not the owner's (player reports: the wrong hand, an invisible weapon, one taken off the floor or
+// out of another fighter's hand). PickAttach alone took the nearest within 150 uu, and PickAttachFar anything within 600.
+//   near   the nearest copy within kAttachRadiusUu, unless the next nearest is within kAmbiguousMarginUu of its distance
+//          (30 uu: about a weapon's hilt-to-guard; the pose's own position is only good to a similar error, so a smaller gap
+//          is a coin toss); a lone copy, or one clearly nearer, is taken;
+//   far    only when no copy is within kAttachRadiusUu AND exactly one copy of the class lies within kAttachFarRadiusUu.
+// A refusal waits: the owner's weapon moves and the pose changes, and the next try sees a clearer picture.
+inline GuardedPick PickGuarded(const std::vector<LooseWeapon>& loose, uint32_t cls, const V3& now, const V3& firstAt) {
+    GuardedPick r;
+    if (cls == kHandEmpty || cls == kHandUnknown) return r;
+    auto dist = [](const V3& a, const V3& b) {
+        const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    int best = -1, nearCount = 0, farCount = 0;
+    double bestD = 0, secondD = 0;
+    bool haveSecond = false;
+    for (size_t i = 0; i < loose.size(); ++i) {
+        if (loose[i].classHash != cls) continue;
+        const double a = dist(loose[i].pos, now), b = dist(loose[i].pos, firstAt);
+        const double d = a < b ? a : b;
+        if (d > kAttachFarRadiusUu) continue;
+        ++farCount;
+        if (d <= kAttachRadiusUu) ++nearCount;
+        if (best < 0 || d < bestD) {
+            if (best >= 0) { secondD = bestD; haveSecond = true; }
+            best = int(i); bestD = d;
+        } else if (!haveSecond || d < secondD) { secondD = d; haveSecond = true; }
+    }
+    if (best < 0) return r;
+    r.distUu = bestD;
+    if (nearCount > 0) {
+        r.inRange = nearCount;
+        if (nearCount > 1 && secondD - bestD < kAmbiguousMarginUu) { r.why = PickWhy::AmbiguousNear; return r; }
+        r.index = best; r.why = PickWhy::Near;
+        return r;
+    }
+    r.inRange = farCount;
+    if (farCount > 1) { r.why = PickWhy::AmbiguousFar; return r; }
+    r.index = best; r.why = PickWhy::FarOnly;
+    return r;
+}
+
+
+// The object id the owner's pose carried for a hand's weapon (protocol rev 52, feat/weapon-prop-id), against what this
+// machine has under that id. Take: attach exactly that actor. Anything else: the guarded class pick (PickGuarded) decides,
+// and the reason is logged.
+enum class IdAttach : uint8_t {
+    NoId,         // the pose carried none (a weapon the owner's machine does not track, or an older sender)
+    NoActor,      // the id is not valid, or maps to no live actor here (not announced here yet, or gone)
+    WrongClass,   // the actor is of another class than the pose's (the id was reused, or the maps disagree)
+    NotFree,      // the actor is held by someone (this stand-in's other hand, another fighter, the local player)
+    Take
+};
+inline IdAttach DecideIdAttach(uint64_t id, bool idValid, bool actorFound, bool classMatches, bool free) {
+    if (id == 0) return IdAttach::NoId;
+    if (!idValid || !actorFound) return IdAttach::NoActor;
+    if (!classMatches) return IdAttach::WrongClass;
+    return free ? IdAttach::Take : IdAttach::NotFree;
+}
+
+// A hand that already holds a weapon of the pose's class, but not the one the pose names, swaps to the named one once it is
+// here and free: an earlier class pick (before the named weapon's announce reached this machine, or a guess between two
+// copies) took another copy. Only a settled hand swaps (held class == pose class); a hand changing class is the matcher's.
+inline bool SwapToNamed(bool holding, uint32_t heldClass, uint32_t poseClass, bool heldIsNamed, IdAttach named) {
+    return holding && heldClass == poseClass && !heldIsNamed && named == IdAttach::Take;
 }
 
 }  // namespace hsm::sync

@@ -39,7 +39,7 @@ static void TestRoomWire() {
     { CryptRoomMsg root = Room(1, 0, 0); auto e = Encode(root); CHECK(Decode(e.data(), e.size(), y) && y.parentSeq == 0 && y.startEntrance == kNoEntrance); }
     CHECK(BudgetClassOf(MsgType::CryptRoom) == BudgetClass::Control && BudgetClassOf(MsgType::CryptDoor) == BudgetClass::Control
           && BudgetClassOf(MsgType::CryptRoomsBuilt) == BudgetClass::Control);
-    CHECK(kProtocolRevision == 51 && kLastDecodedMsgType == 77 && kLastReservedMsgType == 77);
+    CHECK(kProtocolRevision == 52 && kLastDecodedMsgType == 77 && kLastReservedMsgType == 77);
     CHECK(uint8_t(MsgType::CryptRoom) == 73 && uint8_t(MsgType::CryptDoor) == 74 && uint8_t(MsgType::CryptRoomsBuilt) == 75);
 }
 

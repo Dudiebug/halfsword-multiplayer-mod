@@ -428,6 +428,8 @@ private:
     std::map<uint64_t, Entry> table_;
     uint64_t capDenied_ = 0;
 };
+enum class StateVerdict : uint8_t { Applied = 0, NotStreamer = 1, Duplicate = 2, OutOfOrder = 3 };
+
 
 // ---------------------------------------------------------------- every machine's view
 // Who streams each object (from the host's Grants) and the latest BodyState of each of its bodies. senderTimeMs is the
@@ -454,18 +456,23 @@ public:
         o.level = level;
     }
     // True if m came from the streamer and was newer: it is now that body's current state (drive the body to it).
-    bool Apply(const BodyStateMsg& m) {
+    bool Apply(const BodyStateMsg& m) { return Check(m) == StateVerdict::Applied; }
+    // Apply, and say why a state was dropped: not from the granted streamer, the same time stamp again (a duplicate), or an
+    // older one than the newest already through (out of order). Tells a repeating sender from a reordering link.
+    StateVerdict Check(const BodyStateMsg& m) {
         auto it = objs_.find(m.objId);
-        if (m.lessee != (it == objs_.end() ? kHostSlot : it->second.streamer)) return false;
+        if (m.lessee != (it == objs_.end() ? kHostSlot : it->second.streamer)) return StateVerdict::NotStreamer;
         if (it == objs_.end()) it = objs_.emplace(m.objId, Obj{}).first;
         Body& e = it->second.bodies[m.body];
-        if (e.fresh && !SeqNewer(m.senderTimeMs, e.state.senderTimeMs)) return false;
+        if (e.fresh && !SeqNewer(m.senderTimeMs, e.state.senderTimeMs))
+            return m.senderTimeMs == e.state.senderTimeMs ? StateVerdict::Duplicate : StateVerdict::OutOfOrder;
         if (!e.fresh) {
             const auto seen = e.lastTime.find(m.lessee);
-            if (seen != e.lastTime.end() && !SeqNewer(m.senderTimeMs, seen->second)) return false;
+            if (seen != e.lastTime.end() && !SeqNewer(m.senderTimeMs, seen->second))
+                return m.senderTimeMs == seen->second ? StateVerdict::Duplicate : StateVerdict::OutOfOrder;
         }
         e.state = m; e.fresh = true; e.have = true;
-        return true;
+        return StateVerdict::Applied;
     }
     // The latest state applied for a body, kept across a streamer change until the new streamer's first one.
     const BodyStateMsg* Find(uint64_t objId, uint8_t body = 0) const {

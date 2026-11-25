@@ -130,7 +130,8 @@ inline bool RowHasArrows(const SettingRow& r) {
 enum class ModeGroup : uint8_t { Versus, Coop };
 struct ModeCard { Format format = Format::FreeForAll; std::string name, description; bool selected = false, enabled = false; bool progression = false; bool brawl = false;
                   bool crypts = false; bool blossfechten = false; ModeGroup group = ModeGroup::Versus; std::string hint;
-                  bool graveRobbers = false; bool shown = true; };   // progression: the extra last card; brawl: free-for-all with gear = Fists; crypts: gear = Crypts (the CRYPTS card picks the Crypts map and Crypt Royale; Crypt Royale's Battle row picks the format; graveRobbers: Grave Robbers); blossfechten: Last man standing with the Blossfechten scenario; hint: why a card is disabled for the player count (ModeAvailable); shown: the card is on the page (the CRYPTS card only off the Crypts map, Crypt Royale and Grave Robbers on it; Grave Robbers also needs g_cryptsCoopOffered)
+                  bool graveRobbers = false; bool shown = true;
+                  bool coopCrypts = false; };   // coopCrypts: the CRYPTS (CO-OP) card, the game's own Crypts together (IsCoopCrypts); shown on every map with g_cryptsCoopOffered   // progression: the extra last card; brawl: free-for-all with gear = Fists; crypts: gear = Crypts (the CRYPTS card picks the Crypts map and Crypt Royale; Crypt Royale's Battle row picks the format; graveRobbers: Grave Robbers); blossfechten: Last man standing with the Blossfechten scenario; hint: why a card is disabled for the player count (ModeAvailable); shown: the card is on the page (the CRYPTS card only off the Crypts map, Crypt Royale and Grave Robbers on it; Grave Robbers also needs g_cryptsCoopOffered)
 struct MapCard { size_t index = 0; std::string name, tag, reason; bool allowed = false, selected = false, enabled = false;
                  bool modded = false; std::string path; };   // modded: index is MapCount() + the custom map's place, path its package path
 struct BrowserRow {
@@ -299,7 +300,7 @@ inline constexpr ModeSlot kModeOrder[] = {
     {Format::LastManStanding, true}, {Format::Chaos, false}, {Format::OneCrossbow, false}, {Format::Roulette, false}, {Format::HideSeek, false},
     {Format::PlayersVsBots, false}, {Format::Zombies, false}};
 inline constexpr size_t kModeOrderCount = sizeof(kModeOrder) / sizeof(kModeOrder[0]);
-inline constexpr size_t kModeCardCount = kModeOrderCount + 5;   // + Brawl, CRYPTS, Progression, Crypt Royale, Grave Robbers
+inline constexpr size_t kModeCardCount = kModeOrderCount + 6;   // + Brawl, CRYPTS, Progression, Crypt Royale, Grave Robbers, Crypts (co-op)
 
 struct LobbyScene {
     Span pill;
@@ -481,11 +482,13 @@ inline MatchConfig SelectFormat(MatchConfig c, Format f) {
 
 // A mode card picked: the Brawl card is free-for-all with bare fists (gear Fists, kBrawlTier, free-for-all's default limit);
 // the Crypts cards are gear Crypts with Last man standing to start (Crypt Royale's Battle row picks another): Crypt Royale, or
-// Grave Robbers (`graveRobbers`, no fight after); the Blossfechten card is Last
+// Grave Robbers (`graveRobbers`, no fight after), or Co-op Crypts (`coopCrypts`: Grave Robbers with the game's own rules); the Blossfechten card is Last
 // man standing's rounds with the Blossfechten scenario and its fixed kit (BlossfechtenKit: random swords, no armour); the
 // format cards are SelectFormat, and leaving Brawl, Crypts or Blossfechten puts the gear, tier and weapons back at their
 // defaults (even for the card of the same format: other rules). The Duel card is Last man standing (a Duel config reads as it).
-inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts = false, bool blossfechten = false, bool graveRobbers = false) {
+inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts = false, bool blossfechten = false, bool graveRobbers = false,
+                              bool coopCrypts = false) {
+    if (coopCrypts) { crypts = true; graveRobbers = true; }
     if (f == Format::Duel) f = Format::LastManStanding;
     const bool wasBlossfechten = IsBlossfechten(c);
     if (wasBlossfechten && blossfechten && !brawl && !crypts) return c;
@@ -498,12 +501,15 @@ inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts =
     }
     if (crypts) {
         if (IsCrypts(c)) {                           // the other Crypts mode: the run's rows stay
-            c.graveRobbers = graveRobbers;
+            if (c.coopCrypts && !coopCrypts) c.cryptsTier = MatchConfig{}.cryptsTier;   // Co-op Crypts set the game's tiers: back to the row's default
+            c.graveRobbers = graveRobbers; c.coopCrypts = coopCrypts;
+            if (coopCrypts) c.cryptsTier = kCryptsTierTop;
             if (graveRobbers) c.cryptsTogether = false;   // Grave Robbers is one shared crypt: no Apart or Together row
             return c;
         }
         c = LeaveTag(c);
-        c.graveRobbers = graveRobbers;
+        c.graveRobbers = graveRobbers; c.coopCrypts = coopCrypts;
+        if (coopCrypts) c.cryptsTier = kCryptsTierTop;
         c.format = kCryptsDefaultBattle;
         c.scoreLimit = DefaultScoreLimit(c.format);
         c.gear = Gear::Crypts;
@@ -512,7 +518,8 @@ inline MatchConfig SelectMode(MatchConfig c, Format f, bool brawl, bool crypts =
     }
     if (IsCrypts(c)) {                               // leaving Crypts: the same format's card keeps its settings
         c.gear = Gear::Own;
-        c.graveRobbers = false; c.cryptsTogether = false;
+        if (c.coopCrypts) c.cryptsTier = MatchConfig{}.cryptsTier;
+        c.graveRobbers = false; c.cryptsTogether = false; c.coopCrypts = false;
         if (c.format == f && !brawl && !blossfechten) return c;
     }
     if (brawl) {
@@ -564,6 +571,7 @@ inline constexpr const char* kBrawlBlurb = "Bare fists, everyone for themselves.
 inline constexpr const char* kCryptsBlurb = "The whole dungeon. Pick a mode on it.";       // the CRYPTS card: it picks the Crypts map
 inline constexpr const char* kCryptRoyaleBlurb = "Loot the Crypts, then fight.";
 inline constexpr const char* kGraveRobbersBlurb = "Loot the same crypt, together.";
+inline constexpr const char* kCoopCryptsBlurb = "The game's Crypts, together.";
 inline constexpr const char* kProgressionBlurb = "The game's Progression, together.";
 inline constexpr const char* kBlossfechtenBlurb = "Swords only, no armour.";
 
@@ -851,6 +859,7 @@ inline SettingRow Row(const LobbyLocal& l, LobbyRow s) {
 namespace lobby_detail {
 inline std::vector<LobbyRow> FormatRows(const MatchConfig& c) {
     Format f = c.format;
+    if (IsCoopCrypts(c)) return {};                  // Co-op Crypts: the game's own rules, no clock, the game's own tiers
     if (IsGraveRobbers(c)) return {LobbyRow::Gather, LobbyRow::CryptsTier};   // Run time and Dungeon tier: a shared crypt, no fight after
     if (IsCrypts(c)) {                               // Crypt Royale: the Battle and the Gather time, then the battle format's own rows: the gathered kits are the gear
         MatchConfig own = c; own.gear = Gear::Own;
@@ -957,6 +966,7 @@ inline ModeAvail ModeAvailable(Format f, int players) {
 // on by default; [mod] crypts_coop=0 (docs/PLAN_CRYPTS_COOP.md) turns them off, and then START is refused with a plain notice.
 inline ModeAvail ModeAvailable(const MatchConfig& c, int players) {
     if (!g_cryptsCoopOffered) {
+        if (IsCoopCrypts(c) || (IsCrypts(c) && c.coopCrypts)) return {false, "Co-op Crypts is turned off (crypts_coop=0)"};
         if (IsGraveRobbers(c)) return {false, "Grave Robbers is turned off (crypts_coop=0)"};
         if (IsCrypts(c) && c.cryptsTogether) return {false, "Crypts run Together is turned off (crypts_coop=0)"};
     }
@@ -1117,7 +1127,7 @@ inline SettingRow SceneRow(const LobbyLocal& l, LobbyRow s) {
 // build each card in its group's grid.
 inline ModeGroup ModeGroupAt(size_t i) {
     if (i < kModeOrderCount) return IsBotFormat(kModeOrder[i].format) ? ModeGroup::Coop : ModeGroup::Versus;
-    return i <= kModeOrderCount + 1 ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl, CRYPTS; Progression, Crypt Royale, Grave Robbers
+    return i <= kModeOrderCount + 1 ? ModeGroup::Versus : ModeGroup::Coop;   // Brawl, CRYPTS; Progression, Crypt Royale, Grave Robbers, Crypts (co-op)
 }
 
 inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
@@ -1254,9 +1264,18 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         g.format = r.format;
         g.name = "GRAVE ROBBERS";
         g.description = kGraveRobbersBlurb;
-        g.selected = IsGraveRobbers(c) && !l.progression; g.enabled = l.host; g.crypts = true; g.graveRobbers = true;
+        g.selected = IsGraveRobbers(c) && !c.coopCrypts && !l.progression; g.enabled = l.host; g.crypts = true; g.graveRobbers = true;
         g.shown = IsCrypts(c) && !l.progression && g_cryptsCoopOffered;   // hidden by [mod] crypts_coop=0
         s.modes.push_back(g);
+    }
+    {                                                // Co-op Crypts: a mode of its own, on every map (picking it enters the Crypts map)
+        ModeCard k;
+        k.format = kCryptsDefaultBattle;
+        k.name = "CRYPTS (CO-OP)";
+        k.description = kCoopCryptsBlurb;
+        k.selected = IsCoopCrypts(c) && !l.progression; k.enabled = l.host; k.crypts = true; k.graveRobbers = true; k.coopCrypts = true;
+        k.shown = g_cryptsCoopOffered;                // hidden by [mod] crypts_coop=0
+        s.modes.push_back(k);
     }
     for (size_t i = 0; i < s.modes.size(); ++i) s.modes[i].group = ModeGroupAt(i);
     if (l.progression) s.rulesNote = "The game's own rules, in the Tavern.";
@@ -1314,10 +1333,11 @@ inline LobbyScene BuildLobbyScene(const LobbyLocal& l) {
         if (gearRows) s.summary += " \xC2\xB7 " + std::string(GearName(c.gear));
         if (gearRows && GearRolled(c.gear)) s.summary += ", " + std::string(TierName(c.tier));
         if (gearRows && GearRolled(c.gear) && c.weapons != 0) s.summary += ", " + WeaponMaskName(c.weapons);
-        if (IsCrypts(c)) s.summary += ", " + std::to_string(c.gatherS / 60) + " min";
+        if (IsCoopCrypts(c)) s.summary += ", your own crypt character";
+        else if (IsCrypts(c)) s.summary += ", " + std::to_string(c.gatherS / 60) + " min";
         if (IsCrypts(c) && c.cryptsTogether) s.summary += ", together";
         if (IsCryptRoyale(c)) { const size_t fm = EffectiveFightMap(f, l.fightPick); if (fm < MapCount()) s.summary += std::string(", fight on ") + kMaps[fm].display; }
-        if (IsCrypts(c) && c.cryptsTier != kCryptsTierCap)   // the Dungeon tier when the host moved it off Peasant
+        if (IsCrypts(c) && !IsCoopCrypts(c) && c.cryptsTier != kCryptsTierCap)   // the Dungeon tier when the host moved it off Peasant
             s.summary += c.cryptsTier >= kCryptsTierTop ? std::string(", the game's own dungeon") : ", dungeon up to " + std::string(TierName(c.cryptsTier));
     }
     s.waiting = verdict.line;

@@ -30,6 +30,9 @@ namespace hsm::sync {
 // 2: the header carries the grip state (2 bytes after the flags byte). A version-1 frame is refused, not guessed at.
 // Flail heads (flags bits 2 and 3, protocol rev 17) stay version 2: their blocks follow every weapon block, so a
 // decoder that ignores those bits reads the rest of the frame unchanged.
+// The held weapons' object ids (protocol rev 52) stay version 2 as well: flags bit 4 + slot says the slot's weapon has one, and
+// the ids follow the flail heads as 64 bits each, slot 0 first. Revision 52 builds only meet each other (the protocol revision
+// is checked when joining), so no older decoder reads a frame with these bits.
 constexpr uint8_t kPoseCodecVersion = 2;
 
 // ---- quaternion / vector helpers (double precision; safe for NaN/Inf inputs where noted) -----
@@ -374,7 +377,8 @@ constexpr size_t kBitsPerWeapon =
     3 * 8 + 3 * 8 /* vel, angVel */ + 3 * kBladeBits /* base */ + 3 * kBladeBits /* tip */;
 constexpr size_t kBitsPerHead =
     3 * kHeadPosBits /* pos */ + QuatWireBits(kChildQBits) /* rot */ + 3 * 8 + 3 * 8 /* vel, angVel */;
-constexpr size_t kBitsWeaponsMax = size_t(kPoseWeapons) * (kBitsPerWeapon + kBitsPerHead);
+constexpr size_t kBitsPerObjectId = 64;
+constexpr size_t kBitsWeaponsMax = size_t(kPoseWeapons) * (kBitsPerWeapon + kBitsPerHead + kBitsPerObjectId);
 constexpr size_t kBitsMax =
     kBitsRootQuat + kBitsChildQuats + kBitsVelAll + kBitsOverrideMask + kBitsOverrideValuesMax + kBitsWeaponsMax;
 }  // namespace detail
@@ -393,8 +397,10 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
 
     bool head[kPoseWeapons];
     for (int wi = 0; wi < kPoseWeapons; ++wi) head[wi] = f.weapons[wi].present && f.weapons[wi].hasHead;
+    bool hasId[kPoseWeapons];
+    for (int wi = 0; wi < kPoseWeapons; ++wi) hasId[wi] = f.weapons[wi].present && f.weapons[wi].objectId != 0;
     const uint8_t flags = uint8_t((f.weapons[0].present ? 1 : 0) | (f.weapons[1].present ? 2 : 0) | (head[0] ? 4 : 0) |
-                                  (head[1] ? 8 : 0));
+                                  (head[1] ? 8 : 0) | (hasId[0] ? 0x10 : 0) | (hasId[1] ? 0x20 : 0));
     out.push_back(flags);
     detail::AppendU16LE(out, detail::PackGrip(f.grip));
 
@@ -473,6 +479,12 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
         detail::PutVelMu(w, SafeV3(h.vel), kVLinMax);
         detail::PutVelMu(w, SafeV3(h.angVelDeg), kVAngMax);
     }
+    // Object ids after all heads: 64 bits per flagged slot, slot 0 first.
+    for (int wi = 0; wi < kPoseWeapons; ++wi) {
+        if (!hasId[wi]) continue;
+        w.Put(uint32_t(f.weapons[wi].objectId), 32);
+        w.Put(uint32_t(f.weapons[wi].objectId >> 32), 32);
+    }
 
     w.Finish();
 }
@@ -494,6 +506,8 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
     const bool present[kPoseWeapons] = {(flags & 0x01) != 0, (flags & 0x02) != 0};
     const bool head[kPoseWeapons] = {(flags & 0x04) != 0, (flags & 0x08) != 0};
     if ((head[0] && !present[0]) || (head[1] && !present[1])) return false;   // a head without its weapon
+    const bool hasId[kPoseWeapons] = {(flags & 0x10) != 0, (flags & 0x20) != 0};
+    if ((hasId[0] && !present[0]) || (hasId[1] && !present[1])) return false;   // an id without its weapon
     const GripState grip = detail::UnpackGrip(detail::ReadU16LE(data + p)); p += 2;
     const float pelX = detail::ReadF32LE(data + p); p += 4;
     const float pelY = detail::ReadF32LE(data + p); p += 4;
@@ -579,6 +593,14 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
         }
         h.pos = Vec3Add(res.weapons[wi].pos, relPos);
         res.weapons[wi].hasHead = true;
+    }
+    for (int wi = 0; wi < kPoseWeapons; ++wi) {
+        if (!hasId[wi]) continue;
+        uint32_t lo, hi;
+        if (!r.Get(32, lo) || !r.Get(32, hi)) return false;
+        const uint64_t id = uint64_t(lo) | (uint64_t(hi) << 32);
+        if (id == 0) return false;   // flagged but empty: the encoder never sends it
+        res.weapons[wi].objectId = id;
     }
 
     out = res;

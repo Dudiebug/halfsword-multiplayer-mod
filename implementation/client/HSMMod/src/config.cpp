@@ -514,6 +514,17 @@ Config LoadConfig() {
     HSM_LOG("config: crypts_coop=%d: Grave Robbers and the Crypts run's Together are %s", c.cryptsCoop ? 1 : 0,
             c.cryptsCoop ? "offered in the lobby and START opens them (the host's rooms, enemies, loot and doors on every machine, and the run's end)"
                          : "hidden in the lobby and START refuses them");
+    c.weaponPropId = ReadModString(ini, L"weapon_prop_id", "1") != "0";
+    HSM_LOG("config: weapon_prop_id=%d: a held weapon's object id %s", c.weaponPropId ? 1 : 0,
+            c.weaponPropId ? "goes in the pose and a stand-in takes that weapon (props: ... by id / id fallback lines)" : "is neither sent nor used");
+    c.weaponPickGuard = ReadModString(ini, L"weapon_pick_guard", "1") != "0";
+    HSM_LOG("config: weapon_pick_guard=%d: a stand-in's hand takes a loose weapon for the owner's pose %s", c.weaponPickGuard ? 1 : 0,
+            c.weaponPickGuard ? "only when it is unambiguous (refusals are logged as props: ... pick refused)"
+                              : "by the old picks (nearest within 150 uu, then nearest within 600 uu)");
+    c.cryptsHostSpawns = ReadModString(ini, L"crypts_host_spawns", "1") != "0";
+    HSM_LOG("config: crypts_host_spawns=%d: in the shared Crypts %s", c.cryptsHostSpawns ? 1 : 0,
+            c.cryptsHostSpawns ? "the host fills each room with enemies for whichever player walks in"
+                               : "each room fills itself as the game does (it only knows the host's body)");
     c.cryptsLayoutNames = ReadModString(ini, L"crypts_layout_names", "auto");   // checked and logged by cryptslayout::SetNameForm
     // Command-line overrides (several instances may share one ini).
     std::string cl = CommandLineUtf8();

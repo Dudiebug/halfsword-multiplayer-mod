@@ -46,6 +46,8 @@ public:
     // servo drives (bone transforms, weapon roots, centres of mass, the contact bodies' velocities), slot for slot.
     // False if the rig is not valid.
     bool Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sync::FighterNow* now);
+    // The actor of the weapon in slot w when the last Read found it held (nullptr otherwise): what the owner's pose names by id.
+    ue::UObject* HeldWeaponActor(int w) const { return w >= 0 && w < sync::kPoseWeapons && weapons_[w].read ? weapons_[w].actor : nullptr; }
     // Blade tip of the weapon in slot w as of the last Read (false when that slot was not read or has no tip).
     bool WeaponTip(int w, sync::V3& out) const;
 

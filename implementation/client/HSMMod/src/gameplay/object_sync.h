@@ -27,6 +27,7 @@
 #include "session/hsm_prop_census.h"
 #include "session/hsm_structure.h"
 #include "session/hsm_walk_cache.h"
+#include "sync/hsm_class_names.h"
 #include "sync/hsm_crossbow_copy.h"
 #include "sync/hsm_handmatch.h"
 #include "sync/hsm_moving_follow.h"
@@ -141,6 +142,7 @@ public:
     // False for an actor that is no prop here, and for a prop a hand holds (a blow with it is its holder's).
     bool PropOf(ue::UObject* actor, Touch& out);
     ue::UObject* ActorOf(uint64_t propId) const;                     // a prop's live actor here, nullptr if none
+    uint64_t IdOf(ue::UObject* actor) const;                         // a tracked prop actor's object id, 0 if it is none
 
     std::string HealthLine();                                        // since the previous call
 
@@ -266,10 +268,10 @@ private:
     using LevelKey = std::pair<const ue::UObject*, int32_t>;        // a level actor and its object-array slot
     struct Counters {
         uint64_t drops = 0, minted = 0, mintFailed = 0, resolved = 0, forced = 0, kept = 0, unresolved = 0, releaseSkipped = 0, releaseFailed = 0,
-                 requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesStale = 0,
+                 requests = 0, releases = 0, grants = 0, lapsed = 0, statesSent = 0, statesApplied = 0, statesDuplicate = 0, statesOutOfOrder = 0, statesOffStream = 0,
                  statesRejected = 0, leasesRejected = 0, driven = 0, holdDenied = 0, contacts = 0, islands = 0, readFailed = 0, lost = 0,
                  attached = 0, attachMiss = 0, resetUnmoved = 0, matchReleased = 0, selfDrops = 0, reattached = 0, leaseReleased = 0, adopted = 0,
-                 spawned = 0, spawnFailed = 0, giftCopies = 0, copiesMoved = 0,
+                 spawned = 0, spawnFailed = 0, giftCopies = 0, copiesMoved = 0, byId = 0, idFallback = 0, swappedToId = 0,
                  censuses = 0, censusRejected = 0, levelStreamed = 0, levelDriven = 0, levelDeferred = 0, censusPurged = 0,
                  despawned = 0,
                  announced = 0, proposed = 0, refused = 0, rekeyed = 0, bound = 0, ghostsExpired = 0, announceRejected = 0,
@@ -338,6 +340,7 @@ private:
     void SelfDropped(uint8_t entity, ue::UObject* standIn, int hand, StandInHand& sh, std::array<ue::UObject*, 2>& cur, double nowMs);
     bool Attach(uint8_t entity, ue::UObject* standIn, int hand, const StandIns::PoseHandView& pose, double nowMs);
     bool TakeIntoHand(ue::UObject* standIn, int hand, ue::UObject* weapon);
+    bool SwapToNamed(uint8_t entity, ue::UObject* standIn, int hand, StandInHand& sh, const StandIns::PoseHandView& pose, bool havePose, double nowMs);
     bool SpawnIntoHand(uint8_t entity, ue::UObject* standIn, int hand, uint32_t classHash);   // no copy here: one of that class
     ue::UClass* WeaponClassByHash(uint32_t classHash, double nowMs);   // a loaded weapon class by sync::WeaponClassHash
     void LetLoose(uint8_t entity, int hand, ue::UObject* weapon, double nowMs);   // falls here: a prop again, or loose_
@@ -494,6 +497,7 @@ private:
     uint64_t spawnRefused_ = 0;
     SpawnedIdMinter minter_;
     GhostTable ghosts_;
+    sync::ClassNames classNames_;   // class hash -> name, from the classes this machine has seen (log lines only)
     bool ghostsHeld_ = false;                                   // roomsToBuild at the last BindAnnounced (logged on change)
     std::unordered_map<uint32_t, uint32_t> ghostExpiredByClass_; // class hash: announces that expired with no actor here
     std::map<uint64_t, Announced> announced_;                        // canonical announces with no actor here yet

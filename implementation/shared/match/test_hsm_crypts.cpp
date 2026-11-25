@@ -276,6 +276,45 @@ static void TestSnapshots() {
     CHECK(KitUploadDue(a, none) && KitUploadDue(a, b) && !KitUploadDue(a, a) && !KitUploadDue(none, a) && !KitUploadDue(none, none));
 }
 
+// Co-op Crypts: a gather with no clock. It never times out, every joiner opens a run, and it ends when nobody is still in.
+static void TestGatherUntimed() {
+    CryptsGather g;
+    g.Start(0, 600, {0, 1}, true, true);
+    CHECK(g.untimed() && g.together() && GatherUntimed(g.LeftMs(0)) && GatherUntimed(g.LeftMs(0xF0000000u)));
+    CHECK(g.Update(kGatherMaxS * 1000u * 10) == GatherStep::None);                        // ten times the longest clock: still on
+    CHECK(g.Join(2, 0x80000000u) && !g.Done(2));                                           // a late friend still opens a run
+    // the entry kit: before InCrypts only, never once in or done
+    CHECK(g.TakesEntryKit(0) && g.TakesEntryKit(2) && !g.TakesEntryKit(7) && !g.TakesKit(0));
+    g.OnNote(0, GatherNote::InCrypts); CHECK(!g.TakesEntryKit(0) && g.TakesKit(0));
+    g.OnNote(1, GatherNote::InCrypts); g.OnNote(2, GatherNote::InCrypts);
+    g.OnNote(0, GatherNote::Extracted); g.OnNote(1, GatherNote::Died);
+    CHECK(!g.TakesEntryKit(1) && g.Update(1000) == GatherStep::None);                      // 2 is still inside
+    g.OnNote(2, GatherNote::Extracted);
+    CHECK(g.Update(2000) == GatherStep::Collect && !GatherUntimed(g.LeftMs(2000)));         // collecting runs on its own clock
+    // a timed gather is unchanged: no entry kits after the phase, and the clock counts down
+    g.Start(0, 120, {0}, true);
+    CHECK(!g.untimed() && g.LeftMs(1000) == 119000 && g.TakesEntryKit(0));
+    CHECK(g.Update(120000) == GatherStep::Collect && !g.TakesEntryKit(0));
+    // the clients' clock: the untimed value never counts down
+    GatherClock c; c.Set(1000, GatherPhase::Gathering, kGatherUntimedMs, 9, true);
+    CHECK(c.Active() && GatherUntimed(c.LeftMs(1000)) && GatherUntimed(c.LeftMs(999999999)));
+    c.Set(1000, GatherPhase::Gathering, kGatherUntimedMs - 1, 9, true); CHECK(c.LeftMs(2000) == kGatherUntimedMs - 1001);
+}
+
+// Co-op Crypts: Grave Robbers with the game's tiers, only with the flag and Crypts gear.
+static void TestCoopCryptsConfig() {
+    MatchConfig c; c.gear = Gear::Crypts; c.coopCrypts = true; c.cryptsTier = 1; c.cryptsTogether = true;
+    g_cryptsCoopOffered = true;
+    const MatchConfig s = Sanitize(c);
+    CHECK(IsCoopCrypts(s) && IsGraveRobbers(s) && SharedCryptsRun(s) && s.cryptsTier == kCryptsTierTop && !s.cryptsTogether);
+    MatchConfig gr = c; gr.coopCrypts = false; gr.graveRobbers = true;
+    CHECK(!IsCoopCrypts(Sanitize(gr)) && Sanitize(gr).cryptsTier == 1);                   // Grave Robbers keeps its tier row
+    MatchConfig own = c; own.gear = Gear::Own; CHECK(!Sanitize(own).coopCrypts && !Sanitize(own).graveRobbers);
+    g_cryptsCoopOffered = false;
+    CHECK(!Sanitize(c).coopCrypts && !Sanitize(c).graveRobbers && !IsCoopCrypts(Sanitize(c)));   // held back
+    MatchConfig raw = c; raw.graveRobbers = false; CHECK(!IsCoopCrypts(raw));              // the test needs both
+}
+
 static void TestNotes() {
     CHECK(!ValidGatherNote(0) && ValidGatherNote(1) && ValidGatherNote(5) && !ValidGatherNote(6) && !ValidGatherNote(255));
     CHECK(!GatherNoteEnds(GatherNote::Loading) && !GatherNoteEnds(GatherNote::InCrypts));
@@ -298,6 +337,8 @@ int main() {
     TestGatherEarlyAndTimeout();
     TestGatherTogether();
     TestTogetherRunConfig();
+    TestGatherUntimed();
+    TestCoopCryptsConfig();
     TestGatherJoinLeave();
     TestClock();
     TestSnapshots();

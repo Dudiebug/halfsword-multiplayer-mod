@@ -789,7 +789,7 @@ static void TestModes() {
                             Format::Chaos, Format::OneCrossbow, Format::Roulette, Format::HideSeek, Format::PlayersVsBots, Format::Zombies};
     const char* names[] = {"CARNAGE", "DUEL", "TEAMS", "TEAM DUEL", "RIOT", "JUGGERNAUT", "TAG", "INFECTION",
                            "CROSSBOW TDM", "TOURNAMENT", "BLOSSFECHTEN", "CHAOS", "ONE CROSSBOW", "ROULETTE", "HIDE AND SEEK", "SURVIVAL", "ZOMBIES"};
-    CHECK(kModeOrderCount == 17 && kModeCardCount == 22);
+    CHECK(kModeOrderCount == 17 && kModeCardCount == 23);
     for (size_t i = 0; i < s.modes.size() && i < kModeOrderCount; ++i) {
         CHECK(s.modes[i].format == order[i] && s.modes[i].name == names[i] && !s.modes[i].description.empty());
         CHECK(s.modes[i].selected == (i == 1));
@@ -812,7 +812,7 @@ static void TestModes() {
 // Tier row; picking it and leaving it restore the settings.
 static void TestBrawl() {
     LobbyScene s = BuildLobbyScene(InLobby(true, Format::FreeForAll, Gear::Fists));
-    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kModeOrderCount) + 5);
+    CHECK(s.modes.size() == kModeCardCount && kModeCardCount == size_t(kModeOrderCount) + 6);
     const ModeCard& card = s.modes[kModeOrderCount];                          // Brawl, then CRYPTS, Progression, Crypt Royale and Grave Robbers
     CHECK(card.brawl && card.format == Format::FreeForAll && card.name == "BRAWL" && card.selected && card.enabled && !card.progression);
     CHECK(card.description == "Bare fists, everyone for themselves.");

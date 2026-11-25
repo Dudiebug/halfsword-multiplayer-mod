@@ -23,15 +23,26 @@ struct InputModeState {
     bool respawnHappened = false;   // a new body was just possessed
     bool delayedFixDue = false;     // the 1.5 s / 4.5 s after-load input fix is due
     bool fightLevel = true;         // the loaded level is a fight: the menus and lobby set their own input mode
+    bool gameScreenOpen = false;    // a game screen that holds UI-only input is up (kWeaponWheelClass, the weapon wheel)
 };
 
 inline InputMode ChooseInputMode(const InputModeState& s) {
     if (s.typing) return InputMode::Leave;
     if (!s.fightLevel) return InputMode::Leave;   // a stock Quit to menu loads the menu level with the pause menu just gone: not ours to restore
-    if (s.menuOpen) return s.wasMenuOpen ? InputMode::Leave : InputMode::GameAndUI;
+    if (s.menuOpen) return s.wasMenuOpen ? InputMode::Leave : InputMode::GameAndUI;   // the caller closes a game screen first
+    if (s.gameScreenOpen) return InputMode::Leave;   // #3681: a restore would take the wheel's keys and leave it on screen
     if (s.wasMenuOpen || s.respawnHappened || s.delayedFixDue) return InputMode::GameOnly;
     return InputMode::Leave;
 }
+
+// The game's screens that take UI-only input and close only from their own key handlers. The weapon wheel
+// (UI_WeaponSelection_C, made by Willie's Inventory action, Willie_BP.cpp:17288) sets SetInputMode_UIOnlyEx with itself
+// focused and time dilation 0.5 in Construct, and only its Close Widget (from its OnKeyDown / OnKeyUp on R and its mouse
+// clicks) gives game input back and removes it (decomp UI/UI_WeaponSelection.cpp:185-237). Any other input mode set while
+// it is up takes its keyboard focus: R and the clicks never reach it and it stays on screen for good (#3681, #4167).
+// So while one is up ChooseInputMode leaves the input mode alone, and when the mod has to set one anyway (spectate after a
+// death, a respawn, the pause menu, the chat) the screen is closed first by its own Close Widget (Adapter::CloseGameScreens).
+inline constexpr const char* kWeaponWheelClass = "UI_WeaponSelection_C";
 
 // After a respawn the game can leave UI-only input behind once the mod's own restore has run (#3490: the fighter
 // stands but W and the mouse do nothing until Esc). The game mode's stale "Player DED" is cleared a tick after the

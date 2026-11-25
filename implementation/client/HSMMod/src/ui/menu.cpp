@@ -2563,8 +2563,9 @@ void HandleClicks(Session& session) {
         if (!act(Clicked(g.modes[i].card), g.tab == kModeTab && !g.settingsShown && !g.classShown && i < s.modes.size() && s.modes[i].enabled && s.modes[i].shown, why(i < s.modes.size() ? s.modes[i].hint : std::string()))) continue;
         if (s.modes[i].progression) { lobby.SetProgression(true); continue; }
         if (lobby.Progression()) lobby.SetProgression(false);
-        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl, s.modes[i].crypts, s.modes[i].blossfechten, s.modes[i].graveRobbers);
-        if (next.format != c.format || next.gear != c.gear || next.scenario != c.scenario || next.graveRobbers != c.graveRobbers) {
+        MatchConfig next = SelectMode(c, s.modes[i].format, s.modes[i].brawl, s.modes[i].crypts, s.modes[i].blossfechten, s.modes[i].graveRobbers,
+                                      s.modes[i].coopCrypts);
+        if (next.format != c.format || next.gear != c.gear || next.scenario != c.scenario || next.graveRobbers != c.graveRobbers || next.coopCrypts != c.coopCrypts) {
             lobby.SetConfig(next); lobby.ClearOverrides(); c = next;   // the Crypts modes play on the Crypts map by themselves (EffectiveMap)
         }
     }
@@ -2664,7 +2665,7 @@ void HandleClicks(Session& session) {
             lobby.SetMapPick(s.maps[i].modded ? s.maps[i].path : std::string(MapAt(s.maps[i].index).path));
             // The Crypts map enters the Crypts modes; another map while in them leaves (match/hsm_lobby_scene.h MapPicked)
             const MatchConfig next = MapPicked(c, !s.maps[i].modded && MapAt(s.maps[i].index).crypts);
-            if (next.format != c.format || next.gear != c.gear || next.graveRobbers != c.graveRobbers) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
+            if (next.format != c.format || next.gear != c.gear || next.graveRobbers != c.graveRobbers || next.coopCrypts != c.coopCrypts) { lobby.SetConfig(next); lobby.ClearOverrides(); c = next; }
         }
     if (act(Clicked(g.start), s.start, s.startWhy)) {
         bool progression = false;                        // the Progression card is not the last card any more: look for it

@@ -21,6 +21,10 @@ constexpr double kSpawnAfterMs = 1500.0;      // a pose showing a class no weapo
                                               // the stand-in's hand (round start: the loadout fills the hand within 0.2 s)
 constexpr double kClassWalkMs = 10000.0;      // the loaded weapon classes are walked again (on a miss) at most this often
 constexpr uint64_t kLogFirst = 10;            // the first attaches, releases, self-drops and adoptions are logged in full
+constexpr double kPickLogMs = 2000.0;         // a hand's refused or repeated pick is logged at most this often
+constexpr double kSwapMinMs = 1000.0;         // rev 52: a hand swaps to the weapon the pose names at most this often
+inline bool g_weaponPropId = true;            // [mod] weapon_prop_id: the pose carries the held weapon's object id and a stand-in takes that actor
+inline bool g_weaponPickGuard = true;         // [mod] weapon_pick_guard: sync::PickGuarded (true) or the old PickAttach + PickAttachFar
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 5, kBlock = 2;   // ECollisionChannel / ECollisionResponse
 
 struct Hands {                         // what an owned fighter held as of the previous tick
@@ -35,7 +39,9 @@ struct StandInHand {                   // one hand of a stand-in, as the matcher
     uint32_t heldClass = 0;
     double episodeMs = -1;             // the pose's since-time this hand's attach retries belong to
     double retryMs = 0, backoffMs = 0;
+    double pickLogMs = -1e18;          // the last time a refused pick of this hand was logged (kPickLogMs)
     double reattachMs = -1e18;         // the last time a weapon that left by itself was taken back
+    double swapMs = -1e18;             // rev 52: the last swap to the weapon the pose names (SwapToNamed), at most every kSwapMinMs
     bool selfDropLogged = false;       // its first loss since the stand-in was bound (left by itself, or gone) is logged
     // A lease change from the owner let this hand go (NoticeDrop) while the owner's pose still showed that hand in the
     // episode that began at leaseLetGoPoseMs: until the pose moves on the hand takes nothing (it would take the weapon

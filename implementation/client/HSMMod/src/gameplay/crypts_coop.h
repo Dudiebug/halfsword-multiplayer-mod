@@ -9,6 +9,9 @@
 //     each remote body against each live room's boxes and, the first time one is inside, calls that room's own event with the
 //     host's pawn as OtherActor (SpawnLevel: the room's levels; Box: its child rooms; SpawnCharacters: its fighters, the
 //     director's enemies, which the session adopts as bots: PR C);
+//   - with crypts_host_spawns (the default) the SpawnCharacters box is the mod's: the first time any player, the host included, stands
+//     in it, the host picks the room's spawner points with every player's position (session/hsm_crypt_spawn.h) and calls the
+//     director's Spawn Character for each; the room's own event (which skips every point near or in sight of the host) is blocked;
 //   - the director spawns only while its "Spawned Willies" holds 3 or 4 fighters, and the game empties that list by destroying
 //     them (which is blocked here), so the mod takes a dead or removed enemy out of it (session/hsm_crypt_enemies.h).
 // Lines start "crypt room:". Game thread only; inert unless OnLevel(true, ...) armed it (a host in the shared run).
@@ -35,12 +38,19 @@ struct Env {
     // A new room was read (seq is 0): the session numbers it, sends it and returns its seq (0: not taken; the room is not offered again).
     std::function<uint16_t(const crypt::CryptRoomMsg&)> onRoom;
     std::function<bool(ue::UObject*)> isDead;   // a fighter that is dead (the director's list drops it)
+    std::string hostName;                       // for the log
+    // Nothing between `from` and `to`, looking through `ignore` (the players' bodies): the sight test of a spawner point.
+    std::function<bool(const ue::FVector&, const ue::FVector&, const std::vector<ue::UObject*>&)> lineClear;
 };
 
 void InstallRule();                                                  // once, at start-up (ProcessEvent hooks; inert until armed)
 void InstallScripts();                                               // owner sync start: the script-VM blocks (Event Unload Level, ...)
 void RemoveScripts();                                                // the session ended: those blocks go
 void SetModFighterTest(std::function<bool(const ue::UObject*)> f);   // stand-ins and bots: the bodies the fall box must spare
+// [mod] crypts_host_spawns=1 (the default): the host fills a room with enemies for whichever player walks in (session/hsm_crypt_spawn.h)
+// and the room's own SpawnCharacters event, which only knows the host's body, is blocked. =0: the 0.8.0 way (the room's event called
+// with the host's pawn).
+void SetHostSpawns(bool on);
 void OnLevel(bool shared, uint32_t nowMs);                           // each level load: armed for a host in the shared Crypts
 void Tick(uint32_t nowMs, const Env& env);                           // each session tick
 bool Armed();

@@ -88,6 +88,10 @@ inline MatchConfig TogetherRunConfig(MatchConfig c) {
 inline uint8_t CappedCryptsTier(uint8_t tier, uint8_t cap) { return tier > cap ? cap : tier; }
 constexpr uint32_t kGatherCollectMs = 10000;      // after the clock: the last kits come in for at most this long
 constexpr uint32_t kGatherJoinMinMs = 60000;      // a player who joins during the gather opens a run only with a minute left
+// Co-op Crypts (IsCoopCrypts): a gather with no clock. Its time left is this, on the host and in every Gather message, and
+// it never counts down; the run ends when nobody is still inside (or the host leaves).
+constexpr uint32_t kGatherUntimedMs = 0xFFFFFFFFu;
+inline bool GatherUntimed(uint32_t leftMs) { return leftMs == kGatherUntimedMs; }
 constexpr uint32_t kGatherClockEveryMs = 10000;   // the host sends the clock again this often (and to every joiner)
 constexpr uint32_t kKitSnapshotMs = 5000;         // a gathering machine reads its fighter's kit this often while it is alive
 
@@ -121,9 +125,9 @@ class CryptsGather {
 public:
     struct Slot { bool kit = false, done = false, finalKit = false, inRun = false; };   // inRun: InCrypts seen
 
-    void Start(uint32_t now, uint16_t gatherS, const std::vector<uint8_t>& slots, bool together = false) {
+    void Start(uint32_t now, uint16_t gatherS, const std::vector<uint8_t>& slots, bool together = false, bool untimed = false) {
         phase_ = GatherPhase::Gathering;
-        together_ = together;
+        together_ = together; untimed_ = untimed;
         startMs_ = now; collectMs_ = 0;
         gatherMs_ = uint32_t(std::clamp(gatherS, kGatherMinS, kGatherMaxS)) * 1000u;
         if (++seq_ == 0) seq_ = 1;
@@ -135,10 +139,12 @@ public:
     bool Active() const { return phase_ != GatherPhase::Off; }
     uint16_t seq() const { return seq_; }
     bool together() const { return together_; }   // the run is the shared Catacombs (the Crypts run row's Together)
+    bool untimed() const { return untimed_; }     // Co-op Crypts: no clock
 
-    // Gathering: the clock's time left; Collecting: the time left for the last kits; 0 otherwise.
+    // Gathering: the clock's time left (kGatherUntimedMs with no clock); Collecting: the time left for the last kits; 0 otherwise.
     uint32_t LeftMs(uint32_t now) const {
         uint32_t end = 0;
+        if (phase_ == GatherPhase::Gathering && untimed_) return kGatherUntimedMs;
         if (phase_ == GatherPhase::Gathering) end = startMs_ + gatherMs_;
         else if (phase_ == GatherPhase::Collecting) end = collectMs_ + kGatherCollectMs;
         else return 0;
@@ -162,6 +168,13 @@ public:
     bool TakesKit(uint8_t slot) const {
         auto it = slots_.find(slot);
         return phase_ != GatherPhase::Off && it != slots_.end() && it->second.inRun && !it->second.done;
+    }
+    // Co-op Crypts: the character a player brings in (their own, kept between runs), sent before the run: while the gather is
+    // on and the player is in it, not yet in the Crypts (InCrypts not seen; the host deals it at the match start, which comes
+    // first) and not done.
+    bool TakesEntryKit(uint8_t slot) const {
+        auto it = slots_.find(slot);
+        return phase_ == GatherPhase::Gathering && it != slots_.end() && !it->second.inRun && !it->second.done;
     }
     // A kit stored for the slot (the DLL keeps its bytes; TakesKit first). One that comes while the last kits are collected is
     // the final one.
@@ -216,7 +229,7 @@ private:
     GatherPhase phase_ = GatherPhase::Off;
     uint32_t startMs_ = 0, gatherMs_ = 0, collectMs_ = 0;
     uint16_t seq_ = 0;
-    bool together_ = false;
+    bool together_ = false, untimed_ = false;
     std::map<uint8_t, Slot> slots_;
 };
 
@@ -231,6 +244,7 @@ public:
     uint16_t seq() const { return seq_; }
     uint32_t LeftMs(uint32_t now) const {
         if (phase_ == GatherPhase::Off) return 0;
+        if (GatherUntimed(leftMs_)) return kGatherUntimedMs;   // no clock: it never counts down
         const uint32_t ran = now - atMs_;
         return ran >= leftMs_ ? 0 : leftMs_ - ran;
     }

@@ -22,7 +22,7 @@ static void TestWire() {
     { auto x = b; x[3] = uint8_t(MsgType::Gather); CHECK(!Decode(x.data(), x.size(), y)); }       // another type
     { BackToLobbyMsg keep; keep.seq = 7; auto x = b; x[3] = 0; CHECK(!Decode(x.data(), x.size(), keep) && keep.seq == 7); }   // a refusal leaves it as it was
     CHECK(BudgetClassOf(MsgType::BackToLobby) == BudgetClass::Control);
-    CHECK(kProtocolRevision == 51 && kLastDecodedMsgType == 77 && kLastReservedMsgType == 77);
+    CHECK(kProtocolRevision == 52 && kLastDecodedMsgType == 77 && kLastReservedMsgType == 77);
 }
 
 static void TestVerdict() {

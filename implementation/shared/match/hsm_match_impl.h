@@ -52,6 +52,8 @@ inline MatchConfig Sanitize(MatchConfig c) {
     c.gatherS = uint16_t(std::clamp(c.gatherS, kGatherMinS, kGatherMaxS) / 60 * 60);    // Crypts: 2 to 60 whole minutes
     c.cryptsTier = std::min(c.cryptsTier, kCryptsTierTop);                               // Crypts: Beggar .. the game's own
     if (!IsCrypts(c) || !g_cryptsCoopOffered) c.cryptsTogether = false;                  // the Crypts modes' row only, and held back (a stale hsm_ctog included)
+    if (!IsCrypts(c) || !g_cryptsCoopOffered) c.coopCrypts = false;                      // Co-op Crypts: held back like Grave Robbers
+    if (c.coopCrypts) { c.graveRobbers = true; c.cryptsTier = kCryptsTierTop; }          // Co-op Crypts is Grave Robbers with the game's own tiers
     if (!IsCrypts(c) || !g_cryptsCoopOffered) c.graveRobbers = false;                    // Grave Robbers: held back too (a missing key is Crypt Royale)
     if (c.graveRobbers) c.cryptsTogether = false;                                        // Grave Robbers has no Apart/Together row: the crypt is shared
     c.timeOfDay = TimeOfDayRead(c.timeOfDay);              // a stale or peer-written value, and an older host's Map's own: Midday

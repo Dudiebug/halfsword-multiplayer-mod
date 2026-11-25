@@ -540,7 +540,8 @@ static void TestFlailHeadFlagsAndSize() {
     }
     // The budget: 17.1 bytes a head (pos 3x16, rot 2+3x13, vel and angVel 6x8 bits); the worst case has both.
     CHECK(detail::kBitsPerHead == 137);
-    CHECK(detail::kBitsWeaponsMax == 2 * (detail::kBitsPerWeapon + detail::kBitsPerHead));
+    CHECK(detail::kBitsPerObjectId == 64);
+    CHECK(detail::kBitsWeaponsMax == 2 * (detail::kBitsPerWeapon + detail::kBitsPerHead + detail::kBitsPerObjectId));
     CHECK(kPoseFrameMaxBytes == kPoseHeaderBytes + (detail::kBitsMax + 7) / 8);
 }
 
@@ -648,6 +649,74 @@ static void TestMuDecodePreservesEveryCode() {
     }
 }
 
+// ---- held weapon object ids (protocol rev 52): flags bit 4 + slot, 64 bits per flagged slot after the flail heads ------
+static void TestObjectIdRoundTrip() {
+    std::mt19937 rng(31);
+    const PoseFrame f = BuildFkFrame(rng, 1.0, 2);
+    const std::vector<uint8_t> plain = EncodePose(f);
+    const size_t bodyBits = detail::kBitsRootQuat + detail::kBitsChildQuats + detail::kBitsVelAll + detail::kBitsOverrideMask +
+                            2 * detail::kBitsPerWeapon;
+    // Without ids: the old layout exactly (no id bits set, objectId reads 0).
+    CHECK((plain[kFlagsOff] & 0x30) == 0);
+    PoseFrame d{};
+    CHECK(DecodePose(plain.data(), plain.size(), d));
+    CHECK(d.weapons[0].objectId == 0 && d.weapons[1].objectId == 0);
+    const uint64_t ids[3] = {0x0000000000012345ull, 0x4000000100000007ull, 0x8000000000000012ull};
+    for (int mask = 1; mask < 4; ++mask) {
+        for (uint64_t id : ids) {
+            PoseFrame g = f;
+            for (int wi = 0; wi < kPoseWeapons; ++wi) if (mask & (1 << wi)) g.weapons[wi].objectId = id + uint64_t(wi);
+            const std::vector<uint8_t> buf = EncodePose(g);
+            const int n = (mask & 1) + ((mask >> 1) & 1);
+            CHECK(buf[kFlagsOff] == uint8_t(3 | (mask << 4)));
+            CHECK(buf.size() == kPoseHeaderBytes + (bodyBits + size_t(n) * 64 + 7) / 8);
+            PoseFrame r{};
+            CHECK(DecodePose(buf.data(), buf.size(), r));
+            for (int wi = 0; wi < kPoseWeapons; ++wi) {
+                CHECK(r.weapons[wi].objectId == ((mask & (1 << wi)) ? id + uint64_t(wi) : 0));
+                CHECK(r.weapons[wi].classHash == g.weapons[wi].classHash);   // the rest of the weapon is untouched
+            }
+            // Cut inside the id block: refused.
+            CHECK(!DecodePose(buf.data(), buf.size() - 8, r));
+        }
+    }
+    // With a flail head too: the id follows the head block, and both decode.
+    PoseFrame g = f;
+    AddHead(rng, g, 0);
+    g.weapons[0].objectId = 0x1122334455667788ull;
+    const std::vector<uint8_t> buf = EncodePose(g);
+    PoseFrame r{};
+    CHECK(DecodePose(buf.data(), buf.size(), r));
+    CHECK(r.weapons[0].hasHead && r.weapons[0].objectId == 0x1122334455667788ull);
+}
+
+static void TestObjectIdOnlyWithItsWeapon() {
+    std::mt19937 rng(32);
+    // An id on an absent slot is not sent.
+    PoseFrame f = BuildFkFrame(rng, 1.0, 1);
+    const std::vector<uint8_t> plain = EncodePose(f);
+    f.weapons[1].objectId = 77;
+    CHECK(EncodePose(f) == plain);
+    // A frame that flags an id for a slot with no weapon is refused; so is a flagged id of 0.
+    PoseFrame d{};
+    std::vector<uint8_t> b = plain;
+    b[kFlagsOff] = uint8_t(b[kFlagsOff] | 0x20);
+    b.resize(b.size() + 16, 0xFF);
+    CHECK(!DecodePose(b.data(), b.size(), d));
+    // The same frame with weapon 0's id flagged and 64 zero bits behind it (the padding bits are zero too).
+    b = plain;
+    b[kFlagsOff] = uint8_t(b[kFlagsOff] | 0x10);
+    PoseFrame okFrame{};
+    CHECK(DecodePose(plain.data(), plain.size(), okFrame));
+    b.resize(b.size() + 9, 0);
+    CHECK(!DecodePose(b.data(), b.size(), d));
+    // ... and with a nonzero id there it decodes (found by encoding the same frame with an id).
+    PoseFrame g = f;
+    g.weapons[0].objectId = 5;
+    const std::vector<uint8_t> withId = EncodePose(g);
+    CHECK(DecodePose(withId.data(), withId.size(), d) && d.weapons[0].objectId == 5);
+}
+
 int main() {
     TestMuDecodePreservesEveryCode();
     TestPropertyRoundTrip();
@@ -671,6 +740,8 @@ int main() {
     TestFlailHeadLeavesTheRestAlone();
     TestFlailHeadPositionIsClosedLoop();
     TestFlailHeadHostileValuesStayFinite();
+    TestObjectIdRoundTrip();
+    TestObjectIdOnlyWithItsWeapon();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");
     return g_fail != 0;

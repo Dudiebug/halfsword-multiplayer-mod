@@ -1,6 +1,7 @@
 #include "gameplay/crypts_coop.h"
 #include "log.h"
 #include "session/hsm_crypt_enemies.h"
+#include "session/hsm_crypt_spawn.h"
 #include "session/hsm_crypt_walk.h"
 #include "ue/hook.h"
 #include "ue/script_hook.h"
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -47,6 +49,7 @@ struct Room {
     bool boxRead[3] = {};
     bool boxMissingLogged[3] = {};
     bool gone = false;
+    crypt::RoomSpawn spawn;   // crypts_host_spawns: the mod fills it (started when a player first stands in its SpawnCharacters box)
 };
 
 // Kept across levels: what the hooks learned about this build's functions.
@@ -55,6 +58,7 @@ struct Persist {
     std::unordered_map<UFunction*, uint8_t> hookKind;
     std::unordered_map<UFunction*, int32_t> otherActorOffset;
     bool ruleInstalled = false;
+    bool hostSpawns = true;
 };
 Persist p;
 
@@ -77,6 +81,8 @@ struct State {
     size_t rooms0Logged = 0;
     int pruned = 0;               // entries taken out of the director's Spawned Willies
     int boxMissingLogs = 0;       // a room box not read yet (Poll reads it again): the first few logged, then counted
+    std::unordered_map<const UObject*, bool> rolled;   // each spawner point's Spawn Chance roll, made once (as the game's one pass)
+    int spawnedTotal = 0;
 };
 State g;
 
@@ -261,8 +267,18 @@ bool Fire(Room& r, int k, const Env& env) {
     return ok;
 }
 
-void Poll(const Env& env) {
-    if (g.rooms.empty() || env.remotes.empty()) return;
+// Every player's body, the host's first.
+std::vector<Remote> Players(const Env& env) {
+    std::vector<Remote> all;
+    if (env.hostPawn && !IsGarbage(env.hostPawn)) all.push_back({0, env.hostName.empty() ? std::string("the host") : env.hostName, env.hostPawn});
+    for (const Remote& r : env.remotes) if (r.actor && !IsGarbage(r.actor)) all.push_back(r);
+    return all;
+}
+
+void SpawnRoom(Room& r, const Env& env, uint32_t now);
+
+void Poll(const Env& env, uint32_t now) {
+    if (g.rooms.empty() || (env.remotes.empty() && !p.hostSpawns)) return;
     for (Room& r : g.rooms) {
         if (r.gone) continue;
         if (!Alive(r.obj, r.index)) {
@@ -285,8 +301,8 @@ void Poll(const Env& env) {
             }
         }
     }
-    for (const Remote& who : env.remotes) {
-        if (!who.actor || IsGarbage(who.actor)) continue;
+    for (const Remote& who : Players(env)) {
+        const bool host = who.actor == env.hostPawn;
         Call l(who.actor, "K2_GetActorLocation");
         if (!l.invoke()) continue;
         const FVector at = l.get<FVector>("ReturnValue");
@@ -296,6 +312,14 @@ void Poll(const Env& env) {
             for (int k = 0; k < 3; ++k) {
                 if (!r.boxRead[k] || !crypt::InBox(r.box[k], pos)) continue;
                 const BoxKind kind = KindOfBox(k);
+                if (k == 0 && p.hostSpawns) {   // the mod fills the room, for whoever walked in (SpawnRoom)
+                    if (r.spawn.started) continue;
+                    r.spawn.started = true; r.spawn.next = now;
+                    HSM_LOG("crypt coop: #%u %s: %s entered the SpawnCharacters box at %s; the host fills the room", unsigned(r.seq), r.cls.c_str(),
+                            who.name.c_str(), V(at).c_str());
+                    continue;
+                }
+                if (host) continue;             // the host's own overlap fires the room's other events itself
                 if (g.once.Seen(r.seq, kind, 0)) continue;
                 if (k == 0 && !kFireSpawnCharacters) {
                     g.once.First(r.seq, kind, 0);
@@ -311,6 +335,115 @@ void Poll(const Env& env) {
             }
         }
     }
+    for (Room& r : g.rooms)
+        if (!r.gone && r.spawn.Due(now)) SpawnRoom(r, env, now);
+}
+
+// ---- the host fills a room (crypts_host_spawns; session/hsm_crypt_spawn.h)
+
+std::mt19937& Rng() { static std::mt19937 rng{std::random_device{}()}; return rng; }
+
+FVector ActorAt(UObject* a) {
+    Call l(a, "K2_GetActorLocation");
+    return l.invoke() ? l.get<FVector>("ReturnValue") : FVector{};
+}
+
+// The director's Spawn Character, as the room's own event calls it (BP_Procedural_Block_Master.cpp:684/699).
+UObject* SpawnAt(const FVector& at, double radius, int team, bool boss) {
+    Call c(g.director, "Spawn Character");
+    if (!c.valid()) return nullptr;
+    c.set<FVector>("Origin Location", at).setReal("Spawn Radius", radius).set<bool>("Zombie", false).set<int32_t>("Team", team)
+        .set<bool>("Boss", boss).set<bool>("Go To Near Player", false);
+    if (!c.invoke()) return nullptr;
+    UObject* w = c.get<UObject*>("Spawned Character");
+    return w && !IsGarbage(w) ? w : nullptr;
+}
+
+void SpawnRoom(Room& r, const Env& env, uint32_t now) {
+    if (!g.director || !Alive(g.director, g.directorIndex) || !Alive(r.obj, r.index)) { r.spawn.next = now + crypt::kSpawnRetryMs; return; }
+    bool b = false;
+    if (GetBool(r.obj, "Door Barricated", b) && b) {   // the game never fills a barricaded room on entry either
+        r.spawn.done = true;
+        HSM_LOG("crypt coop: #%u %s: its door is barricaded; not filled on entry (as the game's)", unsigned(r.seq), r.cls.c_str());
+        return;
+    }
+    const auto* list = static_cast<const ArrayView<UObject*>*>(FieldPtr(g.director, "Available Spawners"));
+    std::vector<UObject*> all;
+    if (list && list->data && list->num > 0 && list->num <= 4096)
+        for (int32_t i = 0; i < list->num; ++i) if (UObject* s = list->data[i]; s && !IsGarbage(s)) all.push_back(s);
+    // The room's points: those in its boxes; failing that the game's own filter, every point in the room's front half.
+    std::vector<UObject*> mine;
+    std::vector<Point3> pts;
+    std::vector<FVector> at;
+    std::vector<FVector> where;
+    for (UObject* s : all) where.push_back(ActorAt(s));
+    for (size_t i = 0; i < all.size(); ++i) {
+        const Point3 q{where[i].x, where[i].y, where[i].z};
+        bool in = false;
+        for (int k = 0; k < 3 && !in; ++k) in = r.boxRead[k] && crypt::InBox(r.box[k], q, 100);
+        if (in) { mine.push_back(all[i]); pts.push_back(q); at.push_back(where[i]); }
+    }
+    const char* how = "in its boxes";
+    if (mine.empty()) {
+        how = "in its front half (none in its boxes)";
+        const FVector ra = ActorAt(r.obj);
+        Call rr(r.obj, "K2_GetActorRotation");
+        const double yaw = rr.invoke() ? rr.get<FRotator>("ReturnValue").yaw : 0.0;
+        for (size_t i = 0; i < all.size(); ++i) {
+            const Point3 q{where[i].x, where[i].y, where[i].z};
+            if (crypt::InFront({ra.x, ra.y, ra.z}, yaw, q)) { mine.push_back(all[i]); pts.push_back(q); at.push_back(where[i]); }
+        }
+    }
+    const float* chanceF = Field<float>(r.obj, "Spawn Chance");
+    const double chance = chanceF && std::isfinite(*chanceF) ? std::clamp(double(*chanceF), 0.0, 1.0) : 0.5;
+    std::vector<bool> passed;
+    for (UObject* s : mine) {
+        auto it = g.rolled.find(s);
+        if (it == g.rolled.end()) it = g.rolled.emplace(s, std::bernoulli_distribution(chance)(Rng())).first;
+        passed.push_back(it->second);
+    }
+    std::vector<Point3> ppos;
+    std::vector<FVector> pat;
+    std::vector<UObject*> bodies;
+    for (const Remote& who : Players(env)) { const FVector v = ActorAt(who.actor); ppos.push_back({v.x, v.y, v.z}); pat.push_back(v); bodies.push_back(who.actor); }
+    auto sees = [&](size_t i, size_t j) {
+        if (!env.lineClear) return false;
+        const FVector from{at[i].x, at[i].y, at[i].z + crypt::kSpawnTraceUpCm};
+        return env.lineClear(from, pat[j], bodies);
+    };
+    bool bossArena = false;
+    GetBool(r.obj, "Is Boss Arena?", bossArena);
+    UObject** bossField = Field<UObject*>(r.obj, "Spawned Boss");
+    auto bossDue = [&] { return bossArena && bossField && (!*bossField || IsGarbage(*bossField)); };
+    const bool bossFirst = bossDue();
+    const int living = std::max(0, SpawnedWillies());
+    const crypt::SpawnPlan plan = crypt::PlanSpawns(pts, passed, ppos, living, sees, crypt::kSpawnClearCm,
+                                                    bossFirst ? std::max(crypt::kDirectorCap, living + 1) : crypt::kDirectorCap);   // the boss is past the cap
+    // What the room's blocked event would have set: the team its fighters are on (the game's reinforcements read it too).
+    const uint8_t* tierB = Field<uint8_t>(g.director, "Current Abyss Tier");
+    const int tier = tierB ? *tierB : 0;
+    const int team = crypt::RoomTeam(tier, bossArena, [](int n) { return std::uniform_int_distribution<int>(0, n - 1)(Rng()); });
+    if (int32_t* t = Field<int32_t>(r.obj, "Spawned Characters Team")) *t = team;
+    SetBool(r.obj, "Spawned Reinforcements", false);
+    const float* radiusF = Field<float>(r.obj, "Spawn Radius");
+    const double radius = radiusF && std::isfinite(*radiusF) ? *radiusF : 0.0;
+    int spawned = 0;
+    auto one = [&](size_t i) {
+        const bool boss = bossDue();
+        UObject* w = SpawnAt(at[i], radius, team, boss);
+        if (!w) return;
+        ++spawned;
+        if (boss) *bossField = w;
+    };
+    for (size_t i : plan.use) one(i);
+    const crypt::SpawnStep step = crypt::NextStep(r.spawn, plan, spawned, now);
+    if (step == crypt::SpawnStep::Fallback)
+        if (const std::optional<size_t> i = crypt::FallbackPoint(pts, plan, ppos)) one(*i);
+    g.spawnedTotal += spawned;
+    HSM_LOG("crypt coop: #%u %s: %d of %zu point(s) %s spawned (try %d: skipped %d by roll, %d near a player, %d seen, %d over the cap); "
+            "team %d, tier %d%s; director list %d -> %d; %s",
+            unsigned(r.seq), r.cls.c_str(), spawned, pts.size(), how, r.spawn.tries, plan.chance, plan.nearby, plan.seen, plan.capped, team, tier,
+            bossFirst ? ", boss arena" : "", living, SpawnedWillies(), crypt::SpawnStepName(step));
 }
 
 // ---- the hooks
@@ -354,6 +487,7 @@ bool OnBound(UObject*, UFunction* fn, void* params) {
     const uint8_t k = HookKindOf(fn);
     if (k == kHkNone) return false;
     if (k == kHkSpawnLevelEnd) { NoteBlock(k, kHkName[k]); return true; }   // the host walking out of a room's box unloads its parent room
+    if (k == kHkSpawnChars && p.hostSpawns) { NoteBlock(k, "a room's own SpawnCharacters event (the host fills the room for every player)"); return true; }
     UObject* other = OtherActorOf(fn, params);
     if (!other) return false;
     const bool mod = p.isModFighter && p.isModFighter(other);
@@ -409,6 +543,8 @@ void InstallScripts() {
 void RemoveScripts() { ClearScriptHooks(kScriptOwner); }
 
 void SetModFighterTest(std::function<bool(const UObject*)> f) { p.isModFighter = std::move(f); }
+
+void SetHostSpawns(bool on) { p.hostSpawns = on; }
 
 void OnLevel(bool shared, uint32_t nowMs) {
     g = State{};
@@ -481,11 +617,12 @@ int Live() {
 void Tick(uint32_t now, const Env& env) {
     if (!g.shared) return;
     if (int32_t(now - g.nextScan) >= 0) { g.nextScan = now + kScanMs; Scan(env); PruneSpawned(env); }
-    if (int32_t(now - g.nextPoll) >= 0) { g.nextPoll = now + kPollMs; Poll(env); }
+    if (int32_t(now - g.nextPoll) >= 0) { g.nextPoll = now + kPollMs; Poll(env, now); }
     if (int32_t(now - g.nextLive) >= 0) {
         g.nextLive = now + kLiveLogMs;
         HSM_LOG("crypt room: %d live (%zu sent, %zu remote body/bodies)", Live(), g.rooms.size(), env.remotes.size());
-        HSM_LOG("crypt coop: director list holds %d fighter(s); %d taken out so far", SpawnedWillies(), g.pruned);
+        HSM_LOG("crypt coop: director list holds %d fighter(s); %d taken out so far; %d spawned by the host for its players (host spawns %s)",
+                SpawnedWillies(), g.pruned, g.spawnedTotal, p.hostSpawns ? "on" : "off");
     }
 }
 

@@ -26,6 +26,7 @@
 #include "gameplay/game_check.h"
 #include "gameplay/claims.h"
 #include "gameplay/crypts_layout.h"
+#include "gameplay/crypts_character.h"
 #include "gameplay/crypts_coop.h"
 #include "gameplay/crypts_loot.h"
 #include "gameplay/crypts_probe.h"
@@ -127,6 +128,7 @@
 #include "session/hsm_gather.h"
 #include "session/hsm_bench.h"
 #include "session/hsm_crypt_rooms.h"
+#include "session/hsm_crypt_character.h"
 #include "session/hsm_crypt_run.h"
 #include "session/hsm_crypt_enemies.h"
 #include "session/hsm_crypt_walk.h"
@@ -478,14 +480,21 @@ public:
         const uint32_t now = NowMs();
         const MatchConfig c = lobby_.config();
         const bool together = SharedCryptsRun(c);   // Crypt Royale Together and Grave Robbers: one dungeon, the host's
-        battleMap_ = map; gatherKits_.clear(); freshKits_.clear();
-        gather_.Start(now, c.gatherS, AllSlots(), together);
+        const bool coop = together && IsCoopCrypts(c);   // Co-op Crypts: no clock
+        battleMap_ = map; gatherKits_.clear(); freshKits_.clear(); entryKits_.clear();
+        gather_.Start(now, c.gatherS, AllSlots(), together, coop);
         gatherRunSeq_ = gather_.seq();
         graveRun_ = together && IsGraveRobbers(c); runHostLeft_ = runTimeUp_ = false; cryptResultsAt_ = 0; cryptResults_ = {};
+        coopRun_ = coop;
+        if (coop) {                                  // the host's own crypt character, as a client's comes in (OnGatherKit)
+            std::vector<uint8_t> mine = game::cryptschar::Load(adapter_);
+            if (!mine.empty()) entryKits_[kHostSlot] = std::move(mine);
+        }
         runBook_.Begin(gather_.seq());
         if (together) for (uint8_t sl : AllSlots()) runBook_.Add(sl, RealNameOfSlot(sl));
-        HSM_LOG("crypts: gather started (%u min %u s, %d player(s), %s, battle on %s)", unsigned(c.gatherS / 60), unsigned(c.gatherS % 60), gather_.Players(),
-                together ? "together in one shared Crypts" : "each in their own Crypts", map.c_str());
+        if (coop) HSM_LOG("crypts: Co-op Crypts started (no clock, %d player(s), each in their own crypt character)", gather_.Players());
+        else HSM_LOG("crypts: gather started (%u min %u s, %d player(s), %s, battle on %s)", unsigned(c.gatherS / 60), unsigned(c.gatherS % 60), gather_.Players(),
+                     together ? "together in one shared Crypts" : "each in their own Crypts", map.c_str());
         SendGatherClock(now);
         lobby_.SetPublicState("playing", "Crypts", ModeNameFor(c, lobby_.PlayerCount(), lobby_.MaxPlayers()));
         if (together) { OpenTogetherCrypts(); return; }
@@ -522,7 +531,7 @@ public:
         SendGatherClock(now);                           // Off: every machine's run is over
         gatherSelf_ = GatherSelf::None; gatherOpening_ = false; gatherMenuAt_ = 0;
         gatherClock_.Clear();
-        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
+        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear(); entryKits_.clear();
         ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");   // the run is over: those two are settled
         ui::Notify(notices::Id::CryptsStopped);
     }
@@ -560,6 +569,12 @@ public:
     // The game instance for a fresh Crypts run and this machine's new random character of the tier (false: the set-up failed).
     bool PrepareCryptsRun() {
         if (!adapter_.StartFreshCrypts()) return false;
+        if (coopRun_) {                              // Co-op Crypts: the host's own crypt character, the blank peasant the first time
+            const auto it = entryKits_.find(kHostSlot);
+            if (it != entryKits_.end() && adapter_.SetCryptsCharacter(it->second)) HSM_LOG("crypts co-op: this run starts as your crypt character");
+            else HSM_LOG("crypts co-op: this run starts as the blank peasant");
+            return true;
+        }
         if (cfg_.cryptsRandomCharacter) {
             const MatchConfig c = lobby_.config();
             const std::vector<uint8_t> who = game::RandomPassportBlob(adapter_, c.tier, c.weapons);
@@ -641,18 +656,23 @@ public:
         gatherClock_.Set(now, m.phase, m.leftMs, m.seq, m.together);
         if (m.phase == GatherPhase::Off) {
             if (was != GatherPhase::Off) HSM_LOG("crypts: the gather is over");
-            gatherSelf_ = GatherSelf::None;
+            if (gatherSelf_ == GatherSelf::Gathering) SaveCoopCharacter(crypt::Outcome::Inside);   // Co-op Crypts: ended with no results seen
+            gatherSelf_ = GatherSelf::None; coopRun_ = false;
             gatherClock_.Clear();
             return;
         }
         if (fresh) {
             gatherRunSeq_ = m.seq;
             graveRun_ = m.together && IsGraveRobbers(lobby_.config()); cryptResultsAt_ = 0;
-            HSM_LOG("crypts: gather #%u: %u s left%s", unsigned(m.seq), m.leftMs / 1000, m.together ? ", together in one shared Crypts" : "");
+            coopRun_ = m.together && GatherUntimed(m.leftMs);   // Co-op Crypts: the host's untimed shared run
+            if (coopRun_) graveRun_ = true;                  // a Grave Robbers run, whatever this machine's copy of the lobby says yet
+            if (coopRun_) HSM_LOG("crypts: Co-op Crypts #%u: together in one shared Crypts, no clock", unsigned(m.seq));
+            else HSM_LOG("crypts: gather #%u: %u s left%s", unsigned(m.seq), m.leftMs / 1000, m.together ? ", together in one shared Crypts" : "");
             if (m.together && m.leftMs >= kGatherJoinMinMs) {   // the host's Travel to the shared Crypts follows (a joiner's came first)
                 ResetOwnRun();
                 gatherSelf_ = GatherSelf::Opening;
                 SendGatherNote(GatherNote::Loading);
+                if (coopRun_) SendEntryCharacter();
                 return;
             }
             if (m.leftMs >= kGatherJoinMinMs) { OpenOwnCrypts(); return; }
@@ -679,6 +699,11 @@ public:
     void OnGatherKit(uint8_t slot, std::vector<uint8_t> blob) {
         std::string why;
         if (!CheckPassportSave(blob.data(), blob.size(), &why)) { HSM_LOG("crypts: kit from %s refused: %s", NameOfSlot(slot).c_str(), why.c_str()); return; }
+        if (coopRun_ && gather_.TakesEntryKit(slot)) {   // Co-op Crypts: the character this player brings in, dealt at the run's start
+            HSM_LOG("crypts co-op: %s brings their crypt character (%zu bytes)", NameOfSlot(slot).c_str(), blob.size());
+            entryKits_[slot] = std::move(blob);
+            return;
+        }
         if (!gather_.TakesKit(slot)) {
             HSM_LOG("crypts: kit from %s dropped: %s", NameOfSlot(slot).c_str(), !gather_.In(slot) ? "not in the gather" : gather_.Done(slot) ? "their run is over" : "not in their Crypts run yet");
             return;
@@ -759,6 +784,7 @@ public:
         runHostLeft_ = true;
         if (TogetherRun() && gatherSelf_ == GatherSelf::Gathering) {
             TogetherFinalKit();
+            SaveCoopCharacter(crypt::Outcome::Left);
             gatherSelf_ = GatherSelf::Extracted;
             SendGatherNote(GatherNote::Extracted);
         }
@@ -910,6 +936,7 @@ public:
     bool GatherLevelOpen(const std::string& level) {
         if (TogetherRun() && gatherSelf_ == GatherSelf::Gathering && IsMenuLevel(level)) {   // Together: leaving the shared Crypts locks the kit
             TogetherFinalKit();
+            SaveCoopCharacter(crypt::Outcome::Left);
             gatherSelf_ = GatherSelf::Extracted;
             SendGatherNote(GatherNote::Extracted);
             HSM_LOG("crypts: left the shared Crypts - kit locked (%zu bytes)", gatherKit_.size());
@@ -944,7 +971,7 @@ public:
     HudScene CryptsHud() {
         HudScene h; h.visible = true;
         h.pill.visible = true;
-        h.pill.text = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together());
+        h.pill.text = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together(), graveRun_);
         h.chip = KeyChip(gatherSelf_ == GatherSelf::Gathering, !keyHeld_.empty(), keyLine_);   // the key marker: a chip of its own under the pill
         return h;
     }
@@ -971,12 +998,35 @@ public:
     void GraveRunEnds(GatherSelf how) {
         const bool died = how == GatherSelf::Died;
         TogetherFinalKit();
+        SaveCoopCharacter(died ? crypt::Outcome::Down : crypt::Outcome::Out);
         gatherSelf_ = how;
         SendGatherNote(died ? GatherNote::Died : GatherNote::Extracted);
         HSM_LOG(died ? "crypt coop: %s went down - the last kit read alive is kept (%zu bytes, %u item(s))" : "crypt coop: %s reached an exit - kit locked (%zu bytes, %u item(s))",
                 MyName().c_str(), gatherKit_.size(), unsigned(kitItems_));
         ui::NoticeClear("crypts-minute"); ui::NoticeClear("crypts-start");
-        ui::Notify(NoticeKind::Info, "CRYPTS", died ? "You went down. Your run is over; the results show when everyone is out or down." : "You are out with your kit. The results show when everyone is out or down.", "crypts-end");
+        if (coopRun_)
+            ui::Notify(NoticeKind::Info, "CRYPTS", died ? "You fell. Your crypt character is lost, as in the game; the next run starts as a peasant." : "You got out. Your crypt character keeps what you carry for the next run.", "crypts-end");
+        else ui::Notify(NoticeKind::Info, "CRYPTS", died ? "You went down. Your run is over; the results show when everyone is out or down." : "You are out with your kit. The results show when everyone is out or down.", "crypts-end");
+    }
+    // Co-op Crypts: what this run leaves this machine's crypt character with (session/hsm_crypt_character.h), written once a run.
+    void SaveCoopCharacter(crypt::Outcome o) {
+        if (!coopRun_ || !coopCharSaved_.Take(gatherRunSeq_)) return;
+        const crypt::CharAfter a = crypt::CoopCharAfter(o, !gatherKit_.empty());
+        HSM_LOG("crypts co-op: run %u, %s: your crypt character is %s", unsigned(gatherRunSeq_), crypt::OutcomeName(o), crypt::CharAfterName(a));
+        if (a == crypt::CharAfter::Final) game::cryptschar::Save(adapter_, gatherKit_);
+        else if (a == crypt::CharAfter::Blank) {
+            std::vector<uint8_t> blank;
+            if (adapter_.BlankCryptsKit(blank)) game::cryptschar::Save(adapter_, blank);
+            else HSM_LOG("crypts co-op: the blank peasant could not be read; the character file is left as it was");
+        }
+    }
+    // Client, Co-op Crypts: this player's crypt character to the host before the run (the host deals it at the start). None: the
+    // host deals the blank peasant.
+    void SendEntryCharacter() {
+        const std::vector<uint8_t> mine = game::cryptschar::Load(adapter_);
+        if (mine.empty()) return;
+        if (!SendLoadoutChange(mine)) { HSM_LOG("crypts co-op: crypt character too large to send (%zu bytes); the host deals the blank peasant", mine.size()); return; }
+        HSM_LOG("crypts co-op: crypt character sent to the host (%zu bytes)", mine.size());
     }
     // Host: a client's item count for its kit.
     void OnCryptRunKit(uint8_t slot, const crypt::CryptRunMsg& m) {
@@ -994,6 +1044,7 @@ public:
     // Every machine: the run's results, in the log and the chat, and (while still in the shared Crypts) on the board.
     void ShowCryptResults(const crypt::CryptRunMsg& m) {
         if (cryptResultsAt_ && cryptResults_.seq == m.seq) return;
+        if (gatherSelf_ == GatherSelf::Gathering) SaveCoopCharacter(crypt::Outcome::Inside);   // the run ended with this player still inside
         cryptResults_ = m;
         cryptResultsAt_ = NowMs() ? NowMs() : 1;
         HSM_LOG("crypt coop: run over (%s): %d got out", crypt::RunEndName(m.reason), crypt::GotOutOf(m));
@@ -1012,8 +1063,8 @@ public:
         SendGatherClock(NowMs());                       // Off: every machine's run is over
         gatherSelf_ = GatherSelf::None; gatherOpening_ = false; gatherMenuAt_ = 0;
         gatherClock_.Clear();
-        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
-        graveRun_ = false;
+        battleMap_.clear(); gatherKits_.clear(); freshKits_.clear(); entryKits_.clear();
+        graveRun_ = false; coopRun_ = false;
         if (SharedCryptsHere()) HostTravel(kMenuLevel);   // the host that left already took everyone to the menu
     }
     // Together: the match's HUD with the gather's clock under the pill (at most 80 characters) and the key marker beside it as a
@@ -1021,7 +1072,7 @@ public:
     void TogetherHud(HudScene& h) {
         if (crypt::ResultsShowing(NowMs(), cryptResultsAt_) && cryptResults_.kind == crypt::kRunResults) { h = CryptResultsHud(); return; }
         if (!h.visible) { h = CryptsHud(); return; }
-        const std::string line = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), true);
+        const std::string line = CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), true, graveRun_);
         if (!line.empty()) h.info = {true, FitInfo(line), style::kBone, 1, 1};
         h.chip = KeyChip(gatherSelf_ == GatherSelf::Gathering, !keyHeld_.empty(), keyLine_);
     }
@@ -1598,6 +1649,9 @@ public:
             // wants the cursor (the shot waits); under the open menu ChooseInputMode leaves the menu's cursor and the
             // shot is spent.
             ms.respawnHappened = respawnInput_.Due(NowMs()) && !ui::PanelOpen() && !ui::MenuTyping();
+            // The game's weapon wheel holds UI-only input until its own Close Widget: a restore under it would leave it on screen
+            // for good (#3681, #4167). Looked for only when a restore is due.
+            if (!typing && ms.fightLevel && (ms.wasMenuOpen || ms.respawnHappened || ms.delayedFixDue)) ms.gameScreenOpen = adapter_.GameScreenOpen();
             int respawnShot = -2;   // -2: none this tick, -1: the one after the Player DED clear, 0..2: the scheduled ones
             if (ms.respawnHappened && !typing) {
                 respawnShot = respawnInput_.Take(NowMs());
@@ -1611,8 +1665,10 @@ public:
                         HSM_LOG("session: game input mode restored (%s, %u ms after the respawn)",
                                 respawnShot < 0 ? "Player DED was cleared" : "respawn", unsigned(NowMs() - lastRespawnAt_));
                     break;
-                case InputMode::GameAndUI: adapter_.ShowPauseCursor(); HSM_LOG("session: pause menu open; cursor shown"); break;
-                case InputMode::Leave: break;
+                case InputMode::GameAndUI: adapter_.CloseGameScreens("the pause menu"); adapter_.ShowPauseCursor(); HSM_LOG("session: pause menu open; cursor shown"); break;
+                case InputMode::Leave:
+                    if (ms.gameScreenOpen && ++gameScreenSkips_ <= 5) HSM_LOG("session: game input not restored: the game's weapon wheel is open");
+                    break;
             }
             if (!typing) pauseMenuWas_ = menu;
             // A join or a spectate change under the open menu could leave game-only input (no cursor, nothing clickable,
@@ -2504,7 +2560,7 @@ public:
         return due;
     }
     std::string CryptsStatus() override {
-        return GatherOn() ? CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together()) : std::string();
+        return GatherOn() ? CryptsLine(gatherClock_.phase(), gatherSelf_, gatherClock_.LeftMs(NowMs()), gatherClock_.together(), graveRun_) : std::string();
     }
 
     // ------------------------------------------------------------------ the multiplayer menus (match/hsm_mp_scene.h)
@@ -3802,7 +3858,7 @@ private:
         vote_.Clear(); pendingDrops_.clear(); rejected_.reset(); rejectedDetail_.clear();
         modListSent_ = ~0u; sessionMods_ = SessionModsMsg{}; sessionModsSeen_ = false; sessionModsDirty_ = true; hostRuleSet_ = false; nextModTick_ = 0;
         if (cryptsLeft) { gatherMenuAt_ = NowMs() + 1000; HSM_LOG("crypts: the session is over; leaving the Crypts run"); }
-        gather_.Stop(); gatherClock_ = GatherClock{}; gatherSelf_ = GatherSelf::None; battleMap_.clear(); gatherKits_.clear(); freshKits_.clear();
+        gather_.Stop(); gatherClock_ = GatherClock{}; gatherSelf_ = GatherSelf::None; battleMap_.clear(); gatherKits_.clear(); freshKits_.clear(); entryKits_.clear();
         gatherKit_.clear(); gatherKitSent_.clear(); gatherClockSentAt_ = kitSnapAt_ = 0; kitReadFails_ = 0; gatherRunSeq_ = 0;
         kitSnapNever_ = true; gatherOpening_ = false; gatherMinuteWarned_ = false; togetherAlive_ = false;
     }
@@ -4342,6 +4398,7 @@ private:
         inputBatch_.Clear();
         for (sync::InputTimeline& t : timelines_) t.Clear();
         streams_.SetEpochOf([this](uint8_t e) { return leases_.Epoch(e); });   // rev 32: hand-off leases
+        streams_.SetWeaponIdOf([this](UObject* a) { return game::hands::g_weaponPropId ? props_.IdOf(a) : uint64_t(0); });   // rev 52
         GuardStockFlow();
         GuardFence();
         game::cryptscoop::SetModFighterTest([this](const UObject* o) { return IsModFighter(o); });
@@ -6159,6 +6216,7 @@ private:
         game::MouseDelta m;
         if (!game::ReadMouse(adapter_, m) || m.dx != 0 || m.dy != 0) return;
         respawnWatchAt_ = now;
+        if (adapter_.GameScreenOpen()) return;   // the weapon wheel is up (UI-only input by design): not a lost input mode
         adapter_.RestoreGameInput();
         if (++respawnWatchFixes_ <= 10)
             HSM_LOG("session: %u ms after the respawn the controller read no mouse movement; game input re-asserted", unsigned(now - lastRespawnAt_));
@@ -6966,6 +7024,8 @@ private:
         env.gameInstance = adapter_.GameInstance();
         env.hostPawn = adapter_.PlayerWillie(0);
         env.isDead = [this](UObject* w) { return adapter_.IsDead(w); };
+        env.hostName = NameOfSlot(kHostSlot);
+        env.lineClear = [this](const FVector& from, const FVector& to, const std::vector<UObject*>& ignore) { return adapter_.LineClear(from, to, ignore); };
         for (const RosterMember& r : roster_.members()) {
             if (r.slot == kHostSlot) continue;
             if (UObject* a = EntityActor(Roster::EntityForSlot(r.slot))) env.remotes.push_back({r.slot, NameOfSlot(r.slot), a});
@@ -8855,9 +8915,12 @@ private:
         const int32_t* teamInt = Field<int32_t>(w, "Team Int");
         if (v == crypt::EnemyVerdict::Adopt) {
             AnnounceBot(slot, w, StockSide::Foe); ++adopted;
-            HSM_LOG("crypt coop: enemy %s adopted as bot e%u at (%.0f, %.0f, %.0f): %s, Team Int %d (players are on 1), director list %d, %zu bot(s) now",
+            // It may fight a client far off the host's screen: its pose keeps ticking there (as a stand-in's does).
+            const bool ticks = adapter_.AlwaysTickPose(w);
+            HSM_LOG("crypt coop: enemy %s adopted as bot e%u at (%.0f, %.0f, %.0f): %s, Team Int %d (players are on 1), director list %d, %zu bot(s) now; "
+                    "pose ticks off screen: %s",
                     ObjectName(w).c_str(), unsigned(slot), at.x, at.y, at.z, ObjectName(reinterpret_cast<UObject*>(ClassOf(w))).c_str(),
-                    teamInt ? *teamInt : -1, game::cryptscoop::SpawnedWillies(), bots_.size());
+                    teamInt ? *teamInt : -1, game::cryptscoop::SpawnedWillies(), bots_.size(), ticks ? "yes" : "NO (mesh not read)");
             return;
         }
         if (stockLogLevel_ != currentLevel_) { stockLogLevel_ = currentLevel_; stockLogs_ = 0; }
@@ -9056,14 +9119,21 @@ private:
             for (uint8_t slot : slots) {
                 std::vector<uint8_t> blob;
                 const bool gathered = gatherKits_.count(slot) && !gatherKits_[slot].empty();
+                const bool brought = !gathered && coopRun_ && entryKits_.count(slot) && !entryKits_[slot].empty();
                 if (gathered) { blob = gatherKits_[slot]; ++kits; }
-                else {
+                else if (brought) { blob = entryKits_[slot]; ++kits; }
+                else if (coopRun_) {                     // Co-op Crypts: no character brought (a first run, or it did not come in time): the game's blank peasant
+                    if (!adapter_.BlankCryptsKit(blob)) { HSM_LOG("crypts co-op: no blank peasant for slot %u; it keeps its loadout", slot); continue; }
+                    HSM_LOG("crypts co-op: slot %u brought no crypt character; dealt the blank peasant", slot);
+                    ++fresh;
+                } else {
                     blob = CryptsFreshKit(cfg, slot);
                     if (blob.empty()) { HSM_LOG("crypts: no kit for slot %u and no fresh one; it keeps its loadout", slot); continue; }
                     ++fresh;
                 }
                 HSM_LOG("crypts: entity %u fights in %s (%zu bytes)", unsigned(Roster::EntityForSlot(slot)),
-                        gathered ? "its gathered kit" : cfg_.cryptsRandomCharacter ? "a new random character" : "peasant clothes", blob.size());
+                        gathered ? "its gathered kit" : brought ? "its own crypt character" : coopRun_ ? "peasant clothes"
+                                 : cfg_.cryptsRandomCharacter ? "a new random character" : "peasant clothes", blob.size());
                 Dealt(slot, StoreAndRelay(slot, std::move(blob), 0));
             }
             HSM_LOG("host: %s: %d gathered kit(s), %d fresh one(s)", why, kits, fresh);
@@ -9648,6 +9718,7 @@ private:
         if (camState_.free()) {
             // Nothing else in the spectate path asserts the game's input mode, so a UI flow that left the cursor unlocked
             // (the chat, a menu) would stick for the whole flight (#634): game-only input, the mouse locked, as the game's.
+            adapter_.CloseGameScreens("the free camera");
             adapter_.RestoreGameInput();
             HSM_LOG("spectate: free camera on (game input restored)");
         } else {
@@ -9683,6 +9754,7 @@ private:
             const uint32_t nowMs = NowMs();
             if (m.dx == 0 && m.dy == 0 && nowMs - spectateInputAt_ >= 1000) {
                 spectateInputAt_ = nowMs;
+                adapter_.CloseGameScreens("spectate");
                 adapter_.RestoreGameInput();
                 if (++spectateInputRestores_ <= 3) HSM_LOG("spectate: the controller read no mouse movement; game input re-asserted");
             }
@@ -9837,7 +9909,10 @@ private:
                 spectateBody_.store(own);   // the body that is dead now: the only one whose look input is swallowed
                 // As free cam does (#634): a chat or menu that left the cursor unlocked would leave the mouse delta at 0 for the
                 // whole spectate (pre24 tester feedback: the camera sometimes would not turn).
-                if (!ui::Typing() && !adapter_.PauseMenuOpen()) { adapter_.RestoreGameInput(); HSM_LOG("spectate: game input restored"); }
+                if (!ui::Typing() && !adapter_.PauseMenuOpen()) {
+                    adapter_.CloseGameScreens("spectate");   // a wheel left up by the death (#3681, #4167): its keys would be gone with UI-only input
+                    adapter_.RestoreGameInput(); HSM_LOG("spectate: game input restored");
+                }
             }
             if (!flying) { spectating_ = *target; spectateActor_ = actor; spectateIndex_ = ObjectIndex(actor); }
             spectateApplyAt_ = now;
@@ -11301,6 +11376,9 @@ private:
     uint32_t cryptResultsAt_ = 0;                 // when this machine started showing them (0: none showing)
     uint8_t kitItems_ = 0;                        // this machine's last kit's carried things, read while alive
     bool graveRun_ = false;                       // the gather is Grave Robbers: exit and death end a player's run, results and the lobby after
+    bool coopRun_ = false;                        // the gather is Co-op Crypts (IsCoopCrypts): no clock, each player's own crypt character kept between runs
+    std::map<uint8_t, std::vector<uint8_t>> entryKits_;   // host, Co-op Crypts: the crypt character each slot brought in, dealt at the run's start
+    crypt::CharSaveOnce coopCharSaved_;           // Co-op Crypts: this machine's character is written once a run
     bool runHostLeft_ = false, runTimeUp_ = false;   // host: why the shared run ended
     uint32_t leaveDueAt_ = 0;                        // host: LeaveSession waits until then for the run's results to go (kHostLeaveGraceMs)
     bool hostEndedRun_ = false;                      // client: the host's results said it left the shared run (MigrateWhenHostGone)
@@ -11395,6 +11473,7 @@ private:
     uint64_t pressesApplied_ = 0, talksApplied_ = 0;
     uint16_t remoteSeq_ = 0;
     uint32_t spectateOverlaysAt_ = 0;   // the last HideDeathOverlays scan
+    int gameScreenSkips_ = 0;   // "game input not restored: the weapon wheel is open" lines (the first 5 a game run)
     int spectateScreensLogged_ = 0;   // "widgets on screen" lines at a spectate start (the first 10 a game run)
     uint32_t timelinesBlocked_ = 0;             // a stand-in's own timeline callbacks blocked (BlockStandInTimeline), per health window
     static constexpr size_t kFrameSamples = 4096;   // 5 s of frames at up to ~800 fps; the rest of a window is not sampled
@@ -11499,6 +11578,9 @@ bool StartMod(const Config& cfg) {
         return n.rfind("BndEvt__Arena_Cutting_Map_TriggerVolume_0_", 0) == 0;
     }, [](UObject*, UFunction* fn, void* params) { return g_session->CuttingRingOut(fn, params); });
     game::cryptscoop::InstallRule();     // the host's shared Crypts: rooms kept, remote players spared (inert until armed)
+    game::hands::g_weaponPropId = cfg.weaponPropId;
+    game::hands::g_weaponPickGuard = cfg.weaponPickGuard;   // [mod] weapon_pick_guard
+    game::cryptscoop::SetHostSpawns(cfg.cryptsHostSpawns);   // the host fills each room for whichever player walks in
     game::cryptslayout::InstallRule();   // shared Crypts maps: the dungeon off while a layout is armed
     game::cryptsloot::InstallRule();     // the shared Crypts' loot: the host reads its loot points' products, a client rolls none
     game::cryptslayout::SetNameForm(cfg.cryptsLayoutNames);

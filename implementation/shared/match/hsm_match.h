@@ -205,6 +205,8 @@ struct MatchConfig {
                                       // shared dungeon, docs/PLAN_CRYPTS_COOP.md); hidden by [mod] crypts_coop=0 (g_cryptsCoopOffered); the host reads it at the gather's start
     bool graveRobbers = false;        // Crypts gear: the mode (lobby key hsm_grave): Grave Robbers (everyone loots the same crypt, no fight after) rather than Crypt Royale
                                       // (loot, then the Battle in the found kits); a missing key is Crypt Royale; held back like Together; never a wire field
+    bool coopCrypts = false;          // Crypts gear: the Co-op Crypts card (lobby key hsm_ccoop): Grave Robbers with the game's own rules: no clock, the game's
+                                      // own tiers, and each player's own crypt character kept between runs (Sanitize sets graveRobbers with it); never a wire field
 };
 inline constexpr uint16_t kWaveBreakOptions[4] = {10, 30, 60, 120};   // seconds
 // The Clear ground row: every 30 s, 1, 2, 3, 5 or 10 min, 2 min for a new lobby, and no Off. 0 is only what a format without the row
@@ -263,6 +265,9 @@ inline bool IsCrypts(const MatchConfig& c) { return IsCrypts(c.gear); }
 // The two Crypts modes, played on the Crypts map: Grave Robbers (co-op, no fight after) and Crypt Royale (a loot run, then the Battle).
 inline bool IsGraveRobbers(const MatchConfig& c) { return IsCrypts(c) && c.graveRobbers; }
 inline bool IsCryptRoyale(const MatchConfig& c) { return IsCrypts(c) && !c.graveRobbers; }
+// Co-op Crypts: the game's own Crypts with friends. A Grave Robbers run (one shared dungeon, no fight after) with no clock, no Dungeon
+// tier cap, and each player's own crypt character, kept between runs on their machine (session/hsm_crypt_character.h).
+inline bool IsCoopCrypts(const MatchConfig& c) { return IsGraveRobbers(c) && c.coopCrypts; }
 // Whether the lobby offers the co-op half of the Crypts (Grave Robbers and the Crypts run's Together). The mod turns it on by default and
 // [mod] crypts_coop=0 turns it off (client/HSMMod/src/config.cpp sets it; docs/PLAN_CRYPTS_COOP.md). The Crypts map and Crypt Royale
 // Apart are always there. The flag itself starts off here so a test sets what it needs.
