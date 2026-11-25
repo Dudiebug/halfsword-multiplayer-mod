@@ -89,6 +89,7 @@ jobs:
           zip_name="HalfSwordMP-$ver.zip"
           (cd "$stage" && zip -r "$GITHUB_WORKSPACE/$zip_name" .)
           echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "nexus_version=${ver//_/-}" >> "$GITHUB_OUTPUT"   # Nexus versions allow only letters, digits, . and -
           echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload to Nexus Mods
@@ -100,7 +101,7 @@ jobs:
           mod_id: ${{ vars.NEXUS_MOD_ID }}
           filename: ${{ steps.pkg.outputs.zip }}
           display_name: Half Sword Multiplayer ${{ steps.pkg.outputs.version }}${{ steps.rel.outputs.suffix }}
-          version: ${{ steps.pkg.outputs.version }}
+          version: ${{ steps.pkg.outputs.nexus_version }}
           update_mod_version: ${{ steps.rel.outputs.main == 'true' }}
           archive_existing_version: true
           changelog: ${{ steps.rel.outputs.changelog }}
