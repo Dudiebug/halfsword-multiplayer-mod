@@ -1,10 +1,10 @@
-# Uploads each full release to Nexus Mods (new version of the mod's main file).
-# Runs when a release is published as full or a pre-release is promoted, or by hand with a tag.
-# Pre-releases and drafts are never uploaded.
+# Uploads each release to Nexus Mods. A full release becomes a new version of the mod's main file (NEXUS_FILE_ID) and
+# the mod's version; a pre-release becomes a new version of the beta file (NEXUS_BETA_FILE_ID, an Optional file on the
+# mod page) and leaves the mod's version alone. Drafts are never uploaded. Runs on publish, or by hand with a tag.
 name: nexus
 on:
   release:
-    types: [released]
+    types: [released, prereleased]
   workflow_dispatch:
     inputs:
       tag:
@@ -32,13 +32,19 @@ jobs:
         env:
           MOD_ID: ${{ vars.NEXUS_MOD_ID }}
           FILE_ID: ${{ vars.NEXUS_FILE_ID }}
+          BETA_FILE_ID: ${{ vars.NEXUS_BETA_FILE_ID }}
         run: |
           set -euo pipefail
-          [ -n "$MOD_ID" ] && [ -n "$FILE_ID" ] || { echo "::error::set NEXUS_MOD_ID and NEXUS_FILE_ID first"; exit 1; }
           info=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,body)
-          if [ "$(jq -r '.isPrerelease or .isDraft' <<<"$info")" = "true" ]; then
-            echo "::error::$TAG is a pre-release or draft; only full releases go to Nexus"; exit 1
+          if [ "$(jq -r .isDraft <<<"$info")" = "true" ]; then echo "::error::$TAG is a draft"; exit 1; fi
+          if [ "$(jq -r .isPrerelease <<<"$info")" = "true" ]; then
+            file="$BETA_FILE_ID"; main=false; suffix=" (beta)"
+            [ -n "$file" ] || { echo "::error::set NEXUS_BETA_FILE_ID (the beta file's id on Nexus) first"; exit 1; }
+          else
+            file="$FILE_ID"; main=true; suffix=""
           fi
+          [ -n "$MOD_ID" ] && [ -n "$file" ] || { echo "::error::set NEXUS_MOD_ID and NEXUS_FILE_ID first"; exit 1; }
+          { echo "file_id=$file"; echo "main=$main"; echo "suffix=$suffix"; } >> "$GITHUB_OUTPUT"
           {
             echo "changelog<<HSM_NOTES_EOF"
             jq -r .body <<<"$info"
@@ -90,12 +96,12 @@ jobs:
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2 # v1.0.0-beta.11
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ vars.NEXUS_FILE_ID }}
+          file_id: ${{ steps.rel.outputs.file_id }}
           mod_id: ${{ vars.NEXUS_MOD_ID }}
           filename: ${{ steps.pkg.outputs.zip }}
-          display_name: Half Sword Multiplayer ${{ steps.pkg.outputs.version }}
+          display_name: Half Sword Multiplayer ${{ steps.pkg.outputs.version }}${{ steps.rel.outputs.suffix }}
           version: ${{ steps.pkg.outputs.version }}
-          update_mod_version: true
+          update_mod_version: ${{ steps.rel.outputs.main == 'true' }}
           archive_existing_version: true
           changelog: ${{ steps.rel.outputs.changelog }}
 
