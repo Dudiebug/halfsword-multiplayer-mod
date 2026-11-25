@@ -1,0 +1,52 @@
+# Sorts the in-game reports the report relay files (label in-game-report); .github/scripts/issue_triage.py says how.
+# A new issue: crash labels, one tracker per crash location and build, duplicates closed into it.
+# Every 6 hours, or by hand: the same, plus closing trackers and reports with no activity for 14 days and trackers seen
+# only on builds older than the latest release. Issues from Discord or filed by hand are never touched.
+name: Issue triage
+
+on:
+  issues:
+    types: [opened]
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only print what would change
+        type: boolean
+        default: true
+      sweep:
+        description: Also close stale trackers and reports
+        type: boolean
+        default: true
+
+permissions:
+  issues: write
+
+# One run at a time: two at once could both make a tracker for the same crash. A run sorts every open report, so a
+# run GitHub drops while another waits loses nothing.
+concurrency:
+  group: issue-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.event_name != 'issues' || contains(github.event.issue.labels.*.name, 'in-game-report')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Test
+        run: python3 -m unittest discover -s .github/scripts
+      - name: Triage
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SWEEP: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.sweep) }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          args=()
+          [ "$SWEEP" = true ] && args+=(--sweep)
+          [ "$DRY_RUN" = true ] && args+=(--dry-run)
+          python3 .github/scripts/issue_triage.py "${args[@]}"
