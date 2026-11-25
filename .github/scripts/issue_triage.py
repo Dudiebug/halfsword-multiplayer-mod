@@ -7,9 +7,8 @@ Every run (an issue was opened, the 6-hourly schedule, or by hand):
     report); a later report of the same crash is added to the tracker and closed as its duplicate.
   - A written report with the same text as an older open one is closed as its duplicate.
 With --sweep (the schedule and a run by hand) as well:
-  - A tracker with no report for STALE_DAYS, or reported only on mod builds older than the latest release once that
-    release is RELEASE_GRACE_DAYS old, is closed. A new report reopens it (an old-build tracker only for a current build).
-  - A written in-game report with no activity for STALE_DAYS is closed.
+  - A tracker reported only on mod builds older than the latest release is closed once that release is
+    RELEASE_GRACE_DAYS old. A report from a current build reopens it.
 Issues filed any other way (Discord, by hand) are never touched.
 
 Environment: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/name). --dry-run prints what would change and writes nothing.
@@ -28,7 +27,6 @@ from datetime import datetime, timedelta, timezone
 
 REPORT_LABEL = "in-game-report"
 TRACKER_LABEL = "crash-tracker"
-STALE_DAYS = 14
 RELEASE_GRACE_DAYS = 3
 KEEP_NUMBERS = 40                         # report numbers listed on a tracker; the counts cover every report
 CRASH_PREFIX = "Crash (sent automatically): "
@@ -357,31 +355,19 @@ class Triage:
                 seen[d] = issue["number"]
 
     def sweep(self):
-        grace = self.release and self.release["version"] and days_since(self.release["published"], self.now) >= RELEASE_GRACE_DAYS
+        if not (self.release and self.release["version"]
+                and days_since(self.release["published"], self.now) >= RELEASE_GRACE_DAYS):
+            return
         for t in self.trackers.values():
             issue, state = t["issue"], t["state"]
-            if issue["state"] != "open" or not state["last"]:
+            if issue["state"] != "open" or not state["last"] or self.current(state["max_version"]):
                 continue
-            if days_since(state["last"] + "T00:00:00Z", self.now) >= STALE_DAYS:
-                why, reason = "stale", f"No new crash report here for {STALE_DAYS} days, so this is closed."
-            elif grace and not self.current(state["max_version"]):
-                why, reason = "old-build", (f"These crashes have only been reported on builds older than {self.release['tag']}, so it "
-                                            f"is closed.")
-            else:
-                continue
-            state["closed_by"] = why
+            state["closed_by"] = "old-build"
             t["dirty"] = True
             issue["state"] = "closed"
-            self.gh.comment(issue["number"], reason + " It opens again by itself if a new crash report lands here.")
-            self.gh.edit(issue["number"], f"close ({why})", state="closed", state_reason="not_planned")
-        for issue in self.open:
-            if (issue["state"] != "open" or TRACKER_LABEL in labels_of(issue) or parse_crash(issue["body"])
-                    or days_since(issue["updated_at"], self.now) < STALE_DAYS):
-                continue
-            issue["state"] = "closed"
-            self.gh.comment(issue["number"], f"Closing this report after {STALE_DAYS} days with no activity. If it still happens "
-                                             f"on the latest version, please report it again from the game or reopen this issue.")
-            self.gh.edit(issue["number"], "close (no activity)", state="closed", state_reason="not_planned")
+            self.gh.comment(issue["number"], f"These crashes have only been reported on builds older than {self.release['tag']}, "
+                                             f"so this is closed. It opens again by itself if a crash from a current build lands here.")
+            self.gh.edit(issue["number"], "close (old-build)", state="closed", state_reason="not_planned")
 
     def save(self):
         for t in self.trackers.values():
@@ -393,7 +379,7 @@ class Triage:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--sweep", action="store_true", help="also close stale trackers and reports")
+    p.add_argument("--sweep", action="store_true", help="also close trackers seen only on old builds")
     p.add_argument("--dry-run", action="store_true", help="print the changes, write nothing")
     a = p.parse_args(argv)
     token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")

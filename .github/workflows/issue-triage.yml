@@ -1,7 +1,6 @@
 # Sorts the in-game reports the report relay files (label in-game-report); .github/scripts/issue_triage.py says how.
 # A new issue: crash labels, one tracker per crash location and build, duplicates closed into it.
-# Every 6 hours, or by hand: the same, plus closing trackers and reports with no activity for 14 days and trackers seen
-# only on builds older than the latest release. Issues from Discord or filed by hand are never touched.
+# Every 6 hours, or by hand: the same, plus closing trackers seen only on builds older than the latest release. Issues from Discord or filed by hand are never touched.
 name: Issue triage
 
 on:
@@ -16,7 +15,7 @@ on:
         type: boolean
         default: true
       sweep:
-        description: Also close stale trackers and reports
+        description: Also close trackers seen only on old builds
         type: boolean
         default: true
 

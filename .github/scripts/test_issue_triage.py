@@ -122,33 +122,35 @@ class TriageTest(unittest.TestCase):
         self.assertIn({"state": "closed", "state_reason": "duplicate"}, gh.did(21, "edit"))
         self.assertEqual(gh.did(20, "edit") + gh.did(22, "edit"), [])
 
-    def test_sweep_closes_stale_and_old_build_trackers_and_quiet_reports(self):
-        gh = FakeGitHub([issue(30, crash("dwmapi.dll"), day="2026-11-01", mod="0\\.8\\.0\\-pre53 \\(x\\)"),
+    def test_sweep_closes_only_old_build_trackers(self):
+        gh = FakeGitHub([issue(30, crash("ntdll.dll"), day="2026-10-01"),
                          issue(31, crash("dwmapi.dll"), day="2026-11-26", mod="0\\.8\\.0\\-pre54 \\(y\\)"),
                          issue(32, crash("dwmapi.dll"), day="2026-11-26"),
-                         issue(33, "lost my sword", updated="2026-11-01"), issue(34, "lag", updated="2026-11-20")])
+                         issue(33, "lost my sword", updated="2026-10-01")])
         run(gh, now="2026-11-28", sweep=True)
-        self.assertIn({"state": "closed", "state_reason": "not_planned"}, gh.did(30, "edit"))   # stale
         self.assertIn({"state": "closed", "state_reason": "not_planned"}, gh.did(31, "edit"))   # only pre54 < v0.8.0
-        self.assertNotIn({"state": "closed", "state_reason": "not_planned"}, gh.did(32, "edit"))
-        self.assertIn({"state": "closed", "state_reason": "not_planned"}, gh.did(33, "edit"))
-        self.assertEqual(gh.did(34, "edit"), [])
+        for n in (30, 32, 33):   # old but current build, current build, an old written report
+            self.assertNotIn({"state": "closed", "state_reason": "not_planned"}, gh.did(n, "edit"), n)
 
     def test_no_old_build_close_inside_the_release_grace(self):
         gh = FakeGitHub([issue(31, crash("dwmapi.dll"), day="2026-11-25", mod="0\\.8\\.0\\-pre54 \\(y\\)")])
         run(gh, now="2026-11-25", sweep=True)
         self.assertNotIn({"state": "closed", "state_reason": "not_planned"}, gh.did(31, "edit"))
 
-    def test_a_bot_closed_tracker_reopens_on_a_new_report(self):
-        gh = FakeGitHub([issue(40, crash("ntdll.dll"), day="2026-11-01")])
-        run(gh, now="2026-11-20", sweep=True)
+    def test_an_old_build_tracker_reopens_only_for_a_current_build(self):
+        old = "0\\.8\\.0\\-pre54 \\(y\\)"
+        gh = FakeGitHub([issue(40, crash("ntdll.dll"), mod=old)])
+        run(gh, now="2026-11-28", sweep=True)
         tracker = issue(40, "x", state="closed", labels=("in-game-report", it.TRACKER_LABEL))
         tracker["body"] = [f["body"] for f in gh.did(40, "edit") if "body" in f][0]
-        self.assertEqual(it.read_state(tracker["body"])["closed_by"], "stale")
-        gh2 = FakeGitHub([issue(41, crash("ntdll.dll"), day="2026-11-21")], trackers=[tracker])
-        run(gh2, now="2026-11-21")
-        self.assertIn({"state": "open"}, gh2.did(40, "edit"))
-        self.assertIsNone(it.read_state([f["body"] for f in gh2.did(40, "edit") if "body" in f][0])["closed_by"])
+        self.assertEqual(it.read_state(tracker["body"])["closed_by"], "old-build")
+        gh2 = FakeGitHub([issue(41, crash("ntdll.dll"), day="2026-11-29", mod=old)], trackers=[tracker])
+        run(gh2, now="2026-11-29")
+        self.assertNotIn({"state": "open"}, gh2.did(40, "edit"))
+        gh3 = FakeGitHub([issue(42, crash("ntdll.dll"), day="2026-11-29")], trackers=[tracker])
+        run(gh3, now="2026-11-29")
+        self.assertIn({"state": "open"}, gh3.did(40, "edit"))
+        self.assertIsNone(it.read_state([f["body"] for f in gh3.did(40, "edit") if "body" in f][0])["closed_by"])
 
     def test_a_tracker_closed_by_hand_stays_closed(self):
         tracker = issue(50, "x", state="closed", labels=("in-game-report", it.TRACKER_LABEL))
