@@ -34,7 +34,7 @@ public:
     void ArmorAudit(uint8_t entity, ue::UObject* willie, ue::UObject* mesh);
 
 private:
-    struct Offsets { int32_t hitComponent = -1, otherComp = -1, impulse = -1, hit = -1; };
+    struct Offsets { util::ObjectIdent ident; int32_t hitComponent = -1, otherComp = -1, impulse = -1, hit = -1; };   // ident: the function they were read on
     const Offsets& OffsetsOf(ue::UFunction* fn);
     bool ResolveHitResult();
 

@@ -9,6 +9,7 @@
 #include "log.h"
 #include "paths.h"
 #include "session/hsm_cmdline.h"
+#include "ue/hook.h"
 #include "ue4ss_load.h"
 
 namespace hsm {
@@ -26,6 +27,7 @@ DWORD WINAPI ModMain(void*) {
     // The build string carries this DLL's hash (session/hsm_build.h); made here, off the game thread.
     HSM_LOG("build: %s%s", game::ModBuild().c_str(), OwnBinaryHash().empty() ? " (could not read my own DLL: no hash)" : "");
     Config cfg = LoadConfig();
+    ue::UseLegacyHookRelay(cfg.hookRelayLegacy);   // before the first hook is made (StartMod, below)
     style::UseMenuLook(cfg.uiLook);
     style::UseHudOpacity(cfg.hudOpacity);   // before any widget is made (the game thread builds them later)
     game::modmaps::HideTestMaps(cfg.hideTestMaps);
@@ -34,8 +36,9 @@ DWORD WINAPI ModMain(void*) {
     // HSMMod's proxy replaced UE4SS's, so skipping it would silently turn the player's mods off.
     if (cfg.ue4ssBefore) ue4ss::Run(cfg);
     if (cfg.role == Role::Off) { HSM_LOG("role=off: staying vanilla"); ue4ss::Run(cfg); return 0; }
-    if (!StartMod(cfg)) HSM_LOG("startup failed; game continues unmodified");
-    ue4ss::Run(cfg);   // order=after: StartMod ends with InstallProcessEventHook, so HSMMod's hook is in (a no-op if already run)
+    const bool started = StartMod(cfg);
+    if (!started) HSM_LOG("startup failed; game continues unmodified");
+    ue4ss::Run(cfg, started);   // order=after: StartMod ends with InstallProcessEventHook, so HSMMod's hook is in (a no-op if already run)
     return 0;
 }
 }  // namespace hsm

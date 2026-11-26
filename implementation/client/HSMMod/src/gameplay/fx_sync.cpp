@@ -1019,11 +1019,25 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
         const double d = (p.x - at.x) * (p.x - at.x) + (p.y - at.y) * (p.y - at.y) + (p.z - at.z) * (p.z - at.z);
         if (d < bestD) { bestD = d; best = o; }
     }
-    if (!classExists) missingArmor_.PutMiss(m.bone, now);   // no object of that class at all: not looked for again for a while
-    if (!best) {
-        HSM_LOG("fx: no loose %s within %.0f uu of the owner's for the stand-in of e%u", m.bone.c_str(), kArmorMatchUu, m.entity);
+    // No loose piece (in the Crypts the loot sync removes this machine's copy as soon as the owner's take arrives, before this
+    // held-back replay runs, #4237): a fresh piece of the class at the owner's spot, put on the same way.
+    UClass* spawnClass = !best && env_.spawnMissingArmor ? FindClass(m.bone) : nullptr;
+    const combat::ArmorOnSource source = combat::PlanArmorOn(best != nullptr, spawnClass != nullptr, env_.spawnMissingArmor);
+    if (source == combat::ArmorOnSource::None) {
+        if (!classExists && !spawnClass) missingArmor_.PutMiss(m.bone, now);   // nothing of that class here at all: not looked for again for a while
+        HSM_LOG("fx: no loose %s within %.0f uu of the owner's for the stand-in of e%u%s", m.bone.c_str(), kArmorMatchUu, m.entity,
+                env_.spawnMissingArmor ? " (its class is not loaded here)" : " (armor_on_spawn=0)");
         Count(false, m);
         return;
+    }
+    const bool spawned = source == combat::ArmorOnSource::Spawn;
+    if (spawned) {
+        best = adapter_->SpawnActorAt(spawnClass, ToF(at), adapter_->ActorRotation(standIn));
+        if (!best) {
+            HSM_LOG("fx: no loose %s for the stand-in of e%u, and spawning one FAILED", m.bone.c_str(), m.entity);
+            Count(false, m);
+            return;
+        }
     }
     bool staticMesh = false;
     GetBool(best, "World Mesh Static", staticMesh);
@@ -1039,7 +1053,9 @@ void FxSync::ApplyArmorOn(const PaintFxMsg& m, UObject* standIn, const Xform& bo
     }
     // Picked Up is the game's own verdict (a blocked slot or missing arming points leave it false)
     if (ok && FindProperty(pick.function(), "Picked Up") && !pick.get<bool>("Picked Up")) ok = false;
-    HSM_LOG("fx: %s put on the stand-in of e%u%s", m.bone.c_str(), m.entity, ok ? "" : ": FAILED");
+    if (spawned && !ok) adapter_->DestroyActor(best);   // never leave a stray loose copy beside the stand-in
+    HSM_LOG("fx: %s put on the stand-in of e%u%s%s", m.bone.c_str(), m.entity,
+            spawned ? " (no loose piece here: spawned one)" : "", ok ? "" : ": FAILED");
     if (ok && env_.gearChanged) env_.gearChanged(m.entity);
     Count(ok, m);
 }

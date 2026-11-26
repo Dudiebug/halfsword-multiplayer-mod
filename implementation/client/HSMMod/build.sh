@@ -35,7 +35,7 @@ compile() {
   objs+=("$o")
 }
 for f in third_party/minhook/src/{buffer,hook,trampoline}.c third_party/minhook/src/hde/hde64.c; do
-  compile "build/obj/$(basename "${f%.c}").o" "$CC" $COMMON -w -Ithird_party/minhook/include -c "$f"
+  compile "build/obj/$(basename "${f%.c}").o" "$CC" $COMMON -w -Ithird_party/minhook/include -I../../shared -c "$f"
 done
 compile build/obj/miniz.o "$CC" $COMMON -w -c third_party/miniz/miniz.c
 for f in src/*.cpp src/*/*.cpp; do

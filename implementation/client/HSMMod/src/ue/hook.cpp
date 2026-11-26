@@ -2,6 +2,7 @@
 #include "ue/hook.h"
 #include "log.h"
 #include "ue/profiler.h"
+#include "util/hsm_object_ident.h"
 #include <MinHook.h>
 #include <algorithm>
 #include <cstdio>
@@ -21,36 +22,67 @@ struct NameRule { std::function<bool(const std::string&)> match; PreHook hook; }
 // A function's hooks are an immutable list, replaced (never edited) when a rule is added: a hooked call takes a reference
 // instead of copying the list (test 5: the hit hook alone ran 8970 times in one frame).
 using HookList = std::shared_ptr<const std::vector<PreHook>>;
+using util::ObjectIdent;
+// Both tables are keyed by the function's address and carry the identity (object array slot and FName) of the function
+// they were filled for. The engine frees functions inside a level (the Crypts stream their blocks in and out) and gives
+// the address to the next function it makes: an entry counts only while the function at that address is still that one
+// (public #3343, #3417, #3973, #3979, #3297: the hit hook ran on another function and read its OtherActor out of the
+// wrong parameter layout).
+struct ExactEntry { ObjectIdent ident; HookList list; };
 std::shared_mutex g_mu;
-std::unordered_map<UFunction*, HookList> g_exact;                  // includes resolved name rules
-std::unordered_map<UFunction*, bool> g_classified;                 // function already checked against name rules
+std::unordered_map<UFunction*, ExactEntry> g_exact;                // includes resolved name rules
+std::unordered_map<UFunction*, ObjectIdent> g_classified;          // function already checked against name rules
 std::vector<NameRule> g_nameRules;
+uint64_t g_replaced = 0;                                           // functions found replaced at a known address (unique lock)
 
 // Functions with no hooks, per thread: almost every ProcessEvent call of a frame, so they skip the lock and the lookups.
 // A slot counts only at the g_hookGen it was filled at; every change to the hooks bumps it (with the unique lock held).
 std::atomic<uint32_t> g_hookGen{1};
-struct NoHookSlot { UFunction* fn; uint32_t gen; };
+struct NoHookSlot { UFunction* fn; uint32_t gen; ObjectIdent ident; };
 constexpr size_t kNoHookSlots = 1024;
 thread_local NoHookSlot t_noHook[kNoHookSlots];
 NoHookSlot& NoHookSlotFor(UFunction* fn) {
     return t_noHook[size_t((uint64_t(reinterpret_cast<uintptr_t>(fn)) * 0x9E3779B97F4A7C15ull) >> 54)];   // top 10 bits
 }
 
-// Adds a hook to a function's list. Requires the unique lock.
-void AddHook(UFunction* fn, PreHook hook) {
-    HookList& list = g_exact[fn];
-    auto next = std::make_shared<std::vector<PreHook>>(list ? *list : std::vector<PreHook>{});
+ObjectIdent IdentOf(const UFunction* fn) { return IdentityOf(reinterpret_cast<const UObject*>(fn)); }
+FName NameOfKey(uint64_t key) { return FName{int32_t(uint32_t(key)), int32_t(uint32_t(key >> 32))}; }
+
+// Adds a hook to a function's list; a list made for another function at this address is replaced. Requires the unique lock.
+void AddHook(UFunction* fn, const ObjectIdent& ident, PreHook hook) {
+    ExactEntry& e = g_exact[fn];
+    if (e.ident != ident) e = ExactEntry{ident, nullptr};
+    auto next = std::make_shared<std::vector<PreHook>>(e.list ? *e.list : std::vector<PreHook>{});
     next->push_back(std::move(hook));
-    list = std::move(next);
+    e.list = std::move(next);
     g_hookGen.fetch_add(1, std::memory_order_release);
 }
 
+// The function at fn is `now`: what the tables hold for another function at that address (a freed one) is dropped, its
+// name-rule and exact hooks with it, so the function is classified afresh. Requires the unique lock.
+void ForgetIfReplaced(UFunction* fn, const ObjectIdent& now) {
+    bool replaced = false;
+    ObjectIdent was;
+    if (auto c = g_classified.find(fn); c != g_classified.end() && c->second != now) { was = c->second; g_classified.erase(c); replaced = true; }
+    if (auto e = g_exact.find(fn); e != g_exact.end() && e->second.ident != now) {
+        if (!replaced) was = e->second.ident;
+        g_exact.erase(e);
+        replaced = true;
+    }
+    if (!replaced) return;
+    g_hookGen.fetch_add(1, std::memory_order_release);
+    if (util::ReportDue(++g_replaced))   // the stored name is safe to print: the name pool never frees an entry
+        HSM_LOG("hook: function %p was replaced (was index %d '%s', now index %d '%s'); its hooks re-resolved (%llu so far)",
+                static_cast<void*>(fn), was.index, NameToString(NameOfKey(was.name)).c_str(), now.index,
+                NameToString(NameOfKey(now.name)).c_str(), static_cast<unsigned long long>(g_replaced));
+}
+
 // Resolve name rules for a function seen for the first time. Requires the unique lock.
-void Classify(UFunction* fn) {
-    g_classified[fn] = true;
+void Classify(UFunction* fn, const ObjectIdent& ident) {
+    g_classified[fn] = ident;
     if (g_nameRules.empty()) return;
     std::string name = ObjectName(reinterpret_cast<UObject*>(fn));
-    for (const NameRule& r : g_nameRules) if (r.match(name)) AddHook(fn, r.hook);
+    for (const NameRule& r : g_nameRules) if (r.match(name)) AddHook(fn, ident, r.hook);
 }
 
 std::atomic<unsigned long> g_gameThreadId{0};
@@ -86,21 +118,28 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
     prof::Scope call(fn, prof::Kind::kEvent);   // the whole call: our hooks and the original
     if (obj && fn) {
         const uint32_t gen = g_hookGen.load(std::memory_order_acquire);   // before the lookup: a later change stales the slot
+        // The engine passes a live function: its slot and name (two loads) tell whether it is the one an entry was made for.
+        const ObjectIdent ident = IdentOf(fn);
         NoHookSlot& slot = NoHookSlotFor(fn);
-        if (slot.fn == fn && slot.gen == gen) { g_original(obj, fn, params); return; }
+        if (slot.fn == fn && slot.gen == gen && slot.ident == ident) { g_original(obj, fn, params); return; }
         HookList hooks;
         {
             std::shared_lock<std::shared_mutex> lock(g_mu);
-            bool known = g_classified.count(fn) != 0;
-            if (known) { auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second; }
+            auto c = g_classified.find(fn);
+            bool known = c != g_classified.end() && c->second == ident;
+            if (known) {
+                auto it = g_exact.find(fn);
+                if (it != g_exact.end()) { if (it->second.ident == ident) hooks = it->second.list; else known = false; }
+            }
             if (!known) {
                 lock.unlock();
                 std::unique_lock<std::shared_mutex> w(g_mu);
-                if (!g_classified.count(fn)) Classify(fn);
-                auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second;
+                ForgetIfReplaced(fn, ident);
+                if (!g_classified.count(fn)) Classify(fn, ident);
+                auto it = g_exact.find(fn); if (it != g_exact.end()) hooks = it->second.list;
             }
         }
-        if (!hooks || hooks->empty()) slot = {fn, gen};   // filled before any hook runs (a hook may re-enter this detour)
+        if (!hooks || hooks->empty()) slot = {fn, gen, ident};   // filled before any hook runs (a hook may re-enter this detour)
         // Hooks run without the lock so they may call ProcessEvent (re-entering this detour); the list they run
         // stays alive (and unchanged) even if a rule is added meanwhile.
         if (hooks && !hooks->empty()) {
@@ -127,8 +166,20 @@ void Detour(UObject* obj, UFunction* fn, void* params) {
 }
 }  // namespace
 
+namespace {
+std::atomic<bool> g_legacyRelay{false};   // set once by UseLegacyHookRelay, before the first hook
+}  // namespace
+
+void UseLegacyHookRelay(bool legacy) { g_legacyRelay.store(legacy); }
+
 bool EnsureMinHook() {
-    static bool ok = MH_Initialize() == MH_OK;
+    static bool ok = [] {
+        if (MH_Initialize() != MH_OK) return false;
+        MH_SetLegacyRelay(g_legacyRelay.load());
+        HSM_LOG("hook: relay form %s (hook_relay=%s)", g_legacyRelay.load() ? "FF 25 jmp [rip+0] (legacy)" : "48 B8 mov rax,imm64 ; FF E0 jmp rax",
+                g_legacyRelay.load() ? "legacy" : "jmp");
+        return true;
+    }();
     return ok;
 }
 
@@ -160,15 +211,31 @@ void RemoveProcessEventHook() {
 void HookFunction(UFunction* fn, PreHook hook) {
     if (!fn) return;
     std::unique_lock<std::shared_mutex> lock(g_mu);
-    AddHook(fn, std::move(hook));
+    AddHook(fn, IdentOf(fn), std::move(hook));
 }
 
 void HookFunctionsMatching(std::function<bool(const std::string&)> match, PreHook hook) {
     std::unique_lock<std::shared_mutex> lock(g_mu);
     g_nameRules.push_back({match, hook});
-    // Re-check functions already classified so the rule also applies to them.
-    for (auto& [fn, _] : g_classified)
-        if (match(ObjectName(reinterpret_cast<UObject*>(fn)))) AddHook(fn, hook);
+    // Re-check functions already classified so the rule also applies to them. A function freed since is dropped unread:
+    // the object array no longer holds it at its slot, or holds it under another name.
+    size_t dropped = 0;
+    for (auto it = g_classified.begin(); it != g_classified.end();) {
+        UFunction* fn = it->first;
+        const ObjectIdent stored = it->second;
+        if (!util::CacheEntryCurrent(stored, fn, ObjectAt(stored.index), [fn] { return IdentOf(fn); })) {
+            if (auto e = g_exact.find(fn); e != g_exact.end() && e->second.ident == stored) g_exact.erase(e);
+            it = g_classified.erase(it);
+            ++dropped;
+            continue;
+        }
+        if (match(ObjectName(reinterpret_cast<UObject*>(fn)))) AddHook(fn, stored, hook);
+        ++it;
+    }
+    if (dropped) {
+        g_hookGen.fetch_add(1, std::memory_order_release);
+        HSM_LOG("hook: %zu function(s) freed or replaced since they were classified; dropped before a new name rule", dropped);
+    }
 }
 
 void ClearHooks() {

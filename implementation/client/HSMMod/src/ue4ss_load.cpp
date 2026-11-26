@@ -1,5 +1,6 @@
 #include "ue4ss_load.h"
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -9,6 +10,9 @@
 #include "match/hsm_online_rules.h"
 #include "paths.h"
 #include "session/hsm_ue4ss.h"
+#include "session/hsm_ue4ss_wait.h"
+#include "ue/engine.h"
+#include "ue/hook.h"
 #include "ue4ss_bundle.h"
 
 // Load mechanics (assumption until an in-game test has run): UE4SS 3.x's proxy dwmapi.dll
@@ -131,6 +135,38 @@ void CheckProxies(const std::wstring& dir) {
         g_notice = "UE4SS: " + note + ".";
     }
 }
+
+// Public #4221: UE4SS's stock BPModLoaderMod looks up Default__BlueprintPathsLibrary as UE4SS starts its mods, with no null
+// check, and during engine start-up it is not made yet. So the game makes its first ProcessEvent call first
+// (session/hsm_ue4ss_wait.h); HSMMod's hook sees it (GameThreadId is that call's thread, 0 before it). The default object's
+// presence is logged at the start and the end of the wait, so the logs can confirm the cause.
+const char* CdoText() { return ue::FindObject("Default__BlueprintPathsLibrary") ? "made" : "not made yet"; }
+void WaitForGame(const Config& cfg, bool hookIn) {
+    Ue4ssLoadWait w;
+    w.waitOn = cfg.ue4ssWait;
+    w.hookIn = hookIn;
+    const uint64_t start = GetTickCount64();
+    bool logged = false;
+    for (;;) {
+        w.gameRan = ue::GameThreadId() != 0;
+        w.waitedMs = uint32_t(std::min<uint64_t>(GetTickCount64() - start, 0xFFFFFFFFull));
+        const Ue4ssLoadGate g = Ue4ssLoadGateOf(w);
+        if (g == Ue4ssLoadGate::NoWait) {
+            HSM_LOG("ue4ss: loading at once (%s)", !cfg.ue4ssWait ? "ue4ss_wait=0" : "no ProcessEvent hook to wait on");
+            return;
+        }
+        if (g != Ue4ssLoadGate::Wait) {
+            HSM_LOG("ue4ss: %s after %u ms; loading UE4SS (Default__BlueprintPathsLibrary %s)", Ue4ssLoadGateText(g), unsigned(w.waitedMs), CdoText());
+            return;
+        }
+        if (!logged) {
+            logged = true;
+            HSM_LOG("ue4ss: waiting for the game's first ProcessEvent call before loading UE4SS (at most %u s; ue4ss_wait=0 loads it at once); "
+                    "Default__BlueprintPathsLibrary %s", unsigned(kUe4ssLoadWaitMs / 1000), CdoText());
+        }
+        Sleep(50);
+    }
+}
 }  // namespace
 
 // The fixed file version of a DLL, read from its version resource without running it or loading version.dll: the DLL is
@@ -160,7 +196,7 @@ std::string FileVersion(const std::wstring& path) {
     return out;
 }
 
-void Run(const Config& cfg) {
+void Run(const Config& cfg, bool hookIn) {
     if (g_ran.exchange(true)) return;   // once per process
     Decide decide;
     const std::wstring dir = ModFilePath(L"");
@@ -217,6 +253,7 @@ void Run(const Config& cfg) {
         Set("none", {});
         return;
     }
+    WaitForGame(cfg, hookIn);   // public #4221: the game first, then UE4SS's stock mods
     const std::string version = FileVersion(path);
     // An absolute path with LOAD_WITH_ALTERED_SEARCH_PATH: the DLL's own folder is searched for what it imports.
     HMODULE h = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);

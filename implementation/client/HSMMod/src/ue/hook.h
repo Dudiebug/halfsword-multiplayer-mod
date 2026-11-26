@@ -14,6 +14,10 @@ using PreHook = std::function<bool(UObject* obj, UFunction* fn, void* params)>;
 bool InstallProcessEventHook();
 void RemoveProcessEventHook();
 
+// hook_relay=legacy: every hook made after this keeps MinHook's stock `FF 25` relay (shared/session/hsm_relay.h). Call it
+// before the first hook is made (mod.cpp, right after LoadConfig); the default is the `mov rax; jmp rax` relay.
+void UseLegacyHookRelay(bool legacy);
+
 // Exact-function rule.
 void HookFunction(UFunction* fn, PreHook hook);
 // Name rule, evaluated once per distinct UFunction the first time it is seen (covers classes loaded later).

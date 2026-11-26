@@ -48,6 +48,7 @@ public:
         std::function<bool()> stripOff;                             // the lobby's Stripping row is Off (match/hsm_strip.h StripOffHere). Optional.
         std::function<bool()> biteOff;                              // the lobby's Biting row is Off (match/hsm_bite.h BiteOffHere). Optional.
         std::function<bool(const ue::UObject*)> playerFighter;      // a player's fighter simulated here (not a bot): its bites follow the Biting row. Optional.
+        bool spawnMissingArmor = true;                              // [mod] armor_on_spawn: no loose piece for an ArmorOn, spawn one (combat::PlanArmorOn)
     };
     // Installs the observers (owner "fxsync"; they resolve on every level load). False without the script VM hook.
     bool Start(Adapter& adapter, StandIns& standIns, Env env);

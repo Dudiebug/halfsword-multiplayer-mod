@@ -104,18 +104,20 @@ void HitProbe::Clear() {
 }
 
 const HitProbe::Offsets& HitProbe::OffsetsOf(UFunction* fn) {
+    const util::ObjectIdent id = IdentityOf(reinterpret_cast<UObject*>(fn));   // a freed function's address may come back as another
     auto it = offsets_.find(fn);
-    if (it != offsets_.end()) return it->second;
+    if (it != offsets_.end() && it->second.ident == id) return it->second;
     auto offsetOf = [fn](const char* name, bool isStruct) {
         FProperty* p = FindProperty(fn, name);
         return p && (!isStruct || PropertyType(p) == "StructProperty") ? PropertyOffset(p) : -1;
     };
     Offsets o;
+    o.ident = id;
     o.hitComponent = offsetOf("HitComponent", false);
     o.otherComp = offsetOf("OtherComp", false);
     o.impulse = offsetOf("NormalImpulse", true);
     o.hit = offsetOf("Hit", true);
-    return offsets_.emplace(fn, o).first->second;
+    return offsets_[fn] = o;
 }
 
 bool HitProbe::ResolveHitResult() {

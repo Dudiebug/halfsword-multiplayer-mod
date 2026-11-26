@@ -274,6 +274,9 @@ void TestHitSoundPlan() {
     CHECK(Near(p.boneVolume, 0));
     p = PlanHitSound(333, 500, false, false);
     CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0));     // 0.0999: not above the 0.1 gate
+    CHECK(333.33333333333337 * 0.0003 == 0.1);
+    p = PlanHitSound(333.33333333333337, 500, false, false);
+    CHECK(p.blunt == BluntCue::None && Near(p.bluntVolume, 0));     // exactly 0.1: the gate is strictly above
     p = PlanHitSound(334, 500, false, false);
     CHECK(p.blunt == BluntCue::Light && p.bluntVolume > 0.1);
     p = PlanHitSound(1000, 1000, false, false);
@@ -391,6 +394,16 @@ void TestRxLimiter() {
     CHECK(ok == kFxMaxPerSecond && kFxMaxRxPerSecond >= 2 * kFxMaxPerSecond);
 }
 
+// #4237: in the Crypts the loot sync removed the observer's loose shirt before the held-back ArmorOn ran ("no loose
+// BP_Armor_Modular_Core_Body_Shirt_1_C within 1500 uu"): the stand-in lost its clothes and got nothing back.
+void TestArmorOnSource() {
+    CHECK(PlanArmorOn(true, true, true) == ArmorOnSource::Loose);     // a loose piece always wins
+    CHECK(PlanArmorOn(true, false, false) == ArmorOnSource::Loose);
+    CHECK(PlanArmorOn(false, true, true) == ArmorOnSource::Spawn);    // the reported case: no loose piece, class loaded
+    CHECK(PlanArmorOn(false, false, true) == ArmorOnSource::None);    // a class nothing here has loaded: nothing to spawn
+    CHECK(PlanArmorOn(false, true, false) == ArmorOnSource::None);    // armor_on_spawn=0: the old behaviour
+}
+
 }  // namespace
 
 int main() {
@@ -408,6 +421,7 @@ int main() {
     TestWoundRadius();
     TestPassedOnDamage();
     TestLimiter();
+    TestArmorOnSource();
     if (g_fail) { std::printf("test_hsm_fx: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_fx: ok\n");
     return 0;

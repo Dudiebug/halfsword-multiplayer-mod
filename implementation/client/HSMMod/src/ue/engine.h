@@ -2,6 +2,7 @@
 // Objects, functions and properties are resolved by name at runtime, so the mod needs no generated SDK
 // and tolerates Blueprint layout changes; only core engine layouts are fixed per supported build.
 #pragma once
+#include "util/hsm_object_ident.h"
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -54,6 +55,12 @@ bool IsGarbage(const UObject* o);              // destroyed (marked as garbage),
 int32_t ObjectCount();
 int32_t ObjectIndex(const UObject* o);          // GUObjectArray slot (UObjectBase::InternalIndex)
 UObject* ObjectAt(int32_t index);
+// What a live object is apart from its address: its slot and FName (util/hsm_object_ident.h). Two loads; o must be live.
+util::ObjectIdent IdentityOf(const UObject* o);
+// o is an object the object array holds at its own slot: an aligned user-space address first (util::PlausibleObjectAddress),
+// then its slot read back. For a pointer read out of engine memory where the full check (a vtable lookup) costs too much,
+// such as a hit event's OtherActor. An unmapped address that passes the first test is still read.
+bool InObjectArray(const UObject* o);
 UObject* FindObject(const std::string& name, const char* className = nullptr);   // by object name
 std::vector<UObject*> FindInstances(const char* className);                      // non-CDO instances
 UObject* DefaultObject(const UClass* c);

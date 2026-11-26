@@ -326,11 +326,17 @@ Protocol revision 37: 0.8.0-pre23 connects only to pre23. In-game test steps: do
    else `UE4SS.dll` next to the exe. Updating UE4SS later overwrites HSMMod's proxy, so copy ours back (the
    multiplayer page warns when the `dwmapi.dll` next to the exe is not ours). `[mod]` in `HSMMod.ini`: `ue4ss=1`
    (default; 0 skips it) and `ue4ss_order=after` (default: after HSMMod's ProcessEvent hook is installed; `before`
-   loads UE4SS first). The log says `ue4ss: loaded <path> (<version>)`, `ue4ss: none`, `ue4ss: off (ue4ss=0)` or the
+   loads UE4SS first). `hook_relay=jmp` (default) builds the jump behind each of HSMMod's hooks as `mov rax; jmp rax`,
+   which UE4SS follows correctly when it hooks the same function later; `hook_relay=legacy` brings back MinHook's stock
+   `jmp [rip]` (`shared/session/hsm_relay.h`, public #3172). The log says `ue4ss: loaded <path> (<version>)`, `ue4ss: none`, `ue4ss: off (ue4ss=0)` or the
    failure with its Windows error. A UE4SS 2.x install (proxy `xinput1_3.dll`) loads itself and is only noted in the
    log. UE4SS mods are never synced; every player installs their own. Bug reports and crash reports carry the UE4SS
    version and the names (only) of the enabled UE4SS mods (`Mods/mods.txt`, folders with `enabled.txt`). The load
    order is unproven until the in-game spike.
+   With `ue4ss_order=after`, `ue4ss_wait=1` (default) holds UE4SS back until the game has made its first ProcessEvent
+   call (at most 60 s; `shared/session/hsm_ue4ss_wait.h`, public #4221): UE4SS's stock BPModLoaderMod otherwise looks
+   up an engine default object that start-up has not made yet and crashes at the splash screen. The log says
+   `ue4ss: the game made its first ProcessEvent call after N ms; loading UE4SS`; `ue4ss_wait=0` loads it at once.
 5. Every player needs the same HSMMod build. The lobby names anyone on another build ("Bob on 0.6.5 - update") and the
    host cannot start a match until it matches; `allow_build_mismatch=1` in `HSMMod.ini` overrides this for testing.
    From 0.8.0-pre26 the build ends with the first 12 hex digits of the SHA-256 of the mod's own `dwmapi.dll`

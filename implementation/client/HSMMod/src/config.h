@@ -270,7 +270,12 @@ struct Config {
     // before HSMMod's ProcessEvent hook is installed, after (default) once the hook is in.
     bool ue4ss = true;
     bool ue4ssBefore = false;
+    // hook_relay=legacy: MinHook's stock `jmp [rip]` relay behind each hook, not `mov rax,detour; jmp rax` (shared/session/hsm_relay.h).
+    bool hookRelayLegacy = false;
     bool ue4ssConsole = false;   // ue4ss_console=1: leave UE4SS's console mods as mods.txt has them; 0 (default): turn them off at every start
+    // ue4ss_wait=1 (default): with order=after, UE4SS loads once the game has made its first ProcessEvent call (at most 60 s;
+    // shared/session/hsm_ue4ss_wait.h, public #4221); 0: at once, as soon as HSMMod's hook is in.
+    bool ue4ssWait = true;
     // ---- competitive netcode (protocol rev 42; docs/PLAN_COMPETITIVE_NETCODE.md). On by default: competitive=0 goes back to the old behaviour. ----
     // competitive=1: the competitive preset. Every netcode key below takes its competitive default (playout 0.85 / 4 ms,
     // input_delay auto, deflect 1, late_send 1, combat_copies 1, min_fps 60) unless the key itself is in the file.
@@ -320,6 +325,10 @@ struct Config {
     // into it, choosing spawner points away from every player (gameplay/crypts_coop.h, session/hsm_crypt_spawn.h). =0: the 0.8.0 way,
     // the room's own event (it skips every point near or in sight of the host, so a room a client opens often stays empty).
     bool cryptsHostSpawns = true;
+    // [mod] armor_on_spawn=1 (the default): when another player puts on armour and this machine has no loose piece of that class
+    // near them (the Crypts loot sync already removed it here, #4237), a piece of the class is spawned and put on their stand-in
+    // (combat::PlanArmorOn). =0: the old way, the stand-in gets nothing ("fx: no loose ... (armor_on_spawn=0)").
+    bool armorOnSpawn = true;
     // [mod] weapon_pick_guard=1 (the default): a stand-in's hand takes a loose weapon for the owner's pose only when it is
     // unambiguous (sync::PickGuarded: no two copies of the class about as near, and a copy beyond 150 uu only when it is the
     // only one within 600 uu); the refusals are logged. =0: the old picks (nearest within 150 uu, then nearest within 600 uu).

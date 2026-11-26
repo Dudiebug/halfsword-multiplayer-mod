@@ -386,6 +386,16 @@ UObject* ObjectAt(int32_t index) {
     return *reinterpret_cast<UObject**>(chunk + size_t(index % kItemsPerChunk) * kItemSize);
 }
 
+util::ObjectIdent IdentityOf(const UObject* o) {
+    if (!o) return {};
+    const FName n = Read<FName>(o, kObjName);
+    return {Read<int32_t>(o, kObjIndex), util::NameKey(n.index, n.number)};
+}
+
+bool InObjectArray(const UObject* o) {
+    return util::PlausibleObjectAddress(o) && ObjectAt(Read<int32_t>(o, kObjIndex)) == o;
+}
+
 // Once a name has matched, its FName is remembered and later scans compare only that (a shipping build keeps one name
 // entry per case-insensitive string, trailing number split off, so no other FName reads as the same text). Before,
 // every scan built each of about 80k object names as a string, and FindClass of a blueprint class scans twice. An object

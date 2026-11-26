@@ -49,6 +49,20 @@
 
 #include "trampoline.h"
 #include "buffer.h"
+#include "session/hsm_relay.h"   // HSMMod: the relay's bytes (implementation/shared); build.sh adds the include path
+
+// The relay is the space a JMP_ABS takes: TRAMPOLINE_MAX_SIZE above leaves exactly that behind the copied code.
+#if defined(_M_X64) || defined(__x86_64__)
+_Static_assert(sizeof(JMP_ABS) == HSM_RELAY_SIZE, "relay size");
+#endif
+
+// Set by MH_SetLegacyRelay before the first hook is created: 1 builds the stock `FF 25` relay.
+static volatile LONG g_legacyRelay = 0;
+
+VOID WINAPI MH_SetLegacyRelay(BOOL legacy)
+{
+    g_legacyRelay = legacy ? 1 : 0;
+}
 
 // Maximum size of a trampoline function.
 #if defined(_M_X64) || defined(__x86_64__)
@@ -309,11 +323,12 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
     }
 
 #if defined(_M_X64) || defined(__x86_64__)
-    // Create a relay function.
-    jmp.address = (ULONG_PTR)ct->pDetour;
-
+    // Create a relay function (HSMMod: shared/session/hsm_relay.h says why it is not `FF 25` unless asked to be).
     ct->pRelay = (LPBYTE)ct->pTrampoline + newPos;
-    memcpy(ct->pRelay, &jmp, sizeof(jmp));
+    if (g_legacyRelay)
+        hsm_relay_write_legacy((uint8_t*)ct->pRelay, (uint64_t)(ULONG_PTR)ct->pDetour);
+    else
+        hsm_relay_write((uint8_t*)ct->pRelay, (uint64_t)(ULONG_PTR)ct->pDetour);
 #endif
 
     return TRUE;

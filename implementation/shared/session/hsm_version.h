@@ -12,10 +12,13 @@
 
 namespace hsm {
 
-// MAJOR.MINOR.PATCH with an optional -preN. pre == 0 is the full release, which is newer than every -preN of the same
-// number (0.7.0-pre2 < 0.7.0-pre3 < 0.7.0 < 0.7.1-pre1).
+// MAJOR.MINOR.PATCH with an optional -betaN (from 0.8.1; the release order is a full release, then betas of the next
+// number, then that number's full release) or the older -preN. pre == 0 is the full release, which is newer than every
+// beta of the same number (0.8.1-beta1 < 0.8.1-beta2 < 0.8.1 < 0.8.2-beta1). -betaN and -preN with the same N are the
+// same step (0.8.1-pre1 was published as 0.8.1-beta1): the label is only kept for FormatVersion.
 struct Version {
     int major = 0, minor = 0, patch = 0, pre = 0;
+    bool beta = false;   // tagged -betaN, not -preN
     bool prerelease() const { return pre > 0; }
 };
 
@@ -29,7 +32,7 @@ inline int CompareVersion(const Version& a, const Version& b) {
 
 inline std::string FormatVersion(const Version& v) {
     std::string s = std::to_string(v.major) + "." + std::to_string(v.minor) + "." + std::to_string(v.patch);
-    return v.pre ? s + "-pre" + std::to_string(v.pre) : s;
+    return v.pre ? s + (v.beta ? "-beta" : "-pre") + std::to_string(v.pre) : s;
 }
 
 namespace version_detail {
@@ -46,8 +49,8 @@ inline bool Number(const std::string& s, size_t& i, int& out) {
 }
 }  // namespace version_detail
 
-// The whole string: an optional "v", MAJOR.MINOR.PATCH, an optional "-preN" (N >= 1). Anything else (-rc1, a fourth
-// number, trailing text) does not parse.
+// The whole string: an optional "v", MAJOR.MINOR.PATCH, an optional "-betaN" or "-preN" (N >= 1). Anything else (-rc1,
+// _beta1, a fourth number, trailing text) does not parse.
 inline std::optional<Version> ParseVersion(const std::string& s) {
     using version_detail::Number;
     size_t i = !s.empty() && s[0] == 'v' ? 1 : 0;
@@ -56,8 +59,9 @@ inline std::optional<Version> ParseVersion(const std::string& s) {
     if (!Number(s, i, v.minor) || i >= s.size() || s[i++] != '.') return std::nullopt;
     if (!Number(s, i, v.patch)) return std::nullopt;
     if (i == s.size()) return v;
-    if (s.compare(i, 4, "-pre") != 0) return std::nullopt;
-    i += 4;
+    if (s.compare(i, 5, "-beta") == 0) { v.beta = true; i += 5; }
+    else if (s.compare(i, 4, "-pre") == 0) i += 4;
+    else return std::nullopt;
     if (!Number(s, i, v.pre) || v.pre < 1 || i != s.size()) return std::nullopt;
     return v;
 }
@@ -255,7 +259,7 @@ struct UpdateOffer {
 };
 
 // The newest release newer than `running`, or nothing. Drafts are never offered; a prerelease (flagged, or tagged
-// -preN) only to a player who is on a prerelease. Tags that do not parse are ignored.
+// -betaN or -preN) only to a player who is on one. Tags that do not parse are ignored.
 inline std::optional<UpdateOffer> NewestOffer(const std::vector<ReleaseInfo>& releases, const Version& running) {
     std::optional<UpdateOffer> best;
     for (const ReleaseInfo& r : releases) {

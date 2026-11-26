@@ -174,8 +174,12 @@ constexpr char kDefaultIni[] =
     "; ue4ss=1 (default): HSMMod loads UE4SS (ue4ss/UE4SS.dll next to the game exe, or UE4SS.dll beside it), and always replaces any other build there with its own (4.0.0); 0: neither.\n"
     "; ue4ss_order=after (default): load it once HSMMod's hooks are in; before: load it first. UE4SS mods are never synced.\n"
     "; ue4ss_console=0 (default): HSMMod turns UE4SS's console and cheat manager mods off in mods.txt at every start (a Vanilla lobby refuses them); 1: leaves them as you set them.\n"
+    "; ue4ss_wait=1 (default): with ue4ss_order=after, UE4SS loads once the game has finished starting its engine (at most 60 s later), so its stock mods do not crash at the splash screen; 0: load it at once.\n"
+    "ue4ss_wait=1\n"
     "ue4ss=1\n"
     "ue4ss_order=after\n"
+    "; hook_relay=jmp (default): the jump behind each hook is `mov rax,detour; jmp rax`, which UE4SS follows correctly; legacy: the old `jmp [rip]` form (a UE4SS loaded after HSMMod then crashes at the address behind it).\n"
+    "hook_relay=jmp\n"
     "; record=1: write a 60 Hz recording of every fighter, prop and gameplay event in each fight level to HSMRec-<date>-<time>.hsmrec\n"
     "; next to HSMMod.log (tools/hsmrec.py reads it; for mod development, about 40 MB a minute). Off by default.\n"
     "record=0\n"
@@ -493,7 +497,9 @@ Config LoadConfig() {
     c.serverAdmins = ReadString(ini, L"server_admins", "");
     c.serverVoteKick = ReadString(ini, L"votekick", ReadString(ini, L"server_votekick", "1").c_str()) != "0";
     c.ue4ss = ReadModString(ini, L"ue4ss", "1") != "0";
+    c.ue4ssWait = ReadModString(ini, L"ue4ss_wait", "1") != "0";
     c.ue4ssConsole = ReadModString(ini, L"ue4ss_console", "0") == "1";
+    c.hookRelayLegacy = ReadModString(ini, L"hook_relay", "jmp") == "legacy";
     c.ue4ssBefore = ue4ss::ParseOrder(ReadModString(ini, L"ue4ss_order", "after")) == ue4ss::Order::Before;
     c.modPack = ReadModString(ini, L"pack", "");
     c.modRules = ReadModString(ini, L"mod_rules", "1") != "0";
@@ -525,6 +531,9 @@ Config LoadConfig() {
     HSM_LOG("config: crypts_host_spawns=%d: in the shared Crypts %s", c.cryptsHostSpawns ? 1 : 0,
             c.cryptsHostSpawns ? "the host fills each room with enemies for whichever player walks in"
                                : "each room fills itself as the game does (it only knows the host's body)");
+    c.armorOnSpawn = ReadModString(ini, L"armor_on_spawn", "1") != "0";
+    HSM_LOG("config: armor_on_spawn=%d: armour another player puts on with no loose piece of its class here %s", c.armorOnSpawn ? 1 : 0,
+            c.armorOnSpawn ? "is spawned and put on their stand-in" : "is not shown on their stand-in");
     c.cryptsLayoutNames = ReadModString(ini, L"crypts_layout_names", "auto");   // checked and logged by cryptslayout::SetNameForm
     // Command-line overrides (several instances may share one ini).
     std::string cl = CommandLineUtf8();

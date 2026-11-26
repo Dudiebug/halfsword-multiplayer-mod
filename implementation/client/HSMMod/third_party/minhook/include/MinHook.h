@@ -99,6 +99,11 @@ extern "C" {
     // ONCE at the end of your program.
     MH_STATUS WINAPI MH_Uninitialize(VOID);
 
+    // HSMMod: x64 hooks built after this call use MinHook's stock relay (FF 25) when legacy is TRUE, and the
+    // `mov rax, imm64 ; jmp rax` relay of shared/session/hsm_relay.h otherwise (the default). Call it before
+    // MH_CreateHook; hooks that already exist keep their relay.
+    VOID WINAPI MH_SetLegacyRelay(BOOL legacy);
+
     // Creates a hook for the specified target function, in disabled state.
     // Parameters:
     //   pTarget     [in]  A pointer to the target function, which will be

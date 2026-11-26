@@ -144,11 +144,33 @@ static void TestOffer() {
     CHECK(!NewestOffer(r, V("0.7.0")) && !NewestOffer({}, V("0.7.0")));
 }
 
+static void TestBeta() {
+    // From 0.8.1: a full release, then betas of the next number, then its full release.
+    CHECK(V("v0.8.1-beta1").pre == 1 && V("v0.8.1-beta1").beta && V("v0.8.1-beta1").prerelease() && !V("v0.8.1-pre1").beta);
+    CHECK(FormatVersion(V("v0.8.1-beta2")) == "0.8.1-beta2" && FormatVersion(V("0.8.1-pre1")) == "0.8.1-pre1");
+    CHECK(CompareVersion(V("0.8.0"), V("0.8.1-beta1")) < 0);
+    CHECK(CompareVersion(V("0.8.1-beta1"), V("0.8.1-beta2")) < 0);
+    CHECK(CompareVersion(V("0.8.1-beta2"), V("0.8.1")) < 0);
+    CHECK(CompareVersion(V("0.8.1"), V("0.8.2-beta1")) < 0);
+    CHECK(CompareVersion(V("0.8.1-pre1"), V("0.8.1-beta1")) == 0);   // the same build, published under both names
+    CHECK(CompareVersion(V("0.8.1-pre1"), V("0.8.1-beta2")) < 0);
+    for (const char* bad : {"v0.8.1_beta1", "v0.8.1-beta", "v0.8.1-beta0", "v0.8.1-Beta1", "v0.8.1-beta1x", "v0.8.1-bet1", "v0.8.1-betapre1"})
+        CHECK(!ParseVersion(bad));
+    CHECK(ParseDescribedVersion("v0.8.1-beta1-3-gabc1234") && ParseDescribedVersion("v0.8.1-beta1-3-gabc1234")->pre == 1);
+    // A beta is offered to a player on a beta (or an old -pre build), never to a player on a full release.
+    const std::vector<ReleaseInfo> list = {{"v0.8.1-beta2", "u2", true, false, {}}, {"v0.8.1-beta1", "u1", true, false, {}}, {"v0.8.0", "u0", false, false, {}}};
+    CHECK(NewestOffer(list, V("0.8.1-beta1")) && NewestOffer(list, V("0.8.1-beta1"))->tag == "v0.8.1-beta2");
+    CHECK(NewestOffer(list, V("0.8.1-pre1")) && NewestOffer(list, V("0.8.1-pre1"))->tag == "v0.8.1-beta2");
+    CHECK(!NewestOffer(list, V("0.8.0")));
+    CHECK(!NewestOffer(list, V("0.8.1-beta2")));
+}
+
 int main() {
     TestParse();
     TestOrder();
     TestDescribed();
     TestRunning();
+    TestBeta();
     TestScan();
     TestMalformed();
     TestOffer();

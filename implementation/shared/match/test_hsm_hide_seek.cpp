@@ -308,6 +308,7 @@ static void TestLobby() {
     CHECK(SelectMode(set, Format::Tag, false).fuseS == MatchConfig{}.fuseS && SelectMode(set, Format::FreeForAll, true).timeLimitS == MatchConfig{}.timeLimitS);
     MatchConfig keep = SelectMode(MatchConfig{}, Format::LastManStanding, false); keep.timeLimitS = 900; keep.fuseS = 45;   // other cards leave the clock and the fuse alone
     CHECK(SelectMode(keep, Format::Duel, false).timeLimitS == 900 && SelectMode(keep, Format::Duel, false).fuseS == 45);
+    CHECK(SelectMode(keep, Format::FreeForAll, false).timeLimitS == 900 && SelectMode(keep, Format::FreeForAll, false).fuseS == 45);   // leaving Last man standing for another format keeps them too
     const LobbyScene s = BuildLobbyScene(l);
     bool selected = false;
     for (const ModeCard& m : s.modes) if (m.format == f && !m.brawl && !m.progression) selected = m.selected && m.name == "HIDE AND SEEK" && m.enabled;

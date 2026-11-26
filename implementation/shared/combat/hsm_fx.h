@@ -115,6 +115,16 @@ inline bool ValidArmorClassName(std::string_view name) {
            detail::WordChars(name) && detail::EndsWith(name, "_C", false);
 }
 
+// Where a stand-in's ArmorOn replay gets its piece (#4237). The nearest loose piece of the owner's class comes first. With none
+// (the Crypts loot sync removed this machine's copy before the held-back replay ran, or the piece was never synced here) a fresh
+// piece of the class is spawned at the owner's spot and put on, when the class is loaded and [mod] armor_on_spawn is on.
+// Otherwise nothing is put on (counted as failed): the stand-in would keep the swap-out removals and lose its clothes.
+enum class ArmorOnSource : uint8_t { Loose, Spawn, None };
+inline ArmorOnSource PlanArmorOn(bool looseFound, bool classLoaded, bool spawnAllowed) {
+    if (looseFound) return ArmorOnSource::Loose;
+    return classLoaded && spawnAllowed ? ArmorOnSource::Spawn : ArmorOnSource::None;
+}
+
 // A bounded cache of name lookups that remembers failures too (M1/M2): a name that did not resolve is not looked up
 // again until missTtlMs have passed (a peer cannot make every message a full object scan, and a cue that was not loaded
 // yet still gets another try later). At capacity the OLDEST entry (first inserted) goes, not whichever sorts first.

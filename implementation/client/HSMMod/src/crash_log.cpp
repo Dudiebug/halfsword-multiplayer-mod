@@ -109,6 +109,24 @@ void LogCallers(uintptr_t rsp) {
     if (found) LogTry("crash: stack code addresses:%s", line);
 }
 
+// Executing where no module is (public #3134): what the memory there is tells a freed block (MEM_FREE, or MEM_RESERVE
+// once decommitted) from one that lost its execute right (PAGE_READWRITE) and from a pointer that never was code. Only
+// VirtualQuery and ReadProcessMemory, which fail instead of faulting; nothing is allocated.
+void LogExecRegion(const char* what, uintptr_t a) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(a), &mbi, sizeof mbi)) {
+        LogTry("crash: %s 0x%llX: VirtualQuery failed (%lu)", what, (unsigned long long)a, GetLastError());
+        return;
+    }
+    unsigned char b[16];
+    char hex[sizeof b * 3 + 1] = "unreadable";
+    if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(a), b, sizeof b, nullptr))
+        for (size_t i = 0; i < sizeof b; ++i) std::snprintf(hex + 3 * i, 4, i + 1 < sizeof b ? "%02X " : "%02X", b[i]);
+    LogTry("crash: %s 0x%llX: state 0x%lX protect 0x%lX type 0x%lX, allocation 0x%llX (protect 0x%lX), region 0x%llX + 0x%llX; "
+           "bytes %s", what, (unsigned long long)a, mbi.State, mbi.Protect, mbi.Type, (unsigned long long)uintptr_t(mbi.AllocationBase),
+           mbi.AllocationProtect, (unsigned long long)uintptr_t(mbi.BaseAddress), (unsigned long long)mbi.RegionSize, hex);
+}
+
 // Only the faulting thread keeps its stack: the others' stacks are most of a dump of a game with ~100 threads, and the
 // fault is on the thread whose stack matters.
 BOOL CALLBACK DumpFilter(PVOID, const MiniDumpCallbackInput* in, MiniDumpCallbackOutput* out) {
@@ -218,6 +236,18 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
             if (caller[0]) LogTry("crash: return address on the stack: %s+0x%llX", caller, (unsigned long long)callerOff);
         }
         LogCallers(c.Rsp);
+        // public #3134: an execute fault where no module is. If UE4SS.dll made the call, its detours call the trampoline
+        // they keep at [rbx+0x20]: the same for that pointer.
+        if (name[0] == '?' && r.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r.NumberParameters >= 2 && r.ExceptionInformation[0] == 8) {
+            LogExecRegion("executed", uintptr_t(r.ExceptionInformation[1]));
+            uintptr_t first = 0, held = 0;
+            char from[MAX_PATH] = ""; uintptr_t fromOff = 0;
+            if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rsp), &first, sizeof first, nullptr))
+                ModuleOf(first, from, sizeof from, &fromOff);
+            if (_stricmp(from, "UE4SS.dll") == 0 &&
+                ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rbx + 0x20), &held, sizeof held, nullptr))
+                LogExecRegion("UE4SS [rbx+0x20] =", held);
+        }
     }
     WriteMinidump(ep);
     return EXCEPTION_CONTINUE_SEARCH;

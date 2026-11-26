@@ -11,8 +11,9 @@ namespace hsm::ue4ss {
 // Loads UE4SS once (a second call does nothing), unless ue4ss=0 in HSMMod.ini. Call it from ModMain's worker thread only,
 // never from DllMain: LoadLibrary under the loader lock deadlocks. Never throws; every outcome is one "ue4ss:" log line.
 // mod.cpp calls it before StartMod when ue4ss_order=before and after StartMod (the ProcessEvent hook is installed by then)
-// otherwise, and also when role=off, since HSMMod's proxy replaced UE4SS's.
-void Run(const Config& cfg);
+// otherwise, and also when role=off, since HSMMod's proxy replaced UE4SS's. hookIn: HSMMod's ProcessEvent hook is in, so Run
+// first waits for the game's first ProcessEvent call (ue4ss_wait; session/hsm_ue4ss_wait.h); LoadPhase stays Pending meanwhile.
+void Run(const Config& cfg, bool hookIn = false);
 
 // For bug reports and crash notes (thread safe): "3.0.1.0" (the file version), "unknown version", "2.x proxy", "none",
 // "off", or "load failed (error N)"; empty before Run.

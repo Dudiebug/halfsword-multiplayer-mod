@@ -75,6 +75,7 @@
 #include "match/hsm_draw.h"
 #include "match/hsm_emoji.h"
 #include "match/hsm_fighter_class.h"
+#include "match/hsm_bench_pawn.h"
 #include "match/hsm_bot_watchdog.h"
 #include "match/hsm_foreign_purge.h"
 #include "match/hsm_giveup_action.h"
@@ -3222,7 +3223,8 @@ public:
     bool CuttingRingOut(UFunction* fn, void* params) {
         if (!stockFlowGuard_ || !params) return false;
         const int32_t off = OtherActorOffset(fn);
-        UObject* other = off >= 0 ? *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off) : nullptr;
+        UObject* other = nullptr;
+        if (off >= 0) HitOtherActor(fn, params, off, other);   // junk reads as no actor
         bool player = false;
         if (other && adapter_.IsWillie(other) && GetBool(other, "Player", player) && player) RingOut(other, "the Cutting's edge");
         return false;   // the level's own UI_Lose is suppressed with the other owner-match screens
@@ -4439,6 +4441,7 @@ private:
         fenv.stripOff = [this] { return steamMode() && StripOffHere(lobby_.InLobby(), lobby_.Progression(), lobby_.config().stripOff); };   // #1931
         fenv.biteOff = [this] { return steamMode() && BiteOffHere(lobby_.InLobby(), lobby_.Progression(), lobby_.config().biteOff); };
         fenv.playerFighter = [this](const UObject* w) { const uint8_t e = OwnedEntityOf(w); return e != 0 && !bots_.count(e); };   // the Biting row: players only
+        fenv.spawnMissingArmor = cfg_.armorOnSpawn;   // [mod] armor_on_spawn (#4237)
         fenv.noteSpawn = [this] { props_.NoteSpawn(); };   // armour came off: the loose piece is looked for now, not at the next census
         fenv.send = [this](const combat::PaintFxMsg& m) {
             if (!net_) return;
@@ -7155,7 +7158,8 @@ private:
         if (!net_ || !params || !inFight_) return false;
         int32_t off = OtherActorOffset(fn);
         if (off < 0) return false;
-        UObject* other = *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off);
+        UObject* other = nullptr;
+        if (!HitOtherActor(fn, params, off, other)) return false;
         props_.NoteContact(obj, other);
         if (hitProbe_.On()) ProbeContact(obj, other, fn, params);
         // Cheap first (test 5: bodies against the ground were most of the 8970 calls of one Abyss frame): a contact
@@ -7208,7 +7212,8 @@ private:
     void RecordHit(UObject* obj, UFunction* fn, void* params) {
         const int32_t off = OtherActorOffset(fn);
         if (off < 0) return;
-        UObject* other = *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off);
+        UObject* other = nullptr;
+        if (!HitOtherActor(fn, params, off, other)) return;
         const HitKind a = HitKindOf(obj), b = HitKindOf(other);
         if (a == HitKind::Other || b == HitKind::Other || obj == other) return;
         UObject* fa = a == HitKind::Willie ? obj : FighterOfThisFrame(obj);
@@ -7274,24 +7279,42 @@ private:
         return f;
     }
 
-    // Hit events fire thousands of times a second: the parameter offset is looked up once per function.
+    // Hit events fire thousands of times a second: the parameter offset is looked up once per function. An offset counts
+    // only for the function it was looked up on: one freed inside the level leaves its address to another function, with
+    // another layout (the hook's fn is the engine's own, so live: its slot and name are compared directly).
     int32_t OtherActorOffset(UFunction* fn) {
+        const util::ObjectIdent id = IdentityOf(reinterpret_cast<UObject*>(fn));
         auto it = otherActorOffset_.find(fn);
-        if (it != otherActorOffset_.end()) return it->second;
+        if (it != otherActorOffset_.end() && it->second.ident == id) return it->second.off;
         FProperty* p = FindProperty(fn, "OtherActor");
         int32_t off = p ? PropertyOffset(p) : -1;
-        otherActorOffset_[fn] = off;
+        otherActorOffset_[fn] = {id, off};
         return off;
     }
 
     // "NormalImpulse" (an FVector) of a hit signature, -1 without one; looked up once per function like OtherActor.
     int32_t NormalImpulseOffset(UFunction* fn) {
+        const util::ObjectIdent id = IdentityOf(reinterpret_cast<UObject*>(fn));
         auto it = normalImpulseOffset_.find(fn);
-        if (it != normalImpulseOffset_.end()) return it->second;
+        if (it != normalImpulseOffset_.end() && it->second.ident == id) return it->second.off;
         FProperty* p = FindProperty(fn, "NormalImpulse");
         int32_t off = p && PropertyType(p) == "StructProperty" ? PropertyOffset(p) : -1;
-        normalImpulseOffset_[fn] = off;
+        normalImpulseOffset_[fn] = {id, off};
         return off;
+    }
+
+    // A hit event's OtherActor, read at off. False when the slot holds something that is no object in the object array
+    // (public #3343, #3417, #3973, #3979, #3297: packed integers read as OtherActor crashed IsA); a null actor is kept, as
+    // the engine sends it. A cheap check, not LiveObject: the hit hook runs thousands of times a frame.
+    bool HitOtherActor(UFunction* fn, void* params, int32_t off, UObject*& other) {
+        other = *reinterpret_cast<UObject**>(static_cast<uint8_t*>(params) + off);
+        if (!other || InObjectArray(other)) return true;
+        if (util::ReportDue(++hitJunk_))
+            HSM_LOG("session: hit hook: OtherActor %p at +%d of %s (params %d bytes, index %d) is not an object (skipped; %llu so far)",
+                    static_cast<void*>(other), off, ObjectName(reinterpret_cast<UObject*>(fn)).c_str(), ParamsSize(fn),
+                    ObjectIndex(reinterpret_cast<UObject*>(fn)), static_cast<unsigned long long>(hitJunk_));
+        other = nullptr;
+        return false;
     }
 
     int8_t KnownTeam(uint8_t e) {
@@ -8719,16 +8742,16 @@ private:
     }
 
     // A client, benched: the host took its fighter out of the match, but its own pawn still stands here (the Duel bench too: a joiner
-    // has the level's fresh one). It goes down once, so the spectator camera takes over and nothing of it fights.
+    // has the level's fresh one, #4257). It goes down once, so the spectator camera takes over and nothing of it fights.
+    // Which bench, and how it is told from a fighter down between rounds: match/hsm_bench_pawn.h.
     void BenchedBodyTick() {
-        if (IsHost() || !MatchLevel() || !IsQueueFormat(Format(info_.format)) || !world_.myEntity()) { benchKilled_ = nullptr; return; }
-        const MatchPhase ph = MatchPhase(info_.phase);
-        if (ph != MatchPhase::Countdown && !CombatPhase(ph)) return;
+        if (IsHost() || !MatchLevel() || !world_.myEntity()) { benchKilled_ = nullptr; return; }
         UObject* own = adapter_.PlayerWillie(0);
-        if (!own || adapter_.IsDead(own) || benchKilled_ == own || !HostCountsMeDown()) return;
-        if (RoleInQueue(info_, world_.myEntity()) == QueueRole::Fighting) return;   // between two rounds a fighter is down too
+        if (!own || adapter_.IsDead(own) || benchKilled_ == own) return;
+        // ownDeadPending_ from the level change on: the host's Spawn has not replaced the level's stock pawn yet (OnOwnSpawn).
+        if (!BenchedPawnGoesDown(info_, world_.myEntity(), HostCountsMeDown(), ownDeadPending_ && levelGate_.Open())) return;
         benchKilled_ = own;
-        HSM_LOG("bench: I am on the bench (%s); my pawn goes down and I watch", info_.format == uint8_t(Format::Tournament) ? "tournament" : "pit bridge duels");
+        HSM_LOG("bench: I am on the bench (%s); my pawn goes down and I watch", BenchName(Format(info_.format)));
         adapter_.TriggerDeath(own);
     }
 
@@ -11346,7 +11369,9 @@ private:
     double ownBuildWeight_ = -1.0;
     std::atomic<int32_t> myWillieIndex_{-1};   // ue::ObjectIndex of myWillie_ when it was stored (MyWillieLive)
     uint32_t hitsBlocked_ = 0;
-    std::unordered_map<UFunction*, int32_t> otherActorOffset_, normalImpulseOffset_;
+    struct FnOffset { util::ObjectIdent ident; int32_t off = -1; };   // a parameter offset and the function it was read on
+    std::unordered_map<UFunction*, FnOffset> otherActorOffset_, normalImpulseOffset_;
+    uint64_t hitJunk_ = 0;   // HitOtherActor: OtherActor slots that held no object
     std::unordered_map<UClass*, HitKind> hitKind_;
     std::unordered_map<UObject*, UObject*> fighterOfFrame_;
     enum class SpawnIgnoreState : uint8_t { Outside, InTick, Cached };
