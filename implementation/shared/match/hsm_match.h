@@ -413,6 +413,7 @@ inline int TeamCount(Format f, int teams) {
 }
 constexpr uint8_t kFuseMinS = 10, kFuseMaxS = 60, kFuseDefaultS = 30;   // Tag's fuse, seconds
 constexpr uint16_t kInfectionDefaultTimeS = 300;                          // Infection: the survivors win when this runs out (0 is no choice)
+constexpr uint16_t kInfectionMinTimeS = 60;                               // the shortest clock (#4304): less reads "0 min" and ends before a fight starts
 // The score limit is the rounds to win a fight (Tournament: always 1, one round a fight since 0.8.0-pre26), the wins to take
 // the match (Pit Bridge Duels), else rounds or kills.
 inline uint16_t DefaultScoreLimit(Format f) { return IsRoulette(f) || f == Format::FreeForAll || f == Format::PitBridgeDuel ? 5 : f == Format::Tournament ? 1 : IsRoundFormat(f) ? 3 : 10; }

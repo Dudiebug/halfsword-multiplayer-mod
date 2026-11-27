@@ -340,6 +340,7 @@ bool ValidateForClient(const uint8_t* d, size_t n, uint8_t) {
         case MsgType::ObjectEvent: { ObjectEventMsg m; return Decode(d, n, m); }
         case MsgType::PropLease: { PropLeaseMsg m; return Decode(d, n, m) && m.action == LeaseAction::Grant; }
         case MsgType::PropCensus: { PropCensusMsg m; return Decode(d, n, m); }
+        case MsgType::LevelWeapons: { LevelWeaponMsg m; return Decode(d, n, m); }   // rev 53: host -> client only (never in ValidateForHost)
         case MsgType::PaintFx: { combat::PaintFxMsg m; return Decode(d, n, m); }
         case MsgType::Equip: { combat::EquipStateMsg m; return Decode(d, n, m); }
         case MsgType::ReportShare: { ReportShareMsg m; return Decode(d, n, m); }
@@ -381,6 +382,7 @@ public:
             if (strandedInFight) { HSM_LOG("client: lobby gone; returning to the main menu"); game::OpenLevel(lastGameMode_, kMenuLevel, true, ""); }
         };
         lobby_.onOwnerChanged = [this](steam::SteamId old, steam::SteamId now) { return OnLobbyOwnerChanged(old, now); };
+        lobby_.onStranded = [](bool rejoining) { ui::Notify(rejoining ? notices::Id::LobbyRejoin : notices::Id::LobbyLost); };
         lobby_.onMemberJoined = [this](steam::SteamId id) { if (steamNet_ && lobby_.IsHost()) steamNet_->AllowPeer(id); };
         lobby_.onMemberLeft = [this](steam::SteamId id) { lobbyGate_.Forget(id); meshPeers_.Forget(id); if (steamNet_) steamNet_->DropPeer(id); };
         lobby_.onChat = [this](steam::SteamId from, const std::string& text) { OnLobbyChat(from, text); };
@@ -4551,6 +4553,11 @@ private:
         penv.structureRestLock = cfg_.structureRestLock;
         penv.structureBridgesFollow = cfg_.structureBridgesFollow;
         penv.structureGameBreak = cfg_.structureGameBreak;
+        penv.levelWeaponsSync = cfg_.levelWeaponsSync;
+        penv.travel = [this] { return travelSeq_; };
+        penv.cryptsLoot = [this] {
+            return game::cryptscoop::Armed() || game::cryptslayout::CoopArmed() || game::cryptslayout::CoopLive() || info_.gear == uint8_t(Gear::Crypts);
+        };
         penv.fightLevel = [this] { return FighterLevel() && (IsHost() || levelGate_.Open()); };
         penv.roomsToBuild = [this] {
             return !IsHost() && game::cryptslayout::CoopLive() && (cryptRooms_.Known() == 0 || cryptBuilt_.Prefix() < cryptRooms_.Known());
@@ -6779,6 +6786,8 @@ private:
             // The level props' census, then every current lease (a client refuses a level prop's Grant its census lacks),
             // after the level load that cleared the joiner's view (props_.Clear).
             for (const std::vector<uint8_t>& c : props_.CensusForJoiner()) net_->Send(ev.peer, kChanReliable, c, true);
+            if (r.travelSeq == travelSeq_)   // the level's loose weapons, when the match already began here (#4297)
+                for (const std::vector<uint8_t>& w : props_.LevelWeaponsForJoiner(travelSeq_)) net_->Send(ev.peer, kChanReliable, w, true);
             for (const std::vector<uint8_t>& o : props_.ObjectsForJoiner()) net_->Send(ev.peer, kChanReliable, o, true);   // announces, then events
             for (const std::vector<uint8_t>& g : props_.GrantsForJoiner()) net_->Send(ev.peer, kChanReliable, g, true);
             HSM_LOG("host: slot %u ready in %s (travel #%u)", peer.slot, r.level.c_str(), r.travelSeq);
@@ -10971,6 +10980,7 @@ private:
             case MsgType::ObjectAnnounce: { props_.OnObjectAnnounce(d, n, kHostSlot); break; }
             case MsgType::PropLease: { props_.OnPropLease(d, n, kHostSlot); break; }
             case MsgType::PropCensus: { props_.OnPropCensus(d, n); break; }
+            case MsgType::LevelWeapons: { props_.OnLevelWeapons(d, n); break; }   // rev 53: the level's loose weapons (#4297)
             case MsgType::RemoteWrite: {
                 sync::RemoteWriteMsg m;
                 if (FightMsgsOpen() && Decode(d, n, m) && m.target == ClientOwnEntity()) ApplyRemote(m);
@@ -11536,6 +11546,7 @@ bool StartMod(const Config& cfg) {
     game::SetAllowBuildMismatch(cfg.allowBuildMismatch);
     game::modrules::Configure(cfg);
     game::SetDirectP2P(cfg.directP2P);
+    game::SetLobbyRejoin(cfg.lobbyRejoin);
     report::Configure(cfg.reports, cfg.reportUrl);
     game::modpack::SetConfigured(cfg.modPack);
     update::Start(cfg.updateCheck, cfg.reportUrl);   // a worker thread; the menu page and UpdateNoticeTick show the result

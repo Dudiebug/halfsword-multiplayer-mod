@@ -1307,7 +1307,10 @@ void Adapter::StopHair(UObject* willie, bool destroy) {
     UObject* hair = p ? *p : nullptr;
     if (!hair || IsGarbage(hair) || BeingDestroyed(hair)) return;   // none, or already going: the game's Destroy Hair skips it too
     Call off(hair, "SetEnableSimulation");
-    const bool stopped = off.valid() && off.set<bool>("bEnable", false).invoke();
+    // GroomComponent::SetEnableSimulation(bool bInEnableSimulation). The call's buffer starts zeroed, so it is false even if a
+    // build renames the parameter; set it by name where it is there.
+    if (bool* on = static_cast<bool*>(off.paramPtr("bInEnableSimulation"))) *on = false;
+    const bool stopped = off.valid() && off.invoke();
     if (destroy) Call(hair, "K2_DestroyComponent").invoke();
     HSM_LOG("adapter: hair of %s simulation %s%s", ObjectName(willie).c_str(), stopped ? "off" : "NOT turned off", destroy ? ", destroyed" : "");
 }

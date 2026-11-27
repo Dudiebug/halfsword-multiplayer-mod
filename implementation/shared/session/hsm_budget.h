@@ -45,6 +45,7 @@ inline BudgetClass BudgetClassOf(MsgType t) {
         case MsgType::BackToLobby: return BudgetClass::Control;   // rev 49: client -> host only, one per click on BACK TO LOBBY
         case MsgType::CryptRoom: case MsgType::CryptDoor: case MsgType::CryptRoomsBuilt: case MsgType::CryptLoot: case MsgType::CryptRun:   // rev 50: a room, door or placed item per host discovery (a few dozen a run), one ack per built room
             return BudgetClass::Control;
+        case MsgType::LevelWeapons: return BudgetClass::Control;   // rev 53: host -> client only, one per loose weapon at a match start (and to each joiner)
         case MsgType::LevelSeed: return BudgetClass::Control;   // rev 28: host -> client only, one per travel (and one to each joiner)
         case MsgType::ModList: case MsgType::ModAnswer:          // rev 40: one per mod change / per code challenge (60..180 s)
         case MsgType::SessionMods: case MsgType::ModChallenge:

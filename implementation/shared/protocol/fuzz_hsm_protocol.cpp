@@ -12,6 +12,7 @@
 #include "session/hsm_crypt_loot.h"
 #include "session/hsm_crypt_rooms.h"
 #include "session/hsm_crypt_run.h"
+#include "session/hsm_level_weapons.h"
 #include "session/hsm_dice.h"
 #include "session/hsm_gather.h"
 #include "session/hsm_lease.h"
@@ -78,7 +79,7 @@ void TryAll(const uint8_t* d, size_t n) {
     Try<GrabStateMsg>(d, n); Try<BodyStateMsg>(d, n); Try<PropLeaseMsg>(d, n);
     Try<combat::PaintFxMsg>(d, n); Try<combat::EquipStateMsg>(d, n); Try<PropCensusMsg>(d, n); Try<GiveUpMsg>(d, n); Try<ReportShareMsg>(d, n); Try<PeerMapMsg>(d, n); Try<MeshHeardMsg>(d, n); Try<PingTableMsg>(d, n); Try<VoiceMsg>(d, n); Try<VoiceModeMsg>(d, n); Try<RouteTableMsg>(d, n); Try<ForwardMsg>(d, n); Try<VoteStateMsg>(d, n); Try<DeathReport>(d, n);
     Try<ObjectAnnounceMsg>(d, n); Try<ObjectEventMsg>(d, n); Try<ModMapMsg>(d, n); Try<dice::LevelSeedMsg>(d, n); Try<MapResetMsg>(d, n); Try<GroundClearMsg>(d, n); Try<LobbySecretMsg>(d, n); Try<LoadoutChangeMsg>(d, n); Try<LoadoutChangeResult>(d, n); Try<ModeEventMsg>(d, n); Try<ProgVoteMsg>(d, n);
-    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n); Try<GatherMsg>(d, n); Try<GatherNoteMsg>(d, n); Try<BackToLobbyMsg>(d, n); Try<crypt::CryptRoomMsg>(d, n); Try<crypt::CryptRunMsg>(d, n); Try<crypt::CryptDoorMsg>(d, n); Try<crypt::CryptRoomsBuiltMsg>(d, n); Try<crypt::CryptLootMsg>(d, n);
+    Try<ModListMsg>(d, n); Try<SessionModsMsg>(d, n); Try<ModChallengeMsg>(d, n); Try<ModAnswerMsg>(d, n); Try<ProgResultMsg>(d, n); Try<GatherMsg>(d, n); Try<GatherNoteMsg>(d, n); Try<BackToLobbyMsg>(d, n); Try<crypt::CryptRoomMsg>(d, n); Try<crypt::CryptRunMsg>(d, n); Try<crypt::CryptDoorMsg>(d, n); Try<crypt::CryptRoomsBuiltMsg>(d, n); Try<crypt::CryptLootMsg>(d, n); Try<LevelWeaponMsg>(d, n);
     FuzzPak(d, n);
     Ping p; bool pong; DecodePing(d, n, p, pong);
     MsgType t; PeekType(d, n, t);
@@ -149,6 +150,7 @@ std::vector<std::vector<uint8_t>> Seeds() {
     { GatherMsg g; g.phase = GatherPhase::Gathering; g.leftMs = 600000; g.seq = 3; s.push_back(Encode(g)); GatherNoteMsg gn; gn.note = GatherNote::Died; gn.seq = 3; s.push_back(Encode(gn)); }   // rev 47: a Crypts gather
     { BackToLobbyMsg bl; bl.seq = 5; s.push_back(Encode(bl)); }   // rev 49: a guest back in the lobby
     { crypt::CryptRoomMsg cr; cr.seq = 2; cr.catalog = 3; cr.x = 100; cr.parentSeq = 1; cr.startEntrance = 0; cr.generation = 1; s.push_back(Encode(cr)); crypt::CryptRoomMsg root; root.seq = 1; s.push_back(Encode(root)); crypt::CryptDoorMsg cd; cd.seq = 1; cd.kind = 1; cd.state = crypt::kDoorGone; s.push_back(Encode(cd)); crypt::CryptLootMsg cl; cl.room = 2; cl.index = 3; cl.cls = "/Game/Assets/Food/Blueprints/BP_Food_Bread.BP_Food_Bread_C"; cl.x = 10; s.push_back(Encode(cl)); crypt::CryptLootMsg ci; ci.room = 2; ci.index = 4; ci.cls = "/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C"; ci.itemKind = crypt::kItemWeapon; ci.item = ItemSaveSeed(); s.push_back(Encode(ci)); crypt::CryptRoomsBuiltMsg cb; cb.count = 4; s.push_back(Encode(cb)); crypt::CryptRunMsg rk; rk.seq = 3; rk.items = 5; s.push_back(Encode(rk)); crypt::CryptRunMsg rr; rr.kind = crypt::kRunResults; rr.seq = 3; rr.rows.push_back({1, crypt::Outcome::Out, 4, "Ann"}); rr.rows.push_back({2, crypt::Outcome::Down, 0, "Bo"}); s.push_back(Encode(rr)); }   // rev 50: the shared Crypts run
+    { LevelWeaponMsg lw; lw.travel = 4; lw.seq = 1; lw.index = 1; lw.count = 3; lw.cls = "/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C"; lw.x = 10; lw.yaw = 90; lw.item = ItemSaveSeed(); s.push_back(Encode(lw)); LevelWeaponMsg le; le.travel = 4; le.seq = 2; s.push_back(Encode(le)); }   // rev 53: the host's loose level weapons, and an empty list
     { InputBatch b; b.entity = 2; b.delayMs = 33; b.frames.push_back({1000, f}); InputFrame g = f; g.seq = 8; b.frames.push_back({1017, g}); s.push_back(Encode(b)); }
     Snapshot sn; WillieState ws; ws.entity = 1; ws.bodies.resize(23); sn.willies.push_back(ws); s.push_back(Encode(sn));
     Event e; e.kind = EventKind::Died; e.a = 2; s.push_back(Encode(e));

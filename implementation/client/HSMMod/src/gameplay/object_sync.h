@@ -18,6 +18,7 @@
 #include "gameplay/shatter_sync.h"
 #include "gameplay/weapon_hands.h"
 #include "session/hsm_lease.h"
+#include "session/hsm_level_weapons.h"
 #include "session/hsm_map_reset.h"
 #include "session/hsm_object.h"
 #include "session/hsm_incoming_guard.h"
@@ -87,6 +88,14 @@ public:
         bool structureBridgesFollow = true;   // structure_bridges_follow: rest placing and moving follow take census structures too
         bool structureGameBreak = true;       // structure_game_break: a barrel plank off elsewhere comes off here by the game's own code
         bool structureRestLock = true;       // structure_rest_lock: a soft structure at rest is placed once to the host's pose, then held still
+        // level_weapons_sync (default on, read on the host): when its match begins in a level the host sends the level's loose weapons
+        // and every client replaces its own with them (level_weapons_sync.cpp, session/hsm_level_weapons.h, #4297). Off: each machine
+        // keeps the weapons its own level placed, as 0.8.1.
+        bool levelWeaponsSync = true;
+        // The Travel seq of the level this machine is in (the host's, or the last Travel a client heard). Without it no list is sent or followed.
+        std::function<uint32_t()> travel;
+        // A shared Crypts run, whose loot (weapons too) crypts_loot.cpp sends: no level-weapon list is sent or followed.
+        std::function<bool()> cryptsLoot;
     };
     void Start(Adapter& adapter, StandIns& standIns, Env env);
     void Stop();                                                     // everything, the drop sequences too
@@ -131,6 +140,10 @@ public:
     // walk. Client: one part of the host's census, matched once the census is complete; false when it is refused.
     std::vector<std::vector<uint8_t>> CensusForJoiner() const;
     bool OnPropCensus(const uint8_t* d, size_t n);
+    // The level's loose weapons (level_weapons_sync.cpp, #4297). Host: the list sent for this level, for a machine that has just
+    // loaded it (Ready for `travel`); none before the host's match began here or for another travel. Client: one of the host's messages.
+    std::vector<std::vector<uint8_t>> LevelWeaponsForJoiner(uint32_t travel) const;
+    void OnLevelWeapons(const uint8_t* d, size_t n);
 
     // A prop's contact with a fighter (game::Claims; combat::DecidePropContact decides it): what struck, as seen here.
     struct Touch {
@@ -416,6 +429,11 @@ private:
     void StepReset(double nowMs);                                    // a few queued items a frame
     void ResetProp(uint64_t id, Prop& p, ResetAction action, double nowMs);
     void ResetWeapon(size_t i, ResetAction action, double nowMs);
+    // The level's loose weapons from the host (level_weapons_sync.cpp). LevelWeaponsBaseline: from MarkBaseline. StepLevelWeapons:
+    // from Tick; the host saves a few passports a frame and sends the list, a client purges its own and spawns the host's.
+    void LevelWeaponsBaseline();
+    void StepLevelWeapons();
+    bool LevelWeaponsOn() const;
     void ReleaseLease(uint64_t id, Prop& p, double nowMs);                      // a reset prop is FREE again
     bool ShatterBroken(uint64_t id) const;                           // a geometry collection of it has broken
     // A dropped weapon FREE for a minute goes (session/hsm_lease.h IdleDespawnDue); every kIdleCheckMs, while SetIdleDespawn.
@@ -515,6 +533,20 @@ private:
     double baselineMs_ = -1;
     std::vector<LevelWeapon> levelWeapons_;
     std::vector<ResetItem> resetQueue_;
+    // The level's loose weapons (level_weapons_sync.cpp). Host: lwExport_ the next levelWeapons_ entry to save while lwExporting_,
+    // lwOut_ the ones saved, lwSent_ the list as sent (for joiners) for travel lwTravel_, lwSeq_ the last list's seq (it goes on
+    // across levels). Client: lwFollow_ the host's list and how far it is carried out, lwSpawned_ the host's weapons spawned here.
+    bool lwExporting_ = false;
+    size_t lwExport_ = 0, lwLeftOut_ = 0;
+    uint8_t lwTries_ = 0;
+    std::vector<LevelWeaponMsg> lwOut_;
+    std::vector<std::vector<uint8_t>> lwSent_;
+    uint32_t lwTravel_ = 0;
+    uint16_t lwSeq_ = 0;
+    LevelWeaponFollow lwFollow_;
+    std::vector<LevelWeapon> lwSpawned_;
+    size_t lwPurged_ = 0;
+    uint64_t lwRefused_ = 0;
     std::unordered_set<uint64_t> wornKept_;                          // worn gear the props-off sweep spared, logged once each (#3909)
     size_t resetPerFrame_ = 0;
     ResetTally resetTally_;

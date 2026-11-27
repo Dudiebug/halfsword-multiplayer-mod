@@ -854,7 +854,7 @@ inline constexpr GameCheckEntry kEntries[] = {
     {GameCheckKind::Param, "", "SetDisableCollision", "bDisableCollision", "", "gameplay/severs.cpp"},
     {GameCheckKind::Param, "", "SetEnableDamageFromCollision", "bValue", "", "gameplay/shatter_sync.cpp"},
     {GameCheckKind::Param, "", "SetEnableGravity", "bGravityEnabled", "", "gameplay/object_sync.cpp"},
-    {GameCheckKind::Param, "", "SetEnableSimulation", "bEnable", "", "gameplay/adapter.cpp"},
+    {GameCheckKind::Param, "", "SetEnableSimulation", "bInEnableSimulation", "", "gameplay/adapter.cpp"},
     {GameCheckKind::Param, "", "SetFillColorAndOpacity", "InColor", "", "ui/umg.cpp"},
     {GameCheckKind::Param, "", "SetFont", "InFontInfo", "", "ui/pause.cpp"},
     {GameCheckKind::Param, "", "SetGamePaused", "bPaused", "", "gameplay/adapter.cpp"},

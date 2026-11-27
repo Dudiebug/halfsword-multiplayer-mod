@@ -195,6 +195,11 @@ static void TestConfig() {
     const MatchConfig s = Sanitize(c);
     CHECK(s.timeLimitS == kInfectionDefaultTimeS && kInfectionDefaultTimeS == 300 && !s.friendlyFire && s.crossbows == 0 && s.clearGroundS == 0);
     c.timeLimitS = 900; CHECK(Sanitize(c).timeLimitS == 900);
+    c.timeLimitS = 60; CHECK(Sanitize(c).timeLimitS == 60 && kInfectionMinTimeS == 60);      // #4304: a 1 min clock is kept
+    c.timeLimitS = 30; CHECK(Sanitize(c).timeLimitS == 60);                                   // under a minute is raised to it
+    c.timeLimitS = 1; CHECK(Sanitize(c).timeLimitS == 60);
+    c.format = Format::FreeForAll; c.timeLimitS = 30; CHECK(Sanitize(c).timeLimitS == 30);    // only Infection has the floor
+    c.format = Format::Infection;
     CHECK(HasTeams(Format::Infection) && !PicksTeams(Format::Infection) && !HasRoles(Format::Infection) && !IsRoundFormat(Format::Infection));
     CHECK(TeamCount(Format::Infection, 4) == 2 && !ScoresPerFighter(Format::Infection) && !IsBotFormat(Format::Infection));
     const auto t = ResolveTeams({{0, kNoTeam, kNoTeam}, {1, 3, kNoTeam}}, Format::Infection, 4);
@@ -317,8 +322,13 @@ static void TestLobby() {
         if (r.id == LobbyRow::Respawn) CHECK(r.label == "Respawn delay" && r.hint.empty());
     }
     MatchConfig c = Sanitize(InLobby(Format::Infection).config);
-    CHECK(StepSetting(c, LobbyRow::Time, 1).timeLimitS == 600 && StepSetting(c, LobbyRow::Time, -1).timeLimitS == 1200);   // never 0
-    c.timeLimitS = 1200; CHECK(StepSetting(c, LobbyRow::Time, 1).timeLimitS == 300);
+    CHECK(StepSetting(c, LobbyRow::Time, 1).timeLimitS == 600 && StepSetting(c, LobbyRow::Time, -1).timeLimitS == 240);    // #4304: below 5 min now
+    c.timeLimitS = 120; CHECK(StepSetting(c, LobbyRow::Time, -1).timeLimitS == 60 && StepSetting(c, LobbyRow::Time, 1).timeLimitS == 180);
+    c.timeLimitS = 60; CHECK(StepSetting(c, LobbyRow::Time, -1).timeLimitS == 1200);                                       // never 0
+    c.timeLimitS = 1200; CHECK(StepSetting(c, LobbyRow::Time, 1).timeLimitS == 60);
+    for (int s : kInfectionTimeOptions) { c.timeLimitS = uint16_t(s); CHECK(s >= kInfectionMinTimeS && s % 60 == 0 && Sanitize(c).timeLimitS == s); }
+    for (const SettingRow& r : BuildLobbyScene([&] { LobbyLocal l = InLobby(Format::Infection); l.config.timeLimitS = 60; return l; }()).settings)
+        if (r.id == LobbyRow::Time) CHECK(r.value == "1 min");
     c.format = Format::FreeForAll; c.timeLimitS = 300; CHECK(StepSetting(c, LobbyRow::Time, -1).timeLimitS == 0);       // other modes keep "no clock"
     CHECK(!ModeAvailable(Format::Infection, 1).ok && ModeAvailable(Format::Infection, 2).ok);
     LobbyLocal rolled = InLobby(Format::Infection); rolled.config.gear = Gear::Mirror;

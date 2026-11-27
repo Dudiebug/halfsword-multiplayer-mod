@@ -65,6 +65,7 @@ void ObjectSync::MarkBaseline() {
         if (Finite(lw.at)) levelWeapons_.push_back(lw);
     }
     HSM_LOG("reset: the match began here; %zu level weapon(s) recorded", levelWeapons_.size());
+    LevelWeaponsBaseline();
 }
 
 bool ObjectSync::IsLevelWeaponAtStart(UObject* actor) {

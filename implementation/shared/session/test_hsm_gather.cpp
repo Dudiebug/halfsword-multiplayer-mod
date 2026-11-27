@@ -56,7 +56,7 @@ static void TestNoteMsg() {
 
 static void TestBudget() {
     CHECK(BudgetClassOf(MsgType::Gather) == BudgetClass::Control);
-    CHECK(kProtocolRevision == 52 && kLastDecodedMsgType >= uint8_t(MsgType::Gather));
+    CHECK(kProtocolRevision == 53 && kLastDecodedMsgType >= uint8_t(MsgType::Gather));
 }
 
 int main() {

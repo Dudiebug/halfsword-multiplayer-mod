@@ -353,7 +353,7 @@ inline std::vector<int> LimitOptions(Format f) {
 }
 inline const std::vector<int> kTimeOptions = {0, 300, 600, 900, 1200};
 inline const std::vector<int> kRespawnOptions = {3, 5, 10, 15, 20};
-inline const std::vector<int> kInfectionTimeOptions = {300, 600, 900, 1200};   // Infection always has a clock: the survivors win by lasting
+inline const std::vector<int> kInfectionTimeOptions = {60, 120, 180, 240, 300, 600, 900, 1200};   // Infection always has a clock: the survivors win by lasting (#4304: down to 1 min for small maps; whole minutes, TimeValue shows minutes)
 inline const std::vector<int> kFuseOptions = {10, 15, 20, 30, 45, 60};         // Tag's fuse, seconds
 inline const std::vector<int> kHideTimeOptions = {15, 20, 30, 45, 60};         // Hide and Seek: the Hide time, seconds (the Fuse row there)
 inline const std::vector<int> kSeekTimeOptions = {120, 180, 240, 300, 420, 600};   // Hide and Seek: a round's Seek time, seconds (the Time row there)

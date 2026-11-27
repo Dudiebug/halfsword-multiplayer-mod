@@ -38,6 +38,7 @@ inline MatchConfig Sanitize(MatchConfig c) {
     if (IsTag(c.format)) c.timeLimitS = 0;                                                   // the rounds and the fuse are the clock
     if (IsInfection(c.format)) {
         if (c.timeLimitS == 0) c.timeLimitS = kInfectionDefaultTimeS;                        // the survivors win by lasting: there is always a clock
+        else c.timeLimitS = std::max(c.timeLimitS, kInfectionMinTimeS);                      // a stale or hand-set lobby value under a minute
         c.friendlyFire = false;                                                               // survivors and infected are the sides; no row
     }
     if (IsHideSeek(c.format)) {                                                              // the Time row is a round's Seek time, the Fuse row the Hide time

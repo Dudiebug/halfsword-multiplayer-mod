@@ -5,6 +5,7 @@
 #include "match/hsm_match.h"
 #include "session/hsm_mod_rules.h"
 #include "session/hsm_mod_switch.h"
+#include "session/hsm_lobby_strand.h"
 #include "session/hsm_modpack.h"
 #include "steam/steam_api.h"
 #include <cstdint>
@@ -19,7 +20,7 @@ constexpr int kMaxLobbyMembers = 20;  // players: == kMaxPlayers (session/hsm_ro
 #ifdef HSM_TESTBENCH
 constexpr const char* kModVersion = "0.8.0-test";
 #else
-constexpr const char* kModVersion = "0.8.1";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.2-beta1";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.
@@ -29,6 +30,9 @@ void SetAllowBuildMismatch(bool on);
 // direct_p2p in HSMMod.ini (rev 42): Steam may share this machine's addresses with lobby members for a direct path. Set
 // once at start, before Steam networking starts.
 void SetDirectP2P(bool on);
+// lobby_rejoin in HSMMod.ini (public #4296): Steam dropped this machine from its lobby with a lost connection; once Steam
+// is back it leaves and joins that lobby again (session/hsm_lobby_strand.h). Set once at start.
+void SetLobbyRejoin(bool on);
 bool AllowBuildMismatch();
 // The installed game's Steam build id (steam::AppBuildId), read once Steam answers and logged with its verdict
 // (session/hsm_game_build.h); 0 while Steam cannot say.
@@ -66,6 +70,7 @@ public:
     // Membership callbacks for the session (fired on the game thread).
     std::function<void(steam::SteamId)> onMemberJoined, onMemberLeft;
     std::function<void()> onEntered, onLeft;
+    std::function<void(bool rejoining)> onStranded;   // Steam left us out of the lobby: true, joining it again; false, given up (left)
     // The host left and Steam made another member the owner. True: the session migrates to the new owner and the lobby
     // stays; false (or unset): leave the lobby, as before 0.7.0-pre5.
     std::function<bool(steam::SteamId oldOwner, steam::SteamId newOwner)> onOwnerChanged;
@@ -169,6 +174,10 @@ private:
     void Enter(steam::SteamId lobby);
     void RefreshMembers();
     void SetStatus(const std::string& s);
+    void StrandTick();                    // left out of the lobby by Steam (a lost connection): join it again (#4296)
+    LobbyStrand strand_;
+    uint64_t strandCheckAt_ = 0;          // ms (steady clock) of the last check: once a second
+    bool steamUp_ = true;                 // steam::LoggedOn as last checked, for the log line when it changes
     LobbyListing Describe(steam::SteamId lobby) const;
     std::string password_;                // the lobby's password as this machine knows it, for passwordLobby_
     steam::SteamId passwordLobby_ = 0;

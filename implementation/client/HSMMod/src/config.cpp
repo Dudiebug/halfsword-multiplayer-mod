@@ -95,6 +95,8 @@ constexpr char kDefaultIni[] =
     "competitive=1\n"
     "; 1: share your address with lobby members so a direct path can beat the Steam relay (players who are not friends)\n"
     "direct_p2p=1\n"
+    "; 1: Steam dropped you from the lobby when your connection to Steam went: join it again once Steam is back\n"
+    ";lobby_rejoin=1\n"
     "; 1: send your fighter's pose right after the physics step, about a frame sooner\n"
     ";late_send=1\n"
     "; 1: every blow also goes once unreliably beside the reliable copy (a lost packet costs nothing)\n"
@@ -384,6 +386,7 @@ Config LoadConfig() {
     c.minFps = std::atoi(ReadString(ini, L"min_fps", cp ? "60" : "0").c_str());
     if (c.minFps != 0) c.minFps = Clamp(c.minFps, 20, 240);
     c.directP2P = ReadString(ini, L"direct_p2p", "1") != "0";
+    c.lobbyRejoin = ReadString(ini, L"lobby_rejoin", "1") != "0";
     c.playoutQuantile = std::clamp(std::atof(ReadString(ini, L"playout_quantile", cp ? "0.85" : "0.95").c_str()), 0.5, 0.99);
     c.playoutMarginMs = std::clamp(std::atof(ReadString(ini, L"playout_margin_ms", cp ? "4" : "6").c_str()), 0.0, 50.0);
     c.standinLeadMs = std::clamp(std::atof(ReadString(ini, L"standin_lead_ms", "0").c_str()), 0.0, 120.0);
@@ -402,6 +405,7 @@ Config LoadConfig() {
     c.deflect = ReadString(ini, L"deflect", cp ? "1" : "0") == "1";
     c.hostMigration = ReadString(ini, L"host_migration", "1") != "0";
     c.mapReset = ReadString(ini, L"map_reset", "1") != "0";
+    c.levelWeaponsSync = ReadString(ini, L"level_weapons_sync", "1") != "0";
     c.progressionVote = ReadString(ini, L"progression_vote", "1") != "0";
     c.progressionPayout = ReadString(ini, L"progression_payout", "1") != "0";
     c.progressionSave = ReadString(ini, L"progression_save", "1") != "0";
@@ -553,8 +557,8 @@ Config LoadConfig() {
             c.standInTwoHandPose ? 1 : 0, c.standInTwoHandLock ? 1 : 0, c.allowBuildMismatch ? 1 : 0);
     HSM_LOG("config: class_tags=%d class_look=%d tagger_speed=%d bot_watchdog=%d purge_early=%d hse_share_keys=%d", c.classTags ? 1 : 0, c.classLook ? 1 : 0,
             c.taggerSpeed ? 1 : 0, c.botWatchdog ? 1 : 0, c.purgeEarly ? 1 : 0, c.hseShareKeys ? 1 : 0);
-    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d sync_structures=%s structure_follow_broken=%d structure_share_held_breaks=%d structure_follow_moving=%d prop_census_snapshot=%d structure_rest_lock=%d structure_bridges_follow=%d structure_game_break=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
-            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0,
+    HSM_LOG("config: reports=%s name_tags=%d help_improve=%d update_check=%d mesh=%d detour=%d peer_ping=%d host_migration=%d map_reset=%d level_weapons_sync=%d sync_structures=%s structure_follow_broken=%d structure_share_held_breaks=%d structure_follow_moving=%d prop_census_snapshot=%d structure_rest_lock=%d structure_bridges_follow=%d structure_game_break=%d", c.reports ? "on" : "off", c.nameTags ? 1 : 0,
+            c.helpImprove ? 1 : 0, c.updateCheck ? 1 : 0, c.mesh ? 1 : 0, c.detour ? 1 : 0, c.peerPing ? 1 : 0, c.hostMigration ? 1 : 0, c.mapReset ? 1 : 0, c.levelWeaponsSync ? 1 : 0,
             StructureModeName(c.syncStructures), c.structureFollowBroken ? 1 : 0, c.structureShareHeld ? 1 : 0,
             c.structureFollowMoving ? 1 : 0, c.propCensusSnapshot ? 1 : 0, c.structureRestLock ? 1 : 0,
             c.structureBridgesFollow ? 1 : 0, c.structureGameBreak ? 1 : 0);
@@ -563,6 +567,7 @@ Config LoadConfig() {
             c.hostLockOn ? 1 : 0, c.scabbardFix ? 1 : 0, c.forceStrength ? 1 : 0, c.stuckArmorGate ? 1 : 0, c.standInPartsOff ? 1 : 0, c.standInBoxFix ? 1 : 0);
     HSM_LOG("config: netcode competitive=%d late_send=%d combat_copies=%d min_fps=%d", c.competitive ? 1 : 0, c.lateSend ? 1 : 0,
             c.combatCopies ? 1 : 0, c.minFps);
+    HSM_LOG("config: lobby_rejoin=%d", c.lobbyRejoin ? 1 : 0);
     HSM_LOG("config: netcode direct_p2p=%d playout_quantile=%.2f playout_margin_ms=%.0f standin_lead_ms=%.0f input_delay=%s claim_check=%s blow_speed_cap=%.0f deflect=%d",
             c.directP2P ? 1 : 0, c.playoutQuantile, c.playoutMarginMs, c.standinLeadMs,
             c.inputDelay.mode == MatchDelayMode::Auto ? "auto" : std::to_string(c.inputDelay.frames).c_str(),

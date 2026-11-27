@@ -197,6 +197,8 @@ void ObjectSync::Clear() {
     baselineMs_ = -1;
     levelWeapons_.clear();
     resetQueue_.clear();
+    lwExporting_ = false; lwExport_ = lwLeftOut_ = 0; lwTries_ = 0; lwOut_.clear(); lwSent_.clear(); lwTravel_ = 0;   // lwSeq_ goes on
+    lwFollow_.Clear(); lwSpawned_.clear(); lwPurged_ = 0;
     wornKept_.clear();
 }
 
@@ -206,6 +208,7 @@ void ObjectSync::Tick(double nowMs, const std::vector<std::pair<uint8_t, UObject
     if (!active_ || !adapter_) return;
     ++tick_;
     if (!resetQueue_.empty()) StepReset(nowMs);
+    StepLevelWeapons();
     if (env_.host)
         for (uint64_t id : table_.Tick(nowMs)) { ++n_.lapsed; Grant(id, kHostSlot, LeaseLevel::Free); }
     DetectDrops(nowMs, owned);

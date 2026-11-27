@@ -228,6 +228,12 @@ static void TestPauseAndChatNotices() {
         CHECK(std::string(Of(id).title) == "PHOTO" && std::string(Of(id).key) == "photo-key");   // the next refusal replaces the last
         CHECK(Of(id).kind == NoticeKind::Info && !Of(id).longer);
     }
+    // #4296: Steam left this machine out of its lobby. The "giving up" line replaces the "joining again" one.
+    CHECK(std::string(Of(Id::LobbyRejoin).text) == "The connection to Steam dropped and you left the lobby. Joining it again...");
+    CHECK(std::string(Of(Id::LobbyLost).text) == "Could not get back into the lobby. Join it again from the list.");
+    CHECK(Of(Id::LobbyRejoin).kind == NoticeKind::Warn && Of(Id::LobbyLost).kind == NoticeKind::Error);
+    CHECK(std::string(Of(Id::LobbyRejoin).title) == "LOBBY" && std::string(Of(Id::LobbyLost).title) == "LOBBY");
+    CHECK(std::string(Of(Id::LobbyRejoin).key) == "lobby-rejoin" && std::string(Of(Id::LobbyLost).key) == std::string(Of(Id::LobbyRejoin).key));
     // Two dimmed buttons share one key, so a second click replaces the first answer.
     CHECK(std::string(Of(Id::ReportsOff).key) == std::string(Of(Id::LobbyNotInCrypts).key));
     CHECK(std::string(Of(Id::LobbyNone).key) == std::string(Of(Id::LobbyNotInCrypts).key) && std::string(Of(Id::LobbyNotInProgression).key) == std::string(Of(Id::LobbyNotInCrypts).key));

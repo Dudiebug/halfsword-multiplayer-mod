@@ -23,6 +23,7 @@ enum class Id : uint8_t {
     NobodyInFront, GroundCleared,
     BugHint, HelpImproveSending, CrashHint,
     ReportsOff, LobbyNotInCrypts, LobbyNone, LobbyNotInProgression, ChatPaused, PhotoNoMatch, PhotoNotAllowed, PhotoNotReady, PhotoDead,
+    LobbyRejoin, LobbyLost,
     Count
 };
 
@@ -74,6 +75,9 @@ inline constexpr Fixed kFixed[] = {
     {Id::PhotoNotAllowed, NoticeKind::Info, "PHOTO", "The host turned free cameras off for this match, photo mode with them.", "photo-key", false},
     {Id::PhotoNotReady, NoticeKind::Info, "PHOTO", "Photo mode could not start here.", "photo-key", false},
     {Id::PhotoDead, NoticeKind::Info, "PHOTO", "Photo mode needs a living fighter.", "photo-key", false},
+    // Steam left this machine out of its lobby after a lost connection (session/hsm_lobby_strand.h): it joins again, or gives up.
+    {Id::LobbyRejoin, NoticeKind::Warn, "LOBBY", "The connection to Steam dropped and you left the lobby. Joining it again...", "lobby-rejoin", false},
+    {Id::LobbyLost, NoticeKind::Error, "LOBBY", "Could not get back into the lobby. Join it again from the list.", "lobby-rejoin", false},
 };
 static_assert(sizeof(kFixed) / sizeof(kFixed[0]) == size_t(Id::Count), "one row per Id, in order");
 

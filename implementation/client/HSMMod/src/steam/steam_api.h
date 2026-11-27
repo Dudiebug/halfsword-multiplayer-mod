@@ -51,6 +51,7 @@ void Tick();                      // polls call results; pumps callbacks if the 
 bool Poll(Event& out);            // drain queued callbacks/results
 
 SteamId MySteamId();
+bool LoggedOn();                         // signed in to the Steam servers (ISteamUser::BLoggedOn); false without the export
 std::string PersonaName(SteamId user);   // empty for unknown
 uint32_t AppId();
 int AppBuildId();                        // the installed game's Steam build id (ISteamApps::GetAppBuildId); 0 if Steam cannot say

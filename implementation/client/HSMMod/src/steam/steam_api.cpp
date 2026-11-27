@@ -62,6 +62,7 @@ struct Api {
     FLAT(bool, GetImageSize, void*, int, uint32_t*, uint32_t*)
     FLAT(bool, GetImageRGBA, void*, int, uint8_t*, int)
     FLAT(uint64_t, GetSteamID, void*)
+    FLAT(bool, BLoggedOn, void*)   // optional
     FLAT(bool, IsAPICallCompleted, void*, uint64_t, bool*)
     FLAT(bool, GetAPICallResult, void*, uint64_t, void*, int, int, bool*)
     FLAT(uint32_t, GetAppID, void*)
@@ -263,6 +264,9 @@ bool Init() {
     // told apart by the exe key alone, which a content-only game update does not change.
     g.GetAppBuildId = Fn<Api::GetAppBuildId_t>("SteamAPI_ISteamApps_GetAppBuildId");
     if (!g.GetAppBuildId || !g_apps) HSM_LOG("steam: no SteamApps build id export; the game build is checked by its exe only");
+    // Optional: whether Steam is signed in to its servers (the stranded-lobby rejoin, gameplay/lobby.cpp); without it no rejoin.
+    g.BLoggedOn = Fn<Api::BLoggedOn_t>("SteamAPI_ISteamUser_BLoggedOn");
+    if (!g.BLoggedOn) HSM_LOG("steam: no BLoggedOn export; a lobby lost with the Steam connection is not joined again");
     // Optional: avatars on the multiplayer page; without them the rows keep an empty space.
     g.GetMediumFriendAvatar = Fn<Api::GetMediumFriendAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
     g.GetImageSize = Fn<Api::GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
@@ -352,6 +356,7 @@ std::string PersonaName(SteamId user) {
     return n ? n : "";
 }
 uint32_t AppId() { return g_ready ? g.GetAppID(g_utils) : 0; }
+bool LoggedOn() { return g_ready && g.BLoggedOn && g.BLoggedOn(g_user); }
 int AppBuildId() { return g_ready && g_apps && g.GetAppBuildId ? g.GetAppBuildId(g_apps) : 0; }
 
 // EVoiceResult: 0 OK, 1 not initialised, 2 not recording, 3 no data, 4 buffer too small, 5 corrupt, 6 restricted,

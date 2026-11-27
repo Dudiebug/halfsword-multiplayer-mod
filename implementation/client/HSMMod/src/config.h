@@ -144,6 +144,10 @@ struct Config {
     // true (default): the host resets the map at each Duel round and each rematch (props back to their start, objects spawned
     // in the round gone, the level's own weapons back on their spots); 0 sends no MapReset. Read on the host only.
     bool mapReset = true;
+    // true (default): when its match begins in a level the host sends the level's loose weapons (class, place, passport) and
+    // every client replaces its own with them, so a weapon one player sees lying there is there for everyone (#4297); 0
+    // leaves each machine the weapons its own level placed. Read on the host only.
+    bool levelWeaponsSync = true;
     // true (default): in the Tavern hub of a hosted Progression session the host puts the game's next fights to a vote
     // (chat /fight <number>, 30 s) and starts the winner; 0 leaves the choice to the host's own hub UI. Read on the host only.
     bool progressionVote = true;
@@ -291,6 +295,9 @@ struct Config {
     // direct_p2p=1: share this machine's addresses with lobby members (Steam ICE), so players who are not Steam friends
     // can get a direct path instead of the relay when it is faster. Per machine (both ends need it for a direct path).
     bool directP2P = true;
+    // lobby_rejoin=1 (public #4296): Steam dropped this machine from its lobby with a lost connection; once Steam is back,
+    // leave and join that lobby again. 0: as before (the player leaves and joins by hand).
+    bool lobbyRejoin = true;
     // The stand-ins' playout buffer: the share of late poses it waits for (playout_quantile, 0.5-0.99; lower = the
     // opponent shown less in the past, more frames extrapolated) and the margin on top (playout_margin_ms, 0-50). Per machine.
     double playoutQuantile = 0.95;

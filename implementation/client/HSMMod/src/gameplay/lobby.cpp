@@ -51,6 +51,8 @@ bool g_allowBuildMismatch = false;
 void SetAllowBuildMismatch(bool on) { g_allowBuildMismatch = on; }
 bool g_directP2P = false;
 void SetDirectP2P(bool on) { g_directP2P = on; }
+bool g_lobbyRejoin = true;
+void SetLobbyRejoin(bool on) { g_lobbyRejoin = on; }
 bool AllowBuildMismatch() { return g_allowBuildMismatch; }
 
 int SteamBuild() {
@@ -204,6 +206,36 @@ void Lobby::Tick() {
                 break;
         }
     }
+    StrandTick();
+}
+
+// Public #4296: a host lost its internet for 20 s. Steam dropped it from the lobby and named another member the owner;
+// the others carried on with that one. When the connection came back the old host's lobby showed nobody (Steam lists no
+// members and no owner of a lobby we are not in), yet the mod still thought it hosted, and its lobby data writes failed
+// every second until the player left by hand. Now: left out like that for kStrandConfirmMs with Steam signed in, leave
+// and join the same lobby again, as a client of its owner now (the owner's reserved slot takes a client back).
+void Lobby::StrandTick() {
+    if (!g_lobbyRejoin || state_ != State::InLobby) return;
+    if (server_ && owner_ == steam::MySteamId()) return;   // a role=server machine is no player: it never joins as one
+    const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (now - strandCheckAt_ < 1000) return;
+    strandCheckAt_ = now;
+    const std::vector<steam::SteamId> ids = steam::LobbyMembers(lobby_);
+    const bool listed = std::find(ids.begin(), ids.end(), steam::MySteamId()) != ids.end();
+    const steam::SteamId owner = steam::LobbyOwner(lobby_);
+    const bool up = steam::LoggedOn();
+    if (up != steamUp_) { steamUp_ = up; HSM_LOG("lobby: Steam %s", up ? "is signed in again" : "is not signed in (the connection to Steam dropped)"); }
+    const StrandStep step = strand_.Tick(lobby_, listed, owner, up, uint32_t(now));
+    if (step != StrandStep::Rejoin && step != StrandStep::GaveUp) return;
+    const steam::SteamId lobby = lobby_;
+    const std::string password = password_;   // Leave forgets it
+    HSM_LOG("lobby: Steam left this machine out of lobby %llu (%zu member(s) listed, owner %s, we %s): %s",
+            (unsigned long long)lobby, ids.size(), owner ? steam::PersonaName(owner).c_str() : "none", IsHost() ? "hosted it" : "were a client",
+            step == StrandStep::Rejoin ? "leaving it and joining it again" : "left out again soon after joining it again: leaving it");
+    Leave();
+    if (step == StrandStep::Rejoin) Join(lobby, password);
+    else SetStatus("Could not get back into the lobby");
+    if (onStranded) onStranded(step == StrandStep::Rejoin);
 }
 
 LobbyListing Lobby::Describe(steam::SteamId lobby) const {
