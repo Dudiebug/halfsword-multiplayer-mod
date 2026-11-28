@@ -1,5 +1,7 @@
 #include "gameplay/standin_rig.h"
+#include "combat/hsm_equip.h"
 #include "combat/hsm_handloss.h"
+#include "gameplay/weapon_hands.h"
 #include "sync/hsm_grip.h"
 #include "sync/hsm_pose_codec.h"
 #include "sync/hsm_two_hand_update.h"
@@ -67,6 +69,11 @@ constexpr const char* kSlotFields[FighterRig::kSheathSlots] = {"Weapon Slot R 1"
 constexpr const char* kGripBoolFields[] = {"L Hand In Offhand Attached", "R Alt Grip", "Mordhau Grip", "2H Switched Hands (Temp)",
                                             "R Hand Reverse Grip"};
 static_assert(sizeof(kGripBoolFields) / sizeof(kGripBoolFields[0]) == 5, "GripState has five flags");
+// Protocol 54 (sync/hsm_pose.h): the flags the owner's ReceiveTick and input set, which a stand-in's blocked ReceiveTick never
+// does. ABP_Willie reads the last two (ABP_Willie.cpp:1685, :1697: the two-handed arm pose, the off hand reaching for the
+// shaft). Order = GripState: masterStroke, twoHanded, offSearching.
+constexpr const char* kAnimBoolFields[] = {"Master Stroke Grip", "R Two Handed Grip", "L Offhand Searching Grip"};
+static_assert(sizeof(kAnimBoolFields) / sizeof(kAnimBoolFields[0]) == 3, "GripState has three animation flags");
 constexpr const char* kHiddenParts[] = {"DriverSkeleton", "CharacterMesh_Head"};   // standin_parts_off (SetStandInPartsOff)
 constexpr const char* kHandles[] = {"PhysicsHandle GetUp", "PhysicsHandle LowerBody", "PhysicsHandle UpperBody"};
 constexpr const char* kFistsPrefix = "Weapon_Fists";   // an empty hand's pseudo weapon, kinematic at the world origin
@@ -93,6 +100,15 @@ bool g_partsOff = false;                       // standin_parts_off (SetStandInP
 bool g_twoHandPose = true;                     // standin_two_hand_pose (receiver only)
 bool g_twoHandLock = true;                     // standin_two_hand_lock (receiver only)
 bool g_twoHandAudit = false;                   // Help improve only
+bool g_heldSeat = true;                        // standin_held_seat (receiver only)
+bool g_sheatheKept = true;                     // standin_sheathe_kept (receiver only)
+bool g_animFlags = true;                       // standin_anim_flags (receiver only)
+bool g_masterSeat = true;                      // standin_master_seat (receiver only)
+bool g_switchedSeat = true;                    // standin_switched_seat (receiver only)
+bool g_shieldSeat = true;                      // standin_shield_seat (receiver only)
+bool g_seatPoints = true;                      // standin_seat_points (receiver only)
+bool g_twoHandSettle = true;                   // standin_two_hand_settle (receiver only)
+bool g_twoHandWelded = true;                   // standin_two_hand_welded (receiver only)
 constexpr uint8_t kLimited = 1;               // ELinearConstraintMotion::LCM_Limited, EAngularConstraintMotion::ACM_Limited
 constexpr double kOffhandAngleDeg = 36.0;      // the game's MapRangeClamped(Soft Attach Dot 0.9, 0.5, 1, 180, 0), Willie_BP.cpp:18200
 constexpr uint8_t kFree = 0;                  // ELinearConstraintMotion::LCM_Free, EAngularConstraintMotion::ACM_Free
@@ -342,6 +358,7 @@ bool FighterRig::Bind(UObject* willie) {
     if (uint8_t* p = Field<uint8_t>(willie, "R_GripType_Current")) gripTypeOffset_[0] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
     if (uint8_t* p = Field<uint8_t>(willie, "L_GripType_Current")) gripTypeOffset_[1] = int32_t(p - reinterpret_cast<uint8_t*>(willie));
     for (int i = 0; i < 5; ++i) gripFlag_[i] = TypedField(wc, kGripBoolFields[i], "BoolProperty");
+    for (int i = 0; i < 3; ++i) animFlag_[i] = TypedField(wc, kAnimBoolFields[i], "BoolProperty");
     for (const char* f : kStandInZeroDoubleFields)
         if (FProperty* p = TypedField(wc, f, "DoubleProperty")) zeroDoubles_.push_back(PropertyOffset(p));
     for (const char* f : kStandInTrueBoolFields)
@@ -372,6 +389,12 @@ void FighterRig::Unbind() {
 
 bool FighterRig::StillValid() const { return Live(willie_, willieIndex_) && Live(mesh_, meshIndex_); }
 
+bool FighterRig::InSlot(const UObject* actor) const {
+    std::array<const void*, combat::kEquipSlots> slots{};
+    for (int k = 0; k < kSheathSlots; ++k) slots[size_t(k)] = FieldAt(slotOffset_[k]);
+    return combat::LeftHandIntoSlot(actor, slots);
+}
+
 UObject* FighterRig::FieldAt(int32_t offset) const {
     return offset >= 0 ? *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(willie_) + offset) : nullptr;
 }
@@ -385,7 +408,9 @@ void FighterRig::RefreshWeapon(int w) {
     // Let go while neutralised (a stand-in's hand opened; my own fighter's while another machine held it): the held-weapon
     // policy (no gravity, blind to the world) would stay on it for good, floating where it was (#145, #138-#141).
     if (wp.actor && actor != wp.actor && !FieldAt(weaponOffset_[w])) CheckHandLoss(w, wp);   // the variable went null
-    if (boundAtMs_ >= 0.0 && wp.actor && actor != wp.actor) RearmDropped(wp);
+    // standin_sheathe_kept: a weapon that went into a slot keeps the slot's hold (combat::LeftHandIntoSlot): gravity and
+    // full collision on it would make it fall out of the sheath.
+    if (boundAtMs_ >= 0.0 && wp.actor && actor != wp.actor && !(g_sheatheKept && InSlot(wp.actor))) RearmDropped(wp);
     wp = Weapon{};
     weaponChanged_ = true;
     gripFreed_[0] = gripFreed_[1] = nullptr;   // a re-made grip comes with its limits locked again
@@ -754,11 +779,12 @@ bool FighterRig::Read(uint32_t tsMs, uint16_t stepUs, sync::PoseFrame* frame, sy
         frame->grip = ReadGrip();
         // The sender's side of the grip toggles (two-player test 12 asked whether a mordhau was ever sent).
         const sync::GripState& g = frame->grip;
-        const int toggles = sync::SeatKey(g.altGrip, g.mordhau, g.reverseR) | (g.switched2H ? 8 : 0);
+        const int toggles = sync::SeatKey(g.altGrip, g.mordhau, g.reverseR) | (g.switched2H ? 8 : 0) | (g.masterStroke ? 16 : 0);
         if (toggles != ownToggles_) {
             ownToggles_ = toggles;
-            HSM_LOG("rig: %s sends grips R %u L %u%s%s%s%s", ObjectName(willie_).c_str(), unsigned(g.gripR), unsigned(g.gripL),
-                    g.altGrip ? " alt" : "", g.mordhau ? " mordhau" : "", g.switched2H ? " switched" : "", g.reverseR ? " reverse" : "");
+            HSM_LOG("rig: %s sends grips R %u L %u%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(g.gripR), unsigned(g.gripL),
+                    g.altGrip ? " alt" : "", g.mordhau ? " mordhau" : "", g.switched2H ? " switched" : "", g.reverseR ? " reverse" : "",
+                    g.masterStroke ? " master" : "");
         }
         LogHands("owner", g.gripR, g.gripL);
     }
@@ -1092,6 +1118,11 @@ sync::GripState FighterRig::ReadGrip() const {
         bool v = false;
         if (gripFlag_[i] && GetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), v)) *flags[i] = v;
     }
+    bool* const anim[3] = {&g.masterStroke, &g.twoHanded, &g.offSearching};
+    for (int i = 0; i < 3; ++i) {
+        bool v = false;
+        if (animFlag_[i] && GetBoolValue(animFlag_[i], base + PropertyOffset(animFlag_[i]), v)) *anim[i] = v;
+    }
     return g;
 }
 
@@ -1121,6 +1152,15 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     const bool flags[5] = {g.offhand, g.altGrip, g.mordhau, g.switched2H, g.reverseR};
     for (int i = 1; i < 5; ++i)
         if (gripFlag_[i]) SetBoolValue(gripFlag_[i], base + PropertyOffset(gripFlag_[i]), flags[i]);
+    // standin_anim_flags: the stand-in's arms pose as the owner's (two-handed, the off hand reaching for the shaft) and its
+    // Master Stroke Grip matches the owner's; with 0 they stay as the game left them (false), as in 0.8.2.
+    if (g_animFlags) {
+        const bool anim[3] = {g.masterStroke, g.twoHanded, g.offSearching};
+        for (int i = 0; i < 3; ++i)
+            if (animFlag_[i]) SetBoolValue(animFlag_[i], base + PropertyOffset(animFlag_[i]), anim[i]);
+    } else {
+        applied.masterStroke = applied.twoHanded = applied.offSearching = false;
+    }
     UObject* const weaponR = FieldAt(weaponOffset_[0]);
     UObject* const weaponL = FieldAt(weaponOffset_[1]);
     const bool wantOff = g.offhand && weaponR && (!weaponL || weaponL == weaponR);
@@ -1173,14 +1213,16 @@ void FighterRig::ApplyGrip(const sync::GripState& g) {
     LogHands("stand-in", applied.gripR, applied.gripL);
     const sync::GripState& l = gripStateLogged_;
     if (gripStateKnown_ && l.gripR == applied.gripR && l.gripL == applied.gripL && l.offhand == applied.offhand &&
-        l.altGrip == applied.altGrip && l.mordhau == applied.mordhau && l.switched2H == applied.switched2H && l.reverseR == applied.reverseR)
+        l.altGrip == applied.altGrip && l.mordhau == applied.mordhau && l.switched2H == applied.switched2H && l.reverseR == applied.reverseR &&
+        l.masterStroke == applied.masterStroke && l.twoHanded == applied.twoHanded)
         return;
     gripStateLogged_ = applied;
     gripStateKnown_ = true;
     handsLogged_.clear();   // the hands line follows a grip change at once
-    HSM_LOG("rig: %s grips R %u L %u%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(applied.gripR), unsigned(applied.gripL),
+    HSM_LOG("rig: %s grips R %u L %u%s%s%s%s%s%s%s", ObjectName(willie_).c_str(), unsigned(applied.gripR), unsigned(applied.gripL),
             applied.offhand ? " offhand" : "", applied.altGrip ? " alt" : "", applied.mordhau ? " mordhau" : "",
-            applied.switched2H ? " switched" : "", applied.reverseR ? " reverse" : "");
+            applied.switched2H ? " switched" : "", applied.reverseR ? " reverse" : "", applied.masterStroke ? " master" : "",
+            applied.twoHanded ? " two-handed" : "");
 }
 
 // #3282: while a hand holds a shield or lantern grip, the fields ABP_Willie poses it from, read every kHandsReadMs and logged
@@ -1340,35 +1382,58 @@ void FighterRig::ApplySwitch(bool on, UObject* weaponR) {
 // joint is made again there and the weapon goes back, for the locked joint to carry it to its new seat.
 bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
     UObject* const r = FieldAt(gripOffset_[0]);
-    if (r != seatJoint_) { seatJoint_ = r; seatKey_ = 0; }   // the game makes a new joint at the weapon's default seat
-    const uint8_t key = sync::SeatKey(g.altGrip, g.mordhau, g.reverseR);
-    if (!r || !weaponR || key == seatKey_ || !GripToLock(0)) return false;
-    if (!RestoreTwoHandPose()) return false;
-    seatKey_ = key;
+    if (r != seatJoint_) { seatJoint_ = r; seatKey_ = 0; seatGuess_.Clear(); }   // the game makes a new joint at the weapon's default seat
     const auto* base = reinterpret_cast<const uint8_t*>(willie_);
     const uint8_t gripR = gripTypeOffset_[0] >= 0 ? base[gripTypeOffset_[0]] : 0;
+    // standin_held_seat: the alt flag seats only a two-handed grip, as in the game (hsm_grip.h SeatKeyFor).
+    const bool alt = g.altGrip && (!g_heldSeat || sync::TwoHandedGrip(gripR));
+    // standin_master_seat: the master stroke grip is part of the seat (hsm_grip.h MasterSeatFor; protocol 54).
+    const bool master = g_masterSeat && g.masterStroke;
+    const uint8_t key = sync::SeatKeyFor(gripR, g.altGrip, g.mordhau, g.reverseR, !g_heldSeat, master);
+    if (!r || !weaponR || key == seatKey_ || !GripToLock(0)) return false;
+    const bool masterSwitch = sync::MasterSeatChange(seatKey_, key);
+    if (masterSwitch && g.switched2H) {
+        // The game re-makes the left hand's joint here (Willie_BP.cpp:15847), which the hand switch's own references
+        // (ApplySwitch) and the owner-seat check (ApplyHeld) cover; the right hand's seat is left as it is.
+        seatKey_ = key;
+        HSM_LOG("rig: %s: master stroke %s with the hands switched: right hand not re-seated", ObjectName(willie_).c_str(),
+                master ? "on" : "off");
+        return false;
+    }
+    if (!RestoreTwoHandPose()) return false;
+    seatKey_ = key;
     const uint8_t* revType = Field<uint8_t>(willie_, "R Weapon Reverse Grip Type");
-    const sync::GripSeat seat = sync::SeatFor(gripR, offJoint_ != nullptr, g.altGrip, g.mordhau, g.reverseR, revType ? *revType : 3);
+    const uint8_t* weaponDefault = Field<uint8_t>(weaponR, "Grip R Hand Default");
+    const sync::GripSeat seat =
+        masterSwitch ? sync::MasterSeatFor(gripR, weaponDefault ? *weaponDefault : 0, g.switched2H, master, g.reverseR, revType ? *revType : 3)
+    : g_seatPoints ? sync::SeatForBuild({gripR, offJoint_ != nullptr, alt, g.mordhau, g.reverseR, uint8_t(revType ? *revType : 3), master,
+                                         g_animFlags && g.offSearching})
+                     : sync::SeatFor(gripR, offJoint_ != nullptr, alt, g.mordhau, g.reverseR, revType ? *revType : 3, master);
+    const bool atPoint = seat.point != sync::SeatPoint::Socket;
     const char* const pointName = seat.point == sync::SeatPoint::Reverse ? "Grip R Hand Default Pos Reverse"
                                   : seat.point == sync::SeatPoint::Alt   ? "Grip R Hand Alt Pos"
+                                  : seat.point == sync::SeatPoint::Socket ? "the weapon's origin (master stroke)"
+                                  : seat.point == sync::SeatPoint::LeftDefault ? "Grip L Hand Default Pos"
                                                                          : "Grip R Hand Default Pos";
     UObject* const root = ObjField(weaponR, "BaseMesh");
-    UObject* const point = ObjField(weaponR, pointName);
+    UObject* const point = atPoint ? ObjField(weaponR, pointName) : nullptr;
     Call par(point, "GetAttachParent");
     UObject* const parent = point && par.invoke() ? par.get<UObject*>("ReturnValue") : nullptr;
     const FVector* const relLoc = point ? Field<FVector>(point, "RelativeLocation") : nullptr;
     const FRotator* const relRot = point ? Field<FRotator>(point, "RelativeRotation") : nullptr;
-    const char* const socket = seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket";
+    const char* const socket = seat.hammerSocket ? "weapon_rSocket_Hammer" : seat.shieldSocket ? "shield_r_socket" : "weapon_rSocket";
+    const char* const jointSocket = seat.jointHammer ? "weapon_rSocket_Hammer" : socket;
     Call sock(mesh_, "GetSocketTransform");
     sock.setName("InSocketName", MakeName(socket)).set<uint8_t>("TransformSpace", kWorldSpace);
     FTransform keep;
-    if (!root || !parent || !relLoc || !relRot || !sock.invoke() || !WorldTransform(root, keep)) {
+    if (!root || (atPoint && (!parent || !relLoc || !relRot)) || !sock.invoke() || !WorldTransform(root, keep)) {
         HSM_LOG("rig: %s: re-seat FAILED (no %s on %s)", ObjectName(willie_).c_str(), pointName, ObjectName(weaponR).c_str());
         return false;
     }
     const FTransform s = sock.get<FTransform>("ReturnValue");
     const Q4 flip = seat.flip == sync::SeatFlip::Yaw180     ? RotatorQuat(0, 180, 0)
                     : seat.flip == sync::SeatFlip::Pitch180 ? RotatorQuat(180, 0, 0)
+                    : seat.flip == sync::SeatFlip::Yaw90    ? RotatorQuat(0, 90, 0)
                                                             : Q4{};
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
     FTransform t = keep;
@@ -1376,35 +1441,38 @@ bool FighterRig::ApplySeat(const sync::GripState& g, UObject* weaponR) {
     t.rotation = ToFQuat(sync::QuatMul(ToQ4(s.rotation), flip));
     SetWorldTransform(root, t);
     FTransform p;
-    if (WorldTransform(parent, p)) {   // turned so the point's rotation is the hand's ...
+    if (atPoint && WorldTransform(parent, p)) {   // turned so the point's rotation is the hand's ...
         t.rotation = ToFQuat(sync::QuatMul(ToQ4(p.rotation), RotatorQuat(-relRot->pitch, -relRot->yaw, -relRot->roll)));
         SetWorldTransform(root, t);
     }
-    if (WorldTransform(parent, p)) {   // ... and moved so the point sits in it
+    if (atPoint && WorldTransform(parent, p)) {   // ... and moved so the point sits in it
         const V3 off = sync::QuatRotateVec(ToQ4(p.rotation), V3{-relLoc->x * p.scale.x, -relLoc->y * p.scale.y, -relLoc->z * p.scale.z});
         t.translation = FVector{p.translation.x + off.x, p.translation.y + off.y, p.translation.z + off.z};
         SetWorldTransform(root, t);
     }
-    const bool ok = MakeGripJoint(r, root, socket, seat.lowerArm);
+    const bool ok = MakeGripJoint(0, r, root, jointSocket, seat.lowerArm);
     SetWorldTransform(root, keep);
     Call(root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmChain(weapons_[0]);
     ChainPolicy(weapons_[0]);   // the chain's bodies were made again
     gripLocked_[0] = nullptr;   // locked again, and the polearm switch starts from the new seat
     switchOn_ = false;
+    // This seat is a guess from the toggles: ApplyHeld checks it against the owner's with the plain tolerance (hsm_held.h).
+    if (g_heldSeat) seatGuess_.Made(SteadyMs());
     HSM_LOG("rig: %s: weapon re-seated in the right hand at %s%s%s", ObjectName(willie_).c_str(), pointName,
-            seat.flip == sync::SeatFlip::None ? "" : ", turned over", ok ? "" : " (joint NOT remade)");
+            seat.flip == sync::SeatFlip::None ? "" : seat.flip == sync::SeatFlip::Yaw90 ? ", turned 90 deg" : ", turned over",
+            ok ? "" : " (joint NOT remade)");
     return true;
 }
 
-// The right hand's joint made again with the weapon where it now is: the joint keeps that seat.
-bool FighterRig::MakeGripJoint(UObject* joint, UObject* root, const char* socket, bool lowerArm) {
+// A hand's joint made again with the weapon where it now is: the joint keeps that seat.
+bool FighterRig::MakeGripJoint(int hand, UObject* joint, UObject* root, const char* socket, bool lowerArm) {
     Call(joint, "K2_AttachToComponent").set<UObject*>("Parent", mesh_).setName("SocketName", MakeName(socket))
         .set<uint8_t>("LocationRule", 0).set<uint8_t>("RotationRule", 0).set<uint8_t>("ScaleRule", 0)
         .set<bool>("bWeldSimulatedBodies", false).invoke();
     Call cc(joint, "SetConstrainedComponents");
     cc.set<UObject*>("Component1", root).setName("BoneName1", FName{}).set<UObject*>("Component2", mesh_)
-        .setName("BoneName2", MakeName(lowerArm ? "lowerarm_r" : "hand_r"));
+        .setName("BoneName2", MakeName(hand == 0 ? (lowerArm ? "lowerarm_r" : "hand_r") : (lowerArm ? "lowerarm_l" : "hand_l")));
     return cc.invoke();
 }
 
@@ -1575,6 +1643,7 @@ FighterRig::TwoHandResult FighterRig::ApplyTwoHandPose(const sync::PoseFrame& ta
     policy.localClassHash = wp.classHash;
     policy.localFlail = wp.flail || wp.linked;
     policy.localMultipart = wp.head || !wp.parts.empty();
+    policy.welded = g_twoHandWelded;
     policy.localLeftWeapon = FieldAt(weaponOffset_[1]) && FieldAt(weaponOffset_[1]) != wp.actor;
     policy.pinnedWeapons = pinned_; policy.heldBones = heldBones;
     for (int b = 0; b < sync::kPoseBones; ++b) if (now.valid[b]) policy.validBones |= uint32_t(1) << b;
@@ -1640,7 +1709,7 @@ FighterRig::TwoHandResult FighterRig::ApplyTwoHandPose(const sync::PoseFrame& ta
 
 bool FighterRig::TwoHandErrors(const sync::PoseFrame& target, const sync::FighterNow& now, std::array<double, 5>& out) const {
     const Weapon& wp = weapons_[0];
-    return wp.read && wp.haveTip && !wp.flail && !wp.linked && sync::TwoHandWeaponAccepted(wp.head || !wp.parts.empty(), wp.classHash) &&
+    return wp.read && wp.haveTip && !wp.flail && !wp.linked && sync::TwoHandWeaponAccepted(wp.head || !wp.parts.empty(), wp.classHash, g_twoHandWelded) &&
            sync::MeasureTwoHandPose(target, now, wp.classHash, wp.tipPos, out);
 }
 
@@ -1652,59 +1721,99 @@ std::string FighterRig::HeldWeaponName() const {
 // ApplySeat guesses the seat from the owner's toggles; the owner's game does not always re-seat (an alt grip on an axe
 // slides the hand and keeps the weapon's turn), and the guess held the axe upside down (hsm_held.h). The pose says where
 // the owner's weapon sits in the owner's hand: when this stand-in's differs for long enough, the weapon goes there and
-// the joint is made again, as ApplySeat does. The hand switch moves the joints' reference positions (ApplySwitch) and a
-// shield (grips 6, 7) is held by the forearm: neither is re-seated here.
+// the joint is made again, as ApplySeat does. standin_shield_seat: a shield on the forearm (grips 6, 7) is checked against
+// the forearm that holds it (0: not re-seated, as in 0.8.2).
+// standin_switched_seat: the right hand is checked with the polearm's hands switched as well (0: not, as in 0.8.2; the
+// switch moves the joints' reference positions, ApplySwitch, and a weapon left off there stayed off).
+// standin_held_seat: the left hand's own weapon or buckler is checked the same way (nothing else ever seats it: a weapon
+// the owner turned over in the left hand stayed as it was picked up), and a seat ApplySeat has just guessed is checked
+// with the plain tolerance even with both hands on the shaft (hsm_held.h SeatGuess).
 void FighterRig::ApplyHeld(const sync::PoseFrame& target, const sync::FighterNow& now, double nowMs) {
     if (!StillValid()) return;
-    if (HasTwoHandPose()) { heldCheck_.Reset(); return; }   // active or paused: the pose owns these references
-    UObject* const r = FieldAt(gripOffset_[0]);
-    UObject* const weaponR = FieldAt(weaponOffset_[0]);
-    if (r != heldJoint_ || weaponR != heldWeapon_) { heldJoint_ = r; heldWeapon_ = weaponR; heldCheck_.Forget(); }
-    const Weapon& wp = weapons_[0];
-    const sync::WeaponSample& ow = target.weapons[0];
-    const uint8_t gripR = gripTypeOffset_[0] >= 0 ? reinterpret_cast<const uint8_t*>(willie_)[gripTypeOffset_[0]] : 0;
-    const bool usable = r && weaponR && wp.actor == weaponR && wp.root && r == gripLocked_[0] && ow.present && ow.hand == 0 &&
-                        (!ow.classHash || !wp.classHash || ow.classHash == wp.classHash) && now.weaponValid[0] &&
-                        now.valid[sync::kBoneHandR] && !target.grip.switched2H && gripR != 6 && gripR != 7;
-    if (!usable) { heldCheck_.Reset(); return; }
-    const double steadyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (steadyMs - offWantSinceMs_ < kOffhandSettleMs) { heldCheck_.Reset(); return; }   // ApplyGrip's clock
-    const sync::BoneSample& oh = target.bones[sync::kBoneHandR];
-    const sync::BodyNow& sh = now.bones[sync::kBoneHandR];
+    if (HasTwoHandPose()) {   // active or paused: the pose owns these references
+        heldCheck_[0].Reset();
+        heldCheck_[1].Reset();
+        return;
+    }
+    ApplyHeldHand(0, target, now, nowMs);
+    if (g_heldSeat) ApplyHeldHand(1, target, now, nowMs);
+}
+
+void FighterRig::ApplyHeldHand(int hand, const sync::PoseFrame& target, const sync::FighterNow& now, double nowMs) {
+    sync::HeldCheck& check = heldCheck_[hand];
+    UObject* const r = FieldAt(gripOffset_[hand]);
+    UObject* const weapon = FieldAt(weaponOffset_[hand]);
+    if (r != heldJoint_[hand] || weapon != heldWeapon_[hand]) { heldJoint_[hand] = r; heldWeapon_[hand] = weapon; check.Forget(); }
+    const Weapon& wp = weapons_[hand];
+    const sync::WeaponSample& ow = target.weapons[hand];
+    const uint8_t grip = gripTypeOffset_[hand] >= 0 ? reinterpret_cast<const uint8_t*>(willie_)[gripTypeOffset_[hand]] : 0;
+    // standin_shield_seat: a shield on the forearm (grips 6, 7) is held by lowerarm_l / lowerarm_r at shield_?_socket
+    // (Willie_BP Set Up Left Hand Weapon, :8450, :8460): it is measured and seated against the forearm.
+    const bool forearm = grip == 6 || grip == 7;
+    const int handBone = forearm ? (hand == 0 ? sync::kBoneLowerArmR : sync::kBoneLowerArmL) : (hand == 0 ? sync::kBoneHandR : sync::kBoneHandL);
+    // The left hand: its own weapon only. The off hand of a two-handed grip holds the right hand's weapon by offJoint_.
+    const bool ownWeapon = hand == 0 || (weapon != FieldAt(weaponOffset_[0]) && r != offJoint_);
+    const bool usable = r && weapon && ownWeapon && wp.actor == weapon && wp.root && !wp.fists && r == gripLocked_[hand] &&
+                        ow.present && ow.hand == hand && (!ow.classHash || !wp.classHash || ow.classHash == wp.classHash) &&
+                        now.weaponValid[hand] && now.valid[handBone] && !(hand == 0 && target.grip.switched2H && !g_switchedSeat) &&
+                        (!forearm || g_shieldSeat);
+    if (!usable) { check.Reset(); return; }
+    const double steadyMs = SteadyMs();
+    if (hand == 0 && steadyMs - offWantSinceMs_ < kOffhandSettleMs) { check.Reset(); return; }   // ApplyGrip's clock
+    const sync::BoneSample& oh = target.bones[handBone];
+    const sync::BodyNow& sh = now.bones[handBone];
     const sync::HeldPose owner = sync::HeldIn(oh.pos, oh.rot, ow.pos, ow.rot);
-    const sync::HeldPose mine = sync::HeldIn(sh.pos, sh.rot, now.weapons[0].pos, now.weapons[0].rot);
+    const sync::HeldPose mine = sync::HeldIn(sh.pos, sh.rot, now.weapons[hand].pos, now.weapons[hand].rot);
     // A spear or staff held mid-shaft may sit slid along the shaft (hsm_held.h HeldToleranceForShaft).
     const sync::HeldTolerance tol = sync::HeldToleranceForShaft(sync::HeldToleranceFor(wp.flail != nullptr), owner, oh.rot, ow.base, ow.tip);
     sync::HeldTolerance twoHand = tol;
     twoHand.deg = kHeldTwoHandDeg; twoHand.uu = kHeldTwoHandUu;
-    if (offJoint_ && !sync::HeldDiffers(owner, mine, twoHand)) {
-        heldCheck_.Reset();
+    const bool guessed = hand == 0 && g_heldSeat && seatGuess_.Pending(steadyMs);
+    // standin_two_hand_settle: a smaller error with both hands on is made again too, once it has held for 2 s (hsm_held.h
+    // HeldTwoHandSettle); 0: kept for as long as the grip, as in 0.8.2.
+    const bool nearSeat = hand == 0 && offJoint_ && !guessed && !sync::HeldDiffers(owner, mine, twoHand);
+    if (nearSeat && !g_twoHandSettle) {
+        check.Reset();
         return;
     }
-    if (!heldCheck_.Update(nowMs, owner, mine, tol)) return;
+    if (!check.Update(nowMs, owner, mine, nearSeat ? sync::HeldTwoHandSettle(tol) : tol)) return;
     FTransform keep;
     if (!WorldTransform(wp.root, keep)) return;
     V3 pos;
     Q4 rot;
     sync::HeldWorld(sh.pos, sh.rot, owner, &pos, &rot);
-    const sync::GripSeat seat = sync::SeatFor(gripR, offJoint_ != nullptr, false, false, false, 3);   // socket and bone only
+    // Socket and bone only. The left hand's sockets are the game's own (Willie_BP Set Up Left Hand Weapon).
+    const sync::GripSeat seat = sync::SeatFor(grip, hand == 0 && offJoint_ != nullptr, false, false, false, 3);
+    const char* const socket = forearm   ? (hand == 0 ? "shield_r_socket" : "shield_l_socket")
+                               : hand == 0 ? (seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket")
+                                           : (grip == 5 || grip == 8 ? "weapon_lSocket_Hammer" : "weapon_lSocket");
     Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", false).invoke();
     FTransform t = keep;
     t.translation = ToF(pos);
     t.rotation = ToFQuat(rot);
     SetWorldTransform(wp.root, t);
-    const bool ok = MakeGripJoint(r, wp.root, seat.hammerSocket ? "weapon_rSocket_Hammer" : "weapon_rSocket", seat.lowerArm);
+    const bool ok = MakeGripJoint(hand, r, wp.root, socket, seat.lowerArm);
     SetWorldTransform(wp.root, keep);
     Call(wp.root, "SetSimulatePhysics").set<bool>("bSimulate", true).invoke();
     RearmChain(wp);
-    ChainPolicy(wp);            // the chain's bodies were made again
-    gripLocked_[0] = nullptr;   // locked again on the next Drive
-    switchOn_ = false;
+    ChainPolicy(wp);               // the chain's bodies were made again
+    gripLocked_[hand] = nullptr;   // locked again on the next Drive
+    const bool afterGuess = guessed && offJoint_;
+    if (hand == 0) {
+        // standin_switched_seat: with the hands switched the owner's seat already has the hand slid along the shaft, and the
+        // new joint keeps it; ApplySwitch moves the reference again only when the owner switches back. Otherwise the
+        // new joint starts unswitched, and ApplySwitch slides it again as before.
+        if (!(g_switchedSeat && target.grip.switched2H)) switchOn_ = false;
+        seatGuess_.Clear();        // the guess is checked: the seat is the owner's now
+    }
     // The off hand's joint stays (0.8.0-pre7): it holds hand_l to the shaft, which the right hand's new joint now carries
     // to the owner's seat; breaking and re-attaching it (pre6) swung a polearm by the length between the hands (#74, #79).
-    HSM_LOG("rig: %s: weapon re-seated in the right hand as the owner holds it (%.0f deg, %.1f uu off%s)%s",
-            ObjectName(willie_).c_str(), sync::QuatAngleDeg(owner.rot, mine.rot), sync::Vec3Dist(owner.pos, mine.pos),
-            tol.slideUu > 0.0 ? ", mid-shaft" : "", ok ? "" : " (joint NOT remade)");
+    HSM_LOG("rig: %s: weapon re-seated in the %s hand as the owner holds it (%.0f deg, %.1f uu off%s%s%s)%s",
+            ObjectName(willie_).c_str(), hand == 0 ? "right" : "left", sync::QuatAngleDeg(owner.rot, mine.rot),
+            sync::Vec3Dist(owner.pos, mine.pos), tol.slideUu > 0.0 ? ", mid-shaft" : "",
+            afterGuess ? ", after a guessed seat" : nearSeat ? ", both hands on, settled" : "",
+            hand == 0 && target.grip.switched2H ? ", hands switched" : forearm ? ", on the forearm" : "",
+            ok ? "" : " (joint NOT remade)");
 }
 
 void FighterRig::BreakPelvisCapsule() {
@@ -1892,5 +2001,14 @@ void SetStandInPartsOff(bool on) { g_partsOff = on; }
 void SetStandInTwoHandPose(bool on) { g_twoHandPose = on; }
 void SetStandInTwoHandLock(bool on) { g_twoHandLock = on; }
 void SetStandInTwoHandAudit(bool on) { g_twoHandAudit = on; }
+void SetStandInHeldSeat(bool on) { g_heldSeat = on; }
+void SetStandInSheatheKept(bool on) { g_sheatheKept = on; hands::g_sheatheKept = on; }
+void SetStandInAnimFlags(bool on) { g_animFlags = on; }
+void SetStandInMasterSeat(bool on) { g_masterSeat = on; }
+void SetStandInSwitchedSeat(bool on) { g_switchedSeat = on; }
+void SetStandInShieldSeat(bool on) { g_shieldSeat = on; }
+void SetStandInSeatPoints(bool on) { g_seatPoints = on; }
+void SetStandInTwoHandSettle(bool on) { g_twoHandSettle = on; }
+void SetStandInTwoHandWelded(bool on) { g_twoHandWelded = on; }
 
 }  // namespace hsm::game

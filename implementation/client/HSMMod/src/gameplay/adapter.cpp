@@ -15,6 +15,7 @@
 #include "match/hsm_modes.h"
 #include "match/hsm_team_kit.h"
 #include "session/hsm_crypt_loot.h"
+#include "session/hsm_fighter_park.h"
 #include "session/hsm_ground_clear.h"
 #include "session/hsm_gvas.h"
 #include "sync/hsm_gore.h"
@@ -1302,10 +1303,10 @@ std::vector<UObject*> Adapter::CarriedActors(UObject* willie) {
 UObject* Adapter::WeaponHolder(UObject* weapon) { return weapon ? LastWeaponParent(WeaponParents(weapon)) : nullptr; }
 bool Adapter::WeaponHeldBy(UObject* weapon, UObject* who) { return weapon && HasWeaponParent(WeaponParents(weapon), who); }
 
-void Adapter::StopHair(UObject* willie, bool destroy) {
+bool Adapter::StopHair(UObject* willie, bool destroy) {
     UObject** p = Field<UObject*>(willie, "Hair");
     UObject* hair = p ? *p : nullptr;
-    if (!hair || IsGarbage(hair) || BeingDestroyed(hair)) return;   // none, or already going: the game's Destroy Hair skips it too
+    if (!hair || IsGarbage(hair) || BeingDestroyed(hair)) return false;   // none, or already going: the game's Destroy Hair skips it too
     Call off(hair, "SetEnableSimulation");
     // GroomComponent::SetEnableSimulation(bool bInEnableSimulation). The call's buffer starts zeroed, so it is false even if a
     // build renames the parameter; set it by name where it is there.
@@ -1313,10 +1314,23 @@ void Adapter::StopHair(UObject* willie, bool destroy) {
     const bool stopped = off.valid() && off.invoke();
     if (destroy) Call(hair, "K2_DestroyComponent").invoke();
     HSM_LOG("adapter: hair of %s simulation %s%s", ObjectName(willie).c_str(), stopped ? "off" : "NOT turned off", destroy ? ", destroyed" : "");
+    return true;
+}
+
+bool Adapter::IsParked(UObject* willie) const {
+    for (const Parked& pk : parked_) if (pk.willie == willie) return true;
+    return false;
+}
+
+// The groom component, destroyed on its own once its simulation has been off for kHairSettleTicks frames.
+void Adapter::DestroySettledHair(UObject* willie) {
+    UObject** p = Field<UObject*>(willie, "Hair");
+    UObject* hair = p ? *p : nullptr;
+    if (!hair || IsGarbage(hair) || BeingDestroyed(hair)) return;
+    Call(hair, "K2_DestroyComponent").invoke();
 }
 
 namespace {
-constexpr double kParkMaxMs = 3000;   // a parked fighter is destroyed by then whatever the paint plugin says
 double NowMsLocal() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
@@ -1346,7 +1360,10 @@ void Adapter::FinishDestroy(Parked& pk, const char* why, double t0Ms) {
         ++destroyed;
     }
     const std::string name = ObjectName(pk.willie);
-    if (StillValid(pk.willie, pk.index)) DestroyActor(pk.willie);
+    if (StillValid(pk.willie, pk.index)) {
+        if (pk.hair) DestroySettledHair(pk.willie);   // the order the game uses: the groom, then the fighter
+        DestroyActor(pk.willie);
+    }
     HSM_LOG("adapter: destroyed %s and %d carried actor(s) in %.1f ms (%s)", name.c_str(), destroyed, NowMsLocal() - t0Ms, why);
 }
 
@@ -1361,9 +1378,13 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
         if (!a || a == willie || IsA(a, fighter)) continue;
         pk.carried.push_back({a, ObjectIndex(a)});
     }
-    StopHair(willie, true);
-    if (!PaintTasksQueued(willie)) { FinishDestroy(pk, "now", t0); return; }
-    // The plugin's queued task would run on the freed mesh (#72): out of sight until it is done (TickDeferredDestroys).
+    // hair_settle (crash family 2): the simulation goes off now and the groom goes kHairSettleTicks frames later, so no
+    // hair-strands tick already under way reads it freed. 0: off and destroyed in this call, as before.
+    pk.hair = StopHair(willie, !hairSettle_) && hairSettle_;
+    const bool paint = PaintTasksQueued(willie);
+    if (!hsm::ParkOnDestroy(hairSettle_, pk.hair, paint)) { FinishDestroy(pk, "now", t0); return; }
+    // The plugin's queued task would run on the freed mesh (#72), the hair's tick on the freed groom: out of sight until
+    // both are done (TickDeferredDestroys).
     Call(willie, "SetActorHiddenInGame").set<bool>("bNewHidden", true).invoke();
     Call(willie, "SetActorEnableCollision").set<bool>("bNewActorEnableCollision", false).invoke();
     for (auto& [a, i] : pk.carried) {
@@ -1371,8 +1392,10 @@ void Adapter::DestroyFighter(UObject* willie, int32_t index) {
         Call(a, "SetActorHiddenInGame").set<bool>("bNewHidden", true).invoke();
         Call(a, "SetActorEnableCollision").set<bool>("bNewActorEnableCollision", false).invoke();
     }
-    HSM_LOG("adapter: %s has paint tasks queued; parked out of sight until they are done (%zu carried actor(s))",
-            ObjectName(willie).c_str(), pk.carried.size());
+    pk.paintWaited = paint;
+    if (paint)   // the hair-only park is a few frames on every destroy: its line is the destroy's own ("hair settled")
+        HSM_LOG("adapter: %s has paint tasks queued; parked out of sight until they are done (%zu carried actor(s))",
+                ObjectName(willie).c_str(), pk.carried.size());
     parked_.push_back(std::move(pk));
 }
 
@@ -1381,9 +1404,17 @@ void Adapter::TickDeferredDestroys() {
     for (auto it = parked_.begin(); it != parked_.end();) {
         Parked& pk = *it;
         if (!StillValid(pk.willie, pk.index)) { it = parked_.erase(it); continue; }   // gone with the level
-        const bool waited = now - pk.sinceMs >= kParkMaxMs;
-        if (!waited && PaintTasksQueued(pk.willie)) { ++it; continue; }
-        FinishDestroy(pk, waited ? "parked; paint tasks still queued after the wait" : "parked until its paint tasks were done", pk.sinceMs);
+        ++pk.ticks;
+        const hsm::ParkStep step = hsm::ParkTick(hairSettle_, pk.hair, pk.ticks, now - pk.sinceMs, [&] {
+            const bool queued = PaintTasksQueued(pk.willie);
+            pk.paintWaited = pk.paintWaited || queued;
+            return queued;
+        });
+        if (step == hsm::ParkStep::Wait) { ++it; continue; }
+        const char* why = step == hsm::ParkStep::TimedOut
+                              ? (pk.paintWaited ? "parked; paint tasks still queued after the wait" : "parked; destroyed after the wait")
+                              : pk.paintWaited ? "parked until its paint tasks were done" : "hair settled";
+        FinishDestroy(pk, why, pk.sinceMs);
         it = parked_.erase(it);
     }
 }
@@ -2521,7 +2552,8 @@ std::vector<UObject*> Adapter::AllWillies() {
     // FindInstances matches class names exactly, so the zombie class (a child of Willie_BP_C, no new fields) is
     // scanned on its own: without it the Zombies format's bots are invisible to every scan (#561).
     for (const char* cls : {kWillieClass, kZombieClass})
-        for (UObject* w : FindInstances(cls)) if (!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) out.push_back(w);
+        for (UObject* w : FindInstances(cls))
+            if ((!destroyAware_ || (!IsGarbage(w) && !BeingDestroyed(w))) && !IsParked(w)) out.push_back(w);
     return out;
 }
 

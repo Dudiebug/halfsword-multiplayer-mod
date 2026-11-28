@@ -151,6 +151,7 @@
 #include "session/hsm_progvote.h"
 #include "session/hsm_spawn_anchor.h"
 #include "session/hsm_spawn.h"
+#include "session/hsm_spawn_pace.h"
 #include "session/hsm_travel_gate.h"
 #include "agent/bridge.h"
 #include "agent/vmhook.h"
@@ -374,6 +375,8 @@ struct ActorRef {
 class SessionImpl final : public Session {
 public:
     explicit SessionImpl(const Config& c) : cfg_(c) {
+        adapter_.SetHairSettle(cfg_.hairSettle);
+        spawnPace_.SetGap(uint32_t(cfg_.spawnGapMs));
         lobby_.onEntered = [this] { OnLobbyEntered(); };
         lobby_.onLeft = [this] {
             if (menuAfterResults_ && crypt::ResultsShowing(NowMs(), cryptResultsAt_)) { HSM_LOG("client: lobby gone; the run's results first, then the main menu"); return; }
@@ -6186,10 +6189,16 @@ private:
     // round start's respawn traced the floor through a list walked before the stand-in it replaced was spawned, hit that
     // stand-in's head and put the new one 157 cm up), so the next trace walks again.
     void SpawnedThisTick() { if (spawnIgnoreState_ == SpawnIgnoreState::Cached) spawnIgnoreState_ = SpawnIgnoreState::InTick; }
-    UObject* SpawnFighterNow(const game::Adapter::SpawnOptions& o) { UObject* w = adapter_.SpawnFighter(o); SpawnedThisTick(); return w; }
+    UObject* SpawnFighterNow(const game::Adapter::SpawnOptions& o) {
+        UObject* w = adapter_.SpawnFighter(o);
+        SpawnedThisTick();
+        spawnPace_.Note(NowMs());   // crash family J: the next held spawn waits spawn_gap_ms (hsm_spawn_pace.h)
+        return w;
+    }
     UObject* RespawnLocalNow(const game::Adapter::SpawnOptions& o) {
         UObject* w = adapter_.RespawnLocalPlayer(o);
         SpawnedThisTick();
+        spawnPace_.Note(NowMs());   // never held itself, but the stand-ins after it wait
         if (w) { lastRespawnAt_ = NowMs(); respawnInput_.Arm(lastRespawnAt_); }   // #3490: the restore is repeated (match/hsm_input_mode.h)
         return w;
     }
@@ -7880,7 +7889,17 @@ private:
         for (uint8_t e : ev.respawn)
             if (!RespawnQueued(e)) respawnQueue_.push_back(e);
         if (ev.rematch) { LogPairing("rematch"); RespawnAll(); }
-        if (!respawnQueue_.empty()) { const uint8_t e = respawnQueue_.front(); respawnQueue_.pop_front(); RespawnEntity(e); }
+        if (!respawnQueue_.empty()) {
+            if (!spawnPace_.Ready(now)) { if (!paceHeldAt_) paceHeldAt_ = now; }   // crash family J (spawn_gap_ms)
+            else {
+                const uint8_t e = respawnQueue_.front(); respawnQueue_.pop_front();
+                if (paceHeldAt_) {
+                    HSM_LOG("host: respawn of entity %u held %u ms for the spawn gap (spawn_gap_ms=%u)", e, now - paceHeldAt_, spawnPace_.gap());
+                    paceHeldAt_ = 0;
+                }
+                RespawnEntity(e);
+            }
+        }
         if (progression_ && !bots_.empty() && match_.phase() == MatchPhase::Live) {
             // Every opponent out, as the stock Enemy Count takes it: dead, given up or downed (Willie_BP Event Lose Match, build 26568321
             // :16134-16224: "Give Up" is set for every bot but a zombie, Skeletron or a sleeper, so a zombie yields only on the
@@ -10364,8 +10383,10 @@ private:
 
     void CreatePuppets() {
         if (bodyWork_) return;
+        const uint32_t now = NowMs();
         auto have = [this](uint32_t id) { return clientBlobs_.AtLeast(id) != nullptr; };
         for (const Spawn& sp : world_.PendingPuppets(have)) {
+            if (!spawnPace_.Ready(now)) { if (!paceHeldAt_) paceHeldAt_ = now; return; }   // crash family J (spawn_gap_ms)
             game::Adapter::SpawnOptions o;
             o.blob = sp.blobId ? clientBlobs_.AtLeast(sp.blobId) : nullptr;
             o.at = {sp.x, sp.y, sp.z}; o.yawDeg = sp.yaw; o.teamInt = TeamIntFor(sp.team, sp.entity); o.brain = false;   // follows its owner's pose
@@ -10373,6 +10394,10 @@ private:
             // before it knew (a MatchInfo may still be on its way, pre24: Abyss clients saw human bots).
             o.fighterClass = FighterClassFor(Format(info_.format) == Format::Zombies, sp.kind == EntityKind::Bot, (sp.flags & kSpawnZombie) != 0);
             ApplyRole(o, sp.entity);
+            if (paceHeldAt_) {
+                HSM_LOG("client: stand-in of entity %u held %u ms for the spawn gap (spawn_gap_ms=%u)", sp.entity, now - paceHeldAt_, spawnPace_.gap());
+                paceHeldAt_ = 0;
+            }
             UObject* w = SpawnFighterNow(o);
             if (w) {
                 puppets_[sp.entity].Set(w); QueueTint(w, sp.team); standIns_.Attach(sp.entity, w);
@@ -11292,6 +11317,8 @@ private:
     // A fighter was destroyed or spawned this tick (about 60 ms each): the next one waits for the next frame. A Duel
     // round reset did four in one tick (two-player logs 8 and 9: 250 ms).
     bool bodyWork_ = false;
+    hsm::SpawnPace spawnPace_;    // crash family J: fighter spawns on this machine at least spawn_gap_ms apart
+    uint32_t paceHeldAt_ = 0;     // when a stand-in (client) or a queued respawn (host) was first held for the gap (0: none held)
     uint8_t mySlot_ = 0;
     ReportOffer reportOffer_;                     // another player's report this player may add a log to
     BanList bans_;                                // HSMMod.bans plus the short blocks of kicked players (host)
@@ -11540,6 +11567,15 @@ bool StartMod(const Config& cfg) {
     game::SetStandInGripLock(cfg.standInGripLock);
     game::SetStandInTwoHandPose(cfg.standInTwoHandPose);
     game::SetStandInTwoHandLock(cfg.standInTwoHandLock);
+    game::SetStandInHeldSeat(cfg.standInHeldSeat);
+    game::SetStandInSheatheKept(cfg.standInSheatheKept);
+    game::SetStandInAnimFlags(cfg.standInAnimFlags);
+    game::SetStandInMasterSeat(cfg.standInMasterSeat);
+    game::SetStandInSwitchedSeat(cfg.standInSwitchedSeat);
+    game::SetStandInShieldSeat(cfg.standInShieldSeat);
+    game::SetStandInSeatPoints(cfg.standInSeatPoints);
+    game::SetStandInTwoHandSettle(cfg.standInTwoHandSettle);
+    game::SetStandInTwoHandWelded(cfg.standInTwoHandWelded);
     game::SetStandInScabbardFix(cfg.scabbardFix);
     game::SetStandInPartsOff(cfg.standInPartsOff);
     game::SetFighterBoxFix(cfg.standInBoxFix);

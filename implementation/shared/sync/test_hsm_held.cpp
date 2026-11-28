@@ -137,6 +137,52 @@ static void TestResetForgetsTheStretch() {
     CHECK(c.Update(2 * kHeldPersistMs, owner, wrong));
 }
 
+// standin_two_hand_settle: a small two-handed error (past the plain tolerance, under the two-handed one) is made again
+// once it has held for kHeldTwoHandSettleMs, then not again before kHeldTwoHandGapMs.
+static void TestTwoHandSettle() {
+    const HeldTolerance plain = HeldToleranceFor(false);
+    const HeldTolerance settle = HeldTwoHandSettle(plain);
+    CHECK(settle.deg == plain.deg && settle.uu == plain.uu && settle.slideUu == plain.slideUu);
+    CHECK(settle.persistMs == kHeldTwoHandSettleMs && settle.minGapMs == kHeldTwoHandGapMs);
+    CHECK(plain.persistMs == kHeldPersistMs);
+    CHECK(HeldTwoHandSettle(HeldToleranceFor(true)).minGapMs == kHeldTwoHandGapMs);   // never sooner than the flail's 3 s either
+    const HeldPose owner{V3{0, 0, 10}, Q4{}};
+    const HeldPose nearSeat{V3{0, 0, 10}, AxisAngle(V3{0, 1, 0}, 40)};   // under 60 deg, over 25
+    HeldCheck c;
+    CHECK(!c.Update(0, owner, nearSeat, settle));
+    CHECK(!c.Update(kHeldPersistMs, owner, nearSeat, settle));               // the plain wait is not enough
+    CHECK(!c.Update(kHeldTwoHandSettleMs - 1, owner, nearSeat, settle));
+    CHECK(c.Update(kHeldTwoHandSettleMs, owner, nearSeat, settle));
+    const HeldPose moved{V3{0, 0, 10}, AxisAngle(V3{0, 1, 0}, -30)};      // the owner turned it: a new seat to make
+    double t = kHeldTwoHandSettleMs + 1;
+    int seats = 0;
+    for (; t < kHeldTwoHandSettleMs + kHeldTwoHandGapMs - 1; t += 16) seats += c.Update(t, moved, nearSeat, settle);
+    CHECK(seats == 0);                                                     // held long enough, but within the gap
+    for (; t < kHeldTwoHandSettleMs + kHeldTwoHandGapMs + 100; t += 16) seats += c.Update(t, moved, nearSeat, settle);
+    CHECK(seats == 1);
+    CHECK(kHeldTwoHandSettleMs > kHeldPersistMs && kHeldTwoHandGapMs >= kHeldMinGapMs);
+}
+
+static void TestSeatGuess() {
+    SeatGuess g;
+    CHECK(!g.Pending(0.0));                              // nothing guessed yet
+    CHECK(!g.Pending(1e9));
+    g.Made(1000.0);
+    CHECK(g.Pending(1000.0));
+    CHECK(g.Pending(1000.0 + kSeatGuessCheckMs - 1.0));
+    CHECK(!g.Pending(1000.0 + kSeatGuessCheckMs));       // the check ends: the two-handed tolerance is back
+    CHECK(!g.Pending(1000.0 + kSeatGuessCheckMs + 5000.0));
+    g.Made(9000.0);                                      // a later guess starts its own window
+    CHECK(g.Pending(9000.0 + kSeatGuessCheckMs - 1.0));
+    g.Clear();                                           // the seat was made at the owner's: done
+    CHECK(!g.Pending(9000.0));
+    CHECK(!g.Pending(9001.0));
+    g.Made(20000.0);
+    CHECK(g.Pending(20001.0));
+    CHECK(kSeatGuessCheckMs >= kHeldPersistMs + kHeldMinGapMs);   // long enough for one checked re-seat after the guess
+    CHECK(kSeatGuessCheckMs <= 5000.0);
+}
+
 int main() {
     TestHeldRoundTrips();
     TestHeldMovesWithTheHand();
@@ -149,6 +195,8 @@ int main() {
     TestCheckSpacesReseats();
     TestCheckDoesNotRepeatASeatThatDidNotTake();
     TestResetForgetsTheStretch();
+    TestTwoHandSettle();
+    TestSeatGuess();
     if (g_fail) { std::printf("test_hsm_held: %d failure(s)\n", g_fail); return 1; }
     std::printf("test_hsm_held: ok\n");
     return 0;

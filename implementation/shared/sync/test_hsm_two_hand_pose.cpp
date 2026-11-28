@@ -297,6 +297,45 @@ static void TestKnownRigidMultipartWeapons() {
     CHECK(TwoHandWeaponAccepted(false, WeaponClassHash("ModularWeaponBP_C")));
     CHECK(!TwoHandWeaponAccepted(true, WeaponClassHash("ModularWeaponBP_C")));
     CHECK(TwoHandWeaponAccepted(true, WeaponClassHash("ModularWeaponBP_Halberd_D_C")));
+    CHECK(!TwoHandWeaponAccepted(true, WeaponClassHash("ModularWeaponBP_C"), false));
+    CHECK(TwoHandWeaponAccepted(true, WeaponClassHash("ModularWeaponBP_C"), true));
+}
+
+// standin_two_hand_welded: every multipart weapon's parts are welded to BaseMesh (ModularWeaponBP.cpp:235, :1988), so
+// swords, axes and the plain class go on the pose path too; a chain (found here, or a flail's class) still refuses it.
+static void TestWeldedMultipartWeapons() {
+    for (const char* name : {"ModularWeaponBP_C", "ModularWeaponBP_Axe_C", "ModularWeaponBP_Axe_2_C", "ModularWeaponBP_Axe_6_C",
+                             "ModularWeaponBP_Axe2H_C", "ModularWeaponBP_Spear_Custom_C", "ModularWeaponBP_Halberd_A_C"}) {
+        PoseFrame owner = Spear();
+        TwoHandPosePolicy policy = Ready();
+        policy.welded = true;
+        owner.weapons[0].classHash = policy.localClassHash = WeaponClassHash(name);
+        owner.weapons[0].hasHead = true;
+        policy.localMultipart = true;
+        CHECK(!IsChainTwoHandWeapon(owner.weapons[0].classHash));
+        CHECK(TwoHandPoseStatus(owner, policy) == TwoHandPoseReason::Ready);
+        std::array<GripFrame, 2> frames;
+        CHECK(BuildTwoHandPose(owner, policy, {}, frames));
+        policy.localFlail = true;          // a chain found here wins
+        CHECK(TwoHandPoseStatus(owner, policy) == TwoHandPoseReason::Flail);
+        policy.localFlail = false;
+        policy.welded = false;             // 0: only the listed polearms, as in 0.8.2
+        CHECK(TwoHandPoseStatus(owner, policy) ==
+              (IsRigidTwoHandWeapon(owner.weapons[0].classHash) ? TwoHandPoseReason::Ready : TwoHandPoseReason::NotListed));
+    }
+    for (const char* name : {"ModularWeaponBP_Flail_A_C", "ModularWeaponBP_Flail_B_C", "ModularWeaponBP_Flail_C_C",
+                             "ModularWeaponBP_Flail_D_C"}) {
+        PoseFrame owner = Spear();
+        TwoHandPosePolicy policy = Ready();
+        policy.welded = true;
+        owner.weapons[0].classHash = policy.localClassHash = WeaponClassHash(name);
+        owner.weapons[0].hasHead = true;
+        CHECK(IsChainTwoHandWeapon(owner.weapons[0].classHash));
+        CHECK(TwoHandPoseStatus(owner, policy) == TwoHandPoseReason::NotListed);   // even with the chain scan missed
+        CHECK(!TwoHandWeaponAccepted(true, owner.weapons[0].classHash, true));
+        CHECK(TwoHandWeaponAccepted(false, owner.weapons[0].classHash, true));      // one piece: nothing to refuse
+    }
+    CHECK(!IsChainTwoHandWeapon(0));
 
     // The head of a weapon the pose holds is not servoed: a welded Blade's velocity is the whole weapon's.
     CHECK(HeadServoed(true, false, 0));
@@ -433,6 +472,7 @@ int main() {
     TestInvalidInputsAreAtomic();
     TestReasons();
     TestKnownRigidMultipartWeapons();
+    TestWeldedMultipartWeapons();
     TestMeasurementsExposeLongWeaponError();
     TestMeasurementsIgnorePacketTip();
     TestMeasurementsRejectIncompleteData();

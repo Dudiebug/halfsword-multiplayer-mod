@@ -1,5 +1,6 @@
 #include "gameplay/object_sync.h"
 #include "gameplay/weapon_hands.h"
+#include "combat/hsm_equip.h"
 #include "log.h"
 #include <algorithm>
 #include <cstdio>
@@ -12,7 +13,19 @@ using namespace hsm::ue;
 using namespace hsm::game::hands;
 
 // A weapon leaves the hand of a fighter simulated here (dropped, thrown, disarmed): the hand field moves off it and
-// the game takes the fighter off its "Parent Actors" (a sheathed weapon keeps it, Willie_BP "Set Up Right Hand Weapon").
+// the game takes the fighter off its "Parent Actors". Set Up Right/Left Hand Weapon does that to a weapon going into a
+// slot too (Willie_BP.cpp:8932): the game's own sheathe keeps "Parent Actors" only while its scabbard pulls the weapon in,
+// so a stand-in's hand also asks the slots (SlotsOf, combat::LeftHandIntoSlot).
+
+// A fighter's five slot variables (SheathSlots_Enum order), each name written out so tools/check_reflection.py sees it.
+static std::array<const void*, combat::kEquipSlots> SlotsOf(UObject* willie) {
+    std::array<const void*, combat::kEquipSlots> out{};
+    UObject** f[combat::kEquipSlots] = {Field<UObject*>(willie, "Weapon Slot R 1"), Field<UObject*>(willie, "Weapon Slot R 2"),
+                                        Field<UObject*>(willie, "Weapon Slot Back"), Field<UObject*>(willie, "Weapon Slot L 1"),
+                                        Field<UObject*>(willie, "Weapon Slot L 2")};
+    for (int k = 0; k < combat::kEquipSlots; ++k) out[size_t(k)] = f[k] ? *f[k] : nullptr;
+    return out;
+}
 void ObjectSync::DetectDrops(double nowMs, const std::vector<std::pair<uint8_t, UObject*>>& owned) {
     std::array<bool, kMaxWillies + 1> seen{};
     for (const auto& [e, w] : owned) {
@@ -351,6 +364,9 @@ void ObjectSync::MatchHand(uint8_t e, UObject* standIn, int h, std::array<UObjec
                 HSM_LOG("props: stand-in of e%u: the weapon in hand %d is gone, %.0f ms after the stand-in was bound", e, h,
                         nowMs - standInHands_[e].boundMs);
             sh.selfDropLogged = true;
+        } else if (g_sheatheKept && combat::LeftHandIntoSlot(prev, SlotsOf(standIn))) {
+            // Sheathed (EquipSync or the game): the slot holds it. Set Up ... Hand Weapon took the stand-in off its "Parent
+            // Actors" all the same, so that test alone would make it fall out of the slot.
         } else if (!ObjectField(prev, 0)) {
             SelfDropped(e, standIn, h, sh, cur, nowMs);
             if (env_.handsChanged) env_.handsChanged(e);

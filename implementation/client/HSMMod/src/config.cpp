@@ -49,6 +49,25 @@ constexpr char kDefaultIni[] =
     "standin_two_hand_pose=1\n"
     "; 1: under that playback both hands hold the shaft firmly; 0: the off hand slides and turns on it as before (comparison)\n"
     "standin_two_hand_lock=1\n"
+    "; 1: another player's weapon is seated in the hand as its owner holds it: the left hand's too, a sword beside a shield\n"
+    ";   stays put while its owner holds both attack buttons, and a two-handed grip change is checked; 0: as in 0.8.2-beta1\n"
+    "standin_held_seat=1\n"
+    "; 1: a weapon another player puts away stays in its sheath on your screen; 0: as in 0.8.2 (it may fall out)\n"
+    "standin_sheathe_kept=1\n"
+    "; 1: another player's arms take the same two-handed pose as theirs, and their master stroke grip shows; 0: as in 0.8.2\n"
+    "standin_anim_flags=1\n"
+    "; 1: another player's master stroke grip turns their weapon in the hand as it does on their screen; 0: as in 0.8.2\n"
+    "standin_master_seat=1\n"
+    "; 1: another player's polearm with the hands switched sits in their hands as on their screen; 0: as in 0.8.2\n"
+    "standin_switched_seat=1\n"
+    "; 1: another player's shield on the forearm sits on it as on their screen; 0: as in 0.8.2\n"
+    "standin_shield_seat=1\n"
+    "; 1: another player's weapon sits in their hand at the same point as on their screen for every grip; 0: as in 0.8.2\n"
+    "standin_seat_points=1\n"
+    "; 1: another player's two-handed weapon a little off from where they hold it is put right after 2 s; 0: as in 0.8.2\n"
+    "standin_two_hand_settle=1\n"
+    "; 1: another player's sword, axe or mace held in two hands follows their hands like a polearm does; 0: as in 0.8.2\n"
+    "standin_two_hand_welded=1\n"
     "; 1: the host starts a match even when another player runs a different mod build (testing only)\n"
     "allow_build_mismatch=0\n"
     "; 1: every player is built like a fighter of the lobby's tier (same body mass and grip strength), whatever their own\n"
@@ -90,6 +109,11 @@ constexpr char kDefaultIni[] =
     "; client: 1 removes the foes only this machine sees (the level starts its own on every machine) every frame for the first\n"
     "; seconds of a level, and in a lobby between matches too; 0: once a second, and only while a match is running\n"
     "purge_early=1\n"
+    "; 1: a fighter the mod removes has its hair simulation turned off a few frames before its hair and body go; 0: all\n"
+    ";   in the same frame\n"
+    ";hair_settle=1\n"
+    "; ms between two fighters appearing on this machine at a match start or a respawn (0-500; 0: one a frame)\n"
+    ";spawn_gap_ms=120\n"
     "; competitive netcode (on by default). competitive=1 sets every key below to its competitive value; a key you\n"
     ";   uncomment still wins. competitive=0 goes back to the netcode before protocol rev 42.\n"
     "competitive=1\n"
@@ -371,6 +395,8 @@ Config LoadConfig() {
     c.scabbardFix = ReadString(ini, L"scabbard_fix", "1") != "0";
     c.standInPartsOff = ReadString(ini, L"standin_parts_off", "0") == "1";
     c.standInBoxFix = ReadString(ini, L"standin_box_fix", "1") != "0";
+    c.hairSettle = ReadString(ini, L"hair_settle", "1") != "0";
+    c.spawnGapMs = std::clamp(std::atoi(ReadString(ini, L"spawn_gap_ms", "120").c_str()), 0, 500);
     c.fenceFix = ReadString(ini, L"fence_fix", "1") != "0";
     c.cryptsPauseLift = ReadString(ini, L"crypts_pause_lift", "1") != "0";
     c.cryptsRandomCharacter = ReadString(ini, L"crypts_random_character", "1") != "0";
@@ -438,6 +464,24 @@ Config LoadConfig() {
     c.standInGripLock = ReadString(ini, L"standin_grip", "lock") != "free";
     c.standInTwoHandPose = ReadString(ini, L"standin_two_hand_pose", "1") != "0";
     c.standInTwoHandLock = ReadString(ini, L"standin_two_hand_lock", "1") != "0";
+    c.standInHeldSeat = ReadString(ini, L"standin_held_seat", "1") != "0";
+    HSM_LOG("config: standin_held_seat=%d", c.standInHeldSeat ? 1 : 0);
+    c.standInSheatheKept = ReadString(ini, L"standin_sheathe_kept", "1") != "0";
+    HSM_LOG("config: standin_sheathe_kept=%d", c.standInSheatheKept ? 1 : 0);
+    c.standInAnimFlags = ReadString(ini, L"standin_anim_flags", "1") != "0";
+    HSM_LOG("config: standin_anim_flags=%d", c.standInAnimFlags ? 1 : 0);
+    c.standInMasterSeat = ReadString(ini, L"standin_master_seat", "1") != "0";
+    HSM_LOG("config: standin_master_seat=%d", c.standInMasterSeat ? 1 : 0);
+    c.standInSwitchedSeat = ReadString(ini, L"standin_switched_seat", "1") != "0";
+    HSM_LOG("config: standin_switched_seat=%d", c.standInSwitchedSeat ? 1 : 0);
+    c.standInShieldSeat = ReadString(ini, L"standin_shield_seat", "1") != "0";
+    HSM_LOG("config: standin_shield_seat=%d", c.standInShieldSeat ? 1 : 0);
+    c.standInSeatPoints = ReadString(ini, L"standin_seat_points", "1") != "0";
+    HSM_LOG("config: standin_seat_points=%d", c.standInSeatPoints ? 1 : 0);
+    c.standInTwoHandSettle = ReadString(ini, L"standin_two_hand_settle", "1") != "0";
+    HSM_LOG("config: standin_two_hand_settle=%d", c.standInTwoHandSettle ? 1 : 0);
+    c.standInTwoHandWelded = ReadString(ini, L"standin_two_hand_welded", "1") != "0";
+    HSM_LOG("config: standin_two_hand_welded=%d", c.standInTwoHandWelded ? 1 : 0);
     c.allowBuildMismatch = ReadString(ini, L"allow_build_mismatch", "0") == "1";
     c.gameCheckTest = ReadString(ini, L"game_check_test", "0") == "1";
     c.forceUnknownBuild = Clamp(std::atoi(ReadString(ini, L"force_unknown_build", "0").c_str()), 0, 2);
@@ -565,6 +609,8 @@ Config LoadConfig() {
     HSM_LOG("config: drive_lean=%d host_input_delay=%s host_lock_on=%d scabbard_fix=%d force_strength=%d stuck_armor_gate=%d standin_parts_off=%d standin_box_fix=%d", c.driveLean ? 1 : 0,
             c.hostInputDelay.mode == HostDelayMode::Auto ? "auto" : c.hostInputDelay.mode == HostDelayMode::Off ? "0" : std::to_string(c.hostInputDelay.fixedMs).c_str(),
             c.hostLockOn ? 1 : 0, c.scabbardFix ? 1 : 0, c.forceStrength ? 1 : 0, c.stuckArmorGate ? 1 : 0, c.standInPartsOff ? 1 : 0, c.standInBoxFix ? 1 : 0);
+    HSM_LOG("config: hair_settle=%d", c.hairSettle ? 1 : 0);
+    HSM_LOG("config: spawn_gap_ms=%d", c.spawnGapMs);
     HSM_LOG("config: netcode competitive=%d late_send=%d combat_copies=%d min_fps=%d", c.competitive ? 1 : 0, c.lateSend ? 1 : 0,
             c.combatCopies ? 1 : 0, c.minFps);
     HSM_LOG("config: lobby_rejoin=%d", c.lobbyRejoin ? 1 : 0);

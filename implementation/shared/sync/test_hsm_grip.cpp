@@ -96,6 +96,113 @@ static void TestSeatKey() {
     CHECK(SeatKey(false, false, false) == 0);                                          // a new joint's seat
 }
 
+static void TestSeatKeyFor() {
+    for (int g = 0; g <= 255; ++g) CHECK(TwoHandedGrip(uint8_t(g)) == (g >= 10 && g <= 16));   // the game's R Two Handed Grip set
+    for (int g = 0; g <= 31; ++g) for (int m = 0; m < 2; ++m) for (int r = 0; r < 2; ++r) {
+        const uint8_t grip = uint8_t(g);
+        // The alt flag seats only a two-handed grip; in any other grip the key is the one without it.
+        CHECK(SeatKeyFor(grip, true, m != 0, r != 0, false) == SeatKey(g >= 10 && g <= 16, m != 0, r != 0));
+        CHECK(SeatKeyFor(grip, false, m != 0, r != 0, false) == SeatKey(false, m != 0, r != 0));
+        // The earlier rule: every flag counts in every grip.
+        CHECK(SeatKeyFor(grip, true, m != 0, r != 0, true) == SeatKey(true, m != 0, r != 0));
+        CHECK(SeatKeyFor(grip, false, m != 0, r != 0, true) == SeatKey(false, m != 0, r != 0));
+    }
+    CHECK(SeatKeyFor(1, true, false, false, false) == 0);    // a sword beside a shield: both buttons held, no re-seat
+    CHECK(SeatKeyFor(2, true, false, false, false) == 0);
+    CHECK(SeatKeyFor(3, true, false, false, false) == 0);
+    CHECK(SeatKeyFor(9, true, false, false, false) == 0);
+    CHECK(SeatKeyFor(17, true, false, false, false) == 0);
+    CHECK(SeatKeyFor(15, true, false, false, false) == 1);   // the half-sword grip still seats
+    CHECK(SeatKeyFor(10, true, false, false, false) == 1);
+    CHECK(SeatKeyFor(16, true, false, false, false) == 1);
+    CHECK(SeatKeyFor(1, true, true, false, false) == 2);     // mordhau and the reverse grip seat in any grip
+    CHECK(SeatKeyFor(1, true, false, true, false) == 4);
+    CHECK(SeatKeyFor(1, true, false, false, true) == 1);
+}
+
+// Protocol 54: the master stroke grip (Willie_BP.cpp Event Master Stroke Switch, :15841; the alt re-seat, :25862).
+static void TestMasterSeat() {
+    // The alt / mordhau re-seat adds Rot(0,90,0) while the master stroke is on and the grip is not reversed.
+    CHECK(SeatFor(11, true, false, false, false, 1, true).flip == SeatFlip::Yaw90);
+    CHECK(SeatFor(11, true, false, false, false, 1, false).flip == SeatFlip::None);
+    CHECK(SeatFor(11, true, false, false, false, 1).flip == SeatFlip::None);              // the default: no master stroke
+    for (unsigned t = 0; t < 4; ++t) {
+        CHECK(SeatFor(11, true, false, false, true, uint8_t(t), true).flip == ReverseFlip(uint8_t(t)));   // reverse wins
+        CHECK(SeatFor(11, true, false, false, true, uint8_t(t), false).flip == ReverseFlip(uint8_t(t)));
+    }
+    CHECK(ReverseFlip(0) == SeatFlip::Yaw180 && ReverseFlip(1) == SeatFlip::Pitch180 && ReverseFlip(2) == SeatFlip::Pitch180 &&
+          ReverseFlip(3) == SeatFlip::None);
+    CHECK(SeatFor(11, true, false, false, false, 1, true).point == SeatPoint::Default);   // the turn does not move the point
+    CHECK(SeatFor(11, true, true, false, false, 1, true).point == SeatPoint::Alt);
+    // The switch's own seat: the weapon's origin, no attach point; the joint at the hammer socket.
+    for (unsigned d = 0; d < 32; ++d) for (int sw = 0; sw < 2; ++sw) {
+        const GripSeat s = MasterSeatFor(11, uint8_t(d), sw != 0, true, false, 1);
+        CHECK(s.point == SeatPoint::Socket);
+        CHECK(s.jointHammer);
+        CHECK(s.flip == SeatFlip::Yaw90);
+        CHECK(s.hammerSocket == (d == 5 || d == 8 || sw != 0));                          // the weapon's default, not gripR
+        CHECK(s.shieldSocket == (!s.hammerSocket && (d == 6 || d == 7)));
+        CHECK(!(s.hammerSocket && s.shieldSocket));
+        CHECK(!s.lowerArm);                                                              // gripR 11 holds hand_r
+    }
+    CHECK(!MasterSeatFor(15, 1, false, true, false, 1).hammerSocket);                   // gripR 15 alone is not the hammer here
+    CHECK(MasterSeatFor(6, 6, false, true, false, 1).lowerArm && MasterSeatFor(7, 1, false, true, false, 1).lowerArm);
+    CHECK(!MasterSeatFor(10, 6, false, true, false, 1).lowerArm);                        // the bone follows the current grip
+    CHECK(MasterSeatFor(11, 1, false, false, false, 1).flip == SeatFlip::None);          // turned off: straight again
+    for (unsigned t = 0; t < 4; ++t) {
+        CHECK(MasterSeatFor(11, 1, false, true, true, uint8_t(t)).flip == ReverseFlip(uint8_t(t)));
+        CHECK(MasterSeatFor(11, 1, false, false, true, uint8_t(t)).flip == ReverseFlip(uint8_t(t)));
+    }
+    // The key: bit 8, only when the rig counts the master stroke; the other bits are unchanged.
+    for (int g = 0; g <= 31; ++g) for (int a = 0; a < 2; ++a) for (int m = 0; m < 2; ++m) for (int r = 0; r < 2; ++r) {
+        const uint8_t off = SeatKeyFor(uint8_t(g), a != 0, m != 0, r != 0, false, false);
+        const uint8_t on = SeatKeyFor(uint8_t(g), a != 0, m != 0, r != 0, false, true);
+        CHECK(off == SeatKeyFor(uint8_t(g), a != 0, m != 0, r != 0, false));
+        CHECK(on == uint8_t(off | kSeatKeyMaster));
+        CHECK((off & kSeatKeyMaster) == 0);
+        CHECK(MasterSeatChange(off, on) && MasterSeatChange(on, off));
+        CHECK(!MasterSeatChange(off, off) && !MasterSeatChange(on, on));
+    }
+    CHECK(!MasterSeatChange(0, kSeatKeyMaster | 1));   // the alt grip came on with it: the alt re-seat stays
+    CHECK(!MasterSeatChange(kSeatKeyMaster, 1));
+    CHECK(!MasterSeatChange(0, 4) && !MasterSeatChange(kSeatKeyMaster, kSeatKeyMaster | 2));
+}
+
+// Build 26820056's attach point (Willie_BP.cpp:25864): grip 3 and the reach.
+static SeatInput In(uint8_t grip, bool off, bool alt, bool mord, bool search) {
+    SeatInput in;
+    in.gripR = grip; in.offhand = off; in.alt = alt; in.mordhau = mord; in.offSearching = search;
+    return in;
+}
+static void TestSeatForBuild() {
+    CHECK(SeatForBuild(In(3, false, false, false, false)).point == SeatPoint::LeftDefault);   // not the alt point
+    CHECK(SeatForBuild(In(3, true, false, false, false)).point == SeatPoint::LeftDefault);
+    CHECK(SeatForBuild(In(3, false, true, false, false)).point == SeatPoint::Alt);           // the alt grip wins
+    CHECK(SeatForBuild(In(3, false, false, true, false)).point == SeatPoint::Reverse);       // mordhau wins
+    const uint8_t longGrips[3] = {13, 14, 16};
+    for (uint8_t g : longGrips) {
+        CHECK(SeatForBuild(In(g, false, false, false, false)).point == SeatPoint::Alt);      // one hand on it
+        CHECK(SeatForBuild(In(g, false, false, false, true)).point == SeatPoint::Default);   // the off hand reaching
+        CHECK(SeatForBuild(In(g, true, false, false, false)).point == SeatPoint::Default);   // both hands on it
+        CHECK(SeatForBuild(In(g, false, true, false, true)).point == SeatPoint::Alt);        // the alt grip still
+    }
+    for (unsigned g = 0; g < 32; ++g) {
+        if (g == 3 || g == 13 || g == 14 || g == 16) continue;
+        for (int s = 0; s < 2; ++s) {
+            CHECK(SeatForBuild(In(uint8_t(g), false, false, false, s != 0)).point == SeatPoint::Default);
+            CHECK(SeatForBuild(In(uint8_t(g), false, true, false, s != 0)).point == SeatPoint::Alt);
+            CHECK(SeatForBuild(In(uint8_t(g), false, false, true, s != 0)).point == SeatPoint::Reverse);
+        }
+    }
+    // The rest is SeatFor's: flip, sockets, bone.
+    for (unsigned g = 0; g < 32; ++g) for (int r = 0; r < 2; ++r) for (int m = 0; m < 2; ++m) for (unsigned t = 0; t < 4; ++t) {
+        SeatInput in = In(uint8_t(g), false, false, false, false);
+        in.reverse = r != 0; in.master = m != 0; in.reverseType = uint8_t(t);
+        const GripSeat a = SeatForBuild(in), b = SeatFor(uint8_t(g), false, false, false, r != 0, uint8_t(t), m != 0);
+        CHECK(a.flip == b.flip && a.hammerSocket == b.hammerSocket && a.lowerArm == b.lowerArm && !a.shieldSocket && !a.jointHammer);
+    }
+}
+
 static void TestShieldHandGrip() {
     for (int g = 0; g <= 255; ++g) CHECK(ShieldHandGrip(uint8_t(g)) == (g >= 5 && g <= 9));
 }
@@ -109,6 +216,9 @@ int main() {
     TestSeatFlip();
     TestSeatSocketAndBone();
     TestSeatKey();
+    TestSeatKeyFor();
+    TestMasterSeat();
+    TestSeatForBuild();
     TestShieldHandGrip();
     if (g_fail) std::printf("%d CHECK(S) FAILED\n", g_fail);
     else std::printf("all tests passed\n");

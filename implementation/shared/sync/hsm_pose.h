@@ -26,6 +26,7 @@ constexpr std::array<int, kPoseBones> kPoseParent = {0, 0, 1, 2, 3, 4, 5, 6, 7, 
 constexpr std::array<bool, kPoseBones> kPoseHasBody = {true, false, true, true, true, true, true, true, true, true, true, true,
                                                        true, true, true, true, true, true, true, true, true, true, true};
 constexpr int kBonePelvis = 0, kBoneHead = 8, kBoneHandL = 12, kBoneHandR = 16, kBoneFootL = 19, kBoneFootR = 22;
+constexpr int kBoneLowerArmL = 11, kBoneLowerArmR = 15;   // a shield in grip 6 or 7 is held by the forearm
 constexpr bool IsLegBone(int b) { return b >= 17; }
 
 struct BoneSample {
@@ -65,6 +66,13 @@ struct GripState {
     bool mordhau = false;           // Mordhau Grip
     bool switched2H = false;        // 2H Switched Hands (Temp)
     bool reverseR = false;          // R Hand Reverse Grip
+    // Protocol 54. The stand-in's game never sets these itself (its owner's input and tick do), and its seat and its
+    // animation read them: Master Stroke Grip (grip bit 15; the game turns the weapon 90 degrees in the hand, Willie_BP
+    // Event_Master_Stroke_Switch), R Two Handed Grip and L Offhand Searching Grip (pose flags bits 6 and 7; the arm
+    // animation's two-handed pose and the off hand reaching for the shaft).
+    bool masterStroke = false;      // Master Stroke Grip
+    bool twoHanded = false;         // R Two Handed Grip
+    bool offSearching = false;      // L Offhand Searching Grip
 };
 
 struct PoseFrame {

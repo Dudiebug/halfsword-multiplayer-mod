@@ -478,8 +478,23 @@ static void TestSheathHang() {
     CHECK(near(HangRoot({1, 2, 3}, {0.3, -0.1, 0.7, 0.640312}, 0), 1, 2, 3));  // no hang: the socket itself
 }
 
+// The bug: a sheathed weapon (in a slot variable) was taken for one the hand dropped.
+static void TestLeftHandIntoSlot() {
+    int a = 0, b = 0;
+    std::array<const void*, kEquipSlots> slots{};
+    CHECK(!LeftHandIntoSlot(&a, slots));
+    CHECK(!LeftHandIntoSlot(nullptr, slots));   // empty slots are not "nothing went into a slot"
+    for (int k = 0; k < kEquipSlots; ++k) {
+        slots = {};
+        slots[size_t(k)] = &a;
+        CHECK(LeftHandIntoSlot(&a, slots));
+        CHECK(!LeftHandIntoSlot(&b, slots));
+    }
+}
+
 int main() {
     TestSheathHang();
+    TestLeftHandIntoSlot();
     TestRoundTrip();
     TestFraming();
     TestRanges();

@@ -160,8 +160,12 @@ public:
     void TickDeferredDestroys();
     // The game turns a Willie's hair simulation off before it destroys the groom (Willie_BP.cpp:16487-16488); destroying a
     // live, simulating one left Niagara's hair-strands data interface reading freed buffers on a worker thread (public
-    // #28, #39, #44). Turns it off, and with `destroy` also destroys the component. Logged once per fighter.
-    void StopHair(ue::UObject* willie, bool destroy);
+    // #28, #39, #44). Turns it off, and with `destroy` also destroys the component. Logged once per fighter. False when
+    // the fighter has no live groom.
+    bool StopHair(ue::UObject* willie, bool destroy);
+    // hair_settle=1 (crash family 2): DestroyFighter turns the hair simulation off and destroys the groom and the fighter
+    // kHairSettleTicks frames later (shared/session/hsm_fighter_park.h), out of sight until then. 0: in the same call.
+    void SetHairSettle(bool on) { hairSettle_ = on; }
     bool StillValid(ue::UObject* o, int32_t index) const;  // index from ue::ObjectIndex at spawn time
     // Owner sync: StillValid and AllWillies also treat an object the game is destroying (BeingDestroyed) or has destroyed
     // (IsGarbage) as gone, instead of until garbage collection frees its slot. Off in host sync, which keeps its old behaviour.
@@ -470,8 +474,14 @@ private:
         int32_t index = -1;
         std::vector<std::pair<ue::UObject*, int32_t>> carried;
         double sinceMs = 0;
+        int ticks = 0;              // frames since it was parked
+        bool hair = false;          // its groom's simulation is off and the groom waits for the destroy (hair_settle)
+        bool paintWaited = false;   // the paint plugin had a task queued on it
     };
     std::vector<Parked> parked_;
+    bool hairSettle_ = true;
+    bool IsParked(ue::UObject* willie) const;    // DestroyFighter has it out of sight: AllWillies leaves it out
+    void DestroySettledHair(ue::UObject* willie);
     ue::UClass* paintClass_ = nullptr;
     bool paintClassLooked_ = false;
     bool PaintTasksQueued(ue::UObject* willie);

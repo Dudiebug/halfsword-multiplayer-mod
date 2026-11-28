@@ -24,7 +24,9 @@ constexpr uint64_t kLogFirst = 10;            // the first attaches, releases, s
 constexpr double kPickLogMs = 2000.0;         // a hand's refused or repeated pick is logged at most this often
 constexpr double kSwapMinMs = 1000.0;         // rev 52: a hand swaps to the weapon the pose names at most this often
 inline bool g_weaponPropId = true;            // [mod] weapon_prop_id: the pose carries the held weapon's object id and a stand-in takes that actor
-inline bool g_weaponPickGuard = true;         // [mod] weapon_pick_guard: sync::PickGuarded (true) or the old PickAttach + PickAttachFar
+inline bool g_weaponPickGuard = true;
+inline bool g_sheatheKept = true;            // [net] standin_sheathe_kept: a weapon that left a stand-in's hand into one of its
+                                              // slots was sheathed, not dropped (combat::LeftHandIntoSlot)         // [mod] weapon_pick_guard: sync::PickGuarded (true) or the old PickAttach + PickAttachFar
 constexpr uint8_t kWorldStatic = 0, kWorldDynamic = 1, kPawn = 2, kPhysicsBody = 5, kBlock = 2;   // ECollisionChannel / ECollisionResponse
 
 struct Hands {                         // what an owned fighter held as of the previous tick

@@ -28,8 +28,8 @@ inline constexpr uint32_t kTwoHandArmBones = ((uint32_t{1} << 17) - 1u) & ~((uin
 // These stock weapons are one rigid piece: ModularWeaponBP welds their Grip, Blade and Spike parts to BaseMesh, and no joint holds
 // them. The generic multipart reader still streams a "head" for them; that metadata alone does not make them articulated.
 // Up to 0.8.0-pre30 only Spear_A/B and WarStaff_A/B were listed, so billhooks, halberds, staffs and the other spears were refused
-// and played on the grip path. Keep this an exact-class list: a multipart weapon not on it stays on the grip path, which is most
-// axes, tool axes and plain ModularWeaponBP weapons too. They can join once this path has been shown to work in game.
+// and played on the grip path. Keep this an exact-class list: with standin_two_hand_welded=0 a multipart weapon not on it stays on
+// the grip path, which is most axes, tool axes and plain ModularWeaponBP weapons too (TwoHandWeaponAccepted).
 inline constexpr std::array<uint32_t, 15> kRigidTwoHandClasses = {
     WeaponClassHash("ModularWeaponBP_Spear_A_C"),    WeaponClassHash("ModularWeaponBP_Spear_B_C"),
     WeaponClassHash("ModularWeaponBP_Spear_C_C"),    WeaponClassHash("ModularWeaponBP_Spear_D_C"),
@@ -45,9 +45,24 @@ inline constexpr bool IsRigidTwoHandWeapon(uint32_t classHash) {
     return false;
 }
 
+// The stock flails: their head hangs on a chain. A chain the stand-in found here refuses them anyway (localFlail); the name
+// keeps them off the welded path below if that scan missed it.
+inline constexpr std::array<uint32_t, 4> kChainTwoHandClasses = {
+    WeaponClassHash("ModularWeaponBP_Flail_A_C"), WeaponClassHash("ModularWeaponBP_Flail_B_C"),
+    WeaponClassHash("ModularWeaponBP_Flail_C_C"), WeaponClassHash("ModularWeaponBP_Flail_D_C"),
+};
+inline constexpr bool IsChainTwoHandWeapon(uint32_t classHash) {
+    for (uint32_t chain : kChainTwoHandClasses) if (classHash == chain) return true;
+    return false;
+}
+
 // May the pose carry this weapon? One piece, or a multipart weapon known to be rigid.
-inline constexpr bool TwoHandWeaponAccepted(bool multipart, uint32_t classHash) {
-    return !multipart || IsRigidTwoHandWeapon(classHash);
+// welded (standin_two_hand_welded): every ModularWeaponBP part is attached to BaseMesh with its bodies welded
+// (ModularWeaponBP.cpp:235, :1988, build 26820056); only a skeletal part (a chain from Joint1 down, :1995) or Link parts
+// move on their own, and the caller refuses those (localFlail). So any multipart weapon but a flail is rigid: swords,
+// axes, maces and the plain ModularWeaponBP_C as well as the listed polearms.
+inline constexpr bool TwoHandWeaponAccepted(bool multipart, uint32_t classHash, bool welded = false) {
+    return !multipart || IsRigidTwoHandWeapon(classHash) || (welded && !IsChainTwoHandWeapon(classHash));
 }
 
 // The pose holds weapon 0 by its two hand joints. A velocity on its welded head would reach the whole weapon and pull against them.
@@ -74,6 +89,7 @@ struct TwoHandPosePolicy {
     bool localReady = false;
     bool localFlail = false;        // a real chain here: a skeletal one, or Link parts
     bool localMultipart = false;    // simulating parts of any kind here
+    bool welded = false;            // standin_two_hand_welded: any multipart weapon without a chain (TwoHandWeaponAccepted)
     bool localLeftWeapon = false;
     uint32_t localClassHash = 0;
     uint32_t pinnedWeapons = 0;
@@ -153,7 +169,7 @@ inline TwoHandPoseReason TwoHandPoseStatus(const PoseFrame& owner, const TwoHand
     const WeaponSample& w = owner.weapons[0];
     if (!w.present || w.hand != 0 || !w.classHash || w.classHash != p.localClassHash) return TwoHandPoseReason::WeaponMismatch;
     if (p.localFlail) return TwoHandPoseReason::Flail;
-    if (!TwoHandWeaponAccepted(w.hasHead || p.localMultipart, w.classHash)) return TwoHandPoseReason::NotListed;
+    if (!TwoHandWeaponAccepted(w.hasHead || p.localMultipart, w.classHash, p.welded)) return TwoHandPoseReason::NotListed;
     if (p.pinnedWeapons) return TwoHandPoseReason::Pinned;
     if (p.heldBones & kTwoHandArmBones) return TwoHandPoseReason::HeldArm;
     if ((p.validBones & kTwoHandArmBones) != kTwoHandArmBones) return TwoHandPoseReason::MissingBodies;

@@ -48,6 +48,7 @@ struct HeldTolerance {
     // 0.7.0: spears and staffs re-seated at 35-55 uu, each re-seat jumping the weapon and breaking the off hand's joint.
     V3 axis{};
     double slideUu = 0.0;   // 0: no shaft
+    double persistMs = kHeldPersistMs;   // wrong and steady this long before a re-seat
 };
 inline HeldTolerance HeldToleranceFor(bool hasChain) {
     return hasChain ? HeldTolerance{45.0, 20.0, 3000.0} : HeldTolerance{kHeldReseatDeg, kHeldReseatUu, kHeldMinGapMs};
@@ -85,6 +86,18 @@ inline HeldTolerance HeldToleranceForShaft(HeldTolerance tol, const HeldPose& ow
     return tol;
 }
 
+// With both hands on the shaft only a seat far off is made at once (kHeldTwoHandDeg / kHeldTwoHandUu in standin_rig.cpp);
+// one off by less stayed as long as the grip did. standin_two_hand_settle: that smaller error is made again too, but
+// only once it has held, with the owner's seat steady, for kHeldTwoHandSettleMs, and at most every kHeldTwoHandGapMs:
+// the off hand's joint stays and rides the new seat (0.8.0-pre7), so one slow re-seat does not swing the weapon.
+constexpr double kHeldTwoHandSettleMs = 2000.0;
+constexpr double kHeldTwoHandGapMs = 5000.0;
+inline HeldTolerance HeldTwoHandSettle(HeldTolerance tol) {
+    tol.persistMs = std::max(tol.persistMs, kHeldTwoHandSettleMs);
+    tol.minGapMs = std::max(tol.minGapMs, kHeldTwoHandGapMs);
+    return tol;
+}
+
 class HeldCheck {
 public:
     void Reset() { since_ = -1.0; }
@@ -102,7 +115,7 @@ public:
             anchor_ = owner;
             return false;
         }
-        if (nowMs - since_ < kHeldPersistMs || nowMs - lastSeatMs_ < tol.minGapMs) return false;
+        if (nowMs - since_ < tol.persistMs || nowMs - lastSeatMs_ < tol.minGapMs) return false;
         if (seated_ && !HeldDiffers(owner, seatedAt_, kHeldSteadyDeg, kHeldSteadyUu)) return false;
         lastSeatMs_ = nowMs;
         since_ = -1.0;
@@ -117,6 +130,23 @@ private:
     HeldPose anchor_;              // the owner's seat at the start of the stretch
     bool seated_ = false;          // a re-seat was made (since Forget) ...
     HeldPose seatedAt_;            // ... at this owner's seat
+};
+
+// A seat made from the owner's toggles (standin_rig.cpp ApplySeat) is a guess: the owner's game slides the hand on some
+// weapons where the guess turns the weapon (the weapon's Alt Grip Switch Type), and places a turned-over weapon by its
+// root where the guess places it by its grip point. With both hands on the shaft only a seat far off is made again
+// (kHeldTwoHandDeg / kHeldTwoHandUu in standin_rig.cpp), so a wrong guess under that stayed for as long as the grip did.
+// For kSeatGuessCheckMs after a guess the plain one-handed tolerance applies, until the seat is made at the owner's.
+constexpr double kSeatGuessCheckMs = 3000.0;
+class SeatGuess {
+public:
+    void Made(double nowMs) { untilMs_ = nowMs + kSeatGuessCheckMs; pending_ = true; }
+    void Clear() { pending_ = false; }
+    bool Pending(double nowMs) const { return pending_ && nowMs < untilMs_; }
+
+private:
+    double untilMs_ = 0.0;
+    bool pending_ = false;
 };
 
 }  // namespace hsm::sync

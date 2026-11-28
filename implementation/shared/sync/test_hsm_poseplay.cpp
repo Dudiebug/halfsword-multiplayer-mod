@@ -626,16 +626,19 @@ static void TestNoNaNUnderRandomizedStream() {
 static GripState PlayGripA() {
     GripState g;
     g.gripR = 3; g.gripL = 7; g.offhand = true; g.altGrip = true; g.mordhau = true; g.switched2H = true; g.reverseR = false;
+    g.masterStroke = true; g.twoHanded = false; g.offSearching = true;
     return g;
 }
 static GripState PlayGripB() {
     GripState g;
     g.gripR = 12; g.gripL = 0; g.offhand = false; g.altGrip = false; g.mordhau = false; g.switched2H = false; g.reverseR = true;
+    g.masterStroke = false; g.twoHanded = true; g.offSearching = false;
     return g;
 }
 static bool SameGripState(const GripState& a, const GripState& b) {
     return a.gripR == b.gripR && a.gripL == b.gripL && a.offhand == b.offhand && a.altGrip == b.altGrip &&
-           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR;
+           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR &&
+           a.masterStroke == b.masterStroke && a.twoHanded == b.twoHanded && a.offSearching == b.offSearching;
 }
 
 static void TestGripCarriedThroughPlayback() {

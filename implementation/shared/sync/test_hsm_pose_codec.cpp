@@ -351,21 +351,29 @@ static void TestWeaponClassHash() {
 
 // ---- codec v2: the grip state (hands' grip types and the five grip flags) in the header ----------------------------
 // Wire layout of the 2 bytes after the flags byte (header offsets 8 and 9, little-endian u16): bits 0-4 gripR, 5-9 gripL,
-// 10 offhand, 11 altGrip, 12 mordhau, 13 switched2H, 14 reverseR, 15 spare (written 0, ignored when read).
+// 10 offhand, 11 altGrip, 12 mordhau, 13 switched2H, 14 reverseR, 15 masterStroke (protocol 54). twoHanded and offSearching
+// are flags byte (header offset 7) bits 6 and 7.
 static constexpr size_t kGripOff = 8;
+static constexpr size_t kFlagsOff = 7;   // version(1) + tsMs(4) + stepUs(2)
 static constexpr size_t kV1HeaderBytes = 1 + 4 + 2 + 1 + 4 * 3 + 2;   // the documented v1 header: 22 bytes
 
 static uint16_t GripWord(const std::vector<uint8_t>& buf) { return uint16_t(buf[kGripOff] | (buf[kGripOff + 1] << 8)); }
 
 static bool SameGrip(const GripState& a, const GripState& b) {
     return a.gripR == b.gripR && a.gripL == b.gripL && a.offhand == b.offhand && a.altGrip == b.altGrip &&
-           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR;
+           a.mordhau == b.mordhau && a.switched2H == b.switched2H && a.reverseR == b.reverseR &&
+           a.masterStroke == b.masterStroke && a.twoHanded == b.twoHanded && a.offSearching == b.offSearching;
 }
 
 static GripState MakeGrip(unsigned r, unsigned l, bool off, bool alt, bool mord, bool sw, bool rev) {
     GripState g;
     g.gripR = uint8_t(r); g.gripL = uint8_t(l);
     g.offhand = off; g.altGrip = alt; g.mordhau = mord; g.switched2H = sw; g.reverseR = rev;
+    return g;
+}
+
+static GripState WithAnim(GripState g, bool master, bool two, bool search) {
+    g.masterStroke = master; g.twoHanded = two; g.offSearching = search;
     return g;
 }
 
@@ -396,11 +404,18 @@ static void TestGripRoundTripExtremes() {
     // Flags with grips in between do not bleed into each other.
     CHECK(GripRoundTrips(MakeGrip(31, 0, true, false, true, false, true)));
     CHECK(GripRoundTrips(MakeGrip(0, 31, false, true, false, true, false)));
+    // The three protocol-54 flags, each alone, together, and beside the others.
+    CHECK(GripRoundTrips(WithAnim(MakeGrip(0, 0, false, false, false, false, false), true, false, false)));
+    CHECK(GripRoundTrips(WithAnim(MakeGrip(0, 0, false, false, false, false, false), false, true, false)));
+    CHECK(GripRoundTrips(WithAnim(MakeGrip(0, 0, false, false, false, false, false), false, false, true)));
+    CHECK(GripRoundTrips(WithAnim(MakeGrip(31, 31, true, true, true, true, true), true, true, true)));
+    CHECK(GripRoundTrips(WithAnim(MakeGrip(11, 0, false, true, false, false, true), true, false, true)));
     // Every grip value 0..31 on each hand, across 2000 random frames' worth of bone data: the header is independent of the body.
     std::mt19937 rng(0x6121Bu);
     for (int i = 0; i < 2000; ++i) {
         PoseFrame f = BuildFkFrame(rng, 1.0, int(rng() % 3));
-        f.grip = MakeGrip(rng() % 32, rng() % 32, rng() & 1, rng() & 1, rng() & 1, rng() & 1, rng() & 1);
+        f.grip = WithAnim(MakeGrip(rng() % 32, rng() % 32, rng() & 1, rng() & 1, rng() & 1, rng() & 1, rng() & 1), rng() & 1,
+                          rng() & 1, rng() & 1);
         std::vector<uint8_t> buf = EncodePose(f);
         PoseFrame d{};
         CHECK(DecodePose(buf.data(), buf.size(), d));
@@ -419,7 +434,7 @@ static void TestGripWireLayout() {
     CHECK(GripWord(bn) == 0);
     const uint16_t want = uint16_t(21 | (10 << 5) | (1 << 10) | (1 << 12) | (1 << 14));
     CHECK(GripWord(bf) == want);
-    CHECK((GripWord(bf) & 0x8000) == 0);                        // the spare bit is written 0
+    CHECK((GripWord(bf) & 0x8000) == 0);                        // master stroke off: bit 15 is 0
     // Nothing but those two bytes differs: the grip lives in the byte-aligned header, the body is untouched.
     std::vector<uint8_t> a = bn, b = bf;
     a.erase(a.begin() + kGripOff, a.begin() + kGripOff + 2);
@@ -434,6 +449,16 @@ static void TestGripWireLayout() {
     g.grip = GripState{}; g.grip.mordhau = true;  CHECK(GripWord(EncodePose(g)) == 0x1000);
     g.grip = GripState{}; g.grip.switched2H = true; CHECK(GripWord(EncodePose(g)) == 0x2000);
     g.grip = GripState{}; g.grip.reverseR = true; CHECK(GripWord(EncodePose(g)) == 0x4000);
+    g.grip = GripState{}; g.grip.masterStroke = true; CHECK(GripWord(EncodePose(g)) == 0x8000);
+    // twoHanded and offSearching live in the flags byte, not the grip word; the weapon bits beside them are unchanged.
+    const uint8_t baseFlags = EncodePose(f)[kFlagsOff];
+    CHECK((baseFlags & 0xC0) == 0);
+    g.grip = GripState{}; g.grip.twoHanded = true;
+    { const std::vector<uint8_t> e = EncodePose(g); CHECK(GripWord(e) == 0 && e[kFlagsOff] == uint8_t(baseFlags | 0x40)); }
+    g.grip = GripState{}; g.grip.offSearching = true;
+    { const std::vector<uint8_t> e = EncodePose(g); CHECK(GripWord(e) == 0 && e[kFlagsOff] == uint8_t(baseFlags | 0x80)); }
+    g.grip = GripState{}; g.grip.twoHanded = true; g.grip.offSearching = true;
+    { const std::vector<uint8_t> e = EncodePose(g); CHECK(e.size() == EncodePose(f).size() && e[kFlagsOff] == uint8_t(baseFlags | 0xC0)); }
 }
 
 static void TestGripSaturatesNotWraps() {
@@ -448,24 +473,41 @@ static void TestGripSaturatesNotWraps() {
     CHECK((GripWord(buf) & 0x7FFF) == 0x03FF);
 }
 
-static void TestGripSpareBitIgnored() {
+// Protocol 54: bit 15 (spare before) is the master stroke grip and reads into that flag only; the flags byte's bits 6 and 7
+// read into twoHanded and offSearching only.
+static void TestGripMasterAndAnimBits() {
     std::mt19937 rng(13);
     PoseFrame f = BuildFkFrame(rng, 1.0, 1);
     f.grip = MakeGrip(5, 9, false, true, false, false, false);
     std::vector<uint8_t> buf = EncodePose(f);
     PoseFrame ref{};
     CHECK(DecodePose(buf.data(), buf.size(), ref));
-    buf[kGripOff + 1] |= 0x80;                                  // the spare bit set by a sender
+    buf[kGripOff + 1] |= 0x80;                                  // bit 15 set by a sender
     PoseFrame d{};
     CHECK(DecodePose(buf.data(), buf.size(), d));
-    CHECK(SameGrip(d.grip, ref.grip) && SameGrip(d.grip, f.grip));      // read into no flag and no grip type
+    CHECK(SameGrip(d.grip, WithAnim(f.grip, true, false, false)));      // the master stroke flag, nothing else
     for (int i = 0; i < kPoseBones; ++i) CHECK(Vec3Dist(d.bones[i].pos, ref.bones[i].pos) == 0.0);
-    // And with every grip bit zero except the spare one: still an all-zero grip.
+    // And with every grip bit zero except bit 15: master stroke alone.
     f.grip = GripState{};
     buf = EncodePose(f);
     buf[kGripOff + 1] |= 0x80;
     CHECK(DecodePose(buf.data(), buf.size(), d));
-    CHECK(SameGrip(d.grip, GripState{}));
+    CHECK(SameGrip(d.grip, WithAnim(GripState{}, true, false, false)));
+    // Flags bits 6 and 7 by hand: each reads into its own flag, the weapons and the body are unchanged.
+    buf = EncodePose(f);
+    PoseFrame plain{};
+    CHECK(DecodePose(buf.data(), buf.size(), plain));
+    std::vector<uint8_t> b6 = buf, b7 = buf;
+    b6[kFlagsOff] |= 0x40;
+    b7[kFlagsOff] |= 0x80;
+    PoseFrame d6{}, d7{};
+    CHECK(DecodePose(b6.data(), b6.size(), d6) && DecodePose(b7.data(), b7.size(), d7));
+    CHECK(SameGrip(d6.grip, WithAnim(GripState{}, false, true, false)));
+    CHECK(SameGrip(d7.grip, WithAnim(GripState{}, false, false, true)));
+    for (int w = 0; w < kPoseWeapons; ++w)
+        CHECK(d6.weapons[w].present == plain.weapons[w].present && d7.weapons[w].present == plain.weapons[w].present);
+    for (int i = 0; i < kPoseBones; ++i)
+        CHECK(Vec3Dist(d6.bones[i].pos, plain.bones[i].pos) == 0.0 && Vec3Dist(d7.bones[i].pos, plain.bones[i].pos) == 0.0);
 }
 
 static void TestVersionOneFrameRefused() {
@@ -508,7 +550,6 @@ static void TestHeaderGrewByExactlyTwoBytes() {
 }
 
 // ---- flail heads (protocol rev 17): flags bit 2 + slot, one block per head after every weapon block ------------------
-static constexpr size_t kFlagsOff = 7;   // version(1) + tsMs(4) + stepUs(2)
 
 static bool SameWeapon(const WeaponSample& a, const WeaponSample& b) {
     return a.present == b.present && a.hand == b.hand && a.classHash == b.classHash && Vec3Dist(a.pos, b.pos) == 0.0 &&
@@ -732,7 +773,7 @@ int main() {
     TestGripRoundTripExtremes();
     TestGripWireLayout();
     TestGripSaturatesNotWraps();
-    TestGripSpareBitIgnored();
+    TestGripMasterAndAnimBits();
     TestVersionOneFrameRefused();
     TestHeaderGrewByExactlyTwoBytes();
     TestFlailHeadFlagsAndSize();

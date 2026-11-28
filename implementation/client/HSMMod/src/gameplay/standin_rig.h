@@ -29,7 +29,7 @@ namespace hsm::game {
 
 class FighterRig {
 public:
-    static constexpr int kSheathSlots = 5;   // "Weapon Slot R 1" ... "Weapon Slot L 2"
+    static constexpr int kSheathSlots = 5;   // "Weapon Slot R 1" ... "Weapon Slot L 2" (combat::kEquipSlots)
     // Binds the fighter's Mesh and bones (a different or respawned fighter rebinds everything). False when it has no
     // Mesh, a pose bone is missing or a per-frame call does not resolve; the rig is then unbound.
     bool Bind(ue::UObject* willie);
@@ -156,6 +156,7 @@ private:
         sync::Q4 rot{};
     };
     ue::UObject* FieldAt(int32_t offset) const;   // UObject* field of the bound Willie at a cached offset
+    bool InSlot(const ue::UObject* actor) const;  // one of its sheath slot variables holds actor (combat::LeftHandIntoSlot)
     void RefreshWeapon(int w);                    // re-resolves slot w when its field changed
     bool ReadWeapon(int w, const sync::V3& handPos);
     void CheckHandLoss(int w, const Weapon& wp);  // #249: logs the own live fighter's weapon leaving its hand unasked
@@ -230,6 +231,7 @@ private:
     std::vector<ue::FProperty*> trueBools_, falseBools_;
     int32_t gripTypeOffset_[2] = {-1, -1};                   // "R_GripType_Current" / "L_GripType_Current" (ByteProperty)
     ue::FProperty* gripFlag_[5] = {};                        // offhand, alt, mordhau, switched, reverse (BoolProperty)
+    ue::FProperty* animFlag_[3] = {};                        // master stroke, two-handed, off hand searching (BoolProperty)
     sync::GripState gripStateLogged_{};                      // the grip state ApplyGrip last logged
     bool gripStateKnown_ = false;
     int ownToggles_ = -1;                                    // the owner's grip toggles last logged when sending (-1 none)
@@ -254,10 +256,12 @@ private:
     double offWantSinceMs_ = 0;                              // ... and since when (kOffhandAttachMs / kOffhandReleaseMs)
     ue::UObject* seatJoint_ = nullptr;                       // the right hand joint ApplySeat last seated
     uint8_t seatKey_ = 0;                                    // ... and the owner's toggles it was seated for (SeatKey)
-    sync::HeldCheck heldCheck_;                              // ApplyHeld: the stand-in's seat against the owner's
-    ue::UObject* heldJoint_ = nullptr;                       // ... for this right hand joint
-    ue::UObject* heldWeapon_ = nullptr;                      // ... and this right hand weapon
-    bool MakeGripJoint(ue::UObject* joint, ue::UObject* root, const char* socket, bool lowerArm);   // right hand, at the socket
+    sync::HeldCheck heldCheck_[2];                           // ApplyHeld: the stand-in's seat against the owner's, per hand
+    ue::UObject* heldJoint_[2] = {nullptr, nullptr};         // ... for this hand's joint
+    ue::UObject* heldWeapon_[2] = {nullptr, nullptr};        // ... and this hand's weapon
+    sync::SeatGuess seatGuess_;                              // ApplySeat guessed the right hand's seat: checked with the plain tolerance
+    void ApplyHeldHand(int hand, const sync::PoseFrame& target, const sync::FighterNow& now, double nowMs);
+    bool MakeGripJoint(int hand, ue::UObject* joint, ue::UObject* root, const char* socket, bool lowerArm);   // at the socket
     double boundAtMs_ = -1.0, nextFullMs_ = 0.0;
     bool weaponChanged_ = false;
     bool sendsFrames_ = false;                               // the last Read streamed a pose: the player's own live fighter
@@ -289,5 +293,32 @@ void SetStandInTwoHandPose(bool on);
 // standin_two_hand_lock under [net] (config.h): both hand joints lock while the two-hand pose owns them. Set once at start.
 void SetStandInTwoHandLock(bool on);
 void SetStandInTwoHandAudit(bool on);   // Help improve consent; off by default
+// standin_held_seat under [net] (config.h): the alt flag seats only a two-handed grip, the left hand's weapon is seated as
+// the owner holds it, and a guessed seat is checked with both hands on the shaft. Set once at start.
+void SetStandInHeldSeat(bool on);
+// standin_sheathe_kept under [net] (config.h): a weapon that left a stand-in's hand into one of its slots is not re-armed or
+// let fall as a dropped one. Set once at start.
+void SetStandInSheatheKept(bool on);
+// standin_anim_flags under [net] (config.h): a stand-in's Master Stroke Grip, R Two Handed Grip and L Offhand Searching Grip
+// are its owner's (protocol 54). Set once at start.
+void SetStandInAnimFlags(bool on);
+// standin_master_seat under [net] (config.h): the owner's master stroke grip re-seats a stand-in's weapon as the game does
+// (hsm_grip.h MasterSeatFor). Set once at start.
+void SetStandInMasterSeat(bool on);
+// standin_switched_seat under [net] (config.h): the owner-seat check (ApplyHeld) runs with a polearm's hands switched too.
+// Set once at start.
+void SetStandInSwitchedSeat(bool on);
+// standin_shield_seat under [net] (config.h): a shield on the forearm (grips 6, 7) is seated as its owner holds it.
+// Set once at start.
+void SetStandInShieldSeat(bool on);
+// standin_seat_points: the right hand's seat uses the build's attach points (grip 3 at Grip L Hand Default Pos, a
+// one-handed hold of a long weapon at its Alt Pos, the hands switched by Grip L Hand Off Hand); 0 as in 0.8.2.
+void SetStandInSeatPoints(bool on);
+// standin_two_hand_settle: with both hands on the shaft a seat a little off the owner's (under 60 deg / 45 uu) is made
+// again once it has held for 2 s; 0 as in 0.8.2 (only a seat far off is).
+void SetStandInTwoHandSettle(bool on);
+// standin_two_hand_welded: the two-hand pose carries any multipart weapon without a chain (swords, axes, maces), not only
+// the listed polearms (hsm_two_hand_pose.h TwoHandWeaponAccepted); 0 as in 0.8.2.
+void SetStandInTwoHandWelded(bool on);
 
 }  // namespace hsm::game

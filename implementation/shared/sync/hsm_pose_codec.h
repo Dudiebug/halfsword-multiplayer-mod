@@ -33,6 +33,8 @@ namespace hsm::sync {
 // The held weapons' object ids (protocol rev 52) stay version 2 as well: flags bit 4 + slot says the slot's weapon has one, and
 // the ids follow the flail heads as 64 bits each, slot 0 first. Revision 52 builds only meet each other (the protocol revision
 // is checked when joining), so no older decoder reads a frame with these bits.
+// Grip bit 15 and flags bits 6 and 7 (protocol rev 54) stay version 2 for the same reason: the grip word and the flags byte keep
+// their size and place.
 constexpr uint8_t kPoseCodecVersion = 2;
 
 // ---- quaternion / vector helpers (double precision; safe for NaN/Inf inputs where noted) -----
@@ -99,11 +101,13 @@ constexpr double kVAngMax = 5000.0;        // deg/s, mu-law full scale
 constexpr double kMuLaw = 255.0;
 
 // Grip state, a u16 after the flags byte: bits 0-4 gripR, 5-9 gripL, 10 offhand, 11 altGrip, 12 mordhau, 13 switched2H,
-// 14 reverseR, 15 spare (written 0, ignored when read).
+// 14 reverseR, 15 masterStroke (protocol 54; spare before it). R Two Handed Grip and L Offhand Searching Grip are flags
+// byte bits 6 (0x40) and 7 (0x80), protocol 54 as well.
 constexpr unsigned kGripTypeBits = 5;
 constexpr uint8_t kGripTypeMax = (1u << kGripTypeBits) - 1;
 constexpr unsigned kGripLShift = kGripTypeBits, kGripOffhandBit = 10, kGripAltBit = 11, kGripMordhauBit = 12,
-                   kGripSwitchedBit = 13, kGripReverseBit = 14;
+                   kGripSwitchedBit = 13, kGripReverseBit = 14, kGripMasterBit = 15;
+constexpr uint8_t kPoseFlagTwoHanded = 0x40, kPoseFlagOffSearching = 0x80;
 
 // FNV-1a of the class name with ASCII letters folded to lower case: a name's display casing is whichever casing its
 // FName registered first in that process, so two machines can spell one class differently.
@@ -348,6 +352,7 @@ inline uint16_t PackGrip(const GripState& g) {
     if (g.mordhau) w = uint16_t(w | (1u << kGripMordhauBit));
     if (g.switched2H) w = uint16_t(w | (1u << kGripSwitchedBit));
     if (g.reverseR) w = uint16_t(w | (1u << kGripReverseBit));
+    if (g.masterStroke) w = uint16_t(w | (1u << kGripMasterBit));
     return w;
 }
 inline GripState UnpackGrip(uint16_t w) {
@@ -359,6 +364,7 @@ inline GripState UnpackGrip(uint16_t w) {
     g.mordhau = ((w >> kGripMordhauBit) & 1u) != 0;
     g.switched2H = ((w >> kGripSwitchedBit) & 1u) != 0;
     g.reverseR = ((w >> kGripReverseBit) & 1u) != 0;
+    g.masterStroke = ((w >> kGripMasterBit) & 1u) != 0;
     return g;
 }
 
@@ -400,7 +406,8 @@ inline void EncodePoseInto(const PoseFrame& f, std::vector<uint8_t>& out) {
     bool hasId[kPoseWeapons];
     for (int wi = 0; wi < kPoseWeapons; ++wi) hasId[wi] = f.weapons[wi].present && f.weapons[wi].objectId != 0;
     const uint8_t flags = uint8_t((f.weapons[0].present ? 1 : 0) | (f.weapons[1].present ? 2 : 0) | (head[0] ? 4 : 0) |
-                                  (head[1] ? 8 : 0) | (hasId[0] ? 0x10 : 0) | (hasId[1] ? 0x20 : 0));
+                                  (head[1] ? 8 : 0) | (hasId[0] ? 0x10 : 0) | (hasId[1] ? 0x20 : 0) |
+                                  (f.grip.twoHanded ? kPoseFlagTwoHanded : 0) | (f.grip.offSearching ? kPoseFlagOffSearching : 0));
     out.push_back(flags);
     detail::AppendU16LE(out, detail::PackGrip(f.grip));
 
@@ -508,7 +515,9 @@ inline bool DecodePose(const uint8_t* data, size_t size, PoseFrame& out) {
     if ((head[0] && !present[0]) || (head[1] && !present[1])) return false;   // a head without its weapon
     const bool hasId[kPoseWeapons] = {(flags & 0x10) != 0, (flags & 0x20) != 0};
     if ((hasId[0] && !present[0]) || (hasId[1] && !present[1])) return false;   // an id without its weapon
-    const GripState grip = detail::UnpackGrip(detail::ReadU16LE(data + p)); p += 2;
+    GripState grip = detail::UnpackGrip(detail::ReadU16LE(data + p)); p += 2;
+    grip.twoHanded = (flags & kPoseFlagTwoHanded) != 0;
+    grip.offSearching = (flags & kPoseFlagOffSearching) != 0;
     const float pelX = detail::ReadF32LE(data + p); p += 4;
     const float pelY = detail::ReadF32LE(data + p); p += 4;
     const float pelZ = detail::ReadF32LE(data + p); p += 4;

@@ -99,6 +99,14 @@ struct Config {
     // true (default): collision between a stand-in and other fighters' Box1, the invisible box behind a fighter's back, is
     // turned off as the game does between live fighters (gameplay/fighter_boxes.h). standin_box_fix=0 leaves it on. Per machine.
     bool standInBoxFix = true;
+    // hair_settle=1 (crash family 2, exe+0x4DF1614): a fighter the mod destroys has its hair simulation turned off, and is
+    // destroyed with its groom a few frames later, out of sight (Adapter::DestroyFighter). 0: all in the same call, as in
+    // 0.8.2-beta1. Per machine.
+    bool hairSettle = true;
+    // spawn_gap_ms (crash family J, exe+0x21E5CA4; shared/session/hsm_spawn_pace.h): a stand-in spawn here waits this
+    // long after the last fighter spawn here, and so does a host's queued respawn. 0-500; 0: one a frame, as in
+    // 0.8.2-beta1. Per machine.
+    int spawnGapMs = 120;
     // A test switch, off by default: every stand-in here has Box1 stop blocking bodies, and its DriverSkeleton and
     // CharacterMesh_Head lose collision, all back when it becomes a live fighter (standin_rig.cpp). standin_parts_off=1.
     // Per machine; owner sync.
@@ -200,6 +208,35 @@ struct Config {
     // true: while that playback owns a stand-in's two grip joints, both lock (the hands stay on the shaft). false keeps
     // the game's sliding, turning off-hand hold under it, as before. Receiver only.
     bool standInTwoHandLock = true;
+    // true: a stand-in's weapon is seated as its owner holds it in the left hand too, the alt flag seats only a two-handed
+    // grip, and a seat guessed from the toggles is checked with both hands on the shaft. 0: as in 0.8.2-beta1. Receiver only.
+    bool standInHeldSeat = true;
+    // true: a weapon that left a stand-in's hand into one of its slots was sheathed: it is not re-armed or let fall as a
+    // dropped weapon (combat::LeftHandIntoSlot). 0: as in 0.8.2. Receiver only.
+    bool standInSheatheKept = true;
+    // true: a stand-in's Master Stroke Grip, R Two Handed Grip and L Offhand Searching Grip are its owner's (protocol 54; its
+    // own blocked ReceiveTick never sets them): its arms pose as the owner's. 0: as in 0.8.2 (always false). Receiver only.
+    bool standInAnimFlags = true;
+    // true: the owner's master stroke grip re-seats a stand-in's weapon as the game does: turned 90 degrees in the hand at
+    // the socket (hsm_grip.h MasterSeatFor). 0: as in 0.8.2 (the weapon stays as it was). Receiver only.
+    bool standInMasterSeat = true;
+    // true: a stand-in's weapon is seated as its owner holds it with a polearm's hands switched too (FighterRig::ApplyHeld).
+    // 0: as in 0.8.2 (not checked while switched). Receiver only.
+    bool standInSwitchedSeat = true;
+    // true: a shield on a stand-in's forearm (grips 6, 7) is seated as its owner holds it, measured against the forearm
+    // (FighterRig::ApplyHeld). 0: as in 0.8.2 (never re-seated). Receiver only.
+    bool standInShieldSeat = true;
+    // true: a stand-in's right-hand seat uses the build's attach points (hsm_grip.h SeatForBuild: grip 3 at Grip L Hand
+    // Default Pos, a one-handed long weapon at Alt Pos, switched hands placed by Grip L Hand Off Hand). 0: as in 0.8.2.
+    // Receiver only.
+    bool standInSeatPoints = true;
+    // true: with both hands on the shaft a stand-in's seat a little off its owner's (under 60 deg / 45 uu) is made again
+    // once it has held for 2 s (hsm_held.h HeldTwoHandSettle). 0: as in 0.8.2. Receiver only.
+    bool standInTwoHandSettle = true;
+    // true: the two-hand pose (standin_two_hand_pose) carries any multipart weapon without a chain: swords, axes, maces
+    // and the plain ModularWeaponBP_C, whose parts the game welds (hsm_two_hand_pose.h TwoHandWeaponAccepted). 0: only the
+    // listed polearms, as in 0.8.2. Receiver only.
+    bool standInTwoHandWelded = true;
     // true: the host starts a match even while another player runs a different mod build (testing only).
     bool allowBuildMismatch = false;
     // force_unknown_build (testing only, not in the default file): 1 starts as if this HSMMod did not know the game exe,

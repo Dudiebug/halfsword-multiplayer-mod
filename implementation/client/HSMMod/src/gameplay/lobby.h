@@ -20,7 +20,7 @@ constexpr int kMaxLobbyMembers = 20;  // players: == kMaxPlayers (session/hsm_ro
 #ifdef HSM_TESTBENCH
 constexpr const char* kModVersion = "0.8.0-test";
 #else
-constexpr const char* kModVersion = "0.8.2";   // bump with every release tag
+constexpr const char* kModVersion = "0.8.3-beta1";   // bump with every release tag
 #endif
 // This mod's build: kModVersion, the git describe build.sh passed and the DLL file's hash (session/hsm_build.h). Players
 // compare it.

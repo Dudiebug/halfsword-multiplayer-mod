@@ -659,6 +659,8 @@ static void TestDownCarry() {
     using hsm::sync::PoseBoneIndex;
     using hsm::sync::YieldBones;
     CHECK(PoseBoneIndex("hand_r") == sync::kBoneHandR && PoseBoneIndex("pelvis") == 0 && PoseBoneIndex("weapon") == -1);
+    CHECK(PoseBoneIndex("lowerarm_l") == sync::kBoneLowerArmL && PoseBoneIndex("lowerarm_r") == sync::kBoneLowerArmR &&
+          PoseBoneIndex("hand_l") == sync::kBoneHandL);
     CHECK(YieldBones(-1, true) == 0 && YieldBones(sync::kPoseBones, false) == 0);
     CHECK(YieldBones(sync::kBoneHandR, false) == ((1u << 16) | (1u << 15)));          // hand and lower arm
     CHECK(YieldBones(sync::kBoneHandR, true) == ((1u << 16) | (1u << 15) | (1u << 14) | (1u << 13)));   // the arm to the chest

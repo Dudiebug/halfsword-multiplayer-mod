@@ -20,6 +20,8 @@ constexpr uint64_t kLogFirst = 10;   // the first states sent and steps run are 
 // A pose hand counts for a stale-weapon hint once it has shown the same class this long: a held weapon the pose misses
 // for a few frames (kinematic, or swung past kHeldMaxUu) is not put away.
 constexpr double kPoseSettleMs = 200;
+constexpr double kDrawRetryMs = 5000;   // a refused draw of the same weapon into the same hand waits this long
+constexpr uint32_t kDrawFailLog = 3;
 
 constexpr const char* kFistsPrefix = "Weapon_Fists";   // an empty hand's pseudo weapon (standin_rig.cpp)
 
@@ -142,6 +144,7 @@ void EquipSync::Forget(uint8_t entity) {
     planPose_.erase(entity);
     lastGear_.erase(entity);
     sender_.Forget(entity);
+    drawFails_.clear();   // keyed by actor: a forgotten stand-in's entries would linger (the others only retry once more)
 }
 
 // The hands, the slot variables and whether each slot's sheath constraint is live. False when a field is unreadable.
@@ -240,7 +243,7 @@ bool EquipSync::Plan(uint8_t entity, double nowMs) {
         Read now;   // each step changes the stand-in: read it again
         if (!ReadFighter(standIn, now)) { ++n_.readFailed; return true; }
         const bool draw = s.kind == EquipStep::Kind::Draw;
-        const bool ok = draw ? Draw(standIn, now, s.hand, s.slot) : Sheathe(standIn, now, s.hand, s.slot);
+        const bool ok = draw ? Draw(standIn, now, s.hand, s.slot, nowMs) : Sheathe(standIn, now, s.hand, s.slot);
         if (!ok) continue;
         const uint64_t done = draw ? ++n_.draws : ++n_.sheathes;
         if (env_.gearChanged) env_.gearChanged(entity);
@@ -285,10 +288,13 @@ bool EquipSync::MayBeSheathe(uint8_t entity, int hand) const {
 
 // The stand-in's hand grabs the slot's weapon, then the weapon leaves the slot as Check Scabbard Unsheath State lets it
 // go. A hand holding a real weapon is left alone (prop_sync lets go of it first and asks for a re-plan, which draws).
-bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot) {
+bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot, double nowMs) {
     UObject* weapon = r.slots[slot];
     UObject* held = r.hands[hand];
     if (!weapon || Adapter::BeingDestroyed(weapon) || (held && !Fists(held))) { ++n_.skipped; return false; }
+    const auto failKey = std::make_tuple(standIn, weapon, hand);
+    auto failed = drawFails_.find(failKey);
+    if (failed != drawFails_.end() && nowMs - failed->second.atMs < kDrawRetryMs) { ++n_.skipped; return false; }
     const bool grabbed = SetUpHand(standIn, hand, weapon);
     UObject** handField = HandField(standIn, hand);
     if (!grabbed || !handField || *handField != weapon) {
@@ -299,8 +305,24 @@ bool EquipSync::Draw(UObject* standIn, const Read& r, int hand, int slot) {
             return false;
         }
         ++n_.failed;
-        HSM_LOG("equip: stand-in %s did not take %s into hand %s", ObjectName(standIn).c_str(), ObjectName(weapon).c_str(), Side(hand));
+        DrawFail& f = drawFails_[failKey];
+        f.atMs = nowMs;
+        if (++f.count <= kDrawFailLog) {
+            // What the game left: the hand's variable, its grip type, and whether the slot still holds the weapon by its
+            // sheath constraint (a weapon the slot variable names but no constraint holds lies loose somewhere).
+            const uint8_t* grip = hand == 0 ? Field<uint8_t>(standIn, "R_GripType_Current") : Field<uint8_t>(standIn, "L_GripType_Current");
+            UObject** constraint = ConstraintField(standIn, slot);
+            HSM_LOG("equip: stand-in %s did not take %s into hand %s (try %u; the hand holds %s, grip %d, slot %d %s; next try in %.0f s)",
+                    ObjectName(standIn).c_str(), ObjectName(weapon).c_str(), Side(hand), f.count,
+                    handField && *handField ? ObjectName(*handField).c_str() : "nothing", grip ? int(*grip) : -1, slot,
+                    constraint && Live(*constraint) ? "constrained" : "without its sheath constraint", kDrawRetryMs / 1000.0);
+        }
         return false;
+    }
+    if (failed != drawFails_.end()) {
+        HSM_LOG("equip: stand-in %s took %s into hand %s after %u refusal(s)", ObjectName(standIn).c_str(), ObjectName(weapon).c_str(),
+                Side(hand), failed->second.count);
+        drawFails_.erase(failed);
     }
     UObject** constraint = ConstraintField(standIn, slot);
     if (constraint && Live(*constraint)) {

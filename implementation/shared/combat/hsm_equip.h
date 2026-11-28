@@ -145,6 +145,16 @@ constexpr bool HandReachesSlot(int hand, int slot) {
     return false;
 }
 
+// A weapon that left a fighter's hand while one of its slot variables holds it went into that slot: a sheathe, not a
+// drop. Set Up Right/Left Hand Weapon takes the fighter off the weapon's "Parent Actors" either way (Willie_BP.cpp:8932,
+// before the slot branches), so that list cannot tell the two apart. In a 0.8.2-beta1 log a stand-in's sheathe was taken
+// for a drop: its weapon was made to fall out of the slot and every later draw from that slot failed (27 in 55 s).
+inline bool LeftHandIntoSlot(const void* weapon, const std::array<const void*, kEquipSlots>& slots) {
+    if (!weapon) return false;
+    for (const void* s : slots) if (s == weapon) return true;
+    return false;
+}
+
 // The owner's pose shows a weapon of class cls in an empty hand of the stand-in while its Equip token for that hand is
 // other: it may be a draw whose state is still on its way (mid-draw the owner's hand and slot hold the same actor) when a
 // slot the owner shows sheathed holds a weapon of that class on the stand-in (slotClass[k], 0 for an empty slot). Any

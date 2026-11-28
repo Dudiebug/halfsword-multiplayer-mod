@@ -26,6 +26,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -67,7 +68,7 @@ private:
     bool Plan(uint8_t entity, double nowMs);                         // the stand-in matches owner_[entity]; false: not read
     std::array<uint32_t, 2> PoseClasses(uint8_t entity, double nowMs) const;   // the owner's settled pose per hand
     bool Stale(const Read& r, int hand, uint32_t poseClass) const;
-    bool Draw(ue::UObject* standIn, const Read& r, int hand, int slot);
+    bool Draw(ue::UObject* standIn, const Read& r, int hand, int slot, double nowMs);
     bool Sheathe(ue::UObject* standIn, const Read& r, int hand, int slot);
     bool LetGo(ue::UObject* standIn, int hand);
 
@@ -82,6 +83,10 @@ private:
     std::map<uint8_t, combat::EquipTracker> own_, standIn_;          // per entity: fighters simulated here, stand-ins
     std::map<uint8_t, combat::EquipStateMsg> owner_;                 // per stand-in entity: the owner's newest state
     std::map<uint8_t, std::array<uint32_t, 2>> planPose_;            // ... and the pose classes its last plan saw
+    // A draw the stand-in's hand refused, per (stand-in, weapon, hand): tried again only after kDrawRetryMs, logged in full
+    // the first kDrawFailLog times (a 0.8.2-beta1 log had the same refusal 27 times in 55 s, one per owner state).
+    struct DrawFail { double atMs = 0; uint32_t count = 0; };
+    std::map<std::tuple<ue::UObject*, ue::UObject*, int>, DrawFail> drawFails_;
     Counters n_, reported_;
 };
 
